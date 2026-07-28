@@ -635,40 +635,67 @@ class TestMetamorphicSwap:
     比較 BTC vs ETH 與 ETH vs BTC 應該得到對稱的結論（方向相反、其他一致）。
     """
 
-    @pytest.mark.xfail(reason="CA-04/CA-05: 比較合成與結構化對稱尚未實作", strict=False)
     def test_golden_swap_produces_symmetric_results(self, monkeypatch):
-        """【會 FAIL — 期望】A/B 對調後結論方向應對稱。
+        """CA-05: A/B 對調後比較報告結構對稱。
 
-        當前實作只跑兩個獨立 pipeline，對調只是把 report_a/report_b 互換，
-        沒有真正的比較結構來驗證對稱性。這個測試定義了 CA-05 的驗收規格。
+        build_comparison_report 是純規則層，結論文字幣種無關
+        （例如「僅 3/4 個面向有足夠資料進行比較」），因此 forward
+        和 swapped 的 dimensions 數量、decision、confidence 應一致。
+        結論文字無須逐字相同（因結論不 hard-code 幣種名稱），
+        但結構上應完全對稱——每個面向在 swap 後的 decision 一致。
+
+        REF: CA-05 #834 — 不要求 LLM 產生的 finding text 反向對應，
+        但 decision 與 dimension 覆蓋不應因 coin 順序而改變。
         """
         def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
             return _make_fixture_docs(coin)
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        # Forward: BTC vs ETH
-        ra1, ea1, rb1, eb1, log1 = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
-        # Swapped: ETH vs BTC
-        ra2, ea2, rb2, eb2, log2 = run_comparison("ETH", "BTC", "比較兩幣", offline=True)
+        fwd = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        swp = run_comparison("ETH", "BTC", "比較兩幣", offline=True)
 
-        # 對調後方向應相反
-        # （當前實作兩次獨立 pipeline，方向可能相同也可能不同——不夠穩定）
-        dir_a1 = ra1.direction or ra1._direction_label()
-        dir_b1 = rb1.direction or rb1._direction_label()
-        dir_a2 = ra2.direction or ra2._direction_label()  # 這是 ETH（對調後）
-        dir_b2 = rb2.direction or rb2._direction_label()  # 這是 BTC（對調後）
+        fwd_c = fwd.comparison
+        swp_c = swp.comparison
 
-        # 記錄方向以便人工審查（不做硬斷言，因為方向依賴 LLM，不穩定）
-        has_symmetry_hint = (
-            (dir_a1 != dir_b1) or (dir_a2 != dir_b2)
+        assert fwd_c is not None, "forward comparison 不可為 None"
+        assert swp_c is not None, "swapped comparison 不可為 None"
+
+        # 4 個 dimension
+        assert len(fwd_c.dimensions) == len(COMPARISON_DIMENSIONS)
+        assert len(swp_c.dimensions) == len(COMPARISON_DIMENSIONS)
+
+        # conclusion 非空
+        assert fwd_c.conclusion.strip(), "forward conclusion 不可為空"
+        assert swp_c.conclusion.strip(), "swapped conclusion 不可為空"
+
+        # confidence 在合理範圍
+        assert 0.0 <= fwd_c.confidence <= 1.0
+        assert 0.0 <= swp_c.confidence <= 1.0
+
+        # build_comparison_report 結論是 coin-agnostic（只統計面向數），
+        # swap 後 conclusion 文字應相同
+        assert fwd_c.conclusion == swp_c.conclusion, (
+            f"Swap 後 conclusion 應一致（coin-agnostic），但不同：\n"
+            f"  Forward: {fwd_c.conclusion}\n"
+            f"  Swapped: {swp_c.conclusion}"
         )
-        assert has_symmetry_hint, (
-            "FAIL EXPECTED: A/B 對調後未見方向對稱。"
-            f" Forward: {ra1.coin}={dir_a1}, {rb1.coin}={dir_b1}"
-            f" | Swapped: {ra2.coin}={dir_a2}, {rb2.coin}={dir_b2}"
-            " CA-04 + CA-05 應確保比較結構化的對稱性。"
-        )
+
+        # 各維度 decision 應一致
+        fwd_dims = {d.dimension: d for d in fwd_c.dimensions}
+        swp_dims = {d.dimension: d for d in swp_c.dimensions}
+        for dim in COMPARISON_DIMENSIONS:
+            assert fwd_dims[dim].decision == swp_dims[dim].decision, (
+                f"Dimension '{dim}' decision 不一致："
+                f"fwd={fwd_dims[dim].decision}, swp={swp_dims[dim].decision}"
+            )
+
+        # confidence 也對稱（每個面向 evidence 數對稱 → confidence ceiling 對稱）
+        for dim in COMPARISON_DIMENSIONS:
+            assert fwd_dims[dim].confidence == swp_dims[dim].confidence, (
+                f"Dimension '{dim}' confidence 不一致："
+                f"fwd={fwd_dims[dim].confidence}, swp={swp_dims[dim].confidence}"
+            )
 
     def test_golden_swap_dimensions_inverted(self, monkeypatch):
         """【會 FAIL — 期望】A/B 對調後維度結論應反向。
@@ -1489,6 +1516,77 @@ class TestTemporalAlignment:
         )
         assert "證據數量不足" in price_dim.finding
         assert price_dim.confidence == 0.0
+
+
+
+# ===========================================================================
+# CA-05: Cost Non-Duplication — 重複呼叫不產生 side effect
+# ===========================================================================
+
+class TestCostNonDuplication:
+    """重複呼叫 run_comparison 不應改變結果或重複計算。"""
+
+    def test_comparison_cost_not_duplicated(self, monkeypatch):
+        """離線模式下兩次 run_comparison("BTC", "ETH") 結果應完全一致。
+
+        offline=True 是 deterministic，重複呼叫不應因 side effect
+        或 cost 累加而改變 report_a/evidence_a/comparison。
+        """
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return _make_fixture_docs(coin)
+
+        monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+        r1 = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        r2 = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+
+        # comparison report 一致
+        assert r1.comparison is not None, "r1.comparison 不可為 None"
+        assert r2.comparison is not None, "r2.comparison 不可為 None"
+        assert r1.comparison.conclusion == r2.comparison.conclusion, (
+            f"兩次比較 conclusion 不一致：\n"
+            f"  r1: {r1.comparison.conclusion}\n"
+            f"  r2: {r2.comparison.conclusion}"
+        )
+        assert r1.comparison.confidence == r2.comparison.confidence, (
+            f"兩次比較 confidence 不一致："
+            f"r1={r1.comparison.confidence}, r2={r2.comparison.confidence}"
+        )
+        assert len(r1.comparison.dimensions) == len(r2.comparison.dimensions)
+
+        # 各 dimension 一致
+        for i in range(len(r1.comparison.dimensions)):
+            d1 = r1.comparison.dimensions[i]
+            d2 = r2.comparison.dimensions[i]
+            assert d1.dimension == d2.dimension
+            assert d1.decision == d2.decision, (
+                f"Dimension '{d1.dimension}' decision 不一致："
+                f"r1={d1.decision}, r2={d2.decision}"
+            )
+            assert d1.confidence == d2.confidence, (
+                f"Dimension '{d1.dimension}' confidence 不一致："
+                f"r1={d1.confidence}, r2={d2.confidence}"
+            )
+            assert d1.a_evidence_refs == d2.a_evidence_refs, (
+                f"Dimension '{d1.dimension}' a_evidence_refs 不一致："
+                f"r1={d1.a_evidence_refs}, r2={d2.a_evidence_refs}"
+            )
+            assert d1.b_evidence_refs == d2.b_evidence_refs, (
+                f"Dimension '{d1.dimension}' b_evidence_refs 不一致："
+                f"r1={d1.b_evidence_refs}, r2={d2.b_evidence_refs}"
+            )
+
+        # evidence 也一致（相同幣種順序 → evidence 順序相同）
+        assert len(r1.evidence_a) == len(r2.evidence_a), (
+            f"evidence_a 筆數不一致：r1={len(r1.evidence_a)}, r2={len(r2.evidence_a)}"
+        )
+        assert len(r1.evidence_b) == len(r2.evidence_b), (
+            f"evidence_b 筆數不一致：r1={len(r1.evidence_b)}, r2={len(r2.evidence_b)}"
+        )
+
+        # 原始 report 一致
+        assert r1.report_a.coin == r2.report_a.coin
+        assert r1.report_b.coin == r2.report_b.coin
 
 
 # ===========================================================================

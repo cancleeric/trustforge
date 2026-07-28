@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+import re
+import time
+from typing import TYPE_CHECKING, Any
 
 from .bedrock import BedrockClient, LLMResult
 from .comparison_contract import (
@@ -19,6 +21,9 @@ from .comparison_contract import (
     DimensionResult,
 )
 from .schema import Evidence
+
+if TYPE_CHECKING:
+    from .execlog import ExecutionLog
 
 logger = logging.getLogger(__name__)
 
@@ -42,40 +47,111 @@ def synthesize_comparison_with_bedrock(
     comparison: ComparisonReport,
     evidence_a: list[Evidence],
     evidence_b: list[Evidence],
+    log: ExecutionLog | None = None,
+    max_retries: int = 1,
 ) -> ComparisonReport:
     """用 Bedrock 對四個面向產出語意比較，失敗時回傳原始 comparison（降級）。
 
     流程：
     1. 從 comparison 讀取各面向 a_evidence_refs / b_evidence_refs
     2. 組建 Bedrock prompt（JSON 格式，含四面向 A/B evidence 摘要）
-    3. 呼叫 client.complete(system, prompt)
+    3. 呼叫 client.complete(system, prompt)（bounded retry，最多 2 次）
     4. 解析 JSON 回應 → 建立新 ComparisonReport
     5. 解析失敗 / timeout → 回傳原始 comparison（CA-03 deterministic fallback）
     6. 驗證每面向 finding 不引用不存在的 evidence ref
-    7. Confidence 套用 dimension ceiling
+    7. 驗證每面向 finding 數字是否出現在 source evidence（overclaim validation）
+    8. 記錄 latency / cost / execution-event 到 log
+    9. Confidence 套用 dimension ceiling
     """
     system_prompt, user_prompt = _build_synthesis_prompt(comparison, evidence_a, evidence_b)
 
-    try:
-        result: LLMResult = client.complete(system_prompt, user_prompt)
-    except Exception as exc:
-        logger.warning("Bedrock complete() 失敗，降級回原始 comparison: %s", exc)
-        return comparison
+    for attempt in range(max_retries + 1):
+        t_start = time.time()
+        try:
+            result: LLMResult = client.complete(system_prompt, user_prompt)
+        except Exception as exc:
+            if attempt < max_retries:
+                backoff = 1 if attempt == 0 else 3
+                logger.warning(
+                    "Bedrock complete() attempt %d/%d failed: %s. Retrying in %ds...",
+                    attempt + 1,
+                    max_retries + 1,
+                    exc,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+            logger.warning(
+                "Bedrock complete() 失敗（%d/%d attempts），降級回原始 comparison: %s",
+                max_retries + 1,
+                max_retries + 1,
+                exc,
+            )
+            return comparison
 
-    try:
-        parsed = _parse_synthesis_response(result.text)
-    except Exception as exc:
-        logger.warning("Bedrock 回應解析失敗，降級回原始 comparison: %s", exc)
-        return comparison
+        latency = time.time() - t_start
 
-    # 驗證輸出結構
-    violations = _validate_synthesis_output(parsed, comparison)
-    if violations:
-        logger.warning("Bedrock 合成輸出驗證失敗 (%s 項)，降級回原始 comparison: %s", len(violations), violations)
-        return comparison
+        # 記錄 execution event
+        if log is not None:
+            log.record(
+                "comparison.bedrock.call",
+                params={
+                    "attempt": attempt + 1,
+                    "total_attempts": max_retries + 1,
+                    "latency_sec": round(latency, 3),
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "model_id": result.model_id,
+                },
+                summary=f"attempt {attempt + 1}/{max_retries + 1} latency={latency:.3f}s tokens={result.input_tokens}/{result.output_tokens}",
+            )
 
-    # 套用 confidence ceiling 後建出增強 ComparisonReport
-    return _build_enhanced_report(parsed, comparison, evidence_a, evidence_b)
+        try:
+            parsed = _parse_synthesis_response(result.text)
+        except Exception as exc:
+            if attempt < max_retries:
+                backoff = 1 if attempt == 0 else 3
+                logger.warning(
+                    "Bedrock 回應解析失敗（attempt %d/%d）: %s. Retrying in %ds...",
+                    attempt + 1,
+                    max_retries + 1,
+                    exc,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+            logger.warning("Bedrock 回應解析失敗，降級回原始 comparison: %s", exc)
+            return comparison
+
+        # 驗證輸出結構
+        violations = _validate_synthesis_output(parsed, comparison)
+        if violations:
+            if attempt < max_retries:
+                backoff = 1 if attempt == 0 else 3
+                logger.warning(
+                    "Bedrock 合成輸出驗證失敗（attempt %d/%d, %s 項）: %s. Retrying in %ds...",
+                    attempt + 1,
+                    max_retries + 1,
+                    len(violations),
+                    violations,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+            logger.warning(
+                "Bedrock 合成輸出驗證失敗 (%s 項)，降級回原始 comparison: %s",
+                len(violations),
+                violations,
+            )
+            return comparison
+
+        # Overclaim validation：檢查 finding 中的數字是否出現在 evidence 中
+        _validate_overclaim(parsed, evidence_a, evidence_b)
+
+        # 套用 confidence ceiling 後建出增強 ComparisonReport
+        return _build_enhanced_report(parsed, comparison, evidence_a, evidence_b)
+
+    return comparison
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +355,67 @@ def _validate_synthesis_output(
         violations.append(f"overall_confidence 超出範圍: {overall_conf}")
 
     return violations
+
+
+# ---------------------------------------------------------------------------
+# Overclaim validation
+# ---------------------------------------------------------------------------
+
+def _validate_overclaim(
+    response: dict,
+    evidence_a: list[Evidence],
+    evidence_b: list[Evidence],
+) -> None:
+    """檢查每面向 finding 中的數字是否出現在 source evidence 中。
+
+    若 finding 含未在 evidence content_reference 中出現的數字，
+    則將該 dimension 降級為 insufficient，conclusion 保留但標註。
+    修改 response dict in-place。
+    """
+    dims = response.get("dimensions", [])
+    if not isinstance(dims, list):
+        return
+
+    for dim in dims:
+        if not isinstance(dim, dict):
+            continue
+        finding = str(dim.get("finding", ""))
+        numbers = re.findall(r'-?\d+\.?\d*', finding)
+        if not numbers:
+            continue
+
+        # 收集所有被引用的 evidence content_reference 文字
+        a_refs: list[int] = []
+        b_refs: list[int] = []
+        for ref in dim.get("a_evidence_refs", []):
+            try:
+                a_refs.append(int(ref))
+            except (ValueError, TypeError):
+                pass
+        for ref in dim.get("b_evidence_refs", []):
+            try:
+                b_refs.append(int(ref))
+            except (ValueError, TypeError):
+                pass
+
+        evidence_texts: list[str] = []
+        for ref in a_refs:
+            if 0 <= ref < len(evidence_a):
+                cr = evidence_a[ref].content_reference or ""
+                evidence_texts.append(cr)
+        for ref in b_refs:
+            if 0 <= ref < len(evidence_b):
+                cr = evidence_b[ref].content_reference or ""
+                evidence_texts.append(cr)
+
+        combined = " ".join(evidence_texts)
+
+        for num in numbers:
+            if num not in combined:
+                dim["decision"] = "insufficient"
+                old_finding = str(dim.get("finding", ""))
+                dim["finding"] = old_finding + "（部分發現含未驗證數值）"
+                break  # 一個未驗證數字即足以降級
 
 
 # ---------------------------------------------------------------------------
