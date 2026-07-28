@@ -13,6 +13,7 @@ import hashlib
 import secrets
 import re
 import io
+import runpy
 import tarfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -106,11 +107,12 @@ def require_clean_root() -> None:
 
 def bump_patch_version(worktree: Path) -> str:
     """Bump the canonical version and regenerate derived package metadata."""
-    from scripts.release_version import bumped_version, package_version, parse_version, update_version_files
-
-    current = package_version(worktree)
-    next_version = bumped_version(parse_version(current), "patch")
-    update_version_files(next_version, worktree)
+    version_tools = runpy.run_path(str(ROOT / "scripts" / "release_version.py"))
+    current = version_tools["package_version"](worktree)
+    next_version = version_tools["bumped_version"](
+        version_tools["parse_version"](current), "patch"
+    )
+    version_tools["update_version_files"](next_version, worktree)
     return next_version
 
 
