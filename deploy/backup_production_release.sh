@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 REGION="${REGION:-ap-southeast-2}"
 RECEIPT="${TRUSTFORGE_BACKUP_RECEIPT:?TRUSTFORGE_BACKUP_RECEIPT is required}"
+RUN_ID="${TRUSTFORGE_RELEASE_RUN_ID:?TRUSTFORGE_RELEASE_RUN_ID is required}"
 BACKUP_ROOT="${TRUSTFORGE_BACKUP_ROOT:-$PWD/out/release-train/backups}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="trustforge-deploy-${ACCOUNT}"
@@ -36,14 +37,20 @@ for path in sys.argv[1:]:
     if not isinstance(value, dict):
         raise SystemExit(f"backup JSON is not an object: {path}")
 PY
-python3 - "$RECEIPT" "$ARCHIVE" "$DIGEST" <<'PY'
+ARCHIVE_SHA256="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+python3 - "$RECEIPT" "$ARCHIVE" "$DIGEST" "$RUN_ID" "$ARCHIVE_SHA256" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 
-destination, archive, digest = map(Path, sys.argv[1:])
+destination = Path(sys.argv[1])
+archive = Path(sys.argv[2])
+digest, run_id, archive_sha256 = sys.argv[3:]
 payload = {
+    "schema": "trustforge.production-backup/v1",
+    "run_id": run_id,
     "archive": str(archive.resolve(strict=True)),
-    "artifact_digest": str(digest),
+    "archive_sha256": archive_sha256,
+    "artifact_digest": digest,
     "restore_verified": True,
 }
 fd, temporary = tempfile.mkstemp(prefix=".backup-receipt.", dir=destination.parent)

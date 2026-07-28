@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import hashlib
+import secrets
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +30,9 @@ def record(receipt: dict) -> Path:
     temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
     temporary.replace(path)
+    status = OUT / "last-status.json"
+    shutil.copyfile(path, status)
+    os.chmod(status, 0o600)
     return path
 
 
@@ -35,12 +40,17 @@ def record(receipt: dict) -> Path:
 def lease() -> Iterable[None]:
     OUT.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = OUT / "lease"
+    token = secrets.token_hex(16)
     try:
         lock.mkdir(mode=0o700)
     except FileExistsError as exc:
         try:
-            owner = int((lock / "pid").read_text(encoding="ascii").strip())
+            owner_data = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+            owner = int(owner_data["pid"])
             os.kill(owner, 0)
+            birth = run(["ps", "-o", "lstart=", "-p", str(owner)], capture=True).strip()
+            if birth != owner_data.get("birth"):
+                raise ProcessLookupError
         except (FileNotFoundError, ProcessLookupError, ValueError):
             shutil.rmtree(lock)
             try:
@@ -52,10 +62,19 @@ def lease() -> Iterable[None]:
         else:
             raise RuntimeError("another release train owns the lease") from exc
     try:
-        (lock / "pid").write_text(f"{os.getpid()}\n", encoding="ascii")
+        birth = run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture=True).strip()
+        (lock / "owner.json").write_text(
+            json.dumps({"pid": os.getpid(), "birth": birth, "token": token}) + "\n",
+            encoding="utf-8",
+        )
         yield
     finally:
-        shutil.rmtree(lock)
+        try:
+            owner_data = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+            if owner_data.get("token") == token:
+                shutil.rmtree(lock)
+        except FileNotFoundError:
+            pass
 
 
 def require_clean_root() -> None:
@@ -64,16 +83,57 @@ def require_clean_root() -> None:
 
 
 def gate(worktree: Path) -> None:
-    run([str(worktree / ".githooks" / "pre-push")], cwd=worktree)
+    trusted_hook = run(["git", "show", "origin/main:.githooks/pre-push"], capture=True)
+    hook = worktree / ".git-trusted-pre-push"
+    hook.write_text(trusted_hook, encoding="utf-8")
+    hook.chmod(0o500)
+    command = [str(hook)]
+    sandbox = Path("/usr/bin/sandbox-exec")
+    if sys.platform == "darwin":
+        if not sandbox.is_file():
+            raise RuntimeError("trusted gate sandbox is unavailable")
+        home = Path.home()
+        denied = [home / ".aws", home / ".ssh", home / ".config" / "gh", home / "Library" / "Keychains"]
+        rules = "".join(f'(deny file-read* (subpath "{path}"))' for path in denied)
+        profile = f'(version 1)(allow default){rules}(deny process-exec (literal "/usr/bin/security"))'
+        command = [str(sandbox), "-p", profile, str(hook)]
+    env = dict(os.environ)
+    for key in tuple(env):
+        if key.startswith(("AWS_", "GH_", "GITHUB_")):
+            env.pop(key)
+    subprocess.run(command, cwd=worktree, env=env, check=True)
+    hook.unlink()
+
+
+def production_identity() -> tuple[str, str]:
+    account = run(["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"], capture=True).strip()
+    bucket = f"trustforge-deploy-{account}"
+    pointer = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/pointers/active.json", "-", "--region", "ap-southeast-2"], capture=True))
+    digest = str(pointer["digest"])
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise RuntimeError("production active digest is invalid")
+    manifest = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/artifacts/{digest}/manifest.json", "-", "--region", "ap-southeast-2"], capture=True))
+    sha = str(manifest["git_sha"])
+    if len(sha) != 40 or any(char not in "0123456789abcdef" for char in sha):
+        raise RuntimeError("production manifest git SHA is invalid")
+    return sha, digest
 
 
 def require_backup_receipt(command: str, run_id: str) -> Path:
     receipt = OUT / f"{run_id}-backup.json"
-    env = dict(os.environ, TRUSTFORGE_BACKUP_RECEIPT=str(receipt))
+    if receipt.exists():
+        raise RuntimeError("backup receipt already exists")
+    env = dict(os.environ, TRUSTFORGE_BACKUP_RECEIPT=str(receipt), TRUSTFORGE_RELEASE_RUN_ID=run_id)
     subprocess.run(["/bin/zsh", "-lc", command], cwd=ROOT, env=env, check=True)
     payload = json.loads(receipt.read_text(encoding="utf-8"))
     archive = Path(payload.get("archive", ""))
-    if payload.get("restore_verified") is not True or not archive.is_file():
+    archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest() if archive.is_file() else ""
+    if (
+        payload.get("schema") != "trustforge.production-backup/v1"
+        or payload.get("run_id") != run_id
+        or payload.get("restore_verified") is not True
+        or payload.get("archive_sha256") != archive_hash
+    ):
         raise RuntimeError("backup receipt lacks a verified restorable archive")
     return receipt
 
@@ -92,18 +152,19 @@ def execute(args: argparse.Namespace) -> Path:
             ).strip().split()
             main_only, develop_only = (int(value) for value in counts)
             receipt["divergence"] = {"main_only": main_only, "develop_only": develop_only}
+            main_sha_remote = run(["git", "rev-parse", "origin/main"], capture=True).strip()
+            production_sha, production_digest = production_identity()
+            receipt["production_before"] = {"git_sha": production_sha, "artifact_digest": production_digest}
             if args.dry_run:
                 receipt["status"] = "dry-run"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
-            if develop_only == 0:
+            if develop_only == 0 and production_sha == main_sha_remote:
                 receipt["status"] = "no-op"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
-            backup_command = os.environ.get("TRUSTFORGE_RELEASE_BACKUP_CMD", "")
-            deploy_command = os.environ.get("TRUSTFORGE_RELEASE_DEPLOY_CMD", "")
-            if not backup_command or not deploy_command:
-                raise RuntimeError("production backup and deploy commands must both be configured")
+            backup_command = "bash deploy/backup_production_release.sh"
+            deploy_command = "bash deploy/deploy_ec2.sh"
             with tempfile.TemporaryDirectory(prefix="trustforge-release-train-") as temporary:
                 base = Path(temporary)
                 develop_tree = base / "develop"
@@ -114,20 +175,27 @@ def execute(args: argparse.Namespace) -> Path:
                     develop_sha = run(["git", "rev-parse", "HEAD"], cwd=develop_tree, capture=True).strip()
                     receipt["steps"].append({"develop": develop_sha})
                     run(["git", "worktree", "add", "--detach", str(main_tree), "origin/main"])
-                    run(["git", "merge", "--no-edit", "--no-ff", develop_sha], cwd=main_tree)
+                    if develop_only:
+                        run(["git", "merge", "--no-edit", "--no-ff", develop_sha], cwd=main_tree)
                     gate(main_tree)
                     main_sha = run(["git", "rev-parse", "HEAD"], cwd=main_tree, capture=True).strip()
                     release_branch = f"release/auto-{run_id.lower()}-{main_sha[:8]}"
                     backup = require_backup_receipt(backup_command, run_id)
                     receipt["steps"].append({"backup_receipt": str(backup)})
-                    run(
-                        ["git", "push", "--atomic", "origin", f"{main_sha}:main", f"{main_sha}:{release_branch}"],
-                        cwd=main_tree,
-                    )
-                    receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
+                    if develop_only:
+                        run(
+                            ["git", "push", "--atomic", "origin", f"{main_sha}:main", f"{main_sha}:{release_branch}"],
+                            cwd=main_tree,
+                        )
+                        receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
+                    else:
+                        receipt["steps"].append({"main": main_sha, "release_branch": "existing-main-retry"})
                     env = dict(os.environ, TRUSTFORGE_RELEASE_SHA=main_sha, TRUSTFORGE_RELEASE_BRANCH=release_branch)
                     subprocess.run(["/bin/zsh", "-lc", deploy_command], cwd=main_tree, env=env, check=True)
-                    receipt["steps"].append({"production_deploy": "passed"})
+                    deployed_sha, deployed_digest = production_identity()
+                    if deployed_sha != main_sha:
+                        raise RuntimeError("production active SHA does not match the verified main SHA")
+                    receipt["steps"].append({"production_deploy": "passed", "git_sha": deployed_sha, "artifact_digest": deployed_digest})
                 finally:
                     subprocess.run(["git", "worktree", "remove", "--force", str(main_tree)], cwd=ROOT)
                     subprocess.run(["git", "worktree", "remove", "--force", str(develop_tree)], cwd=ROOT)
@@ -137,6 +205,11 @@ def execute(args: argparse.Namespace) -> Path:
         receipt["error"] = str(exc)
         receipt["finished_at"] = datetime.now(UTC).isoformat()
         record(receipt)
+        if sys.platform == "darwin":
+            subprocess.run(
+                ["/usr/bin/osascript", "-e", 'display notification "TrustForge release train failed; inspect last-status.json" with title "TrustForge production"'],
+                check=False,
+            )
         raise
     receipt["finished_at"] = datetime.now(UTC).isoformat()
     return record(receipt)

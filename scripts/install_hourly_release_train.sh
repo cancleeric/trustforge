@@ -20,8 +20,6 @@ ROOT="$("$PYTHON" -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolv
 PYTHON="$("$PYTHON" -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$PYTHON")"
 ARGS=("$PYTHON" "$ROOT/scripts/hourly_release_train.py")
 if (( EXECUTE )); then
-  : "${TRUSTFORGE_RELEASE_BACKUP_CMD:?required with --execute}"
-  : "${TRUSTFORGE_RELEASE_DEPLOY_CMD:?required with --execute}"
   ARGS+=("--execute")
 fi
 
@@ -40,7 +38,7 @@ payload = {
     "ProgramArguments": arguments,
     "EnvironmentVariables": {
         key: os.environ[key]
-        for key in ("PATH", "NVM_DIR", "TRUSTFORGE_RELEASE_BACKUP_CMD", "TRUSTFORGE_RELEASE_DEPLOY_CMD")
+        for key in ("PATH", "NVM_DIR")
         if key in os.environ
     },
     "StartInterval": 3600,

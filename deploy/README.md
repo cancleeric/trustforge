@@ -15,14 +15,12 @@ receipt。
 ./scripts/install_hourly_release_train.sh
 ```
 
-啟用 production 必須同時提供兩個命令。備份命令需把 JSON 寫到
-`$TRUSTFORGE_BACKUP_RECEIPT`，內容至少為
-`{"archive":"/absolute/backup.tar.gz","restore_verified":true}`；部署命令應呼叫
-既有 immutable A/B deployment workflow。缺任一設定會 fail-closed：
+啟用 production 使用 repo 內固定的
+`deploy/backup_production_release.sh` 與 `deploy/deploy_ec2.sh`，不接受 plist
+傳入任意命令，避免憑證或命令字串落碟。備份 receipt 會綁定 run ID、schema、
+archive SHA-256 與回復驗證結果：
 
 ```bash
-TRUSTFORGE_RELEASE_BACKUP_CMD='<approved backup and restore-drill command>' \
-TRUSTFORGE_RELEASE_DEPLOY_CMD='bash deploy/deploy_ec2.sh' \
 ./scripts/install_hourly_release_train.sh --execute
 ```
 

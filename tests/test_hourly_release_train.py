@@ -15,7 +15,13 @@ def test_backup_receipt_requires_archive_and_restore_verification(tmp_path, monk
 
     def fake_run(*args, **kwargs):
         receipt = Path(kwargs["env"]["TRUSTFORGE_BACKUP_RECEIPT"])
-        receipt.write_text(json.dumps({"archive": str(archive), "restore_verified": True}))
+        receipt.write_text(json.dumps({
+            "schema": "trustforge.production-backup/v1",
+            "run_id": "run",
+            "archive": str(archive),
+            "archive_sha256": train.hashlib.sha256(b"backup").hexdigest(),
+            "restore_verified": True,
+        }))
 
     monkeypatch.setattr(train.subprocess, "run", fake_run)
     assert train.require_backup_receipt("backup", "run") == tmp_path / "run-backup.json"
@@ -45,11 +51,11 @@ def test_lease_recovers_dead_owner(tmp_path, monkeypatch):
     train.OUT = tmp_path
     lock = tmp_path / "lease"
     lock.mkdir(parents=True)
-    (lock / "pid").write_text("99999999\n")
+    (lock / "owner.json").write_text(json.dumps({"pid": 99999999, "birth": "old", "token": "old"}))
 
     def dead_owner(_pid, _signal):
         raise ProcessLookupError
 
     monkeypatch.setattr(train.os, "kill", dead_owner)
     with train.lease():
-        assert (lock / "pid").is_file()
+        assert (lock / "owner.json").is_file()
