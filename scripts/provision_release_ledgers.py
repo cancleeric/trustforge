@@ -585,7 +585,18 @@ def main() -> int:
         if backup.exists():
             raise SystemExit("stale provisioning backup without journal")
         stage.mkdir(mode=0o750)
-        os.chown(stage, 0, __import__("grp").getgrnam("trustforge-release").gr_gid)
+        release_gid = __import__("grp").getgrnam("trustforge-release").gr_gid
+        os.chown(stage, 0, release_gid)
+        # Keep the shared staging root non-writable to both service identities.
+        # Root provisions each private child with its final writer ownership
+        # before dropping privileges, so neither writer can replace its sibling.
+        for name, uid in (
+            ("control", operator.pw_uid),
+            ("router-outcomes", router.pw_uid),
+        ):
+            child = stage / name
+            child.mkdir(mode=0o750)
+            os.chown(child, uid, release_gid)
         control_public = _run_as(
             "trustforge-operator",
             "control",
