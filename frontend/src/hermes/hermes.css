@@ -375,6 +375,85 @@
   min-width: 0;
 }
 
+/* N70（CEO：「能按的都移到左邊欄」）：頂欄原本混了顯示與操作，一般使用者掃視
+   時分不出哪些能按。所有導覽/模式/語言鈕搬到左軌頂端這一區。
+   桌機是直排清單（跟左軌其他區塊同一個節奏）；≤560px 左軌整條不顯示，這一區
+   會被抽出來變成頂欄下方的橫向控制條——見下面 `@media (max-width:560px)` 的
+   N70 段落。⚠️ 兩邊要一起看，只改一邊手機就會完全沒有導覽。 */
+.hermes-rail-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.hermes-rail-controls > button {
+  /* 24px 最小點擊目標（N29 為品牌鈕定下的標準，這裡整區沿用）。 */
+  min-height: 24px;
+  /* 長標籤（en 的 "Historical trend"、"完整模式"…）不能把選單欄撐爆：左軌是
+     overflow-y:auto，撐爆等於被裁掉。允許換行而不是硬撐一行。 */
+  max-width: 100%;
+  /* N70：語言鈕標籤只有 "EN"，內容寬僅 19.2px。min-width:0 讓它縮到 24px 以下，
+     踩到 N29 的最小點擊目標。改成 24px 下限——長標籤本來就遠寬於此，不影響換行。 */
+  min-width: 24px;
+  white-space: normal;
+  text-align: left;
+}
+
+/* N70 修正（CEO：「你也改正常一點好不好」）：第一版整區用 flex-wrap，導覽項
+   就照內容寬度一個接一個排（「分析 比較」擠同列、「成本」自己一列），看起來
+   像散落的標籤而不是選單。導覽是清單，一列一項、整列可按。 */
+.hermes-rail-controls .hermes-nav-item {
+  flex: 0 0 100%;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 6px;
+  /* 導覽項原本沿用內文字級，比同一區的開關鈕大一號，兩者擠在一起看起來像兩套
+     設計。統一到選單字級。 */
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.hermes-rail-controls .hermes-nav-item[aria-pressed='true'] {
+  background: var(--color-hermes-inset);
+}
+
+/* 開關類（完整模式／低動態／說明／艦體升級／語言）維持兩欄並排——它們是短標籤
+   的切換鈕，不是導覽層級，跟導覽拉開視覺差異剛好。語言鈕原本沒有框，混在有框
+   的鈕之間像壞掉的文字，補上同一套外框。 */
+.hermes-rail-controls .hermes-lang-toggle {
+  padding: 3px 8px;
+  border: 1px solid var(--color-hermes-bd);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: center;
+}
+
+/* `.hermes-nav-item::after` 那顆說明泡泡原本是為橫向頂欄畫的：`left:50%` +
+   `translateX(-50%)` + 固定 190px。搬進左軌（147~160px 寬且 overflow-y:auto）
+   之後，它有一半落在軌道外會被裁掉。在軌道裡改成靠左對齊並夾住寬度。 */
+.hermes-rail-controls .hermes-nav-item::after {
+  left: 0;
+  transform: none;
+  width: min(190px, 100%);
+}
+
+/* 角度說明只是輔助資訊（使用者不再需要選），用內文字級排在左軌會比導覽還搶眼。
+   壓成註腳級別。 */
+.hermes-focus-derived {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-hermes-tx2);
+}
+
+.hermes-rail-controls-sep {
+  flex-basis: 100%;
+  height: 1px;
+  margin: 2px 0;
+  background: var(--color-hermes-bd2);
+}
+
 @media (min-width: 1280px) {
 
   /* 選擇器必須是 `.hermes-frame` 不是 `:root`：這兩個變數的基準宣告就在
@@ -2565,9 +2644,9 @@
      toggle back off-screen even with everything else collapsed. It's a
      secondary action, not a core control, so it's dropped below ~900px the
      same as the other non-essential badges. */
-  .hermes-topbar .hermes-ship-toggle {
-    display: none !important;
-  }
+  /* N70：艦體升級已搬進左軌，`.hermes-topbar` 底下不再有這顆，這條規則留著
+     只會誤導後人以為頂欄還有它。窄螢幕的容納問題由左軌那條橫向捲動控制條
+     負責，不需要在這裡藏功能。 */
 
   .hermes-energy-deck {
     grid-template-columns: minmax(0, 1fr) 96px;
@@ -2621,10 +2700,66 @@
   .hermes-frame {
     --hermes-rail: 0px;
     --hermes-bottom: 88px;
+    /* ≤560px 頂欄會折成兩排，實測高 84px，`--hermes-topbar: 44px` 只是名目值
+       對不上；原本的 40px 就是在補這段差（84 = 44 + 40）。
+       N70 的橫向控制條再疊在它下面，實測 45px，同樣必須算進 --hermes-top，
+       不然會壓在艦橋第一排標題上（跟 N38 同一個教訓）。 */
+    --hermes-topbar-wrapped: 40px;
+    --hermes-rail-strip: 45px;
+    --hermes-tagline: calc(var(--hermes-topbar-wrapped) + var(--hermes-rail-strip));
   }
 
-  [data-region='left-rail'] {
+  /* N70：這裡原本是 `[data-region='left-rail'] { display:none !important }`。
+     N70 把頂欄所有可按的控制項搬進左軌之後，這一行等於在手機上把導覽、語言、
+     完整模式、低動態、說明全部刪掉——搬家搬到一半就會變成這樣，所以不能只留
+     display:none。
+     改法：左軌自身與選單欄改成 `display: contents`（不生成盒子，等於原本的
+     「這一欄不佔版面」），只有控制區留下來並改成頂欄下方的橫向控制條；左軌其他
+     內容（HERMES 對話、輸入框、歷史…）維持不顯示，跟 N70 之前完全一樣。 */
+  [data-region='left-rail'],
+  .hermes-rail-split,
+  .hermes-rail-menu {
+    display: contents !important;
+  }
+
+  .hermes-rail-chat,
+  .hermes-rail-menu > *:not(.hermes-rail-controls) {
     display: none !important;
+  }
+
+  .hermes-rail-controls {
+    position: fixed;
+    /* 貼在折行後的頂欄底下，不是名目的 44px——否則會蓋掉頂欄下半排。 */
+    top: calc(var(--hermes-topbar) + var(--hermes-topbar-wrapped));
+    left: 0;
+    right: 0;
+    z-index: 13;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 6px;
+    padding: 6px 10px;
+    background: rgba(10, 16, 24, .92);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--color-hermes-bd);
+  }
+
+  /* nowrap + 可橫向捲：320px 也不會把最後一顆（語言切換）擠出畫面外——這正是
+     N52 在頂欄踩過的坑，這裡直接用捲動避開，不靠算寬度。 */
+  .hermes-rail-controls > * {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  /* 桌機把導覽做成一列一項（整列可按）；手機這條是橫向捲動的控制條，一列一項
+     會變成只看得到一顆。這裡把整列寬度收回內容寬度。 */
+  .hermes-rail-controls .hermes-nav-item {
+    flex: 0 0 auto;
+    width: auto;
+  }
+
+  .hermes-rail-controls-sep {
+    display: none;
   }
 
   /* .bridge-display-mode（右上「HOLOGRAPHIC DISPLAY / AWAITING DATA」）與
@@ -2647,13 +2782,13 @@
      不逐項砍字，改成讓「最寬且最不重要」的品牌鈕可壓縮並截字：控制項一定
      保留可點，品牌退讓成 TRUSTFO…。這樣任何語系任何寬度都成立，不是針對
      en/320 硬調數字。（inline style 沒設 min-width/overflow，CSS 蓋得到。） */
-  .hermes-topbar>button:first-child {
+  .hermes-topbar>div:first-child {
     flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
   }
 
-  .hermes-topbar>button:first-child>span {
+  .hermes-topbar>div:first-child>span {
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -2780,9 +2915,7 @@
    the one dropped in this narrower band; it's already fully hidden below
    900px by the rule above. */
 @media (max-width:1080px) {
-  .hermes-topbar .hermes-ship-toggle {
-    display: none !important;
-  }
+  /* N70：同上，艦體升級已不在頂欄，這條規則已無對象。 */
 
   /* hiding ship-toggle alone still left the topbar over budget at the
      narrow end of this range (~960-1000px): the system-id/version badges

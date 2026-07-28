@@ -87,22 +87,21 @@ export default function HermesDashboard() {
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
   const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
-  const [questionType, setQuestionType] = useState<QuestionTypeId>('multi_source')
-  const [focus, setFocus] = useState<AnalysisFocusId>('risk')
-  // 使用者是否自己動過題型下拉。沒動過時，切角度會沿用既有的角度→題型預設
-  // 映射；動過之後就以使用者選的題型為準（題型才是官方評分看的那層）。
-  const typeEdited = useRef(false)
-
-  const handleQuestionType = useCallback((next: QuestionTypeId) => {
-    typeEdited.current = true
-    setQuestionType(next)
-  }, [])
-
-  const handleFocus = useCallback((next: AnalysisFocusId) => {
-    setFocus(next)
-    if (!typeEdited.current) setQuestionType(defaultQuestionTypeForFocus(next))
-  }, [])
+  const [urlQuestionType, setUrlQuestionType] = useState<QuestionTypeId | null>(null)
+  // N69：question_type 不再是使用者選的一顆下拉（原因見 HermesLeftRail 的註解——
+  // 官方文件那三種是「範例題型」不是限制），改由分析角度推導。這個對應表跟後端
+  // `analysis_flow.MODES` 是同一套：fundamentals/catalyst → hypothesis，其餘
+  // → multi_source，所以前端顯示的題型跟後端實際跑的一定一致，不會各說各話。
+  // URL 的 ?type= 仍然被尊重（深連結／既有測試／從 /analyze 帶回來的狀態）。
   const [query, setQuery] = useState(t('defaultQuery'))
+  // N70（CEO：「分析角度 也不給使用者選」）：角度不再是使用者狀態，改成推導值。
+  // 優先序：URL 的 ?mode=（深連結、排程回連、既有測試都靠它）> 由題目關鍵字
+  // 判定（`recommendAnalysisMode`，beginnerExperience.ts:26，已有測試）。
+  // 後端完全沒動：`mode` 仍是必填且白名單化（analysis_flow.py:459-462），我們
+  // 送的值一樣落在那五個裡面，只是不再要求使用者自己挑。
+  const urlFocus = searchParams.get('mode')
+  const focus: AnalysisFocusId = isAnalysisFocusId(urlFocus) ? urlFocus : recommendAnalysisMode(query)
+  const questionType = urlQuestionType ?? defaultQuestionTypeForFocus(focus)
   const [typedLen, setTypedLen] = useState(0)
   const [focusPulse, setFocusPulse] = useState(false)
   const [displayScore, setDisplayScore] = useState(0)
@@ -126,24 +125,29 @@ export default function HermesDashboard() {
     requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
       ? requestedModule : null
   const activeQuestionMode = focus
-  const recommendedMode = recommendAnalysisMode(query)
 
+  // N70（CEO：「新手模式不要動選單，動作是切回首頁、中間顯示新手板」）：
+  // 新手模式原本的作用是把左軌導覽砍到只剩「分析」——把功能藏起來，新手反而
+  // 沒有比較的入口。選單一律不動；切進新手模式改成回首頁，中間才顯示新手板
+  // （`beginnerMode && !activeModule` 才會 render HermesBeginnerNarrative，
+  // 停在 /compare 之類的工作區時切過去是完全沒有畫面反應的）。
   const setExperienceMode = useCallback((enabled: boolean) => {
     setBeginnerMode(enabled)
     document.cookie = `trustforge_hermes_experience=${enabled ? 'beginner' : 'full'}; Max-Age=31536000; Path=/; SameSite=Lax`
-  }, [])
+    if (enabled) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('workspace')
+      setSearchParams(next)
+    }
+  }, [searchParams, setSearchParams])
 
-  const applyAnalysisMode = useCallback((mode: AnalysisModeId) => {
-    setFocus(mode)
-    // 角度是選填的第二層，但使用者從「我想做什麼」挑 intent 時並沒有選題型，
-    // 這時仍沿用既有的角度→題型映射當預設；使用者自己動過題型選單就以他為準。
-    setQuestionType(defaultQuestionTypeForFocus(mode))
-  }, [])
-
-  const chooseIntent = useCallback((mode: AnalysisModeId, question: string) => {
-    applyAnalysisMode(mode)
+  // N70：意圖卡只負責把題目填進去。角度由題目推導（見上面的 `focus`），題型再由
+  // 角度推導，所以這裡不必也不該再寫任何一顆狀態；`mode` 參數保留是為了讓呼叫端
+  // （BEGINNER_INTENTS）不必改形狀，但刻意不使用。
+  const chooseIntent = useCallback((_mode: AnalysisModeId, question: string) => {
+    setUrlQuestionType(null)
     setQuery(question)
-  }, [applyAnalysisMode])
+  }, [])
 
   useEffect(() => {
     if (searchParams.get('tour') === '1') setOnboardingOpen(true)
@@ -162,7 +166,10 @@ export default function HermesDashboard() {
     setPhase('loading')
     setLastOrder(true)
     setSelectedId(coin.toLowerCase())
-    const type = mode === 'fundamentals' ? 'hypothesis' : 'multi_source'
+    // N70：原本這行漏了 catalyst（catalyst 在後端是 HYPOTHESIS，
+    // analysis_flow.py:61），跟 `defaultQuestionTypeForFocus` 各說各話。改成直接
+    // 用同一個函式，兩邊不可能再分岔。
+    const type = defaultQuestionTypeForFocus(mode)
     setSearchParams({ coin, type, q: question, mode, workspace: 'analyze' })
   }, [setSearchParams])
 
@@ -186,11 +193,10 @@ export default function HermesDashboard() {
   }, [model.byId, requestedCoin, selectedId])
 
   useEffect(() => {
-    const mode = searchParams.get('mode')
-    const nextFocus: AnalysisFocusId = isAnalysisFocusId(mode) ? mode : 'risk'
-    setFocus(nextFocus)
+    // N70：?mode= 不再同步進 state（focus 直接從 searchParams 推導），這裡只剩
+    // ?type= 與 ?q= 要落回表單。
     const requestedType = searchParams.get('type')
-    setQuestionType(isQuestionTypeId(requestedType) ? requestedType : defaultQuestionTypeForFocus(nextFocus))
+    setUrlQuestionType(isQuestionTypeId(requestedType) ? requestedType : null)
     const nextQuery = searchParams.get('q')
     setQuery(nextQuery ?? `分析${(requestedCoin ?? 'btc').toUpperCase()}近期市場狀況，整合多源資料`)
   }, [requestedCoin, searchParams])
@@ -593,7 +599,7 @@ export default function HermesDashboard() {
         <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} reducedMotion={reducedMotion} onReducedMotionToggle={toggleReducedMotion} runtimeStatus={<AgentCoreStatusBadge locale={locale} />} />
+          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} degradedMessage={globalError} beginnerMode={beginnerMode} trackedCount={model.coins.length} tierCounts={model.tierCounts} serviceMonitor={serviceMonitor} runtimeStatus={<AgentCoreStatusBadge locale={locale} />} />
         </div>
 
         <HermesHeroTagline />
@@ -603,25 +609,27 @@ export default function HermesDashboard() {
 
         <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <HermesLeftRail
-            model={model}
             hermesMessage={hermesMessage}
             hasOrder={lastOrder}
-            questionType={questionType}
             focus={focus}
             query={query}
             submitLabel={phase === 'loading' ? t('analyzingNow') : t('reAnalyze')}
-            onQuestionType={handleQuestionType}
-            onFocus={handleFocus}
             onQuery={setQuery}
             onSubmit={onSubmit}
             disabled={!query.trim() || phase === 'loading'}
-            serviceMonitor={serviceMonitor}
             questionContext={questionContext}
             onRecallQuestion={setQuery}
             beginnerMode={beginnerMode}
-            recommendedMode={recommendedMode}
             onChooseIntent={chooseIntent}
-            onApplyRecommendedMode={applyAnalysisMode}
+            /* N70：頂欄只留顯示，所有可按的都在左軌。 */
+            activeModule={activeModule}
+            onModuleSelect={openModule}
+            onHome={closeModule}
+            onBeginnerModeChange={setExperienceMode}
+            reducedMotion={reducedMotion}
+            onReducedMotionToggle={toggleReducedMotion}
+            onHelp={() => setOnboardingOpen(true)}
+            onToggleShip={toggleShip}
           />
         </div>
 

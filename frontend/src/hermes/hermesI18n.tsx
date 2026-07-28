@@ -89,6 +89,8 @@ const messages = {
     historyDisclaimer: '歷史參考 · 非本次 Evidence，不參與信任評分',
     noSimilarQuestions: '尚無相似歷史題目',
     analysisExpectationPrefix: '將使用目前可用的多來源資料進行「', analysisExpectationSuffix: '」，整理可信程度、主要原因與不確定性。',
+    // N70：分析角度改為依題目自動判定，這兩段是取代下拉的唯讀說明。
+    derivedFocusPrefix: '本次將以「', derivedFocusSuffix: '」角度分析（依你的題目自動判定）。',
     suggestSwitchToPrefix: '建議改用「', suggestSwitchToSuffix: '」分析',
     reAnalyze: '立即重新分析', analyzingNow: 'Hermes 自動分析中…',
     queued: '排隊', processing: '處理中', standby: '待命', retryLabel: '重試', retryIn: '後重試', waitingSnapshot: '等待此幣快照',
@@ -451,6 +453,7 @@ const messages = {
     historyDisclaimer: 'Historical reference · not this run’s evidence, does not affect the trust score',
     noSimilarQuestions: 'No similar past questions yet',
     analysisExpectationPrefix: 'Will use the currently available multi-source data for "', analysisExpectationSuffix: '", summarizing credibility, key reasons, and uncertainty.',
+    derivedFocusPrefix: 'This run uses the "', derivedFocusSuffix: '" angle (chosen automatically from your question).',
     suggestSwitchToPrefix: 'Suggest switching to "', suggestSwitchToSuffix: '" analysis',
     reAnalyze: 'Re-run analysis', analyzingNow: 'Hermes is analyzing…',
     queued: 'Queued', processing: 'Processing', standby: 'Standby', retryLabel: 'Retry', retryIn: 'retry in', waitingSnapshot: 'Waiting for this asset’s snapshot',

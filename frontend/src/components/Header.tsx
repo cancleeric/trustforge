@@ -104,8 +104,25 @@ export default function Header() {
       <Link to="/asset-context" className="flex min-h-[24px] items-center self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
         {t('hdrAssetContext')}
       </Link>
-      <Link to="/eco-link" className="flex min-h-[24px] items-center self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
-        {t('hdrEcoLink')}
+      {/* ⛔ N68：EcoLink（/eco-link）刻意不掛在主導覽——請不要「順手加回來」。
+          原因是結構性的、不是資料還沒補：`src/trustforge/ecolink.py` 的
+          `OFFICIAL_ECOLINK_HOSTS` 只放行 arbitrum.foundation / blog.arbitrum.io /
+          forum.arbitrum.foundation / gov.optimism.io / ethereum.org 五個官方網域，
+          來源不在名單內的 fixture 一律被 `_ensure_allowlisted_host` 擋掉。
+          也就是說 EcoLink 依設計只能涵蓋 ETH L2 生態，對比賽指定的 COIN_POOL
+          （BTC/ETH/SOL/BNB/XRP —— 五條互不相依的 L1）永遠給不出路徑，
+          點進去幾乎必定撲空。CEO 實測回報「只有 ARB 有東西 其他也是空的」。
+          要恢復這個連結的前提是先擴充 allowlist 並補進真實的官方依賴邊；
+          在那之前把它擺在跟「資產脈絡查詢」平起平坐的位置就是在誤導使用者。
+          ⚠️ 不接受的「修法」：替五幣捏造依賴邊讓畫面有東西——`ImpactPath`
+          的 docstring 明訂路徑只是「可能相關」而非因果，造資料正是它禁止的事。
+          路由本身保留在 App.tsx，深連結、既有測試、內部示範都還能用。
+          `EcoLinkPage.test.tsx` 有一條測試把 chip 綁死在 fixture 真的收錄的資產。 */}
+      {/* N68：空出來的位子換成 /settings。那頁本來就存在、雙語齊全、主題切換
+          是真的串 lib/theme.ts，但全站沒有任何連結指向它——只能手打網址。
+          用一個「有路由沒入口」的可用頁，換掉一個「有入口沒資料」的死路。 */}
+      <Link to="/settings" className="flex min-h-[24px] items-center self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
+        {t('settings')}
       </Link>
       <Link to="/peer-metrics" className="flex min-h-[24px] items-center self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
         {t('hdrPeerCompare')}

@@ -666,9 +666,9 @@ def test_candidate_success_cannot_change_active_report_or_evidence(monkeypatch, 
     derive = next(
         event for event in shadow_log.events if event["tool"] == "judgment.derive"
     )
-    assert derive["params"]["shadow_observation_status"] == "success"
-    assert derive["params"]["shadow_provider_calls"] == 0
-    assert derive["params"]["shadow_cost_usd"] == 0.0
+    assert "shadow_observation_status" not in derive["params"]
+    assert "shadow_provider_calls" not in derive["params"]
+    assert "shadow_cost_usd" not in derive["params"]
     assert asdict(shadow_report) == asdict(baseline_report)
     assert [asdict(item) for item in shadow_evidence] == [
         asdict(item) for item in baseline_evidence

@@ -85,6 +85,16 @@ def test_pyproject_version_matches_package_version():
     data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     assert data["project"]["version"] == trustforge.__version__
 
+    frontend_package = json.loads(
+        (pyproject_path.parent / "frontend/package.json").read_text(encoding="utf-8")
+    )
+    frontend_lock = json.loads(
+        (pyproject_path.parent / "frontend/package-lock.json").read_text(encoding="utf-8")
+    )
+    assert frontend_package["version"] == trustforge.__version__
+    assert frontend_lock["version"] == trustforge.__version__
+    assert frontend_lock["packages"][""]["version"] == trustforge.__version__
+
 
 def test_lambda_handler_analyze_json_has_version(monkeypatch):
     """Lambda handler 的一般分析 /analyze.json 回應應含 version（與 web.VERSION 一致）。"""

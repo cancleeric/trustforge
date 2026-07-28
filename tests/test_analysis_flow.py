@@ -592,15 +592,17 @@ def test_claim_extraction_fail_closed_when_gate_raises(tmp_path, monkeypatch):
 
 
 def test_trust_reasoning_passes_client_offline_state_to_score(tmp_path, monkeypatch):
-    """Step2 `score()` 的 `offline` 必須反映 Step1 真實決定的 live 狀態，不再
-    寫死 True。"""
+    """Step2 resolution 的 ``offline`` 必須反映 Step1 真實狀態。"""
     captured = {}
+    from trustforge.agent import authoritative_kernel_mapper as kernel_mapper
+    real_resolver = kernel_mapper.resolve_kernel_run_resolution
 
-    def _fake_score(claims, now, *, stance_fn=None, offline=None, dynamic_reputation=None):
+    def _capturing_resolver(claims, now, **kwargs):
+        offline = kwargs.get("offline")
         captured["offline"] = offline
-        return []
+        return real_resolver(claims, now, **kwargs)
 
-    monkeypatch.setattr("trustforge.analysis_flow.score", _fake_score)
+    monkeypatch.setattr(kernel_mapper, "resolve_kernel_run_resolution", _capturing_resolver)
 
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")
     package = _claim_extraction_package()
@@ -623,6 +625,7 @@ def test_evidence_assembly_rechecks_gate_and_can_flip_to_offline_when_cap_hits_b
     captured = {}
 
     def _fake_build_report(question, coin, qtype, brief, *, client, log, stance_fn, scored,
+                           kernel_judgment,
                            locale="zh-Hant"):
         captured["offline_at_call"] = client.offline
         return {"report": "stub"}, {"evidence": "stub"}
@@ -636,6 +639,7 @@ def test_evidence_assembly_rechecks_gate_and_can_flip_to_offline_when_cap_hits_b
     package["scored"] = []
     package["brief"] = None
     package["stance"] = None
+    package["kernel_judgment"] = object()
     flow._stage_evidence_assembly(package)
 
     assert captured["offline_at_call"] is True

@@ -20,6 +20,7 @@ from typing import Callable, Iterable
 
 from ..bedrock import BedrockClient
 from ..budget_guard import record_unledgered_spend
+from ..direction_resolution import resolve_direction
 from ..execlog import ExecutionLog
 from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
@@ -27,6 +28,9 @@ from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..term_annotations import annotate_terms
 from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 from . import narrative_locale as _loc
+from .authoritative_kernel_mapper import run_authoritative_judgment
+from .kernel_mapper import to_kernel_claim
+from .kernel_projection import KernelJudgment
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
 _STEP4_MIN_BUDGET_SEC = 60.0
@@ -990,6 +994,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                  now_fn=time.time,
                  stance_fn: Callable[[str, str], str] | None = None,
                  scored: list[ScoredClaim] | None = None,
+                 kernel_judgment: KernelJudgment | None = None,
                  locale: str = _loc.DEFAULT_LOCALE) -> tuple[Report, list[Evidence]]:
     """`stance_fn`：選填。供跨源 stance_pairs 偵測（Step 2.5）使用；未提供時
     （例如直接呼叫 `build_report` 的測試）會自建一份**有預算上限**的
@@ -1105,22 +1110,44 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # `_count_independent_sources`（`_normalize_source_key` 正規化去重），
     # 跟 `aggregate_trust_by_kind`/`detect_cross_source_signal` 同一口徑。
     n_indep = _count_independent_sources(sc.claim.doc.source for sc in brief.supporting)
-    is_abstain = (
-        calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_indep < _ABSTAIN_MIN_SUPPORTING
-    )
-    is_low_confidence = (not is_abstain) and calibrated < 0.5
+    if kernel_judgment is not None:
+        # #734: production direction/confidence/abstain are immutable Kernel
+        # outputs.  Presentation code may narrate them but must never recompute
+        # or override them with the former application heuristics.
+        calibrated = kernel_judgment.confidence
+        n_indep = kernel_judgment.independent_sources
+        is_abstain = kernel_judgment.abstain
+        decision_state = kernel_judgment.decision_state
+        direction = {
+            "bullish": "偏多",
+            "bearish": "偏空",
+            "neutral": "中性",
+            "unknown": "不明",
+        }.get(kernel_judgment.direction, kernel_judgment.direction)
+        is_low_confidence = decision_state == "low_confidence"
+    else:
+        # Compatibility-only path for direct presentation tests and inventoried
+        # callers.  Production entrypoints always provide kernel_judgment.
+        is_abstain = (
+            calibrated < _ABSTAIN_CALIBRATED_THRESHOLD
+            or n_indep < _ABSTAIN_MIN_SUPPORTING
+        )
+        is_low_confidence = (not is_abstain) and calibrated < 0.5
+        decision_state = (
+            "abstain"
+            if is_abstain
+            else ("low_confidence" if is_low_confidence else "normal")
+        )
+        direction = _direction(brief.supporting, all_scored=scored)
     # W4 codex 對抗審第 2 輪 [HIGH-1]：三態字面值下放給 `schema.Report.
     # decision_state`，供 UI／analyze.json 消費端結構化辨態（見該欄位註解），
     # 不必再各自重算 calibrated 門檻。
-    decision_state = "abstain" if is_abstain else ("low_confidence" if is_low_confidence else "normal")
-
     facts = [sc.claim.text for sc in brief.supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
 
     if is_abstain:
         # 證據不足：不代客決策，但仍嘗試從價格趨勢給出參考方向（Issue #367）。
         # 若 _direction 能從客觀 OHLCV 算出偏多/偏空/中性，附上「僅供參考」提示；
         # 若連方向都判不出（"不明"），退回原本的純中性文案。
-        direction = _direction(brief.supporting, all_scored=scored)
         if direction == "不明":
             head = _loc.abstain_unknown_direction(coin, n_supporting, calibrated, locale)
         else:
@@ -1131,7 +1158,6 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             else:
                 head = _loc.abstain_general(coin, direction, locale)
     else:
-        direction = _direction(brief.supporting, all_scored=scored)
         if qtype == QuestionType.HYPOTHESIS:
             head = _loc.judgment_hypothesis(query, coin, direction, locale)
         elif qtype == QuestionType.COMPARISON:
@@ -1400,7 +1426,7 @@ def run_agent_pipeline(
 
     Execution Log 保證 ≥2 筆 bedrock.complete 記錄（Step1 + Step3）。
     """
-    from ..trust.scoring import aggregate, build_stance_fn, score  # 延遲匯入避免頂層循環
+    from ..trust.scoring import build_stance_fn  # 延遲匯入避免頂層循環
 
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
@@ -1496,65 +1522,39 @@ def run_agent_pipeline(
     # `tests/test_stance_budget_sharing.py`）。小樣本守門（<3 獨立佐證來源
     # 強制 α=1，見 `scoring.py` `_iterate_source_reputation`）本身就是失效
     # 安全，故不做 feature flag，直接預設開。
-    scored = score(
+    resolved_direction = resolve_direction(
+        tuple(to_kernel_claim(claim) for claim in claims),
+        coin=coin,
+        pit_epoch=now_ts,
+    )
+    kernel_output, scored, brief, kernel_judgment = run_authoritative_judgment(
         claims,
-        now=now_ts,
+        pit_epoch=now_ts,
+        coin=coin,
+        query=query,
+        direction=resolved_direction,
         stance_fn=shared_stance_fn,
-        dynamic_reputation=True,
         offline=getattr(client, "offline", False),
     )
-    # score() 跑完、Step2 交叉佐證矛盾閘可能觸發的 stance 呼叫都已發生，
+    # Resolution 跑完、Step2 交叉佐證矛盾閘可能觸發的 stance 呼叫都已發生，
     # 這裡統一收割進 log、並清空 client.cost_events，避免下個 run 重複計費。
     _harvest_stance_cost_events(client, log)
-    # coin=coin：「coin-filter 主導」（demo 可靠性 #32 追加）——見 aggregate() docstring，
-    # 讓明確提及該幣的證據不因 query 措辭（如中文複合詞、無空格）忽窄忽寬地被截斷擠出。
-    brief = aggregate(scored, query=query, coin=coin)
-
-    # #732 PR3: candidate observation is explicitly enabled, bounded,
-    # non-authoritative, and durably recorded.  Every failure mode returns a
-    # diagnostic state only; report_scored/report_brief remain the exact active
-    # legacy objects regardless of candidate behavior.
     report_scored, report_brief = scored, brief
-    from .shadow_runtime import observe_candidate
-    _shadow_result = observe_candidate(
-        claims=claims,
-        scored=scored,
-        legacy_confidence=(
-            brief.calibrated_confidence
-            if brief.calibrated_confidence is not None
-            else brief.confidence
-        ),
-        legacy_trust_raw=brief.confidence,
-        coin=coin,
-        question_type=qtype.value,
-        query=query,
-        request_id=log.run_id,
-        pit_epoch=now_ts,
-        observed_epoch=_wall_clock,
-    )
-    kernel_output = _shadow_result.kernel_output
-    _shadow_parity = _shadow_result.parity
-    _shadow_observation = {
-        "status": _shadow_result.status,
-        "last_parity_passed": (
-            _shadow_parity.parity_passed if _shadow_parity is not None else None
-        ),
-    }
     log.record(
         "judgment.derive",
-        params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),
-                "confidence": round(brief.confidence, 3),
-                "kernel_confidence": round(kernel_output.confidence, 3) if kernel_output is not None else None,
-                "kernel_abstain": kernel_output.abstain if kernel_output is not None else None,
-                "kernel_reason_codes": kernel_output.reason_codes if kernel_output is not None else (),
-                "shadow_observation_status": _shadow_observation["status"],
-                "shadow_candidate_latency_ms": _shadow_result.elapsed_ms,
-                "shadow_parity_passed": _shadow_observation.get("last_parity_passed"),
-                "shadow_observation_event_id": _shadow_result.observation_event_id,
-                "shadow_provider_calls": _shadow_result.provider_calls,
-                "shadow_cost_usd": _shadow_result.cost_usd,
-                "shadow_diagnostic": _shadow_result.diagnostic},
-        summary="Step2 純 pipeline 完成；判斷由演算法產生，非 LLM",
+        params={
+            "judgment_source": "trustforge_core.run_kernel",
+            "contract_version": kernel_output.contract_version,
+            "supporting": kernel_output.supporting_count,
+            "confidence": kernel_output.confidence,
+            "direction": kernel_output.direction,
+            "abstain": kernel_output.abstain,
+            "decision_state": kernel_output.decision_state,
+            "reason_codes": kernel_output.reason_codes,
+            "provider_calls": 0,
+            "cost_usd": 0.0,
+        },
+        summary="Step2 canonical kernel judgment complete",
     )
 
     # Observation has no activation authority.  The active result remains the
@@ -1571,6 +1571,7 @@ def run_agent_pipeline(
         # 偵測，避免 aggregate() 的 supporting[:10]/contrarian[:5] 截斷把真矛盾
         # 配對擠出偵測範圍（見 build_report docstring）。
         scored=report_scored,
+        kernel_judgment=kernel_judgment,
     )
     # 防禦性再收割一次（demo 可靠性 #32 追加 cost-integrity HIGH 修正）：
     # build_report() 內部已在 Step2.5 偵測後自行收割一次，這裡屬於
