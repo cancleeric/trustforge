@@ -24,8 +24,8 @@ def test_hermes_scheduler_sets_packaged_home_and_starts_timer():
 def test_fetch_scheduler_probes_infrastructure_and_allows_upstream_degradation():
     script = FETCH_SCRIPT.read_text(encoding="utf-8")
 
-    assert "ExecStartPre=/usr/bin/python3 scripts/fetch_scheduler.py --probe" in script
-    assert "ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py --allow-partial" in script
+    assert "ExecStartPre=/usr/bin/python3.11 scripts/fetch_scheduler.py --probe" in script
+    assert "ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py --allow-partial" in script
 
 
 def test_backend_candidate_is_healthy_before_primary_restart():

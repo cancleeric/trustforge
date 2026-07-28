@@ -78,7 +78,7 @@ verify_fetch_scheduler() {
 
   local vcmdid
   vcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","if ! ( AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe failed\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe passed\""]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","if ! ( AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3.11 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe failed\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe passed\""]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$vcmdid" ] || [ "$vcmdid" = "None" ]; then
     echo "[ec2] ERROR: fetch-scheduler probe send-command failed" >&2
@@ -207,7 +207,8 @@ fi
 # 2) Build content-addressed artifact + manifest --------------------------------------
 echo "[ec2] building artifact..."
 B=$(mktemp -d); ZIP="$(pwd)/build/trustforge_app.zip"; mkdir -p build
-cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
+cp -r src/trustforge "$B/trustforge"; cp -r src/trustforge_core "$B/trustforge_core"
+cp -r data "$B/data"; cp -r demo "$B/demo"
 cp -r scripts "$B/scripts"
 cp -r skills "$B/skills"
 cp -r deploy "$B/deploy"
@@ -231,7 +232,7 @@ CONFIG_IDENTITY=$(echo "$CONFIG_SNAPSHOT" | python3 -c "import sys,json; print(j
 CONFIG_SNAPSHOT_JSON=$(echo "$CONFIG_SNAPSHOT" | python3 -c "import sys,json; print(json.load(sys.stdin)['payload'])")
 export CONFIG_SNAPSHOT_JSON
 
-( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts skills deploy docs llms.txt -x '*/__pycache__/*' )
+( cd "$B" && zip -qr "$ZIP" trustforge trustforge_core data demo scripts skills deploy docs llms.txt -x '*/__pycache__/*' )
 ARTIFACT_DIGEST=$(sha256sum "$ZIP" | awk '{print $1}')
 ARTIFACT_PREFIX="artifacts/${ARTIFACT_DIGEST}/"
 MANIFEST_JSON=$(cd "$B" && "$PYTHON" -c "
@@ -342,8 +343,8 @@ UD=$(mktemp)
 cat > "$UD" <<EOF
 #!/bin/bash
 set -x
-dnf install -y python3 python3-pip unzip >/var/log/tf-setup.log 2>&1
-pip3 install boto3 certifi >>/var/log/tf-setup.log 2>&1
+dnf install -y python3.11 python3.11-pip unzip >/var/log/tf-setup.log 2>&1
+python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
 mkdir -p /opt/trustforge && cd /opt/trustforge
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}artifact.zip ./app.zip --region ${REGION} >>/var/log/tf-setup.log 2>&1
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}manifest.json ./manifest.json --region ${REGION} >>/var/log/tf-setup.log 2>&1
@@ -363,7 +364,7 @@ Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
 ExecStartPre=/opt/trustforge/scripts/sweep_deploy_parameters.sh
-${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3 -m trustforge.web
+${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3.11 -m trustforge.web
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -376,7 +377,7 @@ Description=TrustForge connector cache fetch scheduler
 Type=oneshot
 WorkingDirectory=/opt/trustforge
 Environment=AWS_REGION=${REGION}
-ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py
+ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py
 UNIT2
 cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3
 [Unit]
