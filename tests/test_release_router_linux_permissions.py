@@ -253,10 +253,14 @@ assert records[-1]["event"]["kind"] == "operator_stop"
         ],
         check=True,
     )
+    tmpfiles_root = tmp_path / "tmpfiles-root"
+    (tmpfiles_root / "etc").mkdir(parents=True)
+    shutil.copy2("/etc/passwd", tmpfiles_root / "etc/passwd")
+    shutil.copy2("/etc/group", tmpfiles_root / "etc/group")
     subprocess.run(
         [
             "systemd-tmpfiles",
-            "--dry-run",
+            f"--root={tmpfiles_root}",
             "--create",
             str(ROOT / "deploy/trustforge-release-router.tmpfiles.conf"),
         ],
