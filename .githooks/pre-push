@@ -55,6 +55,15 @@ run_gate "frontend tests" npm --prefix frontend test -- --run
 run_gate "frontend lint" npm --prefix frontend run lint
 run_gate "frontend build" npm --prefix frontend run build
 run_gate "diff check" git diff --check
+if [ -n "${TRUSTFORGE_RELEASE_BASE_REF:-}" ]; then
+  if ! git rev-parse --verify "${TRUSTFORGE_RELEASE_BASE_REF}^{commit}" >/dev/null 2>&1; then
+    echo "[pre-push] FAILED: release base ref is not a local commit: ${TRUSTFORGE_RELEASE_BASE_REF}" >&2
+    exit 1
+  fi
+  run_gate \
+    "release range diff check (${TRUSTFORGE_RELEASE_BASE_REF}..HEAD)" \
+    git diff --check "${TRUSTFORGE_RELEASE_BASE_REF}..HEAD"
+fi
 
 echo "[pre-push] all local quality gates passed"
 
