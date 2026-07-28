@@ -4,7 +4,7 @@
  * Desktop: table layout
  * Mobile: card layout (via CSS grid)
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useHermesI18n } from './hermesI18n'
 import ConflictBadge from './ConflictBadge'
 import type { AngleResult, MultiAngleReport } from '../lib/multiAngleEndpoints'
@@ -45,6 +45,16 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
   const [loading, setLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    }
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -67,22 +77,23 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     try {
       const result = await submitMultiAngle(coin)
       if (result) {
-        // Poll until synthesis is ready (simple retry with backoff)
         let attempts = 0
         const poll = async () => {
+          if (!mountedRef.current) return
           attempts++
           const data = await fetchMultiAngleReport(coin, result.snapshot_id)
+          if (!mountedRef.current) return
           if (data?.multi_angle) {
             setReport(data.multi_angle)
             setSubmitting(false)
           } else if (attempts < 30) {
-            setTimeout(poll, Math.min(2000 + attempts * 500, 10000))
+            pollTimerRef.current = setTimeout(poll, Math.min(2000 + attempts * 500, 10000))
           } else {
             setError('分析超時，請稍後重新整理')
             setSubmitting(false)
           }
         }
-        setTimeout(poll, 3000)
+        pollTimerRef.current = setTimeout(poll, 3000)
       }
     } catch {
       setError('提交失敗')

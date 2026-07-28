@@ -5451,14 +5451,13 @@ def _handle_api_multi_angle_get(qs: dict | None = None) -> tuple[int, str]:
 
 def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, str]:
     """`POST /api/multi-angle`：觸發五角度綜合分析（#809）。"""
-    try:
-        content_length = int(headers.get("Content-Length", 0))
-        body = json.loads(rfile.read(content_length)) if content_length else {}
-    except (json.JSONDecodeError, ValueError):
-        return 400, _json_envelope_err("invalid_json", "請求 body 須為有效 JSON")
-    coin = str(body.get("coin", "")).strip().upper()
-    question = str(body.get("question", "")).strip()
-    locale = str(body.get("locale", "zh-Hant"))
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error
+    assert payload is not None
+    coin = str(payload.get("coin", "")).strip().upper()
+    question = str(payload.get("question", "")).strip()
+    locale = str(payload.get("locale", "zh-Hant"))
     if not coin:
         return 400, _json_envelope_err("missing_param", "必須提供 coin")
     from .schema import COIN_POOL
@@ -5467,10 +5466,13 @@ def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, s
     if not question:
         question = f"評估{coin}整體信任狀態，多角度綜合分析。"
     try:
+        _check_status_rate_limit(client_ip, "analysis-write")
         from .analysis_flow import AnalysisFlow
         with AnalysisFlow() as flow:
             result = flow.submit_multi_angle(coin, question, locale=locale)
         return 200, _json_envelope_ok(result)
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
     except ValueError as exc:
         return 400, _json_envelope_err("validation_error", str(exc))
     except Exception:

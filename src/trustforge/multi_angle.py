@@ -286,10 +286,17 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
         per_angle_sources.append(a.evidence_sources)
 
     # 共用來源 = 出現在所有角度中的 source
-    if per_angle_sources and all_sources:
-        shared = set.intersection(*[s for s in per_angle_sources if s])
+    # 空 sources 的角度視為「無可追溯來源」，不排除於計算外（codex review #1）
+    non_empty_sources = [s for s in per_angle_sources if s]
+    empty_count = len(per_angle_sources) - len(non_empty_sources)
+    if non_empty_sources and all_sources:
+        shared = set.intersection(*non_empty_sources)
         overlap_ratio = len(shared) / len(all_sources)
         evidence_independence = round(1.0 - overlap_ratio, 4)
+        # 有角度完全無 traceable sources → 降低獨立性評分
+        if empty_count > 0:
+            penalty = empty_count / len(per_angle_sources)
+            evidence_independence = round(evidence_independence * (1.0 - penalty), 4)
     else:
         evidence_independence = 0.0
 
