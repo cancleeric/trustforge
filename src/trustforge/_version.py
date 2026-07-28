@@ -16,4 +16,4 @@ git describe 的結果。
 並由 tests/test_version.py 釘住兩者一致，避免日後改一邊漏一邊。
 """
 
-VERSION = "0.18.1"
+VERSION = "0.18.2"
