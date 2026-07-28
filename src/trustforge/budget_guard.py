@@ -499,25 +499,22 @@ class BudgetReservation:
             self._reserved = round(self._reserved + cost, 6)
             return cost
 
-    def try_reserve_batch(
+    def available(
         self, count: int, ledger: Ledger | None = None, *, now_fn=time.time
-    ) -> float | None:
-        """原子預留 ``count`` 個請求，計入既有 in-flight reservations。"""
+    ) -> bool:
+        """唯讀確認目前 spent + process-local reservations 可容納幾次呼叫。"""
         if count <= 0:
             raise ValueError("count must be positive")
         cap = daily_cap_usd()
         cost = round(request_max_cost_usd() * count, 6)
         if cap <= 0:
-            return None
+            return False
         with self._lock:
             try:
                 spent = daily_cost_usd(ledger, now_fn=now_fn)
             except Exception:
-                return None
-            if round(spent + self._reserved + cost, 6) > cap:
-                return None
-            self._reserved = round(self._reserved + cost, 6)
-            return cost
+                return False
+            return round(spent + self._reserved + cost, 6) <= cap
 
     def release(self, amount: float | None) -> None:
         """釋放先前 `try_reserve()` 成功回傳的預留額度（reconcile：pipeline
@@ -606,26 +603,30 @@ def try_reserve_request_budget(
     return cost if ok else None
 
 
-def try_reserve_request_budget_batch(
+def request_budget_available(
     count: int, ledger: Ledger | None = None, *, now_fn=time.time
-) -> float | None:
-    """一次原子預留多個請求；用於 fan-out 前的 fail-closed admission gate。"""
+) -> bool:
+    """唯讀確認目前可觀測額度是否容得下 ``count`` 次呼叫。
+
+    這是 admission preflight，不預扣款；真正的原子預留仍由每個 worker
+    呼叫 ``try_reserve_request_budget`` 時執行。共享後端無法讀取時
+    fail-closed，避免把「不可確認」誤當成零 reservations。
+    """
     if count <= 0:
         raise ValueError("count must be positive")
     backend = _budget_counter_backend()
-    if backend is None:
-        return _RESERVATION.try_reserve_batch(count, ledger, now_fn=now_fn)
     cap = daily_cap_usd()
     cost = round(request_max_cost_usd() * count, 6)
+    if cap <= 0:
+        return False
     try:
-        spent = daily_cost_usd(ledger, now_fn=now_fn)
-        ok = backend.try_reserve(spent_daily=spent, cost=cost, cap=cap, now=now_fn())
-    except BudgetBackendError:
-        _maybe_emit_budget_backend_down_metric(now_fn())
-        return _RESERVATION.try_reserve_batch(count, ledger, now_fn=now_fn)
+        if backend is not None:
+            spent = daily_cost_usd(ledger, now_fn=now_fn)
+            reserved = backend.current_reserved_strict(now_fn())
+            return round(spent + reserved + cost, 6) <= cap
+        return _RESERVATION.available(count, ledger, now_fn=now_fn)
     except Exception:
-        return None
-    return cost if ok else None
+        return False
 
 
 def release_request_budget(amount: float | None) -> None:

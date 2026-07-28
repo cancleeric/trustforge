@@ -1192,7 +1192,7 @@ paths:
               schema: {$ref: "#/components/schemas/OkEnvelope"}
         "400": {$ref: "#/components/responses/BadRequest"}
         "409":
-          description: 無法原子預留五個工作所需預算
+          description: 唯讀預檢顯示目前可觀測額度不足以啟動五個工作（未預扣款）
         "503":
           description: 佇列無法同時容納五個工作
         "502": {$ref: "#/components/responses/UpstreamError"}
