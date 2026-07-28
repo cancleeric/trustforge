@@ -27,7 +27,12 @@ BUILD="$(mktemp -d)"; ZIP="$(pwd)/build/trustforge_lambda.zip"; mkdir -p build
 cp -r src/trustforge "$BUILD/trustforge"
 cp -r data "$BUILD/data"
 cp -r demo "$BUILD/demo"
-GIT_VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+PACKAGE_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+[[ "$PACKAGE_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  echo "ERROR: refusing release without a strict package SemVer" >&2
+  exit 1
+}
+GIT_VER="v${PACKAGE_VER}"
 printf 'VERSION = "%s"\n' "$GIT_VER" > "$BUILD/trustforge/_version.py"
 echo "[lambda] 版號 = $GIT_VER"
 ( cd "$BUILD" && zip -qr "$ZIP" trustforge data demo -x '*/__pycache__/*' )
