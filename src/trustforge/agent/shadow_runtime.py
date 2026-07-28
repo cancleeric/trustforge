@@ -26,7 +26,6 @@ from .shadow_contracts import (
     load_policy,
 )
 from .shadow_identity import measured_release_identity, verify_reviewed_loaded_candidate
-from .shadow_evidence_store import ShadowEvidenceStore
 
 _ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 _RUNTIME_FLAG = "TRUSTFORGE_SHADOW_RUNTIME_ENABLED"
@@ -134,6 +133,10 @@ def _observation_worker(
                 verify_reviewed_loaded_candidate(
                     kernel_fn, mapper_fn, candidate_contract_version,
                 )
+            if store_factory is None:
+                from .shadow_evidence_store import ShadowEvidenceStore
+
+                store_factory = ShadowEvidenceStore
             remaining_ms = max(1, int((deadline - monotonic_fn()) * 1000.0))
             store = store_factory(
                 busy_timeout_ms=min(int(hard_timeout_ms), remaining_ms),
@@ -247,7 +250,7 @@ def observe_candidate(
     monotonic_fn: Callable[[], float] = time.monotonic,
     kernel_fn: Callable = run_kernel,
     mapper_fn: Callable = to_kernel_input,
-    store_factory: Callable[..., ShadowEvidenceStore] = ShadowEvidenceStore,
+    store_factory: Callable[..., object] | None = None,
 ) -> ShadowRuntimeResult:
     """Attempt one bounded observation without affecting the active pipeline.
 
