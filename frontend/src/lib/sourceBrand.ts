@@ -27,6 +27,8 @@ const SOURCE_DISPLAY_NAME_FINE: Record<string, string> = {
   'mempool-space-fees': 'mempool.space · 建議手續費',
   'mempool-space-difficulty': 'mempool.space · 難度調整進度',
   blockchair: 'Blockchair · BTC 鏈上統計',
+  'whale-alert': 'Whale Alert · 鯨魚大額轉帳',
+  'arkham-intel': 'Arkham · 標記錢包交易',
 }
 
 /** 任何使用者可見處都應呼叫這支，不得直接印 `evidence.source` 原始 slug。 */
@@ -40,7 +42,7 @@ export function sourceDisplayName(source: string): string {
 }
 
 const OFFICIAL_KINDS = new Set(['price', 'hoyabit', 'regulatory'])
-const THIRD_PARTY_KINDS = new Set(['price_live', 'onchain'])
+const THIRD_PARTY_KINDS = new Set(['price_live', 'onchain', 'whale_onchain', 'celebrity_trade'])
 const COMMUNITY_KINDS = new Set(['news', 'social', 'sentiment'])
 
 export interface IndependenceTier {

@@ -4,10 +4,11 @@ import ComparePage from '../pages/ComparePage'
 import HistoryPage from '../pages/HistoryPage'
 import StatusPage from '../pages/StatusPage'
 import CostsPage from '../pages/CostsPage'
+import WhaleHistoryPanel from '../components/WhaleHistoryPanel'
 import { BridgeHologramProvider, type BridgeHologramData } from '../components/BridgeHologramContext'
 import { useHermesI18n } from './hermesI18n'
 
-export type HermesWorkspaceModule = 'analyze' | 'compare' | 'history' | 'status' | 'costs'
+export type HermesWorkspaceModule = 'analyze' | 'compare' | 'history' | 'status' | 'costs' | 'whale'
 
 const MODULES = {
   analyze: AnalyzePage,
@@ -15,6 +16,7 @@ const MODULES = {
   history: HistoryPage,
   status: StatusPage,
   costs: CostsPage,
+  whale: WhaleHistoryPanel,
 }
 
 export default function HermesModuleDeck({

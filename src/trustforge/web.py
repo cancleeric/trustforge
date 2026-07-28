@@ -7064,6 +7064,51 @@ def _handle_api_costs(qs: dict | None = None, client_ip: str = "") -> tuple[int,
         return 502, _json_envelope_err("upstream_error", "成本資料暫時無法讀取，請稍後再試")
 
 
+# ---------------------------------------------------------------------------
+# Whale Alert API（大額轉帳即時摘要 + 歷程）
+# ---------------------------------------------------------------------------
+
+def _handle_api_whale_summary(qs: dict) -> tuple[int, str]:
+    """`/api/whale-summary`：從 cache 讀最新 whale-alert 資料，聚合為即時摘要。
+
+    參數：`coin`（預設 BTC，須在 COIN_POOL 白名單內）。
+    """
+    from .whale_api import whale_summary
+
+    coin_raw = (qs.get("coin", ["BTC"])[0]).strip().upper()
+    if coin_raw not in {"BTC", "ETH", "SOL", "BNB", "XRP"}:
+        return 400, _json_envelope_err("invalid_coin", f"不支援的幣種：{coin_raw}")
+    try:
+        backend = _shared_web_cache_backend()
+        data = whale_summary(coin_raw, backend)
+        return 200, _json_envelope_ok(data)
+    except Exception as exc:
+        return 502, _json_envelope_err("whale_summary_error", str(exc))
+
+
+def _handle_api_whale_history(qs: dict) -> tuple[int, str]:
+    """`/api/whale-history`：從 SourceEventArchive 讀歷史 whale-alert 資料。
+
+    參數：`coin`（預設 BTC）、`days`（預設 7，僅接受 1/7/30）。
+    """
+    from .whale_api import whale_history
+
+    coin_raw = (qs.get("coin", ["BTC"])[0]).strip().upper()
+    if coin_raw not in {"BTC", "ETH", "SOL", "BNB", "XRP"}:
+        return 400, _json_envelope_err("invalid_coin", f"不支援的幣種：{coin_raw}")
+    try:
+        days = int(qs.get("days", ["7"])[0])
+    except (ValueError, TypeError):
+        days = 7
+    if days not in (1, 7, 30):
+        days = 7
+    try:
+        data = whale_history(coin_raw, days)
+        return 200, _json_envelope_ok(data)
+    except Exception as exc:
+        return 502, _json_envelope_err("whale_history_error", str(exc))
+
+
 # 對齊 `cache.py::TRUST_SNAPSHOT_HISTORY_TTL_SECONDS`（90 天保留期限）——問
 # 超過保留期限的天數本來就查無資料，直接在 API 層擋掉，不做無意義的大量
 # cache 逐日讀取。
@@ -8156,6 +8201,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/history":
             code, body = _handle_api_history(qs, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/whale-summary":
+            code, body = _handle_api_whale_summary(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/whale-history":
+            code, body = _handle_api_whale_history(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/operations-status":
             code, body = _handle_api_operations_status()

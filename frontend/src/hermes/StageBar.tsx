@@ -23,12 +23,14 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
     history: ['歷史封存', '時間切片', '每日回放', '結果回標', '校準趨勢'],
     status: ['來源連線', '快取狀態', '資料鮮度', '異常告警', '系統健康'],
     costs: ['呼叫收集', '模型分組', 'Token 計量', '帳本封存', '累計成本'],
+    whale: ['鯨魚偵測', '交易所流向', '淨流入出', '大額明細', '趨勢總覽'],
   } : {
     analyze: ['SOURCE INTAKE', 'CLAIM EXTRACTION', 'TRUST REASONING', 'EVIDENCE BINDING', 'REPORT DELIVERY'],
     compare: ['MARKET A', 'MARKET B', 'NORMALIZE', 'DELTA VECTOR', 'VERDICT'],
     history: ['ARCHIVE', 'TIME SLICE', 'DAILY REPLAY', 'OUTCOME LABEL', 'CALIBRATION'],
     status: ['UPLINK', 'CACHE', 'FRESHNESS', 'ALERTS', 'HEALTH'],
     costs: ['CALLS', 'MODELS', 'TOKENS', 'LEDGER', 'TOTAL COST'],
+    whale: ['WHALE DETECT', 'EXCHANGE FLOW', 'NET FLOW', 'LARGE TX', 'TREND'],
   }
   const liveFlow = !telemetry?.runId && flow?.stages.some((stage) => stage.current || stage.queued > 0)
   const engineStages = mode === 'analyze' && liveFlow ? flow?.stages.map((stage) => ({

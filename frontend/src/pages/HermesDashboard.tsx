@@ -19,6 +19,8 @@ import HermesBeginnerNarrative from '../components/HermesBeginnerNarrative'
 import HermesMobileDivergenceEntry from '../hermes/HermesMobileDivergenceEntry'
 import TrainingStatusCard from '../components/TrainingStatusCard'
 import AgentCoreStatusBadge from '../components/AgentCoreStatusBadge'
+import { getWhaleSummary } from '../lib/endpoints'
+import type { WhaleSummary } from '../components/WhaleActivityPanel'
 import { defaultQuestionTypeForFocus, isAnalysisFocusId, isQuestionTypeId, type AnalysisFocusId, type QuestionTypeId } from '../lib/analysisTaxonomy'
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 import HermesFirstRun from '../hermes/HermesFirstRun'
@@ -85,6 +87,7 @@ export default function HermesDashboard() {
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
   const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
+  const [whaleSummary, setWhaleSummary] = useState<WhaleSummary | null>(null)
   const [urlQuestionType, setUrlQuestionType] = useState<QuestionTypeId | null>(null)
   // N69：question_type 不再是使用者選的一顆下拉（原因見 HermesLeftRail 的註解——
   // 官方文件那三種是「範例題型」不是限制），改由分析角度推導。這個對應表跟後端
@@ -120,7 +123,7 @@ export default function HermesDashboard() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const requestedModule = searchParams.get('workspace')
   const activeModule: HermesWorkspaceModule | null =
-    requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
+    requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs' || requestedModule === 'whale'
       ? requestedModule : null
   const activeQuestionMode = focus
 
@@ -384,6 +387,21 @@ export default function HermesDashboard() {
       controllers.forEach((controller) => controller.abort())
     }
   }, [])
+
+  // Whale Alert 鯨魚動態背景輪詢（30 秒）
+  useEffect(() => {
+    let active = true
+    let timer: number | undefined
+    let controller: AbortController | null = null
+    const poll = async () => {
+      controller = new AbortController()
+      const result = await getWhaleSummary(selectedId.toUpperCase(), controller.signal)
+      if (active && result.ok) setWhaleSummary(result.data)
+      if (active) timer = window.setTimeout(() => void poll(), 30_000)
+    }
+    void poll()
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
+  }, [selectedId])
 
   // 啟動時完整自檢；進入艦橋後持續監控所有唯讀系統通道。
   useEffect(() => {
@@ -669,6 +687,7 @@ export default function HermesDashboard() {
               crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
               derivation={hudDerivation}
               trainingStatus={<TrainingStatusCard />}
+              whaleSummary={whaleSummary}
               onOpenComposite={() => setSelectedStage('composite')}
               onOpenDivergence={() => setSelectedStage('divergence')}
             />
