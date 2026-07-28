@@ -553,6 +553,32 @@ export interface ExecutionEvent {
   summary: string
 }
 
+/** `/api/analyze?type=comparison` 回傳的結構化比較報告（CA-06）。對應
+ * `ComparisonReport.to_dict()`——四個比較面向（DimensionResult）、綜合結論、
+ * 限制與可能推翻結論的條件。 */
+export interface ComparisonReportData {
+  coin_a: string
+  coin_b: string
+  query: string
+  conclusion: string
+  dimensions: Array<{
+    dimension: string
+    decision: string
+    reasoning: string
+    confidence: number
+    evidence_refs: string[]
+    abstain_reason?: string
+  }>
+  confidence: number
+  limits: string[]
+  could_flip: string[]
+  generated_at: string
+  supporting_report_a?: Report
+  supporting_report_b?: Report
+  supporting_evidence_a?: Evidence[]
+  supporting_evidence_b?: Evidence[]
+}
+
 /** `/api/analyze?type=comparison`：`report`/`evidence`/... 全套欄位各出現
  * 兩次（`_a`/`_b` 後綴），對應 `_handle_api_analyze` comparison 分支 payload
  * （見 `web.py`）。刻意不重用 `AnalyzeData`（欄位名不同、非巢狀關係），單獨
@@ -571,6 +597,9 @@ export interface ComparisonAnalyzeData {
   price_provenance_b: PriceProvenance
   execution?: ExecutionManifest
   execution_log: ExecutionEvent[]
+  /** CA-06：結構化比較報告（`ComparisonReport.to_dict()`）；需要 `build_comparison_report`
+   *  的規則層介入，不一定每次都有（離線／樣本例可能為 null）。 */
+  comparison_report?: ComparisonReportData | null
 }
 
 // ── /api/health ──────────────────────────────────────────────────────────
