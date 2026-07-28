@@ -29,6 +29,7 @@ vi.mock('../lib/endpoints', () => ({
   getAnalysisQuestionContext: vi.fn().mockResolvedValue({ ok: true, data: { query: '', matches: [], conversation: [], retrieval: 'test' } }),
   getHermesUpgrades: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'no_request', message: 'no request' } }),
+  getWhaleSummary: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { accepted: true } }),
 }))
 
