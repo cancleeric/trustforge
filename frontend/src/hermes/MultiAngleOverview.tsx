@@ -9,6 +9,7 @@ import { useHermesI18n } from './hermesI18n'
 import ConflictBadge from './ConflictBadge'
 import type { AngleResult, MultiAngleReport } from '../lib/multiAngleEndpoints'
 import { fetchMultiAngleReport, submitMultiAngle } from '../lib/multiAngleEndpoints'
+import { getAnalysisJob } from '../lib/endpoints'
 
 const MODE_LABELS_ZH: Record<string, string> = {
   risk: '風險評估',
@@ -51,9 +52,9 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     setError(null)
     try {
       const result = await fetchMultiAngleReport(coin, snapshotId)
-      setReport(result?.multi_angle ?? null)
-    } catch {
-      setError('載入失敗')
+      setReport(result.multi_angle)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '載入失敗')
     } finally {
       setLoading(false)
     }
@@ -65,30 +66,39 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     setSubmitting(true)
     setError(null)
     try {
-      const result = await submitMultiAngle(coin)
-      if (result) {
-        // Poll until synthesis is ready (simple retry with backoff)
-        let attempts = 0
-        const poll = async () => {
-          attempts++
+      const result = await submitMultiAngle(coin, undefined, locale)
+      const deadline = Date.now() + 10 * 60 * 1000
+      const poll = async () => {
+        const states = await Promise.all(
+          Object.values(result.job_ids).map((jobId) => getAnalysisJob(jobId)),
+        )
+        const failed = states.find((state) => state.ok && state.data.state === 'failed')
+        if (failed?.ok) {
+          throw new Error(failed.data.error || '其中一個分析角度執行失敗')
+        }
+        if (states.every((state) => state.ok && state.data.state === 'completed')) {
           const data = await fetchMultiAngleReport(coin, result.snapshot_id)
-          if (data?.multi_angle) {
+          if (data.multi_angle) {
             setReport(data.multi_angle)
             setSubmitting(false)
-          } else if (attempts < 30) {
-            setTimeout(poll, Math.min(2000 + attempts * 500, 10000))
-          } else {
-            setError('分析超時，請稍後重新整理')
-            setSubmitting(false)
+            return
           }
         }
-        setTimeout(poll, 3000)
+        if (Date.now() >= deadline) {
+          throw new Error('分析工作長時間沒有完成，請稍後再確認')
+        }
+        window.setTimeout(() => { void poll().catch(handlePollError) }, 1500)
       }
-    } catch {
-      setError('提交失敗')
+      const handlePollError = (reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : '分析狀態讀取失敗')
+        setSubmitting(false)
+      }
+      window.setTimeout(() => { void poll().catch(handlePollError) }, 1000)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '提交失敗')
       setSubmitting(false)
     }
-  }, [coin])
+  }, [coin, locale])
 
   if (loading) {
     return <div className="animate-pulse text-center py-8 text-gray-400">{t('maTitle') || '五角度綜合分析'}...</div>

@@ -5475,10 +5475,18 @@ def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, s
     if not question:
         question = f"評估{coin}整體信任狀態，多角度綜合分析。"
     try:
-        from .analysis_flow import AnalysisFlow
+        from .analysis_flow import (
+            AnalysisFlow,
+            MultiAngleBudgetError,
+            MultiAngleCapacityError,
+        )
         with AnalysisFlow() as flow:
             result = flow.submit_multi_angle(coin, question, locale=locale)
         return 200, _json_envelope_ok(result)
+    except MultiAngleBudgetError as exc:
+        return 409, _json_envelope_err("multi_angle_budget_unavailable", str(exc))
+    except MultiAngleCapacityError as exc:
+        return 503, _json_envelope_err("multi_angle_queue_unavailable", str(exc))
     except ValueError as exc:
         return 400, _json_envelope_err("validation_error", str(exc))
     except Exception:

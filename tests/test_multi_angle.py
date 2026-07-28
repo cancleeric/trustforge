@@ -18,10 +18,7 @@ import json
 import pytest
 
 from trustforge.multi_angle import (
-    CONFIDENCE_GAP_THRESHOLD,
-    AngleConflict,
     AngleResult,
-    MultiAngleReport,
     _build_agreement_matrix,
     _is_opposing,
     _weighted_confidence,
@@ -119,6 +116,20 @@ class TestWeightedConfidence:
         result = _weighted_confidence(angles)
         assert result == pytest.approx(0.7, abs=0.001)
 
+    def test_duplicate_sources_receive_independence_penalty(self):
+        duplicated = _make_angle(
+            angle="risk", calibrated_confidence=1.0, evidence_sources={"shared"}
+        )
+        peer = _make_angle(
+            angle="news", calibrated_confidence=0.2, evidence_sources={"shared"}
+        )
+        independent = _make_angle(
+            angle="catalyst", calibrated_confidence=0.2, evidence_sources={"unique"}
+        )
+        # The duplicated high-confidence angle must not dominate merely by
+        # repeating the same source family.
+        assert _weighted_confidence([duplicated, peer, independent]) < 0.5
+
 
 # ---------------------------------------------------------------------------
 # angle_result_from_payload
@@ -186,6 +197,13 @@ class TestAngleResultFromPayload:
         assert result.direction == "偏多"
         assert result.evidence_sources == {"x"}
 
+    @pytest.mark.parametrize("bad", [None, "bad", float("nan"), float("inf"), -1, 2])
+    def test_invalid_confidence_is_safe_and_bounded(self, bad):
+        result = angle_result_from_payload(
+            "risk", {"report": {"calibrated_confidence": bad}, "evidence": []}
+        )
+        assert 0.0 <= result.calibrated_confidence <= 1.0
+
 
 # ---------------------------------------------------------------------------
 # synthesize_angles — 全 normal 同方向
@@ -230,7 +248,8 @@ class TestSynthesizeDirectionDivergence:
 
         report = synthesize_angles(angles, "BTC", "snap-div")
 
-        assert report.consensus == "分歧"
+        # 4:1 的嚴格多數不可被單一反向角度覆寫成「分歧」。
+        assert report.consensus == "偏多"
         divergences = [c for c in report.conflicts if c.conflict_type == "direction_divergence"]
         assert len(divergences) >= 1
         # risk vs sentiment 應該出現
@@ -263,7 +282,7 @@ class TestSynthesizeAbstain:
 
         report = synthesize_angles(angles, "BTC", "snap-pa")
 
-        assert report.consensus == "partial_abstain"
+        assert report.consensus == "偏多"
         # confidence 只算 active 角度
         assert report.consensus_confidence == pytest.approx(0.65, abs=0.001)
         assert any("棄權" in lim for lim in report.limits)
@@ -280,15 +299,14 @@ class TestSynthesizeAbstain:
         assert "棄權" in report.synthesis_summary
 
     def test_abstain_not_promoted_to_normal(self):
-        """即使多數角度偏多，有 abstain 就不能是純 '偏多'。"""
+        """abstain 不投票，但也不可抹掉其餘 active 角度的真多數。"""
         angles = _five_angles(direction="偏多")
         angles[4] = _make_angle(angle="catalyst", decision_state="abstain",
                                 direction="不明", calibrated_confidence=0.0,
                                 qtype=QuestionType.HYPOTHESIS)
 
         report = synthesize_angles(angles, "BTC", "snap-no-promo")
-        assert report.consensus == "partial_abstain"
-        assert report.consensus != "偏多"
+        assert report.consensus == "偏多"
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +324,7 @@ class TestSynthesizeEvidenceOverlap:
         # 所有角度共用 1 個 source，交集=聯集，overlap=1.0，independence=0.0
         assert report.evidence_independence == pytest.approx(0.0, abs=0.01)
         assert any("獨立性" in lim for lim in report.limits)
+        assert any(c.conflict_type == "evidence_overlap" for c in report.conflicts)
 
     def test_all_different_sources_high_independence(self):
         angles = []
@@ -321,6 +340,18 @@ class TestSynthesizeEvidenceOverlap:
         # 沒有任何共用來源，intersection 為空，independence = 1.0
         assert report.evidence_independence == pytest.approx(1.0, abs=0.01)
         assert not any("獨立性" in lim for lim in report.limits)
+
+    def test_chained_pairwise_overlap_is_not_false_independence(self):
+        modes = ["risk", "sentiment", "fundamentals", "news", "catalyst"]
+        sources = [
+            {"a", "b"}, {"b", "c"}, {"c", "d"}, {"d", "e"}, {"e", "a"},
+        ]
+        angles = [
+            _make_angle(angle=mode, evidence_sources=source)
+            for mode, source in zip(modes, sources)
+        ]
+        report = synthesize_angles(angles, "BTC", "snap-chain")
+        assert 0.0 < report.evidence_independence < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +407,7 @@ class TestSynthesizeConfidenceGap:
 
 class TestSynthesizeMixed:
     def test_divergence_plus_abstain(self):
-        """3 偏多、1 偏空、1 abstain → 分歧（divergence 優先於 partial_abstain）"""
+        """3 偏多、1 偏空、1 abstain → active 角度真多數偏多。"""
         angles = [
             _make_angle(angle="risk", direction="偏空"),
             _make_angle(angle="sentiment", direction="偏多"),
@@ -387,8 +418,7 @@ class TestSynthesizeMixed:
         ]
         report = synthesize_angles(angles, "BTC", "snap-mixed")
 
-        # divergence 優先判定
-        assert report.consensus == "分歧"
+        assert report.consensus == "偏多"
         assert any(c.conflict_type == "direction_divergence" for c in report.conflicts)
 
 
