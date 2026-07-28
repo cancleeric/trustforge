@@ -35,7 +35,7 @@ export default function ConflictBadge({ conflicts, currentAngle }: ConflictBadge
             style={{ backgroundColor: 'rgba(251, 146, 60, 0.2)', color: '#f97316' }}
             title={c.summary}
             role="status"
-            aria-label={`與${label}${c.conflict_type === 'direction_divergence' ? '方向相反' : '信心差距大'}`}
+            aria-label={`與${label}${c.conflict_type === 'direction_divergence' ? '方向相反' : '資訊完整度差距大'}`}
           >
             {icon} 與 {label}
           </span>
