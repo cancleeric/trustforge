@@ -1205,11 +1205,21 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     # `_dedup_analyze_call` 呼叫這個 wait() **之前**，用來算
     # `remaining` 參數的，不受這裡影響）。
     real_wait = flight.event.wait
+    follower_waiting = threading.Event()
+    simulated_now = [flight.started_at]
+
+    def _fake_wall_time():
+        return simulated_now[0]
+
+    monkeypatch.setattr(web, "_dedup_wall_time", _fake_wall_time)
 
     def _delayed_wait(timeout=None):
+        follower_waiting.set()
         completed = real_wait(timeout=timeout)
         if completed:
-            time.sleep(6.0)  # 刻意比舊的 5 秒 TTL 寬限期更長
+            # 推進邏輯牆鐘而不真的睡六秒：仍精確模擬「喚醒後被排程延遲
+            # 超過舊 5 秒 TTL」的語意，且不把測試正確性綁在機器速度。
+            simulated_now[0] += 6.0
         return completed
 
     flight.event.wait = _delayed_wait
@@ -1234,7 +1244,7 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
 
     follower_thread = threading.Thread(target=_worker_follower)
     follower_thread.start()
-    time.sleep(0.2)  # 確保 follower 真的先走到 event.wait() 上
+    assert follower_waiting.wait(timeout=2), "follower 應先進入 event.wait()"
 
     leader_may_finish.set()
     leader_thread.join(timeout=10)

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import time
 
 import pytest
 
@@ -33,7 +32,7 @@ class TestRecordInvocation:
         tele = ModuleTelemetry(db_path=tmp_db)
         tele.record_invocation("trust.scoring", 42.5, "success")
         # Wait for background writer
-        time.sleep(0.5)
+        assert tele.flush()
 
         rec = tele.get_telemetry("trust.scoring")
         assert rec is not None
@@ -51,7 +50,7 @@ class TestRecordInvocation:
         tele.record_invocation("agent.build_report", 100.0, "success")
         tele.record_invocation("agent.build_report", 200.0, "success")
         tele.record_invocation("agent.build_report", 300.0, "failure")
-        time.sleep(0.5)
+        assert tele.flush()
 
         rec = tele.get_telemetry("agent.build_report")
         assert rec is not None
@@ -75,7 +74,7 @@ class TestRecordInvocation:
         tele = ModuleTelemetry(db_path=tmp_db)
         tele.record_invocation("mod.a", 10.0, "success")
         tele.record_invocation("mod.b", 20.0, "degraded")
-        time.sleep(0.5)
+        assert tele.flush()
 
         all_recs = tele.get_all_telemetry()
         assert len(all_recs) == 2
@@ -89,7 +88,7 @@ class TestRecordInvocation:
 
         tele = ModuleTelemetry(db_path=tmp_db)
         tele.record_invocation("mod.x", 5.0, "success", metadata={"claims_count": 12})
-        time.sleep(0.5)
+        assert tele.flush()
 
         rec = tele.get_telemetry("mod.x")
         assert rec is not None
@@ -105,7 +104,7 @@ class TestModuleLevelFunctions:
         monkeypatch.setattr(mt, "_DEFAULT_DB_PATH", tmp_db)
 
         mt.record_invocation("test.module", 33.3, "success")
-        time.sleep(0.5)
+        assert mt.flush()
         rec = mt.get_telemetry("test.module")
         assert rec is not None
         assert rec.module_id == "test.module"
@@ -143,7 +142,7 @@ class TestModuleStateV2:
 
         tele = ModuleTelemetry(db_path=tmp_db)
         tele.record_invocation("trust.scoring", 50.0, "success")
-        time.sleep(0.5)
+        assert tele.flush()
 
         rec = tele.get_telemetry("trust.scoring")
         assert rec is not None
@@ -158,10 +157,10 @@ class TestModuleStateV2:
         tele = ModuleTelemetry(db_path=tmp_db)
         # 先 invoke
         tele.record_invocation("trust.scoring", 50.0, "success")
-        time.sleep(0.3)
+        assert tele.flush()
         # 再 verify
         tele.record_verified("trust.scoring", "tests/test_trust_scoring.py::test_basic")
-        time.sleep(0.5)
+        assert tele.flush()
 
         rec = tele.get_telemetry("trust.scoring")
         assert rec is not None
@@ -211,12 +210,12 @@ class TestModuleStateV2:
 
         tele = ModuleTelemetry(db_path=tmp_db)
         tele.record_invocation("mod.a", 10.0, "success")
-        time.sleep(0.3)
+        assert tele.flush()
         tele.record_verified("mod.a", "ci/run-123")
-        time.sleep(0.3)
+        assert tele.flush()
         # 再次 invoke（evidence_ref 為空字串，不應覆蓋）
         tele.record_invocation("mod.a", 20.0, "success")
-        time.sleep(0.5)
+        assert tele.flush()
 
         rec = tele.get_telemetry("mod.a")
         assert rec is not None
@@ -232,9 +231,9 @@ class TestModuleStateV2:
         monkeypatch.setattr(mt, "_DEFAULT_DB_PATH", tmp_db)
 
         mt.record_invocation("agent.build_report", 100.0, "success")
-        time.sleep(0.3)
+        assert mt.flush()
         mt.record_verified("agent.build_report", "tests/test_orchestrator.py::test_build_report")
-        time.sleep(0.5)
+        assert mt.flush()
 
         rec = mt.get_telemetry("agent.build_report")
         assert rec is not None
@@ -252,7 +251,7 @@ class TestModuleStateV2:
             evidence_ref="env:BEDROCK_MODEL_ID",
             metadata={"phase": "configured"},
         )
-        time.sleep(0.2)
+        assert tele.flush()
         rec = tele.get_telemetry("provider.llm")
         assert rec is not None
         assert rec.state == "configured"
@@ -269,7 +268,7 @@ class TestModuleStateV2:
             evidence_ref="provider.resolve:llm",
             metadata={"resolved": "bedrock"},
         )
-        time.sleep(0.2)
+        assert tele.flush()
         rec = tele.get_telemetry("provider.llm")
         assert rec is not None
         assert rec.state == "resolved"
@@ -281,7 +280,7 @@ class TestModuleStateV2:
         assert rec.metadata == {"resolved": "bedrock"}
 
         tele.record_invocation("provider.llm", 12.5, "success", metadata={"tool": "complete"})
-        time.sleep(0.2)
+        assert tele.flush()
         rec = tele.get_telemetry("provider.llm")
         assert rec is not None
         assert rec.state == "invoked"
@@ -291,7 +290,7 @@ class TestModuleStateV2:
         assert rec.evidence_ref == "provider.resolve:llm"
 
         tele.record_verified("provider.llm", "ci:test_provider_ports")
-        time.sleep(0.5)
+        assert tele.flush()
         rec = tele.get_telemetry("provider.llm")
         assert rec is not None
         assert rec.state == "verified"
@@ -326,7 +325,7 @@ class TestPublicApiWhitelist:
             "agent.build_report", 42.0, "success",
             metadata={"internal_path": "/etc/secrets/keys.json"},
         )
-        time.sleep(0.3)
+        assert tele.flush()
 
         rec = tele.get_telemetry("agent.build_report")
         assert rec is not None
@@ -336,7 +335,7 @@ class TestPublicApiWhitelist:
             "agent.build_report",
             "https://ci.internal.example.com/jobs/12345",
         )
-        time.sleep(0.5)
+        assert tele.flush()
 
         rec = tele.get_telemetry("agent.build_report")
         assert rec is not None
@@ -362,12 +361,12 @@ class TestPublicApiWhitelist:
 
         tele = ModuleTelemetry(db_path=tmp_db)
         tele.record_invocation("agent.build_report", 10.0, "success")
-        time.sleep(0.3)
+        assert tele.flush()
         tele.record_verified(
             "agent.build_report",
             "tests/test_orchestrator.py::test_build_report",
         )
-        time.sleep(0.5)
+        assert tele.flush()
 
         monkeypatch.setattr(mt, "get_telemetry", tele.get_telemetry)
         monkeypatch.setattr(mt, "get_all_telemetry", tele.get_all_telemetry)
@@ -395,9 +394,9 @@ class TestPublicApiWhitelist:
             "agent.build_report", 10.0, "success",
             metadata={"secret": "should-not-leak"},
         )
-        time.sleep(0.3)
+        assert tele.flush()
         tele.record_verified("agent.build_report", "ci://internal-run-999")
-        time.sleep(0.5)
+        assert tele.flush()
 
         monkeypatch.setattr(mt, "get_telemetry", tele.get_telemetry)
         monkeypatch.setattr(mt, "get_all_telemetry", tele.get_all_telemetry)

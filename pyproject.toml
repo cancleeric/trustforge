@@ -25,7 +25,13 @@ dependencies = [
 # CI（.github/workflows/ci.yml）以 `pip install -e ".[dev]"` 安裝後直接跑 `pytest`，
 # 若這裡沒帶 pytest-cov，addopts 的 --cov 會讓 pytest 報「unrecognized arguments」
 # → CI 直接變紅。故新增 pytest-cov 是覆蓋率閘的必要相依。
-dev = ["pytest>=8", "moto[dynamodb]>=5", "pytest-cov>=5", "jsonschema>=4,<5"]
+dev = [
+    "pytest>=8",
+    "moto[dynamodb]>=5",
+    "pytest-cov>=5",
+    "pytest-xdist>=3,<4",
+    "jsonschema>=4,<5",
+]
 
 [project.scripts]
 trustforge = "trustforge.cli:main"
@@ -41,7 +47,7 @@ testpaths = ["tests"]
 # ⛔ --cov-fail-under 由 .githooks/pre-push 顯式傳入，不放在 addopts 中——
 #   放在 addopts 會讓單一測試檔也吃閥值（跑子集時全倉 9%→白爆）。
 #   本機跑子集時仍可加 --no-cov 加速。
-addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing"
+addopts = "--cov=trustforge --cov=trustforge_core"
 # Suppress benign GC-timing ResourceWarnings from sqlite3 connections.  All
 # sqlite-backed stores (SourceEventArchive, TrustFeatureStore,
 # SQLiteCacheBackend, AnalysisFlow) define close()+__del__, but Python's
@@ -60,3 +66,9 @@ markers = [
     "serial: tests that must not run concurrently with related tests",
     "subprocess: tests that spawn external commands or child processes",
 ]
+
+[tool.coverage.run]
+# Python 3.12+ 的 sys.monitoring coverage core 保留逐行覆蓋語意，但避免
+# settrace 對 5k+ 測試造成的大量 interpreter overhead。沒有排除任何產品
+# 模組；pre-push 仍以完整 trustforge + trustforge_core 統計守住 75%。
+core = "sysmon"

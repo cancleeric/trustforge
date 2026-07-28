@@ -72,7 +72,7 @@ def _extract_ids(html_body: str) -> set[str]:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_home_overview_cache(monkeypatch):
+def _isolate_home_overview_cache(monkeypatch, tmp_path):
     """比照 `tests/test_web.py` 既有 autouse fixture：避免首頁總覽背景
     thread 打到真 DynamoDB / 汙染跨測試狀態。"""
     monkeypatch.setenv("CACHE_BACKEND", "json")
@@ -86,7 +86,18 @@ def _isolate_home_overview_cache(monkeypatch):
     web._overview_bg_stop_event = None
     web._overview_html = None
     web._overview_expiry_epoch = 0.0
+    # This module verifies link reachability, not rate limiting. Concurrent
+    # reachability cases deliberately share the synthetic 127.0.0.1 client;
+    # isolate that unrelated quota so xdist ordering cannot turn a valid link
+    # into a spurious 429.
+    monkeypatch.setattr(
+        web, "_analyze_enforce_caller_rate_limit", lambda qs, client_ip: None
+    )
+    from trustforge.idempotency_lease import JsonLeaseBackend, set_lease_backend
+
+    set_lease_backend(JsonLeaseBackend(tmp_path / "analyze-leases.json"))
     yield
+    set_lease_backend(None)
 
 
 def test_home_page_has_no_dead_fragment_anchors():
