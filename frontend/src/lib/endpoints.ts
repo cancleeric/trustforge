@@ -46,6 +46,34 @@ export function getOverview(signal?: AbortSignal): Promise<ApiEnvelope<OverviewD
   })
 }
 
+export interface AgentCoreStatusData {
+  provider: 'builtin' | 'agentcore'
+  selected: boolean
+  runtime_configured: boolean
+  state: 'inactive' | 'configured' | 'misconfigured'
+}
+
+export function getAgentCoreStatus(
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AgentCoreStatusData>> {
+  const valid = (value: unknown): value is AgentCoreStatusData => {
+    if (!value || typeof value !== 'object') return false
+    const data = value as AgentCoreStatusData
+    return (
+      (data.provider === 'builtin' || data.provider === 'agentcore') &&
+      typeof data.selected === 'boolean' &&
+      typeof data.runtime_configured === 'boolean' &&
+      ['inactive', 'configured', 'misconfigured'].includes(data.state)
+    )
+  }
+  return apiFetch<AgentCoreStatusData>(
+    '/api/agentcore/status',
+    undefined,
+    valid,
+    { signal, timeoutMs: DEFAULT_TIMEOUT_MS },
+  )
+}
+
 export interface AnalyzeParams {
   coin: string
   type: 'multi_source' | 'hypothesis' | 'comparison'

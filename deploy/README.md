@@ -1,5 +1,38 @@
 # 部署 — AWS CLI + pre-push CD（Lambda + Function URL）
 
+## 每小時 release train
+
+`scripts/hourly_release_train.py` 不掃描 feature 分支、不建立或合併 PR，只從已由
+開發流程整理完成的遠端 `develop` 開始。每輪使用獨立 worktree 與 lease，先驗
+`develop` 完整 pre-push gate，再合併到 `main`、重跑完整 gate、建立不可混淆的
+`release/auto-<YYYYMMDD>` 每日 release 分支（同日只允許 fast-forward），最後才
+執行備份回復驗證與 production deploy。
+衝突、測試、備份或部署任一失敗都會停止並在 `out/release-train/` 留下 JSON
+receipt。
+
+安裝預設為 dry-run，每小時只產盤點 receipt：
+
+```bash
+./scripts/install_hourly_release_train.sh
+```
+
+啟用 production 使用 repo 內固定的
+`deploy/backup_production_release.sh` 與 `deploy/deploy_ec2.sh`，不接受 plist
+傳入任意命令，避免憑證或命令字串落碟。備份 receipt 會綁定 run ID、schema、
+archive SHA-256 與回復驗證結果：
+
+```bash
+./scripts/install_hourly_release_train.sh --execute
+```
+
+目前核定的唯讀 production 備份命令是
+`bash deploy/backup_production_release.sh`：它封存 active/previous pointer、
+active immutable artifact 與 manifest 成 `tar.gz`，重新解壓核對 SHA-256，並確認
+cost ledger DynamoDB PITR 已啟用；相同 artifact digest 會重用同一份備份，不會
+每次重試重複佔空間。排程 receipt 保留最近 100 份；不寫 AWS、不碰 schema。
+
+此排程不會啟動或變更 Hermes、資料收集、web 或 frontend daemon。
+
 > 不走 App Runner 自動化。流程：`git push` → pre-push hook 跑測試 → 綠 → AWS CLI 部署到 Lambda。
 > Lambda 在免費方案內可用、每月 100 萬請求免費；App Runner 不在免費內故不採用。
 
@@ -44,6 +77,42 @@ retention/
 | `config_snapshot_identity` | `sha256:<digest>` of canonical config JSON |
 | `build_timestamp` | ISO 8601 UTC |
 | `build_host` | Hostname where build ran |
+
+### A/B app endpoint identity（#733）
+
+真正的 A/B app 仍由 production entrypoint `python -m trustforge.web` 提供服務；
+每個 immutable release instance 必須設定
+`TRUSTFORGE_RELEASE_IDENTITY_REQUIRED=1`，並提供以下五個值：
+
+| env | runtime read-only input |
+|-----|-------------------------|
+| `TRUSTFORGE_ENDPOINT_MANIFEST_PATH` | build/release plane 簽好的 endpoint manifest |
+| `TRUSTFORGE_RELEASE_MANIFEST_PATH` | 同一份 artifact 的 `ReleaseManifest` |
+| `TRUSTFORGE_RELEASE_ARTIFACT_PATH` | app 實際啟動來源的 immutable artifact ZIP |
+| `TRUSTFORGE_ENDPOINT_MANIFEST_KEYRING_PATH` | 只含 Ed25519 public keys 的 keyring |
+| `TRUSTFORGE_RELEASE_ORIGIN` | router 使用的固定 loopback origin（含 port） |
+
+啟動時會確認簽章、key role、loopback origin 及 artifact digest 綁定；缺檔、
+符號連結、非 regular file、不安全 owner/permissions、錯誤簽章或 digest
+不一致都會在 bind socket 前中止。runtime **不得**持有 endpoint manifest
+private key。驗證通過後，app 於
+`GET /.well-known/trustforge-release-manifest` 回傳凍結的 canonical JSON，
+供 release router 在每次轉送前驗證。
+
+簽署是 build/release-plane 步驟（不是 production installer）：
+
+```bash
+.venv/bin/python scripts/build_endpoint_manifest.py \
+  --release-manifest /absolute/build/manifest.json \
+  --origin http://127.0.0.1:18081 \
+  --key-id endpoint-2026-07 \
+  --private-key /absolute/offline/endpoint-ed25519.key \
+  --output /absolute/build/endpoint-manifest.json
+```
+
+private key 必須是 owner-only 的 32-byte raw Ed25519 seed；output 必須是尚未
+存在的絕對路徑，以 `O_EXCL` 建立為 read-only。A/B systemd unit 與 transactional
+installer 的實際接線屬下一層工作，本層不會自行安裝、enable 或部署服務。
 
 ### Verification gates（fail-closed）
 

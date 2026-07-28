@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { useHermesI18n } from './hermesI18n'
 import type { HermesWorkspaceModule } from './HermesModuleDeck'
 
@@ -15,6 +16,7 @@ interface HermesTopBarProps {
   onBeginnerModeChange?: (enabled: boolean) => void
   reducedMotion?: boolean
   onReducedMotionToggle?: () => void
+  runtimeStatus?: ReactNode
 }
 
 export default function HermesTopBar({
@@ -31,6 +33,7 @@ export default function HermesTopBar({
   onBeginnerModeChange,
   reducedMotion = false,
   onReducedMotionToggle,
+  runtimeStatus,
 }: HermesTopBarProps) {
   const { locale, setLocale, t } = useHermesI18n()
   // 後端沒走發版流程時 /api/health 會回 version: "dev"。那不是版號，是「這台
@@ -116,6 +119,7 @@ export default function HermesTopBar({
         ))}
       </nav>
       <div style={{ flex: 1 }} />
+      {runtimeStatus}
       <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
         {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
       </button>

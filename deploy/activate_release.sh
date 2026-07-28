@@ -103,7 +103,7 @@ verify_fetch_scheduler() {
   local iid="$1"
   local vcmdid
   vcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","if ! ( AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[activate] fetch-scheduler --probe failed\" >&2; exit 1; fi","echo \"[activate] fetch-scheduler probe passed\""]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","if ! ( AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3.11 scripts/fetch_scheduler.py --probe ); then echo \"[activate] fetch-scheduler --probe failed\" >&2; exit 1; fi","echo \"[activate] fetch-scheduler probe passed\""]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$vcmdid" ] || [ "$vcmdid" = "None" ]; then
     echo "[activate] ERROR: fetch-scheduler probe send-command failed" >&2
@@ -273,6 +273,26 @@ echo "[activate] Step 1: preflight gate..."
 }
 echo "[activate] preflight passed"
 
+# Step 1.5: Ensure the target runtime satisfies pyproject requires-python.
+echo "[activate] Step 1.5: ensuring Python 3.11 runtime..."
+PCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","dnf install -y python3.11 python3.11-pip","/usr/bin/python3.11 -m pip install '\''boto3>=1.34'\'' '\''certifi>=2024.2.2'\'' '\''cryptography>=44,<50'\'' '\''portalocker>=3,<4'\'' '\''pypdf>=5,<7'\''","sed -i \"s|^ExecStart=/usr/bin/python3 -m trustforge.web$|ExecStart=/usr/bin/python3.11 -m trustforge.web|\" /etc/systemd/system/trustforge.service","grep -q TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH /etc/systemd/system/trustforge.service || sed -i \"/Environment=COST_LEDGER_BACKEND/a Environment=TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH=/opt/trustforge/manifest.json\\nEnvironment=TRUSTFORGE_RUNTIME_RELEASE_ARTIFACT_PATH=/opt/trustforge/app.zip\" /etc/systemd/system/trustforge.service","for unit in fetch-scheduler.service hermes-cycle.service trustforge-analysis-flow.service; do if [ -f /etc/systemd/system/$unit ]; then sed -i \"s|/usr/bin/python3 |/usr/bin/python3.11 |g\" /etc/systemd/system/$unit; fi; done","systemctl daemon-reload","/usr/bin/python3.11 -c \"import boto3, certifi, cryptography, enum, portalocker, pypdf; assert hasattr(enum, '\''StrEnum'\'')\""]' \
+  --query 'Command.CommandId' --output text)
+if [ -z "$PCMDID" ] || [ "$PCMDID" = "None" ]; then
+  echo "[activate] ERROR: Python 3.11 migration send-command failed" >&2
+  release_lock
+  exit 1
+fi
+PSTATUS=$(poll_ssm_terminal_status "$PCMDID" "$TARGET" 300 5) || true
+if [ "$PSTATUS" != "Success" ]; then
+  echo "[activate] ERROR: Python 3.11 migration failed (Status=${PSTATUS})" >&2
+  aws ssm get-command-invocation --region "$REGION" --command-id "$PCMDID" --instance-id "$TARGET" \
+    --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
+  release_lock
+  exit 1
+fi
+echo "[activate] Python 3.11 runtime verified"
+
 # Step 2: Capture pre-state
 echo "[activate] Step 2: capturing pre-state..."
 ACTIVE_JSON=$(aws s3 cp "s3://${BUCKET}/pointers/active.json" - --region "$REGION" 2>/dev/null || echo "")
@@ -333,7 +353,7 @@ echo "[activate] artifact verified"
 # Step 5: Restart service (zero-downtime)
 echo "[activate] Step 5: restarting service..."
 RCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","echo \"[activate] service restarted\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","echo \"[activate] service restarted\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$RCMDID" ] || [ "$RCMDID" = "None" ]; then
   echo "[activate] ERROR: restart send-command failed" >&2

@@ -1,0 +1,38 @@
+[Unit]
+Description=TrustForge release-level A/B GET router
+After=network.target trustforge-a.service trustforge-b.service
+Requires=trustforge-a.service
+
+[Service]
+Type=simple
+User=trustforge-router
+Group=trustforge-release
+WorkingDirectory=/opt/trustforge
+ExecStart=/opt/trustforge/.venv/bin/python scripts/release_router_service.py
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=trustforge
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=64
+MemoryMax=256M
+CPUQuota=100%
+ReadOnlyPaths=/var/lib/trustforge/security-ledger/control
+ReadWritePaths=/var/lib/trustforge/security-ledger/router-outcomes
+ReadWritePaths=/run/trustforge-release-control/coordination.lock
+InaccessiblePaths=/etc/trustforge/deployment-keys
+InaccessiblePaths=/etc/trustforge/deployment-control.json
+ReadOnlyPaths=/etc/trustforge/release-router-runtime.json
+ReadOnlyPaths=/etc/trustforge/release-router-runtime-keys.json
+
+[Install]
+WantedBy=multi-user.target

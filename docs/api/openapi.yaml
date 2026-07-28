@@ -163,6 +163,35 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/agentcore/status:
+    get:
+      tags: [observability]
+      operationId: getAgentCoreStatus
+      summary: AgentCore provider readiness（不探測 AWS、不洩漏 ARN）
+      description: |
+        回報目前 runtime provider 是否選為 AgentCore，以及必要 runtime
+        identity 是否已設定。此端點不呼叫 AWS，也不回傳 ARN、帳號或憑證。
+      responses:
+        "200":
+          description: AgentCore readiness snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  provider: builtin
+                  selected: false
+                  runtime_configured: false
+                  state: inactive
+        "500":
+          description: 狀態讀取失敗
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+
   /api/rate-limit-status:
     get:
       tags: [observability]
