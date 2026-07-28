@@ -452,6 +452,10 @@ def main() -> int:
                     os.chmod(Path(directory) / child, 0o555)
                 if Path(directory) != stage:
                     os.chmod(directory, 0o555)
+            os.chmod(stage, 0o555)
+            _verify_tree(stage, expected, expected_dirs, expected_uid)
+            _verify_runtime_lock(stage, runtime_lock, tree_digest)
+            os.chmod(stage, 0o700)
             os.replace(stage, target)
             os.chmod(target, 0o555)
             parent_fd = os.open(args.releases_root, os.O_RDONLY | os.O_DIRECTORY)
@@ -461,6 +465,7 @@ def main() -> int:
             _verify_runtime_lock(target, runtime_lock, tree_digest)
         except BaseException:
             if stage.exists():
+                os.chmod(stage, 0o700)
                 for directory, directories, _ in os.walk(stage):
                     os.chmod(directory, 0o700)
                     for child in directories:

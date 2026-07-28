@@ -24,19 +24,33 @@ def test_actual_router_runtime_is_provenance_complete_and_importable(tmp_path):
         check=True,
     )
     releases = tmp_path / "releases"
+    install_command = [
+        str(PYTHON),
+        str(ROOT / "scripts/install_router_release_artifact.py"),
+        "--archive",
+        str(output / "router-runtime.tar"),
+        "--tree-manifest",
+        str(output / "router-tree-manifest.json"),
+        "--runtime-lock",
+        str(output / "runtime-lock.json"),
+        "--releases-root",
+        str(releases),
+    ]
+    runtime_lock_path = output / "runtime-lock.json"
+    valid_runtime_lock = runtime_lock_path.read_text()
+    invalid_runtime_lock = json.loads(valid_runtime_lock)
+    invalid_runtime_lock["distributions"]["trustforge"]["metadata_sha256"] = "0" * 64
+    runtime_lock_path.write_text(
+        json.dumps(invalid_runtime_lock, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    rejected = subprocess.run(install_command, capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "runtime distribution metadata mismatch" in rejected.stderr
+    assert not any(releases.iterdir())
+
+    runtime_lock_path.write_text(valid_runtime_lock)
     installed = subprocess.run(
-        [
-            str(PYTHON),
-            str(ROOT / "scripts/install_router_release_artifact.py"),
-            "--archive",
-            str(output / "router-runtime.tar"),
-            "--tree-manifest",
-            str(output / "router-tree-manifest.json"),
-            "--runtime-lock",
-            str(output / "runtime-lock.json"),
-            "--releases-root",
-            str(releases),
-        ],
+        install_command,
         check=True,
         capture_output=True,
         text=True,
