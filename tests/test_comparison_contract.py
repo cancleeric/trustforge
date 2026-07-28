@@ -1308,7 +1308,7 @@ class TestBuildComparisonReport:
         assert "僅有 BTC 的證據" in price_dim.finding
 
     def test_build_comparison_report_normal_when_both_sides(self, btc_eth_fixture):
-        """雙邊皆有證據的面向 decision 為 normal。"""
+        """雙邊皆有足夠證據的面向 decision 為 normal；證據不足的面向為 insufficient。"""
         result = btc_eth_fixture
         comparison = build_comparison_report(
             coin_a="BTC",
@@ -1320,9 +1320,16 @@ class TestBuildComparisonReport:
             evidence_b=list(result.evidence_b),
         )
         for dim in comparison.dimensions:
-            assert dim.decision == "normal", (
-                f"'{dim.dimension}' 雙邊有證據時應為 normal"
-            )
+            # 生態發展只有 1 條 evidence per side → comparability guard → insufficient
+            if dim.dimension == "生態發展":
+                assert dim.decision == "insufficient", (
+                    f"'{dim.dimension}' 證據不足（A={len(dim.a_evidence_refs)},"
+                    f" B={len(dim.b_evidence_refs)}）應為 insufficient"
+                )
+            else:
+                assert dim.decision == "normal", (
+                    f"'{dim.dimension}' 雙邊有足夠證據時應為 normal"
+                )
             assert len(dim.a_evidence_refs) > 0
             assert len(dim.b_evidence_refs) > 0
 
@@ -1347,10 +1354,12 @@ class TestBuildComparisonReport:
             report_a=report_a,
             report_b=report_b,
             evidence_a=[
-                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.99)
+                Evidence(source="t", fetched_at="2026-07-01T00:00:00Z", content_reference="", related_claim="", kind="price", trust=0.99),
+                Evidence(source="t", fetched_at="2026-07-01T01:00:00Z", content_reference="", related_claim="", kind="price", trust=0.95),
             ],
             evidence_b=[
-                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.99)
+                Evidence(source="t", fetched_at="2026-07-01T00:30:00Z", content_reference="", related_claim="", kind="price", trust=0.99),
+                Evidence(source="t", fetched_at="2026-07-01T01:30:00Z", content_reference="", related_claim="", kind="price", trust=0.95),
             ],
         )
         price_dim = next(d for d in comparison.dimensions if d.dimension == "價格動能")
@@ -1358,6 +1367,128 @@ class TestBuildComparisonReport:
         assert price_dim.confidence <= 0.85, (
             f"價格動能 confidence {price_dim.confidence} 應被 ceiling 0.85 限制"
         )
+
+
+# ===========================================================================
+# CA-03 時間對齊與可比性 guard 測試
+# ===========================================================================
+
+class TestTemporalAlignment:
+    """CA-03: build_comparison_report 的時間對齊與可比性 guard。"""
+
+    @staticmethod
+    def _make_reports():
+        """產生一對空白 Report 供 build_comparison_report 使用。"""
+        return (
+            Report(
+                coin="BTC", question_type="comparison", question="比較",
+                market_judgment="", facts=[], inferences=[], key_basis=[],
+                confidence=0.0, limits=[], could_flip=[], contrarian=[],
+                generated_at="2026-07-26T00:00:00Z",
+            ),
+            Report(
+                coin="ETH", question_type="comparison", question="比較",
+                market_judgment="", facts=[], inferences=[], key_basis=[],
+                confidence=0.0, limits=[], could_flip=[], contrarian=[],
+                generated_at="2026-07-26T00:00:00Z",
+            ),
+        )
+
+    def test_temporal_alignment_pass(self):
+        """時間相近的 evidence → normal。"""
+        report_a, report_b = self._make_reports()
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=[
+                Evidence(source="t", fetched_at="2026-07-01T00:00:00Z", content_reference="", related_claim="", kind="price", trust=0.9),
+                Evidence(source="t", fetched_at="2026-07-01T05:00:00Z", content_reference="", related_claim="", kind="price", trust=0.8),
+            ],
+            evidence_b=[
+                Evidence(source="t", fetched_at="2026-07-01T02:00:00Z", content_reference="", related_claim="", kind="price", trust=0.9),
+                Evidence(source="t", fetched_at="2026-07-01T06:00:00Z", content_reference="", related_claim="", kind="price", trust=0.8),
+            ],
+        )
+        price_dim = next(d for d in comparison.dimensions if d.dimension == "價格動能")
+        assert price_dim.decision == "normal", (
+            f"時間相近應為 normal，實際 {price_dim.decision}。finding: {price_dim.finding}"
+        )
+        assert price_dim.confidence > 0.0
+
+    def test_temporal_alignment_fail(self):
+        """時間差距 > 24h → insufficient。"""
+        report_a, report_b = self._make_reports()
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=[
+                Evidence(source="t", fetched_at="2026-07-01T00:00:00Z", content_reference="", related_claim="", kind="price", trust=0.9),
+                Evidence(source="t", fetched_at="2026-07-01T01:00:00Z", content_reference="", related_claim="", kind="price", trust=0.8),
+            ],
+            evidence_b=[
+                Evidence(source="t", fetched_at="2026-07-03T00:00:00Z", content_reference="", related_claim="", kind="price", trust=0.9),
+                Evidence(source="t", fetched_at="2026-07-03T01:00:00Z", content_reference="", related_claim="", kind="price", trust=0.8),
+            ],
+        )
+        price_dim = next(d for d in comparison.dimensions if d.dimension == "價格動能")
+        assert price_dim.decision == "insufficient", (
+            f"時間差距 > 24h 應為 insufficient，實際 {price_dim.decision}。finding: {price_dim.finding}"
+        )
+        assert "24 小時" in price_dim.finding
+        assert price_dim.confidence == 0.0
+
+    def test_temporal_alignment_no_timestamps(self):
+        """無時間戳 → pass（不攔截）。"""
+        report_a, report_b = self._make_reports()
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=[
+                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.9),
+                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.8),
+            ],
+            evidence_b=[
+                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.9),
+                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.8),
+            ],
+        )
+        price_dim = next(d for d in comparison.dimensions if d.dimension == "價格動能")
+        # 無時間戳 → _validate_temporal_alignment 保守放行 → normal
+        assert price_dim.decision == "normal", (
+            f"無時間戳應保守放行為 normal，實際 {price_dim.decision}。finding: {price_dim.finding}"
+        )
+
+    def test_comparability_guard_insufficient_evidence(self):
+        """任一側只有 ≤1 條 evidence → insufficient。"""
+        report_a, report_b = self._make_reports()
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=[
+                Evidence(source="t", fetched_at="2026-07-01T00:00:00Z", content_reference="", related_claim="", kind="price", trust=0.9),
+            ],
+            evidence_b=[
+                Evidence(source="t", fetched_at="2026-07-01T00:30:00Z", content_reference="", related_claim="", kind="price", trust=0.9),
+            ],
+        )
+        price_dim = next(d for d in comparison.dimensions if d.dimension == "價格動能")
+        assert price_dim.decision == "insufficient", (
+            f"證據數量不足（各 1 條）應為 insufficient，實際 {price_dim.decision}。finding: {price_dim.finding}"
+        )
+        assert "證據數量不足" in price_dim.finding
+        assert price_dim.confidence == 0.0
 
 
 # ===========================================================================

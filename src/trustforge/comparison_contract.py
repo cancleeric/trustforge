@@ -51,6 +51,41 @@ EVIDENCE_KIND_TO_DIMENSION = {
 }
 
 
+def _compute_temporal_gap_hours(evidence_a: list[Evidence], evidence_b: list[Evidence]) -> float | None:
+    """計算 A/B evidence 集合之間的最大時間差距（小時）。
+
+    Returns:
+        float | None: 差距小時數；若任一側無有效 fetched_at 則回傳 None。
+    """
+    a_times = [e.fetched_at for e in evidence_a if e.fetched_at]
+    b_times = [e.fetched_at for e in evidence_b if e.fetched_at]
+    if not a_times or not b_times:
+        return None
+    max_a = max(a_times)
+    max_b = max(b_times)
+    return abs(
+        (datetime.fromisoformat(max_a) - datetime.fromisoformat(max_b)).total_seconds()
+        / 3600
+    )
+
+
+def _validate_temporal_alignment(
+    evidence_a: list[Evidence],
+    evidence_b: list[Evidence],
+    max_gap_hours: float = 24,
+) -> bool:
+    """Check that A/B evidence times are within max_gap_hours of each other.
+
+    無法比較時（無時間戳 / 空集合）保守放行（return True）。
+    """
+    if not evidence_a or not evidence_b:
+        return False
+    gap = _compute_temporal_gap_hours(evidence_a, evidence_b)
+    if gap is None:
+        return True  # can't validate, assume ok
+    return gap <= max_gap_hours
+
+
 def classify_evidence_to_dimension(evidence: Evidence) -> str | None:
     """根據 evidence.kind 歸類到四個比較面向。
 
@@ -99,14 +134,35 @@ def build_comparison_report(
         ceiling = DIMENSION_CEILINGS[dim]
 
         if has_a and has_b:
-            max_trust = max(
-                max((evidence_a[i].trust for i in a_refs), default=0.0),
-                max((evidence_b[i].trust for i in b_refs), default=0.0),
-            )
-            confidence = min(max_trust, ceiling)
-            finding = f"雙邊均有足夠證據進行{dim}比較。"
-            decision = "normal"
-            normal_count += 1
+            a_evs = [evidence_a[i] for i in a_refs]
+            b_evs = [evidence_b[i] for i in b_refs]
+
+            # CA-03 時間對齊檢查：雙邊證據時間戳差距不得 > 24h
+            if not _validate_temporal_alignment(a_evs, b_evs):
+                gap = _compute_temporal_gap_hours(a_evs, b_evs)
+                confidence = 0.0
+                finding = (
+                    f"雙邊均有證據，但時間戳差距達 {gap:.1f} 小時"
+                    f"（超過 24 小時閾值），無法進行可靠{dim}比較。"
+                )
+                decision = "insufficient"
+            # CA-03 可比性 guard：任一側只有 ≤1 筆 evidence 時視為不足
+            elif len(a_refs) <= 1 or len(b_refs) <= 1:
+                confidence = 0.0
+                finding = (
+                    f"雙邊證據數量不足（A 幣 {len(a_refs)} 條,"
+                    f" B 幣 {len(b_refs)} 條），無法進行可靠{dim}比較。"
+                )
+                decision = "insufficient"
+            else:
+                max_trust = max(
+                    max((evidence_a[i].trust for i in a_refs), default=0.0),
+                    max((evidence_b[i].trust for i in b_refs), default=0.0),
+                )
+                confidence = min(max_trust, ceiling)
+                finding = f"雙邊均有足夠證據進行{dim}比較。"
+                decision = "normal"
+                normal_count += 1
         elif has_a or has_b:
             confidence = 0.0
             side = coin_a if has_a else coin_b
