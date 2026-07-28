@@ -30,14 +30,21 @@ CONTROL_KINDS = frozenset(
 OUTCOME_KINDS = frozenset(
     {"candidate_reservation", "candidate_result", "router_emergency_stop"}
 )
+DEFAULT_COORDINATION_LOCK = Path("/run/trustforge-release-control/coordination.lock")
 ALLOWED_FIXED_FILES = frozenset({"bootstrap.json", "events.jsonl", "head.json"})
 JOURNAL_SCHEMA = "trustforge.release-ledger-migration/v1"
 JOURNAL_STATES = frozenset({"staged", "old-backed-up", "published", "committed"})
 
 
 def _allowed_entry(name: str) -> bool:
-    return name in ALLOWED_FIXED_FILES or (
-        name.startswith("epoch-stop-") and name.endswith(".json")
+    if name in ALLOWED_FIXED_FILES or name == "authorization-checkpoint.json":
+        return True
+    prefix = "epoch-stop-"
+    if not name.startswith(prefix) or not name.endswith(".json"):
+        return False
+    epoch = name[len(prefix) : -len(".json")]
+    return len(epoch) == 64 and all(
+        character in "0123456789abcdef" for character in epoch
     )
 
 
@@ -227,6 +234,10 @@ def _copy_ledger(source: Path, target: Path, owner: int, group: int) -> None:
     for entry in source.iterdir():
         if not _allowed_entry(entry.name):
             raise SystemExit(f"unknown ledger migration entry: {entry}")
+        if entry.name == "authorization-checkpoint.json":
+            # Derived projection: never copy it as authority. The operator signer
+            # rebuilds it after the first authenticated terminal transition.
+            continue
         info = os.lstat(entry)
         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise SystemExit(f"unsafe ledger migration entry: {entry}")
@@ -295,9 +306,37 @@ def main() -> int:
     parser.add_argument("--target-root", type=Path, required=True)
     parser.add_argument("--control-public", type=Path, required=True)
     parser.add_argument("--outcome-public", type=Path, required=True)
+    parser.add_argument(
+        "--coordination-lock",
+        type=Path,
+        default=DEFAULT_COORDINATION_LOCK,
+    )
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("ledger migration requires root")
+    lock_parent = os.lstat(args.coordination_lock.parent)
+    release_gid = grp.getgrnam("trustforge-release").gr_gid
+    coordination = os.open(
+        args.coordination_lock,
+        os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    lock_info = os.fstat(coordination)
+    if (
+        not stat.S_ISDIR(lock_parent.st_mode)
+        or stat.S_ISLNK(lock_parent.st_mode)
+        or lock_parent.st_uid != 0
+        or lock_parent.st_gid != release_gid
+        or stat.S_IMODE(lock_parent.st_mode) != 0o750
+        or not stat.S_ISREG(lock_info.st_mode)
+        or lock_info.st_uid != 0
+        or lock_info.st_gid != release_gid
+        or stat.S_IMODE(lock_info.st_mode) != 0o660
+        or lock_info.st_nlink != 1
+        or lock_info.st_dev != lock_parent.st_dev
+    ):
+        os.close(coordination)
+        raise SystemExit("unsafe release coordination lock")
+    fcntl.flock(coordination, fcntl.LOCK_EX)
     args.target_root.parent.mkdir(parents=True, exist_ok=True)
     parent_info = os.lstat(args.target_root.parent)
     if parent_info.st_uid != 0 or stat.S_IMODE(parent_info.st_mode) & 0o022:
@@ -305,29 +344,25 @@ def main() -> int:
     stage = args.target_root.with_name(args.target_root.name + ".staging")
     backup = args.target_root.with_name(args.target_root.name + ".rollback")
     journal = args.target_root.with_name(args.target_root.name + ".migration.json")
-    coordination = os.open(
-        args.target_root.parent / f".{args.target_root.name}.migration.lock",
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-        0o600,
-    )
-    os.fchmod(coordination, 0o600)
-    fcntl.flock(coordination, fcntl.LOCK_EX)
     # Recovery is always first while holding the stable parent lock.
     _recover(journal, args.target_root, stage, backup)
     control_keys = _keys(args.control_public)
     outcome_keys = _keys(args.outcome_public)
-    release_gid = grp.getgrnam("trustforge-release").gr_gid
     operator_uid = pwd.getpwnam("trustforge-operator").pw_uid
     router_uid = pwd.getpwnam("trustforge-router").pw_uid
-    event_fds: list[int] = []
+    event_fds: list[int | None] = []
     try:
         # Fixed-order exclusive locks fence appenders from verification to durable publish.
         for directory in ("control", "router-outcomes"):
-            fd = os.open(
-                args.source_root / directory / "events.jsonl",
-                os.O_RDWR | os.O_NOFOLLOW,
-            )
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                fd = os.open(
+                    args.source_root / directory / "events.jsonl",
+                    os.O_RDWR | os.O_NOFOLLOW,
+                )
+            except FileNotFoundError:
+                fd = None
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
             event_fds.append(fd)
         source_heads = []
         for index, (directory, keys, domain, kinds) in enumerate(
@@ -344,7 +379,12 @@ def main() -> int:
             projection = _verified_projection(
                 args.source_root, directory, keys, domain, kinds, verify=False
             )
-            records = projection.read_from_exclusively_locked_fd(event_fds[index])
+            locked_fd = event_fds[index]
+            records = (
+                projection.read_from_exclusively_locked_fd(locked_fd)
+                if locked_fd is not None
+                else projection.read()
+            )
             source_heads.append(records[-1]["event_hash"] if records else None)
         same_root = args.target_root.exists() and os.path.samestat(
             os.stat(args.source_root), os.stat(args.target_root)
@@ -390,8 +430,9 @@ def main() -> int:
         _publish_swap(stage, args.target_root, backup, journal)
     finally:
         for fd in reversed(event_fds):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
         fcntl.flock(coordination, fcntl.LOCK_UN)
         os.close(coordination)
     return 0

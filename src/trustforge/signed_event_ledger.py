@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import stat
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
@@ -64,6 +65,8 @@ class SignedEventLedger:
     convenience. A valid router signature therefore cannot authenticate a
     control-plane event.
     """
+
+    _coordination_state = threading.local()
 
     def __init__(
         self,
@@ -235,8 +238,20 @@ class SignedEventLedger:
     @contextmanager
     def coordination_lock(self):
         """Serialize cross-ledger control transitions and route reservations."""
+        key = str(self.coordination_lock_path)
+        held = getattr(self._coordination_state, "held", None)
+        if held is None:
+            held = {}
+            self._coordination_state.held = held
+        if key in held:
+            held[key]["depth"] += 1
+            try:
+                yield
+            finally:
+                held[key]["depth"] -= 1
+            return
+        parent_info = os.lstat(self.coordination_lock_path.parent)
         if self._preprovisioned_coordination_lock:
-            parent_info = os.lstat(self.coordination_lock_path.parent)
             if (
                 not stat.S_ISDIR(parent_info.st_mode)
                 or stat.S_ISLNK(parent_info.st_mode)
@@ -266,12 +281,17 @@ class SignedEventLedger:
                 or info.st_uid != self.coordination_lock_owner_uid
                 or info.st_gid != expected_gid
                 or stat.S_IMODE(info.st_mode) != self.coordination_lock_mode
+                or info.st_nlink != 1
+                or info.st_dev != parent_info.st_dev
             ):
                 raise LedgerError("coordination lock metadata is unsafe")
             fcntl.flock(fd, fcntl.LOCK_EX)
+            held[key] = {"depth": 1, "fd": fd}
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            state = held.pop(key, None)
+            if state is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
     @property
@@ -365,6 +385,12 @@ class SignedEventLedger:
 
     def trip_epoch_stop(self, *, ledger_id: str, canary_epoch: str) -> None:
         """Create a signed, one-way stop latch for one canary epoch."""
+        with self.coordination_lock():
+            self._trip_epoch_stop_unlocked(
+                ledger_id=ledger_id, canary_epoch=canary_epoch
+            )
+
+    def _trip_epoch_stop_unlocked(self, *, ledger_id: str, canary_epoch: str) -> None:
         if (
             self._private_key is None
             or self._signing_key_id is None
@@ -416,6 +442,12 @@ class SignedEventLedger:
 
     def epoch_stopped(self, *, ledger_id: str, canary_epoch: str) -> bool:
         """Read and authenticate the immutable stop latch when present."""
+        with self.coordination_lock():
+            return self._epoch_stopped_unlocked(
+                ledger_id=ledger_id, canary_epoch=canary_epoch
+            )
+
+    def _epoch_stopped_unlocked(self, *, ledger_id: str, canary_epoch: str) -> bool:
         if (
             len(ledger_id) != 32
             or len(canary_epoch) != 64
@@ -776,6 +808,13 @@ class SignedEventLedger:
         return records
 
     def append(
+        self, event: Mapping[str, Any], *, expected_head: str | None = None
+    ) -> dict[str, Any]:
+        """Append only after acquiring the stable external coordination lock."""
+        with self.coordination_lock():
+            return self._append_unlocked(event, expected_head=expected_head)
+
+    def _append_unlocked(
         self, event: Mapping[str, Any], *, expected_head: str | None = None
     ) -> dict[str, Any]:
         if self._private_key is None:

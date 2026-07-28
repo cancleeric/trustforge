@@ -261,3 +261,10 @@ of the `trustforge-operator`, `trustforge-router`, and `trustforge-release`
 identities and addition of the nginx worker to `trustforge-release` are
 intentional non-reversible host mutations; rollback does not delete users,
 groups, or memberships.
+
+The release workflow must provide a canonical
+`trustforge.release-install-evidence/v1` receipt and its root-owned `0400`
+Ed25519 public keyring. The domain-separated signature binds the exact unit,
+runtime configuration, runtime public key material, both ledger bootstraps,
+retained A artifact, candidate B artifact, and endpoint-manifest bundle.
+Installation verifies this receipt before writing any host artifact.

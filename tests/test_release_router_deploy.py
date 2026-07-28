@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-import subprocess
+import json
+import hashlib
 import os
+import subprocess
 from pathlib import Path
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from scripts.deployment_readiness import (
     COORDINATION_LOCK_PATH as OPERATOR_COORDINATION_LOCK_PATH,
@@ -198,7 +204,10 @@ def test_operator_emergency_paths_are_artifact_and_extra_key_independent():
     assert "outcome-private" not in _key_roles_for_command("promote")
 
 
-def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
+@pytest.mark.parametrize("rollback_daemon_failure", [False, True])
+def test_installer_failure_stops_new_service_and_restores_nginx(
+    tmp_path, rollback_daemon_failure
+):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     trace = tmp_path / "trace"
@@ -220,6 +229,10 @@ def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
     command(
         "systemctl",
         f'echo "$*" >>"{trace}"\n'
+        f'if [ "${{1:-}}" = "stop" ]; then touch "{tmp_path}/stopped"; fi\n'
+        f'if [ "${{1:-}}" = "daemon-reload" ] && '
+        f'[ -f "{tmp_path}/stopped" ] && '
+        f'[ "{str(rollback_daemon_failure).lower()}" = "true" ]; then exit 1; fi\n'
         'if [ "${1:-}" = "is-active" ]; then exit 0; fi\n'
         f'if [ "${{1:-}}" = "show" ]; then '
         f'if [ -f "{tmp_path}/pid-seen" ]; then echo 222; '
@@ -259,6 +272,16 @@ def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
     netrc.chmod(0o600)
     ca = tmp_path / "ca.pem"
     ca.write_text("test-ca")
+    evidence = tmp_path / "release-evidence.json"
+    evidence_keys = tmp_path / "release-evidence-keys.json"
+    artifact_a = tmp_path / "a.artifact"
+    artifact_b = tmp_path / "b.artifact"
+    manifests = tmp_path / "endpoint-manifests.json"
+    for path in (evidence, artifact_a, artifact_b, manifests):
+        path.write_text("{}")
+    evidence.chmod(0o600)
+    evidence_keys.write_text("{}")
+    evidence_keys.chmod(0o400)
     env = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -266,6 +289,11 @@ def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
         "TRUSTFORGE_SMOKE_NETRC": str(netrc),
         "TRUSTFORGE_SMOKE_CA": str(ca),
         "TRUSTFORGE_SMOKE_HOST": "router.test",
+        "TRUSTFORGE_EXPECTED_RELEASE_EVIDENCE": str(evidence),
+        "TRUSTFORGE_RELEASE_EVIDENCE_KEYS": str(evidence_keys),
+        "TRUSTFORGE_A_ARTIFACT": str(artifact_a),
+        "TRUSTFORGE_B_ARTIFACT": str(artifact_b),
+        "TRUSTFORGE_ENDPOINT_MANIFESTS": str(manifests),
     }
 
     result = subprocess.run(
@@ -287,3 +315,71 @@ def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
     assert "--insecure" not in recorded
     assert "secret-user" not in recorded
     assert "secret-pass" not in recorded
+    evidence = install_root / "var/lib/trustforge/release-install-rollback-failed.json"
+    if rollback_daemon_failure:
+        assert result.returncode == 91
+        assert evidence.stat().st_mode & 0o777 == 0o600
+        payload = json.loads(evidence.read_text())
+        assert payload["schema"] == "trustforge.release-install-rollback-failed/v1"
+    else:
+        assert result.returncode == 22
+        assert not evidence.exists()
+
+
+def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
+    names = (
+        "unit",
+        "runtime",
+        "keys",
+        "control-bootstrap",
+        "outcome-bootstrap",
+        "a-artifact",
+        "b-artifact",
+        "endpoint-manifests",
+    )
+    paths = {}
+    private = Ed25519PrivateKey.generate()
+    payload = {
+        "schema": "trustforge.release-install-evidence/v1",
+        "key_id": "release-1",
+    }
+    for name in names:
+        path = tmp_path / name
+        path.write_bytes((name + "\n").encode())
+        paths[name] = path
+        payload[name.replace("-", "_") + "_sha256"] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    signature = private.sign(
+        b"trustforge.release-install-evidence.v1\x00"
+        + json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hex()
+    payload["signature"] = signature
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    evidence.chmod(0o600)
+    keyring = tmp_path / "release-keys.json"
+    public = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+    keyring.write_text(
+        json.dumps({"release-1": public}, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    keyring.chmod(0o400)
+    command = [
+        str(ROOT / ".venv/bin/python"),
+        str(ROOT / "scripts/verify_release_install_evidence.py"),
+        "--evidence",
+        str(evidence),
+        "--public-keyring",
+        str(keyring),
+    ]
+    for name in names:
+        command.extend(("--" + name, str(paths[name])))
+
+    subprocess.run(command, check=True)
+    paths["b-artifact"].write_text("tampered")
+    failed = subprocess.run(command, capture_output=True, text=True)
+
+    assert failed.returncode != 0
+    assert "b_artifact_sha256" in failed.stderr

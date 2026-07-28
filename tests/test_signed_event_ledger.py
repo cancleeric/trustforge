@@ -3,6 +3,7 @@ from __future__ import annotations
 import grp
 import json
 import os
+import threading
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -85,6 +86,38 @@ def test_projection_uses_public_keys_only_and_cannot_append(tmp_path):
     assert projection.read()[0]["event"]["kind"] == "deployment_initialized"
     with pytest.raises(LedgerError, match="projection-only"):
         projection.append({"kind": "operator_stop"})
+
+
+def test_writer_opens_ledger_only_after_external_coordination_lock(tmp_path):
+    writer = _ledger(tmp_path)
+    started = threading.Event()
+    finished = threading.Event()
+
+    def append() -> None:
+        started.set()
+        writer.append({"kind": "deployment_initialized"})
+        finished.set()
+
+    with writer.coordination_lock():
+        thread = threading.Thread(target=append)
+        thread.start()
+        assert started.wait(1)
+        assert not finished.wait(0.1)
+        assert not (tmp_path / "ledger" / "events.jsonl").exists()
+    thread.join(timeout=2)
+
+    assert finished.is_set()
+    assert writer.read()[0]["event"]["kind"] == "deployment_initialized"
+
+
+def test_same_path_nested_ledger_coordination_is_reentrant(tmp_path):
+    first = _ledger(tmp_path)
+    second = _ledger(tmp_path)
+
+    with first.coordination_lock():
+        second.append({"kind": "deployment_initialized"})
+
+    assert len(first.read()) == 1
 
 
 def test_epoch_stop_latch_is_one_way_signed_and_projection_verifiable(tmp_path):

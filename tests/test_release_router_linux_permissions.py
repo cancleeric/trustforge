@@ -34,6 +34,12 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     operator = pwd.getpwnam("trustforge-operator")
     release_gid = __import__("grp").getgrnam("trustforge-release").gr_gid
     tmp_path.chmod(0o755)
+    lock_parent = tmp_path / "release-control"
+    lock_parent.mkdir(mode=0o750)
+    os.chown(lock_parent, 0, release_gid)
+    coordination_lock = lock_parent / "coordination.lock"
+    coordination_lock.touch(mode=0o660)
+    os.chown(coordination_lock, 0, release_gid)
     root = tmp_path / "security-ledger"
     control = root / "control"
     outcomes = root / "router-outcomes"
@@ -106,10 +112,9 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     )
     control_public_file.chmod(0o400)
     outcome_public_file.chmod(0o400)
-    for directory, owner in ((control, operator.pw_uid), (outcomes, router.pw_uid)):
-        event = directory / "events.jsonl"
-        event.touch(mode=0o640)
-        os.chown(event, owner, release_gid)
+    control_event = control / "events.jsonl"
+    control_event.touch(mode=0o640)
+    os.chown(control_event, operator.pw_uid, release_gid)
     subprocess.run(
         [
             sys.executable,
@@ -122,12 +127,17 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
             str(control_public_file),
             "--outcome-public",
             str(outcome_public_file),
+            "--coordination-lock",
+            str(coordination_lock),
         ],
         check=True,
         timeout=10,
     )
     assert (control / "bootstrap.json").stat().st_mode & 0o777 == 0o640
     assert (outcomes / "bootstrap.json").stat().st_mode & 0o777 == 0o640
+    outcome_event = outcomes / "events.jsonl"
+    outcome_event.touch(mode=0o640)
+    os.chown(outcome_event, router.pw_uid, release_gid)
     subprocess.run(
         [
             "systemd-sysusers",

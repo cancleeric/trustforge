@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import grp
 import json
 import os
 import stat
@@ -10,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.migrate_release_ledgers import _allowed_entry, _publish_swap, _recover
+from scripts.migrate_release_ledgers import (
+    _allowed_entry,
+    _copy_ledger,
+    _publish_swap,
+    _recover,
+)
 from scripts.provision_release_ledgers import _recover_provision
 
 
@@ -490,6 +496,36 @@ def test_migration_allowlist_rejects_unexpected_state() -> None:
     assert _allowed_entry("epoch-stop-" + "a" * 64 + ".json")
     assert not _allowed_entry("private-key.json")
     assert not _allowed_entry(".coordination.lock")
+
+
+def test_migration_copies_terminal_latch_but_omits_derived_checkpoint(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir(mode=0o750)
+    epoch = "a" * 64
+    for name in (
+        "bootstrap.json",
+        "events.jsonl",
+        "head.json",
+        f"epoch-stop-{epoch}.json",
+        "authorization-checkpoint.json",
+    ):
+        path = source / name
+        path.write_text(name)
+        path.chmod(0o640)
+
+    _copy_ledger(
+        source,
+        target,
+        os.geteuid(),
+        os.getegid(),
+    )
+
+    assert (target / f"epoch-stop-{epoch}.json").read_text().startswith("epoch-stop")
+    assert not (target / "authorization-checkpoint.json").exists()
+    assert grp.getgrgid(target.stat().st_gid).gr_gid == os.getegid()
 
 
 def test_exclusive_migration_lock_fences_concurrent_writer(tmp_path: Path) -> None:

@@ -28,9 +28,11 @@ for source in "$UNIT_SOURCE" "$NGINX_SOURCE" "$SYSUSERS_SOURCE" "$TMPFILES_SOURC
     exit 2
   }
 done
+EXPECTED_UNIT_SHA256="$(sha256sum "$UNIT_SOURCE" | awk '{print $1}')"
 
 if $DRY_RUN; then
   printf '%s\n' \
+    "python3 scripts/verify_release_install_evidence.py # bind unit/runtime/keys/A/B/manifests" \
     "install -o root -g root -m 0644 $UNIT_SOURCE $UNIT_TARGET" \
     "install -o root -g root -m 0644 $NGINX_SOURCE $NGINX_TARGET" \
     "install -o root -g root -m 0644 $SYSUSERS_SOURCE $SYSUSERS_TARGET" \
@@ -57,9 +59,27 @@ fi
   exit 77
 }
 
+RELEASE_EVIDENCE="${TRUSTFORGE_EXPECTED_RELEASE_EVIDENCE:?set root-only release evidence receipt}"
+RELEASE_EVIDENCE_KEYS="${TRUSTFORGE_RELEASE_EVIDENCE_KEYS:?set release evidence public keyring}"
+A_ARTIFACT="${TRUSTFORGE_A_ARTIFACT:?set exact retained A artifact}"
+B_ARTIFACT="${TRUSTFORGE_B_ARTIFACT:?set exact candidate B artifact}"
+ENDPOINT_MANIFESTS="${TRUSTFORGE_ENDPOINT_MANIFESTS:?set signed endpoint manifest bundle}"
+python3 "$ROOT_DIR/scripts/verify_release_install_evidence.py" \
+  --evidence "$RELEASE_EVIDENCE" \
+  --public-keyring "$RELEASE_EVIDENCE_KEYS" \
+  --unit "$UNIT_SOURCE" \
+  --runtime "$CONFIG_ROOT/release-router-runtime.json" \
+  --keys "$CONFIG_ROOT/release-router-runtime-keys.json" \
+  --control-bootstrap "$LEDGER_ROOT/control/bootstrap.json" \
+  --outcome-bootstrap "$LEDGER_ROOT/router-outcomes/bootstrap.json" \
+  --a-artifact "$A_ARTIFACT" \
+  --b-artifact "$B_ARTIFACT" \
+  --endpoint-manifests "$ENDPOINT_MANIFESTS" >/dev/null
+
 mkdir -p "$(dirname "$UNIT_TARGET")" "$(dirname "$NGINX_TARGET")" \
   "$(dirname "$SYSUSERS_TARGET")" "$(dirname "$TMPFILES_TARGET")" \
-  "$DEST_ROOT/var/tmp"
+  "$DEST_ROOT/var/tmp" "$DEST_ROOT/var/lib/trustforge"
+ROLLBACK_EVIDENCE="$DEST_ROOT/var/lib/trustforge/release-install-rollback-failed.json"
 BACKUP_DIR="$(mktemp -d "$DEST_ROOT/var/tmp/trustforge-router-install.XXXXXX")"
 chmod 0700 "$BACKUP_DIR"
 TARGETS=("$UNIT_TARGET" "$NGINX_TARGET" "$SYSUSERS_TARGET" "$TMPFILES_TARGET")
@@ -73,24 +93,58 @@ for index in "${!TARGETS[@]}"; do
     EXISTED[$index]=false
   fi
 done
+PREFLIGHT_INPUT_SHA256="$(
+  sha256sum \
+    "$CONFIG_ROOT/release-router-runtime.json" \
+    "$CONFIG_ROOT/release-router-runtime-keys.json" \
+    "$LEDGER_ROOT/control/bootstrap.json" \
+    "$LEDGER_ROOT/router-outcomes/bootstrap.json"
+)"
 SERVICE_WAS_ACTIVE=false
 systemctl is-active --quiet trustforge-release-router.service && SERVICE_WAS_ACTIVE=true
 OLD_MAIN_PID="$(systemctl show -p MainPID --value trustforge-release-router.service 2>/dev/null || echo 0)"
 rollback_install() {
   status=$?
-  systemctl stop trustforge-release-router.service >/dev/null 2>&1 || true
+  rollback_failed=false
+  systemctl stop trustforge-release-router.service >/dev/null 2>&1 ||
+    rollback_failed=true
   for index in "${!TARGETS[@]}"; do
     if ${EXISTED[$index]}; then
-      install -o root -g root -m 0644 "$BACKUP_DIR/$index" "${TARGETS[$index]}"
+      install -o root -g root -m 0644 "$BACKUP_DIR/$index" "${TARGETS[$index]}" ||
+        rollback_failed=true
+      cmp -s "$BACKUP_DIR/$index" "${TARGETS[$index]}" || rollback_failed=true
     else
-      rm -f -- "${TARGETS[$index]}"
+      rm -f -- "${TARGETS[$index]}" || rollback_failed=true
+      [[ ! -e "${TARGETS[$index]}" ]] || rollback_failed=true
     fi
   done
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || rollback_failed=true
+  nginx -t >/dev/null 2>&1 || rollback_failed=true
+  systemctl reload nginx >/dev/null 2>&1 || rollback_failed=true
   if $SERVICE_WAS_ACTIVE; then
-    systemctl start trustforge-release-router.service >/dev/null 2>&1 || true
+    systemctl start trustforge-release-router.service >/dev/null 2>&1 ||
+      rollback_failed=true
+    systemctl is-active --quiet trustforge-release-router.service ||
+      rollback_failed=true
+    restored_pid="$(systemctl show -p MainPID --value trustforge-release-router.service)"
+    [[ "$restored_pid" =~ ^[1-9][0-9]*$ ]] || rollback_failed=true
+    curl --fail --silent --show-error \
+      --unix-socket /run/trustforge/release-router.sock \
+      -H 'X-TrustForge-Trusted-Subject: rollback-verify' \
+      http://localhost/healthz >/dev/null 2>&1 || rollback_failed=true
   fi
+  if $rollback_failed; then
+    evidence_tmp="$ROLLBACK_EVIDENCE.$$"
+    printf '{"original_status":%d,"schema":"trustforge.release-install-rollback-failed/v1"}\n' \
+      "$status" >"$evidence_tmp"
+    chmod 0600 "$evidence_tmp"
+    sync -f "$evidence_tmp"
+    mv -f "$evidence_tmp" "$ROLLBACK_EVIDENCE"
+    sync -f "$(dirname "$ROLLBACK_EVIDENCE")"
+    rm -rf -- "$BACKUP_DIR"
+    exit 91
+  fi
+  rm -f -- "$ROLLBACK_EVIDENCE"
   rm -rf -- "$BACKUP_DIR"
   exit "$status"
 }
@@ -152,6 +206,21 @@ if $SERVICE_WAS_ACTIVE && [[ "$NEW_MAIN_PID" == "$OLD_MAIN_PID" ]]; then
   echo "release router upgrade did not replace the running process" >&2
   false
 fi
+[[ "$(sha256sum "$UNIT_TARGET" | awk '{print $1}')" == "$EXPECTED_UNIT_SHA256" ]] || {
+  echo "installed router unit does not match intended release" >&2
+  false
+}
+if [[ -z "$DEST_ROOT" ]]; then
+  [[ "$(readlink -f "/proc/$NEW_MAIN_PID/exe")" == "/opt/trustforge/.venv/bin/python"* ]] || {
+    echo "router process executable does not match intended release" >&2
+    false
+  }
+  tr '\0' '\n' <"/proc/$NEW_MAIN_PID/cmdline" |
+    grep -Fx "scripts/release_router_service.py" >/dev/null || {
+      echo "router process command does not match intended release" >&2
+      false
+    }
+fi
 systemctl reload nginx
 setpriv \
   "--reuid=$NGINX_WORKER_USER" \
@@ -183,6 +252,21 @@ curl --fail --silent --show-error --netrc-file /dev/fd/9 \
   --cacert "$SMOKE_CA" --resolve "$SMOKE_HOST:443:127.0.0.1" \
   "https://$SMOKE_HOST/healthz" >/dev/null
 exec 9<&-
+setpriv \
+  --reuid=trustforge-operator \
+  --regid=trustforge-operator \
+  --init-groups \
+  python3 "$ROOT_DIR/scripts/deployment_readiness.py" status >/dev/null
+[[ "$(
+  sha256sum \
+    "$CONFIG_ROOT/release-router-runtime.json" \
+    "$CONFIG_ROOT/release-router-runtime-keys.json" \
+    "$LEDGER_ROOT/control/bootstrap.json" \
+    "$LEDGER_ROOT/router-outcomes/bootstrap.json"
+)" == "$PREFLIGHT_INPUT_SHA256" ]] || {
+  echo "signed release inputs changed during installation" >&2
+  false
+}
 systemctl enable trustforge-release-router.service
 trap - ERR INT TERM
 rm -rf -- "$BACKUP_DIR"

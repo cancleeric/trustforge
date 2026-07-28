@@ -163,6 +163,11 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
 
     def _read_checkpoint(self) -> dict[str, Any] | None:
         """Strictly read the pinned coarse control-plane time checkpoint."""
+        with self.ledger.coordination_lock():
+            return self._read_checkpoint_unlocked()
+
+    def _read_checkpoint_unlocked(self) -> dict[str, Any] | None:
+        """Read after the stable release coordination lock is held."""
         try:
             directory_fd = os.open(
                 self.ledger.directory,
@@ -232,6 +237,18 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         return value
 
     def _write_checkpoint(
+        self,
+        *,
+        terminal_record: Mapping[str, Any],
+        floor: datetime | None = None,
+    ) -> None:
+        """Publish the derived checkpoint under the external release lock."""
+        with self.ledger.coordination_lock():
+            self._write_checkpoint_unlocked(
+                terminal_record=terminal_record, floor=floor
+            )
+
+    def _write_checkpoint_unlocked(
         self,
         *,
         terminal_record: Mapping[str, Any],
