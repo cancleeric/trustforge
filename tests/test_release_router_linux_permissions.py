@@ -44,6 +44,7 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     os.chown(lock_parent, 0, release_gid)
     coordination_lock = lock_parent / "coordination.lock"
     coordination_lock.touch(mode=0o660)
+    coordination_lock.chmod(0o660)
     os.chown(coordination_lock, 0, release_gid)
     root = tmp_path / "security-ledger"
     control = root / "control"
