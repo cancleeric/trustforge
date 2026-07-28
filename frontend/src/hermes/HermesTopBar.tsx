@@ -90,7 +90,7 @@ export default function HermesTopBar({
            且 < 49（drilldown 遮罩），所以 drilldown 打開時頂欄照樣被壓暗。 */
         position: 'absolute', left: 0, right: 0, top: 0, height: 'var(--hermes-top)', zIndex: 32,
         display: 'flex', alignItems: 'center', gap: 14, padding: '0 20px',
-        background: 'rgba(10,16,24,.62)', backdropFilter: 'blur(10px)',
+        background: 'rgba(10,16,24,.62)', backdropFilter: 'blur(10px)', willChange: 'backdrop-filter',
         borderBottom: '1px solid var(--color-hermes-bd)',
         boxShadow: '0 1px 12px rgba(77,216,224,.08)',
       }}

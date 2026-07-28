@@ -53,13 +53,13 @@ def _fail_boundary(*args, **kwargs):
 
 
 def _slow_kernel(kernel_input):
-    time.sleep(2)
+    time.sleep(0.9)
     return run_kernel(kernel_input)
 
 
 def _hung_kernel(kernel_input):
     while True:
-        time.sleep(1)
+        time.sleep(0.2)
 
 
 def _blocked_kernel(kernel_input, entered, release):
