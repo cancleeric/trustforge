@@ -2,21 +2,23 @@
  * ConflictBadge — 角度間衝突的視覺提示 pill (#810).
  */
 import type { AngleConflict } from '../lib/multiAngleEndpoints'
+import { useHermesI18n } from './hermesI18n'
 
 interface ConflictBadgeProps {
   conflicts: AngleConflict[]
   currentAngle: string
 }
 
-const MODE_LABELS: Record<string, string> = {
-  risk: '風險',
-  sentiment: '情緒',
-  fundamentals: '基本面',
-  news: '新聞',
-  catalyst: '催化',
+const SHORT_KEY_MAP: Record<string, string> = {
+  risk: 'maRiskShort',
+  sentiment: 'maSentimentShort',
+  fundamentals: 'maFundamentalsShort',
+  news: 'maNewsShort',
+  catalyst: 'maCatalystShort',
 }
 
 export default function ConflictBadge({ conflicts, currentAngle }: ConflictBadgeProps) {
+  const { t } = useHermesI18n()
   const relevant = conflicts.filter(
     (c) => c.angle_a === currentAngle || c.angle_b === currentAngle,
   )
@@ -26,8 +28,11 @@ export default function ConflictBadge({ conflicts, currentAngle }: ConflictBadge
     <span className="inline-flex gap-1 flex-wrap">
       {relevant.map((c, i) => {
         const other = c.angle_a === currentAngle ? c.angle_b : c.angle_a
-        const label = MODE_LABELS[other] ?? other
+        const label = t(SHORT_KEY_MAP[other]) ?? other
         const icon = c.conflict_type === 'direction_divergence' ? '⚠️' : '📊'
+        const reason = c.conflict_type === 'direction_divergence'
+          ? t('maConflictDirOpposite')
+          : t('maConflictGapLarge')
         return (
           <span
             key={i}
@@ -35,9 +40,9 @@ export default function ConflictBadge({ conflicts, currentAngle }: ConflictBadge
             style={{ backgroundColor: 'rgba(251, 146, 60, 0.2)', color: '#f97316' }}
             title={c.summary}
             role="status"
-            aria-label={`與${label}${c.conflict_type === 'direction_divergence' ? '方向相反' : '資訊完整度差距大'}`}
+            aria-label={t('maConflictAriaLabel', { other: label, reason })}
           >
-            {icon} 與 {label}
+            {icon} {t('maConflictWithPrefix', { other: label })}
           </span>
         )
       })}
