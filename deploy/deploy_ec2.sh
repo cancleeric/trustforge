@@ -207,7 +207,8 @@ fi
 # 2) Build content-addressed artifact + manifest --------------------------------------
 echo "[ec2] building artifact..."
 B=$(mktemp -d); ZIP="$(pwd)/build/trustforge_app.zip"; mkdir -p build
-cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
+cp -r src/trustforge "$B/trustforge"; cp -r src/trustforge_core "$B/trustforge_core"
+cp -r data "$B/data"; cp -r demo "$B/demo"
 cp -r scripts "$B/scripts"
 cp -r skills "$B/skills"
 cp -r deploy "$B/deploy"
@@ -231,7 +232,7 @@ CONFIG_IDENTITY=$(echo "$CONFIG_SNAPSHOT" | python3 -c "import sys,json; print(j
 CONFIG_SNAPSHOT_JSON=$(echo "$CONFIG_SNAPSHOT" | python3 -c "import sys,json; print(json.load(sys.stdin)['payload'])")
 export CONFIG_SNAPSHOT_JSON
 
-( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts skills deploy docs llms.txt -x '*/__pycache__/*' )
+( cd "$B" && zip -qr "$ZIP" trustforge trustforge_core data demo scripts skills deploy docs llms.txt -x '*/__pycache__/*' )
 ARTIFACT_DIGEST=$(sha256sum "$ZIP" | awk '{print $1}')
 ARTIFACT_PREFIX="artifacts/${ARTIFACT_DIGEST}/"
 MANIFEST_JSON=$(cd "$B" && "$PYTHON" -c "
