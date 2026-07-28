@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trustforge"
-version = "0.18.1"
+dynamic = ["version"]
 description = "加密市場分析 AI Agent：多源資訊的信任提煉（AWS Bedrock）"
 requires-python = ">=3.11"
 dependencies = [
@@ -38,6 +38,9 @@ trustforge = "trustforge.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "trustforge._version.VERSION"}
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
