@@ -111,12 +111,13 @@ def compute_manifest(
     config_snapshot_bytes: bytes,
     *,
     build_host: str | None = None,
+    git_sha: str | None = None,
 ) -> ReleaseManifest:
     if not os.path.isfile(zip_path):
         raise FileNotFoundError(f"zip not found: {zip_path}")
 
     artifact_digest = _sha256_of_file(zip_path)
-    git_sha = _git_sha()
+    git_sha = git_sha or _git_sha()
     contract_ver, resolution_ver = _kernel_versions()
     core_hash = _core_hash()
     config_identity = "sha256:" + hashlib.sha256(config_snapshot_bytes).hexdigest()

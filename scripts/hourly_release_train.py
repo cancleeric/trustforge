@@ -11,6 +11,7 @@ import sys
 import tempfile
 import hashlib
 import secrets
+import re
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -114,6 +115,11 @@ def production_identity() -> tuple[str, str]:
         raise RuntimeError("production active digest is invalid")
     manifest = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/artifacts/{digest}/manifest.json", "-", "--region", "ap-southeast-2"], capture=True))
     sha = str(manifest["git_sha"])
+    if sha == "unknown":
+        legacy = re.search(r"-g([0-9a-f]{7,40})(?:$|-)", str(pointer.get("version", "")))
+        if not legacy:
+            raise RuntimeError("legacy production pointer does not contain a git SHA")
+        sha = run(["git", "rev-parse", legacy.group(1)], capture=True).strip()
     if len(sha) != 40 or any(char not in "0123456789abcdef" for char in sha):
         raise RuntimeError("production manifest git SHA is invalid")
     return sha, digest
