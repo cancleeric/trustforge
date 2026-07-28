@@ -241,7 +241,7 @@ def execute(args: argparse.Namespace) -> Path:
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
             backup_command = "bash deploy/backup_production_release.sh"
-            deploy_command = "bash deploy/deploy_ec2.sh"
+            deploy_command = "TRUSTFORGE_BOOTSTRAP=0 bash deploy/deploy_ec2.sh"
             with tempfile.TemporaryDirectory(prefix="trustforge-release-train-") as temporary:
                 base = Path(temporary)
                 develop_tree = base / "develop"
