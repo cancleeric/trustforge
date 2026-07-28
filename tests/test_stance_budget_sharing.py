@@ -36,6 +36,7 @@ demo 可靠性 #32 追加 cost-integrity HIGH（第二次對抗審）：codex �
 from __future__ import annotations
 
 import trustforge.agent.orchestrator as orch_mod
+import trustforge.agent.kernel_mapper as mapper_mod
 import trustforge.trust.scoring as scoring_mod
 from trustforge.agent.orchestrator import (
     detect_cross_source_signal,
@@ -77,11 +78,11 @@ def test_run_agent_pipeline_shares_one_stance_fn_between_score_and_stance_pairs(
     """
     captured: dict[str, object] = {}
 
-    real_score = scoring_mod.score
+    real_resolver = mapper_mod.resolve_kernel_run_resolution
 
-    def _spy_score(*args, **kwargs):
-        captured["score_stance_fn"] = kwargs.get("stance_fn")
-        return real_score(*args, **kwargs)
+    def _spy_resolver(*args, **kwargs):
+        captured["resolution_stance_fn"] = kwargs.get("stance_fn")
+        return real_resolver(*args, **kwargs)
 
     real_detect = orch_mod.detect_cross_source_signal
 
@@ -89,7 +90,7 @@ def test_run_agent_pipeline_shares_one_stance_fn_between_score_and_stance_pairs(
         captured["detect_stance_fn"] = kwargs.get("stance_fn")
         return real_detect(*args, **kwargs)
 
-    monkeypatch.setattr(scoring_mod, "score", _spy_score)
+    monkeypatch.setattr(mapper_mod, "resolve_kernel_run_resolution", _spy_resolver)
     monkeypatch.setattr(orch_mod, "detect_cross_source_signal", _spy_detect)
 
     docs = _opposite_direction_news_docs()
@@ -99,12 +100,14 @@ def test_run_agent_pipeline_shares_one_stance_fn_between_score_and_stance_pairs(
         log=ExecutionLog(now_fn=lambda: 1000.0), now_fn=lambda: 1000.0,
     )
 
-    assert captured.get("score_stance_fn") is not None, "score() 應收到非 None 的 stance_fn"
+    assert captured.get("resolution_stance_fn") is not None, (
+        "resolution builder 應收到非 None 的 stance_fn"
+    )
     assert captured.get("detect_stance_fn") is not None, (
         "detect_cross_source_signal() 應收到非 None 的 stance_fn"
     )
-    assert captured["score_stance_fn"] is captured["detect_stance_fn"], (
-        "Step2 score() 與 Step 2.5 stance_pairs 偵測必須共用同一個 stance_fn/"
+    assert captured["resolution_stance_fn"] is captured["detect_stance_fn"], (
+        "Step2 resolution 與 Step 2.5 stance_pairs 偵測必須共用同一個 stance_fn/"
         "_StanceBudget 實例，不可各自另建一份、讓真呼叫硬上限實質變成兩倍"
     )
 

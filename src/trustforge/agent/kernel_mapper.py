@@ -17,11 +17,14 @@ from trustforge_core import (
     KernelInput,
     KernelOutput,
     KernelReputationTrace,
-    KernelScoredClaim,
     canonical_source,
+    run_kernel,
 )
 
+from ..direction_resolution import ResolvedDirection
 from ..trust.scoring import Claim, ScoredClaim, TrustedBrief
+from ..trust.scoring import resolve_kernel_run_resolution
+from .kernel_projection import KernelJudgment, project
 
 
 def _freeze_json(value: Any) -> JsonValue:
@@ -46,6 +49,12 @@ def to_kernel_claim(claim: Claim) -> KernelClaim:
     metadata = _freeze_json(document.meta)
     if not isinstance(metadata, tuple):
         metadata = (("value", metadata),)
+    try:
+        timestamp = float(document.ts)
+    except (TypeError, ValueError, OverflowError):
+        timestamp = 0.0
+    if not math.isfinite(timestamp):
+        timestamp = 0.0
     return KernelClaim(
         id=claim.id,
         text=claim.text,
@@ -56,7 +65,7 @@ def to_kernel_claim(claim: Claim) -> KernelClaim:
             kind=document.kind,
             source=document.source,
             text=document.text,
-            timestamp=float(document.ts),
+            timestamp=timestamp,
             url=document.url,
             metadata=metadata,
         ),
@@ -64,14 +73,43 @@ def to_kernel_claim(claim: Claim) -> KernelClaim:
 
 
 def to_kernel_input(
-    claims: Sequence[Claim], *, pit_epoch: float, coin: str, query: str
+    claims: Sequence[Claim],
+    *,
+    pit_epoch: float,
+    coin: str,
+    query: str,
+    direction: ResolvedDirection | None = None,
+    stance_fn: Any = None,
+    offline: bool = False,
 ) -> KernelInput:
-    """Build an immutable kernel request at the application boundary."""
+    """Build the fully resolved immutable production kernel request."""
+    normalized = list(claims)
+    if direction is None:
+        # Retained only for archived shadow/parity utilities. Production calls
+        # ``run_authoritative_judgment``, which requires an exact direction and
+        # therefore always supplies a non-null resolution.
+        return KernelInput(
+            claims=tuple(to_kernel_claim(claim) for claim in normalized),
+            pit_epoch=float(pit_epoch),
+            coin=coin,
+            query=query,
+        )
+    if type(direction) is not ResolvedDirection:
+        raise ValueError("direction must be an exact ResolvedDirection")
+    resolution = resolve_kernel_run_resolution(
+        normalized,
+        pit_epoch,
+        resolved_direction=direction.value,
+        stance_fn=stance_fn,
+        dynamic_reputation=True,
+        offline=offline,
+    )
     return KernelInput(
-        claims=tuple(to_kernel_claim(claim) for claim in claims),
+        claims=tuple(to_kernel_claim(claim) for claim in normalized),
         pit_epoch=float(pit_epoch),
         coin=coin,
         query=query,
+        resolution=resolution,
     )
 
 
@@ -149,10 +187,10 @@ def _validate_kernel_output(output: KernelOutput, claims: Sequence[Claim]) -> No
         raise ValueError("contrarian claims must contain unique claim IDs")
 
 
-def to_legacy_scoring(
+def to_app_scoring(
     output: KernelOutput, claims: Sequence[Claim]
 ) -> tuple[list[ScoredClaim], TrustedBrief]:
-    """Convert kernel output into legacy ScoredClaim list and TrustedBrief.
+    """Project kernel output into the application's presentation-only shapes.
 
     Validates the complete output graph before mapping fields.  Field
     mappings are exact and deterministic:
@@ -187,3 +225,47 @@ def to_legacy_scoring(
         calibrated_confidence=output.confidence,
     )
     return scored_claims, brief
+
+
+def run_authoritative_judgment(
+    claims: Sequence[Claim],
+    *,
+    pit_epoch: float,
+    coin: str,
+    query: str,
+    direction: ResolvedDirection,
+    stance_fn: Any = None,
+    offline: bool = False,
+) -> tuple[KernelOutput, list[ScoredClaim], TrustedBrief, KernelJudgment]:
+    """Run the sole production judgment engine and project its immutable result.
+
+    There is intentionally no legacy scoring fallback here.  A kernel contract
+    or execution failure aborts the request so release-level A/B rollback—not a
+    second in-process judgment engine—remains the only recovery mechanism.
+    """
+
+    output = run_kernel(
+        to_kernel_input(
+            claims,
+            pit_epoch=pit_epoch,
+            coin=coin,
+            query=query,
+            direction=direction,
+            stance_fn=stance_fn,
+            offline=offline,
+        )
+    )
+    scored, brief = to_app_scoring(output, claims)
+    return output, scored, brief, project(output, coin=coin)
+
+
+def to_legacy_scoring(
+    output: KernelOutput, claims: Sequence[Claim]
+) -> tuple[list[ScoredClaim], TrustedBrief]:
+    """Compatibility shape facade for offline parity consumers.
+
+    Production entrypoints use :func:`run_authoritative_judgment`.  This named
+    wrapper preserves the public adapter symbol while delegating only immutable
+    output projection; it cannot score, aggregate, or select a judgment.
+    """
+    return to_app_scoring(output, claims)

@@ -27,8 +27,10 @@ from typing import Callable
 from trustforge_core.contracts import (
     KERNEL_CONTRACT_VERSION as _CORE_CONTRACT_VERSION,
     KernelClaim as _CoreKernelClaim,
+    KernelClaimResolution as _CoreKernelClaimResolution,
     KernelDocument as _CoreKernelDocument,
     KernelReputationTrace as _CoreKernelReputationTrace,
+    KernelRunResolution as _CoreKernelRunResolution,
     KernelScoredClaim as _CoreKernelScoredClaim,
 )
 from trustforge_core.aggregation import (
@@ -1429,6 +1431,144 @@ def build_stance_fn(
 
 
 # --- 主評分 --------------------------------------------------------------
+def resolve_kernel_run_resolution(
+    claims: list[Claim],
+    now: float,
+    *,
+    resolved_direction: str,
+    weights: dict | None = None,
+    stance_fn: Callable[[str, str], str] | None = None,
+    dynamic_reputation: bool = True,
+    reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
+    offline: bool = False,
+) -> _CoreKernelRunResolution:
+    """Resolve every app-owned input before the deterministic kernel runs.
+
+    This function does not score or aggregate claims.  It resolves provider and
+    application facts into an immutable core contract.  Unlike the retired
+    legacy path, failures propagate: production recovery is release-level A/B,
+    never a silent in-process change of judgment policy.
+    """
+    if type(claims) is not list or not all(type(claim) is Claim for claim in claims):
+        raise ValueError("claims must be an exact list of exact Claim values")
+    if type(now) not in {int, float} or type(now) is bool or not math.isfinite(now):
+        raise ValueError("now must be a finite nonnegative number")
+    if now < 0:
+        raise ValueError("now must be a finite nonnegative number")
+    if type(dynamic_reputation) is not bool:
+        raise ValueError("dynamic_reputation must be an exact boolean")
+    if (
+        type(reputation_iterations) is not int
+        or not 1 <= reputation_iterations <= MAX_REPUTATION_ITERATIONS
+    ):
+        raise ValueError("reputation_iterations is outside the supported range")
+    resolved_weights = DEFAULT_WEIGHTS if weights is None else weights
+    if type(resolved_weights) is not dict or set(resolved_weights) != {
+        "src", "corr", "rec", "manip"
+    }:
+        raise ValueError("weights must contain exactly src, corr, rec, and manip")
+    weight_table = tuple(
+        (key, float(resolved_weights[key]))
+        for key in ("src", "corr", "rec", "manip")
+    )
+    calibration_version, calibration_table = _aggregate_calibration_spec()
+    # Validate the complete run-level policy before any provider-backed
+    # reputation/stance resolution can perform work.
+    _CoreKernelRunResolution(
+        claim_resolutions=(),
+        score_weights=weight_table,
+        reputations=tuple(KIND_REPUTATION.items()),
+        half_lives=(
+            ("default", _DEFAULT_HALF_LIFE_HOURS),
+            *tuple(KIND_HALFLIFE_HOURS.items()),
+        ),
+        calibration_model_version=calibration_version,
+        calibration_table=calibration_table,
+        resolved_direction=resolved_direction,
+    )
+    info_flags_by_id = _coordination_signals(claims) if claims else {}
+    stance = stance_fn if stance_fn is not None else build_stance_fn(None)
+
+    dynamic_map: dict[str, float] | None = None
+    trace_by_source: dict[str, dict] = {}
+    if dynamic_reputation and claims:
+        evidence = _reputation_evidence(claims, stance_fn=stance)
+        trace_meta: dict = {}
+        priors: dict[str, float] = {}
+        raw_sources: dict[str, str] = {}
+        for claim in claims:
+            source = _canonical_source(claim.doc.source)
+            if source not in priors:
+                priors[source] = _source_reputation(claim)
+                raw_sources[source] = claim.doc.source
+        dynamic_map = _iterate_source_reputation(
+            claims,
+            now,
+            weights=resolved_weights,
+            stance_fn=stance,
+            iterations=reputation_iterations,
+            evidence=evidence,
+            trace_out=trace_meta,
+            offline=offline,
+        )
+        by_source: dict[str, list[Claim]] = {}
+        for claim in claims:
+            by_source.setdefault(_canonical_source(claim.doc.source), []).append(claim)
+        for source, source_claims in by_source.items():
+            if trace_meta.get("mode") == "ds_em":
+                agree_n = trace_meta.get("ds_agree_n", {}).get(source, 0)
+                contradict_n = trace_meta.get("ds_contradict_n", {}).get(source, 0)
+            else:
+                agree_sources: set[str] = set()
+                contradict_sources: set[str] = set()
+                for claim in source_claims:
+                    agree, contradict = evidence.get(claim.id, (set(), set()))
+                    agree_sources |= agree
+                    contradict_sources |= contradict
+                agree_n = len(agree_sources)
+                contradict_n = len(contradict_sources)
+            trace_by_source[source] = {
+                "source": raw_sources[source],
+                "prior": priors[source],
+                "final": dynamic_map[source],
+                "agree_n": agree_n,
+                "contradict_n": contradict_n,
+                "iterations_run": trace_meta.get("iterations_run", 0),
+                "mode": trace_meta.get("mode", "entailment"),
+            }
+
+    claim_resolutions: list[_CoreKernelClaimResolution] = []
+    for claim in claims:
+        independent_sources, _ = _corroboration_detail(
+            claim, claims, stance_fn=stance
+        )
+        source = _canonical_source(claim.doc.source)
+        trace = trace_by_source.get(source)
+        claim_resolutions.append(
+            _CoreKernelClaimResolution(
+                claim_id=claim.id,
+                independent_sources=tuple(sorted(independent_sources)),
+                dynamic_reputation=(
+                    dynamic_map[source] if dynamic_map is not None else None
+                ),
+                reputation_trace=_to_core_reputation_trace(trace),
+                info_flags=tuple(info_flags_by_id.get(claim.id, [])),
+            )
+        )
+    return _CoreKernelRunResolution(
+        claim_resolutions=tuple(claim_resolutions),
+        score_weights=weight_table,
+        reputations=tuple(KIND_REPUTATION.items()),
+        half_lives=(
+            ("default", _DEFAULT_HALF_LIFE_HOURS),
+            *tuple(KIND_HALFLIFE_HOURS.items()),
+        ),
+        calibration_model_version=calibration_version,
+        calibration_table=calibration_table,
+        resolved_direction=resolved_direction,
+    )
+
+
 def score(
     claims: list[Claim],
     now: float,

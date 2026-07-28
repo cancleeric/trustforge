@@ -326,7 +326,7 @@ def test_anticheat_judgment_from_pipeline_not_llm():
     )
 
     # market_judgment 應包含 pipeline 產生的方向字詞與信心分數
-    assert any(kw in report.market_judgment for kw in ("偏多", "偏空", "中性")), (
+    assert any(kw in report.market_judgment for kw in ("偏多", "偏空", "中性", "不明")), (
         f"market_judgment 缺少 pipeline 方向詞：{report.market_judgment}"
     )
     assert "信心" in report.market_judgment or "個獨立來源" in report.market_judgment, (
@@ -398,7 +398,7 @@ def test_pipeline_now_ts_capped_to_wall_clock_against_forged_future_doc(monkeypa
     """偽造未來時間戳的文件不應能把 `now_ts`（進而是全池的時效參考點）
     撐到未來；該文件自己的 recency 應降為中性 0.5，其餘正常文件的 recency
     仍以真實牆鐘為準計算，不被錯誤壓成「異常老舊」。"""
-    import trustforge.trust.scoring as scoring_mod
+    import trustforge.agent.kernel_mapper as mapper_mod
     from trustforge.trust.scoring import _recency_decay
 
     wall_clock = 1_000_000.0
@@ -411,14 +411,14 @@ def test_pipeline_now_ts_capped_to_wall_clock_against_forged_future_doc(monkeypa
     ]
 
     captured: dict = {}
-    real_score = scoring_mod.score
+    real_resolver = mapper_mod.resolve_kernel_run_resolution
 
-    def _spy_score(claims, now, **kwargs):
+    def _spy_resolver(claims, now, **kwargs):
         captured["now"] = now
         captured["claims"] = list(claims)
-        return real_score(claims, now, **kwargs)
+        return real_resolver(claims, now, **kwargs)
 
-    monkeypatch.setattr(scoring_mod, "score", _spy_score)
+    monkeypatch.setattr(mapper_mod, "resolve_kernel_run_resolution", _spy_resolver)
 
     client = BedrockClient(offline=True)
     log = ExecutionLog(now_fn=lambda: wall_clock)
@@ -432,7 +432,7 @@ def test_pipeline_now_ts_capped_to_wall_clock_against_forged_future_doc(monkeypa
         now_fn=lambda: wall_clock,
     )
 
-    assert "now" in captured, "score() 應被真實呼叫過（spy 只是 call-through，不取代）"
+    assert "now" in captured, "resolution builder 應被真實呼叫過"
     # 核心斷言：now_ts 被 cap 在牆鐘，不會被偽造未來戳撐高
     assert captured["now"] == wall_clock, (
         f"now_ts 不應超過真實牆鐘 {wall_clock}，實得 {captured['now']}"
@@ -462,19 +462,19 @@ def test_pipeline_now_ts_unaffected_for_all_past_offline_docs(monkeypatch):
     """回歸鎖：全部文件時間戳都在牆鐘之前（典型離線 fixture 情境，如 HOYA
     歷史資料）時，`now_ts` 行為完全不受本次修正影響——仍取 docs 時間戳的
     最大值（dataset-relative），不會被錯誤 cap 成別的值。"""
-    import trustforge.trust.scoring as scoring_mod
+    import trustforge.agent.kernel_mapper as mapper_mod
 
     docs = _make_docs()  # 全部 ts=1000.0（預設值），遠早於任何真實牆鐘時間
     max_docs_ts = max(d.ts for d in docs)
 
     captured: dict = {}
-    real_score = scoring_mod.score
+    real_resolver = mapper_mod.resolve_kernel_run_resolution
 
-    def _spy_score(claims, now, **kwargs):
+    def _spy_resolver(claims, now, **kwargs):
         captured["now"] = now
-        return real_score(claims, now, **kwargs)
+        return real_resolver(claims, now, **kwargs)
 
-    monkeypatch.setattr(scoring_mod, "score", _spy_score)
+    monkeypatch.setattr(mapper_mod, "resolve_kernel_run_resolution", _spy_resolver)
 
     client = BedrockClient(offline=True)
     log = ExecutionLog(now_fn=lambda: 1000.0)
@@ -519,7 +519,7 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
     且不應污染 now_ts（now_ts 必須維持有限值），也不應把其他正常文件的
     recency 拖老。"""
     monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
-    import trustforge.trust.scoring as scoring_mod
+    import trustforge.agent.kernel_mapper as mapper_mod
 
     wall_clock = 1_000_000.0
     normal_ts = wall_clock - 3600 * 2  # 正常：2 小時前
@@ -530,14 +530,14 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
     ]
 
     captured: dict = {}
-    real_score = scoring_mod.score
+    real_resolver = mapper_mod.resolve_kernel_run_resolution
 
-    def _spy_score(claims, now, **kwargs):
+    def _spy_resolver(claims, now, **kwargs):
         captured["now"] = now
         captured["claims"] = list(claims)
-        return real_score(claims, now, **kwargs)
+        return real_resolver(claims, now, **kwargs)
 
-    monkeypatch.setattr(scoring_mod, "score", _spy_score)
+    monkeypatch.setattr(mapper_mod, "resolve_kernel_run_resolution", _spy_resolver)
 
     client = BedrockClient(offline=True)
     log = ExecutionLog(now_fn=lambda: wall_clock)
@@ -553,11 +553,10 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
     assert report is not None
     assert math.isfinite(captured["now"])
     derive = next(event for event in log.events if event.get("tool") == "judgment.derive")
-    assert derive["params"]["shadow_observation_status"] == "not_observed"
+    assert derive["params"]["judgment_source"] == "trustforge_core.run_kernel"
 
 
 def test_run_agent_pipeline_pr1_never_invokes_candidate_runtime(monkeypatch):
-    """PR1 has contracts only: mapper, kernel and recorder are not active wiring."""
     monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
     monkeypatch.setenv("KERNEL_CANARY_RATIO", "1")
 
@@ -584,14 +583,13 @@ def test_run_agent_pipeline_pr1_never_invokes_candidate_runtime(monkeypatch):
     derive_events = [
         event for event in log.events
         if event.get("tool") == "judgment.derive"
-        and "shadow_observation_status" in event.get("params", {})
+        and event.get("params", {}).get("judgment_source")
+        == "trustforge_core.run_kernel"
     ]
     assert derive_events
     params = derive_events[-1]["params"]
-    assert params["shadow_observation_status"] == "not_observed"
-    assert params["shadow_candidate_latency_ms"] == 0.0
-    assert params["kernel_confidence"] is None
-    assert params["kernel_abstain"] is None
+    assert "shadow_observation_status" not in params
+    assert params["provider_calls"] == 0
 
 
 def test_run_agent_pipeline_pr1_golden_legacy_ignores_candidate_switch(monkeypatch):
@@ -604,28 +602,19 @@ def test_run_agent_pipeline_pr1_golden_legacy_ignores_candidate_switch(monkeypat
             "BTC 多源分析", "BTC", QuestionType.MULTI_SOURCE, _make_docs(),
             client=client, log=log, now_fn=lambda: wall_clock,
         )
-        status = next(
-            event["params"]["shadow_observation_status"]
+        source = next(
+            event["params"]["judgment_source"]
             for event in log.events
             if event.get("tool") == "judgment.derive"
-            and "shadow_observation_status" in event.get("params", {})
         )
-        latency = next(
-            event["params"]["shadow_candidate_latency_ms"]
-            for event in log.events
-            if event.get("tool") == "judgment.derive"
-            and "shadow_candidate_latency_ms" in event.get("params", {})
-        )
-        return report, evidence, status, latency
+        return report, evidence, source
 
     monkeypatch.delenv("KERNEL_SHADOW_OBSERVE", raising=False)
-    baseline_report, baseline_evidence, baseline_status, baseline_latency = run_once()
-    assert baseline_status == "not_observed"
-    assert baseline_latency == 0.0
+    baseline_report, baseline_evidence, baseline_source = run_once()
+    assert baseline_source == "trustforge_core.run_kernel"
     monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
     monkeypatch.setenv("KERNEL_CANARY_RATIO", "1")
-    shadow_report, shadow_evidence, status, latency = run_once()
+    shadow_report, shadow_evidence, source = run_once()
     assert shadow_report == baseline_report
     assert shadow_evidence == baseline_evidence
-    assert status == "not_observed"
-    assert latency == 0.0
+    assert source == "trustforge_core.run_kernel"

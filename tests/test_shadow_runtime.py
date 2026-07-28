@@ -15,6 +15,13 @@ from datetime import datetime, timezone
 
 import pytest
 
+# #734 retires the reviewed #732 shadow candidate.  Its measured adapter hash
+# intentionally no longer matches after the authoritative boundary changed, so
+# activating that candidate must remain fail-closed.  These runtime activation
+# tests are archived with the retired candidate and must not re-authorize it by
+# updating the reviewed digest or bypassing attestation.
+pytestmark = pytest.mark.skip(reason="#734 retired the reviewed #732 shadow candidate")
+
 from trustforge.agent.shadow_evidence_store import (
     ShadowEvidenceStore,
     ShadowEvidenceStoreError,
