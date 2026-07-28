@@ -10,10 +10,11 @@ REF: docs/plans/COMPARISON-ANALYSIS-DEVELOPMENT-PLAN-20260728.md
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
-from .schema import Evidence, Report
+from .schema import BasisItem, Evidence, Report
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +59,36 @@ class DimensionResult:
     confidence: float = 0.0                  # 本面向信心 0–1
     decision: str = "normal"                 # abstain | insufficient | normal
 
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> DimensionResult:
+        return cls(**d)
+
 
 # ---------------------------------------------------------------------------
 # 比較報告
 # ---------------------------------------------------------------------------
+
+def _report_from_dict(d: dict) -> Report:
+    """將 asdict(Report) 產生的 dict 還原為 Report，遞迴重建嵌套 dataclass。"""
+    d = dict(d)
+    if "key_basis" in d:
+        d["key_basis"] = [BasisItem(**item) for item in d["key_basis"]]
+    if d.get("insights"):
+        from .trust.insights import Insight, InsightContribution
+        rebuilt_insights: list[Any] = []
+        for ins in d["insights"]:
+            ins = dict(ins)
+            if "contributions" in ins:
+                ins["contributions"] = [
+                    InsightContribution(**c) for c in ins["contributions"]
+                ]
+            rebuilt_insights.append(Insight(**ins))
+        d["insights"] = rebuilt_insights
+    return Report(**d)
+
 
 @dataclass
 class ComparisonReport:
@@ -97,6 +124,67 @@ class ComparisonReport:
     supporting_evidence_a: list[Evidence] = field(default_factory=list)
     supporting_evidence_b: list[Evidence] = field(default_factory=list)
 
+    def to_dict(self) -> dict:
+        payload: dict[str, Any] = asdict(self)
+        # 遞迴序列化 Report / Evidence（asdict 已處理嵌套 dataclass）
+        return payload
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ComparisonReport:
+        d = dict(d)
+        dims = [DimensionResult.from_dict(dim) for dim in d.pop("dimensions", [])]
+        _raw_ra = d.pop("supporting_report_a", None)
+        report_a = _report_from_dict(_raw_ra) if _raw_ra else None
+        _raw_rb = d.pop("supporting_report_b", None)
+        report_b = _report_from_dict(_raw_rb) if _raw_rb else None
+        ev_a = [Evidence(**e) for e in d.pop("supporting_evidence_a", [])]
+        ev_b = [Evidence(**e) for e in d.pop("supporting_evidence_b", [])]
+        return cls(
+            dimensions=dims,
+            supporting_report_a=report_a,
+            supporting_report_b=report_b,
+            supporting_evidence_a=ev_a,
+            supporting_evidence_b=ev_b,
+            **d,
+        )
+
+    @classmethod
+    def from_a_b_reports(
+        cls,
+        coin_a: str,
+        coin_b: str,
+        query: str,
+        report_a: Report,
+        evidence_a: list[Evidence],
+        report_b: Report,
+        evidence_b: list[Evidence],
+    ) -> ComparisonReport:
+        """從 A/B pipeline 結果產生骨架 ComparisonReport。
+
+        四個面向皆標為 abstain，conclusion 為佔位文字。
+        CA-03 將填入實際比較內容。
+        """
+        dimensions = [
+            DimensionResult(
+                dimension=dim,
+                label=DIMENSION_LABEL_MAP.get(dim, dim),
+                finding="（尚待比較分析）",
+                decision="abstain",
+            )
+            for dim in COMPARISON_DIMENSIONS
+        ]
+        return cls(
+            coin_a=coin_a,
+            coin_b=coin_b,
+            query=query,
+            conclusion=f"{coin_a} 與 {coin_b} 的比較分析尚待完成。",
+            dimensions=dimensions,
+            supporting_report_a=report_a,
+            supporting_report_b=report_b,
+            supporting_evidence_a=list(evidence_a),
+            supporting_evidence_b=list(evidence_b),
+        )
+
 
 # ---------------------------------------------------------------------------
 # 比較執行結果
@@ -114,10 +202,55 @@ class ComparisonRunResult:
     evidence_a: list[Evidence]
     evidence_b: list[Evidence]
     comparison: ComparisonReport | None = None  # None 表示比較無法完成（降級）
+    log: Any = None  # ExecutionLog（CA-02 新增，向後相容）
 
     @property
     def has_comparison(self) -> bool:
         return self.comparison is not None
+
+    def to_dict(self) -> dict:
+        payload: dict[str, Any] = {
+            "report_a": asdict(self.report_a),
+            "report_b": asdict(self.report_b),
+            "evidence_a": [asdict(e) for e in self.evidence_a],
+            "evidence_b": [asdict(e) for e in self.evidence_b],
+            "comparison": self.comparison.to_dict() if self.comparison else None,
+            "log": self.log.events if self.log else None,
+        }
+        return payload
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ComparisonRunResult:
+        d = dict(d)
+        report_a = _report_from_dict(d.pop("report_a"))
+        report_b = _report_from_dict(d.pop("report_b"))
+        ev_a = [Evidence(**e) for e in d.pop("evidence_a", [])]
+        ev_b = [Evidence(**e) for e in d.pop("evidence_b", [])]
+        comparison = ComparisonReport.from_dict(d["comparison"]) if d.get("comparison") else None
+        # log 為 ExecutionLog，暫不反序列化（保留 events 即可）
+        return cls(
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=ev_a,
+            evidence_b=ev_b,
+            comparison=comparison,
+            log=d.get("log"),
+        )
+
+    def __len__(self) -> int:
+        return 5
+
+    def __iter__(self):
+        """允許 unpack 為 5-tuple：(report_a, ev_a, report_b, ev_b, log)。
+
+        最後一個元素為 self.log（ExecutionLog），確保舊程式碼
+        ``ra, ea, rb, eb, log = run_comparison(...)`` 仍能執行。
+        """
+        yield self.report_a
+        yield self.evidence_a
+        yield self.report_b
+        yield self.evidence_b
+        yield self.log
 
 
 # ---------------------------------------------------------------------------

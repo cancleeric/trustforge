@@ -115,26 +115,11 @@ class TestSideBySideIsNotComparison:
     共同結論、比較面向分析。它們定義了 CA-02 ~ CA-05 的驗收規格。
     """
 
-    @pytest.mark.xfail(reason="CA-02: ComparisonReport schema 尚未實作", strict=False)
-    def test_golden_no_structured_comparison_report(self, btc_eth_fixture):
-        """【會 FAIL — 期望】目前輸出沒有結構化 ComparisonReport。
-
-        當前 `run_comparison` 回傳 (report_a, ev_a, report_b, ev_b, log)，
-        沒有 `ComparisonReport` 或等價結構。這個測試證明我們需要 CA-02 的
-        ComparisonReport schema。
-        """
-        report_a, ev_a, report_b, ev_b, log = btc_eth_fixture
-
-        # 目前只有兩份獨立報告，沒有統一的比較結構
-        has_comparison_structure = (
-            hasattr(report_a, "comparison_dimensions") or
-            hasattr(report_a, "comparison_report") or
-            "comparison_report" in locals()
-        )
-        # 這個 assertion 應該 FAIL — 證明我們需要 ComparisonReport
-        assert has_comparison_structure, (
-            "FAIL EXPECTED: 目前只有兩份獨立 Report，缺少 ComparisonReport 結構。"
-            " CA-02 將建立 ComparisonReport schema。"
+    def test_golden_structured_comparison_report(self, btc_eth_fixture):
+        """CA-02: run_comparison() 回傳 ComparisonRunResult。"""
+        result = btc_eth_fixture
+        assert isinstance(result, ComparisonRunResult), (
+            f"run_comparison() 應回傳 ComparisonRunResult，實際回傳 {type(result)}"
         )
 
     @pytest.mark.xfail(reason="CA-02/CA-04: ComparisonReport.conclusion 尚未實作", strict=False)
@@ -975,6 +960,192 @@ class TestComparisonRunResult:
 
 
 # ===========================================================================
+# CA-02 序列化/反序列化
+# ===========================================================================
+
+class TestSerializeDeserialize:
+    """CA-02：DimensionResult / ComparisonReport / ComparisonRunResult 的序列化 roundtrip。"""
+
+    def test_dimension_result_roundtrip(self):
+        """DimensionResult to_dict → from_dict 一致。"""
+        dim = DimensionResult(
+            dimension="價格動能",
+            label="價格動能比較",
+            finding="BTC 優於 ETH",
+            a_evidence_refs=[0, 1],
+            b_evidence_refs=[2],
+            confidence=0.85,
+            decision="normal",
+        )
+        d = dim.to_dict()
+        restored = DimensionResult.from_dict(d)
+        assert restored.dimension == dim.dimension
+        assert restored.label == dim.label
+        assert restored.finding == dim.finding
+        assert restored.a_evidence_refs == dim.a_evidence_refs
+        assert restored.b_evidence_refs == dim.b_evidence_refs
+        assert restored.confidence == dim.confidence
+        assert restored.decision == dim.decision
+
+    def test_comparison_report_roundtrip(self, btc_eth_fixture):
+        """ComparisonReport to_dict → from_dict 一致（含 dimensions 與 supporting reports/evidence）。"""
+        result = btc_eth_fixture
+        report_a, ev_a, report_b, ev_b, log = result
+
+        dims = [
+            DimensionResult(
+                dimension="價格動能",
+                label="價格動能比較",
+                finding="BTC +4% vs ETH -2%，BTC 優",
+                a_evidence_refs=[i for i, e in enumerate(ev_a) if e.kind == "price"],
+                b_evidence_refs=[i for i, e in enumerate(ev_b) if e.kind == "price"],
+                confidence=0.85,
+                decision="normal",
+            ),
+            DimensionResult(
+                dimension="鏈上活動",
+                label="鏈上活動比較",
+                finding="BTC 鏈上活動更強",
+                a_evidence_refs=[i for i, e in enumerate(ev_a) if e.kind == "onchain"],
+                b_evidence_refs=[i for i, e in enumerate(ev_b) if e.kind == "onchain"],
+                confidence=0.80,
+                decision="normal",
+            ),
+            DimensionResult(
+                dimension="市場情緒",
+                label="市場情緒比較",
+                finding="BTC 市場情緒優於 ETH",
+                a_evidence_refs=[i for i, e in enumerate(ev_a) if e.kind in ("news", "social")],
+                b_evidence_refs=[i for i, e in enumerate(ev_b) if e.kind in ("news", "social")],
+                confidence=0.75,
+                decision="normal",
+            ),
+            DimensionResult(
+                dimension="生態發展",
+                label="生態發展比較",
+                finding="BTC 生態前景較明朗",
+                a_evidence_refs=[i for i, e in enumerate(ev_a) if e.kind == "regulatory"],
+                b_evidence_refs=[i for i, e in enumerate(ev_b) if e.kind == "regulatory"],
+                confidence=0.70,
+                decision="normal",
+            ),
+        ]
+
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較 BTC 與 ETH",
+            conclusion="BTC 在四個面向全數優於 ETH",
+            dimensions=dims,
+            confidence=0.78,
+            limits=["資料有限"],
+            could_flip=["若 ETH ETF 轉淨流入"],
+            supporting_report_a=report_a,
+            supporting_report_b=report_b,
+            supporting_evidence_a=list(ev_a),
+            supporting_evidence_b=list(ev_b),
+        )
+
+        d = cr.to_dict()
+        restored = ComparisonReport.from_dict(d)
+
+        assert restored.coin_a == cr.coin_a
+        assert restored.coin_b == cr.coin_b
+        assert restored.query == cr.query
+        assert restored.conclusion == cr.conclusion
+        assert restored.confidence == cr.confidence
+        assert len(restored.dimensions) == 4
+        for i, dim in enumerate(cr.dimensions):
+            assert restored.dimensions[i].dimension == dim.dimension
+            assert restored.dimensions[i].finding == dim.finding
+        # 驗證 nested Report 反序列化
+        assert restored.supporting_report_a is not None
+        assert restored.supporting_report_a.coin == "BTC"
+        assert restored.supporting_report_b is not None
+        assert restored.supporting_report_b.coin == "ETH"
+        # 驗證 nested Evidence 反序列化
+        assert len(restored.supporting_evidence_a) == len(ev_a)
+        assert len(restored.supporting_evidence_b) == len(ev_b)
+
+    def test_comparison_run_result_roundtrip(self, btc_eth_fixture):
+        """ComparisonRunResult to_dict → from_dict 一致。"""
+        result = btc_eth_fixture
+        report_a, ev_a, report_b, ev_b, log = result
+
+        dims = [
+            DimensionResult(
+                dimension=dim,
+                label=DIMENSION_LABEL_MAP.get(dim, dim),
+                finding=f"{dim} 測試",
+                a_evidence_refs=[0],
+                b_evidence_refs=[0],
+                decision="normal",
+            )
+            for dim in COMPARISON_DIMENSIONS
+        ]
+
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            conclusion="測試結論",
+            dimensions=dims,
+            supporting_evidence_a=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+            supporting_evidence_b=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+        )
+
+        run_result = ComparisonRunResult(
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=list(ev_a),
+            evidence_b=list(ev_b),
+            comparison=cr,
+            log=log,
+        )
+
+        d = run_result.to_dict()
+        restored = ComparisonRunResult.from_dict(d)
+
+        assert restored.report_a.coin == "BTC"
+        assert restored.report_b.coin == "ETH"
+        assert len(restored.evidence_a) == len(ev_a)
+        assert len(restored.evidence_b) == len(ev_b)
+        assert restored.comparison is not None
+        assert restored.comparison.coin_a == "BTC"
+        assert len(restored.comparison.dimensions) == 4
+
+    def test_from_a_b_reports_produces_skeleton(self, btc_eth_fixture):
+        """from_a_b_reports 產出含四 abstain 面向的骨架報告。"""
+        result = btc_eth_fixture
+        report_a, ev_a, report_b, ev_b, log = result
+
+        cr = ComparisonReport.from_a_b_reports(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較測試",
+            report_a=report_a,
+            evidence_a=list(ev_a),
+            report_b=report_b,
+            evidence_b=list(ev_b),
+        )
+
+        assert cr.coin_a == "BTC"
+        assert cr.coin_b == "ETH"
+        assert len(cr.dimensions) == 4
+        present = {d.dimension for d in cr.dimensions}
+        for dim in COMPARISON_DIMENSIONS:
+            assert dim in present
+        for d in cr.dimensions:
+            assert d.decision == "abstain"
+        assert cr.supporting_report_a is not None
+        assert cr.supporting_report_b is not None
+
+        # 骨架應可通過 validate（四面向皆 abstain 是合法的）
+        violations = validate_comparison_report(cr, _raise=False)
+        assert len(violations) == 0, f"骨架報告應無違規，實際: {violations}"
+
+
+# ===========================================================================
 # 向後相容驗證（不破壞現有功能）
 # ===========================================================================
 
@@ -1011,6 +1182,43 @@ class TestBackwardCompatibility:
         assert ev_b
         assert "comparison.start" in [e["tool"] for e in log.events]
         assert "comparison.done" in [e["tool"] for e in log.events]
+
+    def test_run_comparison_returns_comparison_run_result(self, monkeypatch):
+        """CA-02: run_comparison() 回傳型別為 ComparisonRunResult。"""
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return _make_fixture_docs(coin)
+
+        monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        assert isinstance(result, ComparisonRunResult), (
+            f"期望 ComparisonRunResult，實際 {type(result)}"
+        )
+
+    def test_run_comparison_unpacks_to_five_tuple(self, monkeypatch):
+        """CA-02: unpack 5-tuple 仍能執行。"""
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return _make_fixture_docs(coin)
+
+        monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        report_a, ev_a, report_b, ev_b, log = result
+        assert report_a.coin == "BTC"
+        assert report_b.coin == "ETH"
+        assert ev_a
+        assert ev_b
+        assert "comparison.start" in [e["tool"] for e in log.events]
+
+    def test_run_comparison_has_comparison_none(self, monkeypatch):
+        """CA-02: result.comparison is None（CA-03 才填內容）。"""
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return _make_fixture_docs(coin)
+
+        monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        assert result.comparison is None
 
 
 # ===========================================================================
