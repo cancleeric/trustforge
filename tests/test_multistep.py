@@ -398,7 +398,7 @@ def test_pipeline_now_ts_capped_to_wall_clock_against_forged_future_doc(monkeypa
     """偽造未來時間戳的文件不應能把 `now_ts`（進而是全池的時效參考點）
     撐到未來；該文件自己的 recency 應降為中性 0.5，其餘正常文件的 recency
     仍以真實牆鐘為準計算，不被錯誤壓成「異常老舊」。"""
-    import trustforge.agent.kernel_mapper as mapper_mod
+    import trustforge.agent.authoritative_kernel_mapper as mapper_mod
     from trustforge.trust.scoring import _recency_decay
 
     wall_clock = 1_000_000.0
@@ -462,7 +462,7 @@ def test_pipeline_now_ts_unaffected_for_all_past_offline_docs(monkeypatch):
     """回歸鎖：全部文件時間戳都在牆鐘之前（典型離線 fixture 情境，如 HOYA
     歷史資料）時，`now_ts` 行為完全不受本次修正影響——仍取 docs 時間戳的
     最大值（dataset-relative），不會被錯誤 cap 成別的值。"""
-    import trustforge.agent.kernel_mapper as mapper_mod
+    import trustforge.agent.authoritative_kernel_mapper as mapper_mod
 
     docs = _make_docs()  # 全部 ts=1000.0（預設值），遠早於任何真實牆鐘時間
     max_docs_ts = max(d.ts for d in docs)
@@ -519,7 +519,7 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
     且不應污染 now_ts（now_ts 必須維持有限值），也不應把其他正常文件的
     recency 拖老。"""
     monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
-    import trustforge.agent.kernel_mapper as mapper_mod
+    import trustforge.agent.authoritative_kernel_mapper as mapper_mod
 
     wall_clock = 1_000_000.0
     normal_ts = wall_clock - 3600 * 2  # 正常：2 小時前
@@ -541,19 +541,20 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
 
     client = BedrockClient(offline=True)
     log = ExecutionLog(now_fn=lambda: wall_clock)
-    report, _ = run_agent_pipeline(
-        query="分析 BTC 市場",
-        coin="BTC",
-        qtype=QuestionType.MULTI_SOURCE,
-        docs=docs,
-        client=client,
-        log=log,
-        now_fn=lambda: wall_clock,
+    with pytest.raises(ValueError, match="timestamp must be a finite number"):
+        run_agent_pipeline(
+            query="分析 BTC 市場",
+            coin="BTC",
+            qtype=QuestionType.MULTI_SOURCE,
+            docs=docs,
+            client=client,
+            log=log,
+            now_fn=lambda: wall_clock,
+        )
+    assert captured == {}
+    assert not any(
+        event.get("tool") == "judgment.derive" for event in log.events
     )
-    assert report is not None
-    assert math.isfinite(captured["now"])
-    derive = next(event for event in log.events if event.get("tool") == "judgment.derive")
-    assert derive["params"]["judgment_source"] == "trustforge_core.run_kernel"
 
 
 def test_run_agent_pipeline_pr1_never_invokes_candidate_runtime(monkeypatch):

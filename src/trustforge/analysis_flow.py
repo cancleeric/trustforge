@@ -1035,7 +1035,8 @@ class AnalysisFlow:
         return package
 
     def _stage_trust_reasoning(self, package: dict) -> dict:
-        from .agent.kernel_mapper import run_authoritative_judgment, to_kernel_claim
+        from .agent.authoritative_kernel_mapper import run_authoritative_judgment
+        from .agent.kernel_mapper import to_kernel_claim
         from .direction_resolution import resolve_direction
 
         finite = [d.ts for d in package["docs"] if math.isfinite(d.ts)]
@@ -1044,18 +1045,10 @@ class AnalysisFlow:
         # `offline` 反映 Step1（`_stage_claim_extraction`）決定的真實 live 狀態，
         # 不再寫死 True——`stance_client=None` 本來就不會真的打 Bedrock 分類，
         # 這裡只影響 DS EM 離線 fallback 是否觸發（見 `score()` docstring）。
-        semantic_provider = None
-        if not package["client"].offline:
-            from .semantic_direction import analyze_direction
-
-            def semantic_provider(evidence):
-                return analyze_direction(evidence, package["client"])
-
         direction = resolve_direction(
             tuple(to_kernel_claim(claim) for claim in package["claims"]),
             coin=package["job"]["coin"],
             pit_epoch=now,
-            semantic_provider=semantic_provider,
         )
         (
             package["kernel_output"],

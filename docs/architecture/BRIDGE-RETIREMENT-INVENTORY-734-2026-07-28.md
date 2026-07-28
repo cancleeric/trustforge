@@ -5,13 +5,15 @@ this document.
 
 ## Authoritative production boundary
 
-`trustforge.agent.kernel_mapper.run_authoritative_judgment` is the sole
+`trustforge.agent.authoritative_kernel_mapper.run_authoritative_judgment` is the sole
 application composition boundary for production judgment. It constructs a
 non-null immutable `KernelRunResolution`, calls
 `trustforge_core.run_kernel` exactly once, validates the complete output graph,
 and projects a `KernelJudgment`. Resolution, kernel, contract, or projection
 failure propagates. There is no in-process legacy fallback; recovery is through
-release-level A/B rollback.
+release-level A/B rollback. Both production consumers use provider-free,
+deterministic PIT direction resolution; provider failure cannot silently switch
+the authoritative judgment policy or bypass the cost ledger.
 
 Production consumers:
 
@@ -22,10 +24,10 @@ Production consumers:
 
 | Facade | Consumers | Owner | Contract | Decision |
 |---|---|---|---|---|
-| `kernel_mapper.to_kernel_input(..., direction=None)` | archived parity and shadow tests/tools | Core platform | Kernel input 2.2.0 | Compatibility only. Production boundary always supplies an exact `ResolvedDirection` and asserts non-null resolution. Remove with archived #732 utilities after release rollback retention expires. |
+| `kernel_mapper.to_kernel_input` | reviewed #732 shadow and archived parity tools | Core platform | Kernel input 2.2.0 | Preserve byte-for-byte while the signed #732 candidate is retained. Production imports the separate authoritative mapper and always supplies an exact `ResolvedDirection` with non-null resolution. |
 | `kernel_mapper.to_legacy_scoring` | parity/golden tests | Core platform | Kernel output 2.2.0 → app DTO shape | Retain as a named projection-only wrapper. It cannot score or aggregate. Remove when all presentation consumers accept `KernelJudgment` directly. |
 | `trustforge.trust.scoring.score` / `aggregate` | offline research, legacy unit tests | Research platform | legacy app DTO | Forbidden from production entrypoints. Retain for research comparison until release B is verified and the rollback-retention window closes. |
-| `agent.shadow_runtime.observe_candidate` | retired #732 candidate tooling | Core platform | reviewed #732 candidate digest | Retired and disconnected from production. The old attestation digest intentionally fails closed after #734 adapter changes; do not re-sign it. Delete after audit retention. |
+| `agent.shadow_runtime.observe_candidate` | retired #732 candidate tooling | Core platform | reviewed #732 candidate digest | Retired and disconnected from production. Its measured mapper remains unchanged so the retained timeout, attestation, persistence, and cleanup safety suite remains valid; do not re-sign the candidate. Delete after audit retention. |
 | `trustforge.kernel_runner.run_kernel` | compatibility tests/tools | Core platform | pre-core stub | Forbidden from production call graph. Delete in the final retirement PR after consumer inventory reaches zero. |
 | `trustforge.trust.kernel.run_kernel` | legacy compatibility tests/tools | Core platform | legacy facade | Forbidden from production call graph. Delete in the final retirement PR after consumer inventory reaches zero. |
 

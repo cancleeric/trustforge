@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from trustforge.agent import kernel_mapper
+from trustforge.agent import authoritative_kernel_mapper as kernel_mapper
 from trustforge.direction_resolution import (
     DIRECTION_POLICY_VERSION,
     ResolvedDirection,
@@ -16,7 +16,7 @@ from trustforge.ingestion.base import Document
 from trustforge.trust.scoring import Claim
 
 
-def _claim() -> Claim:
+def _claim(timestamp=100.0) -> Claim:
     return Claim(
         "claim-1",
         "BTC demand increased",
@@ -25,7 +25,7 @@ def _claim() -> Claim:
             "news",
             "coindesk",
             "BTC demand increased",
-            100.0,
+            ts=timestamp,
             meta={"coin": "BTC"},
         ),
         "fact",
@@ -88,14 +88,41 @@ def test_authoritative_boundary_propagates_kernel_failure_without_fallback(
         )
 
 
+@pytest.mark.parametrize("timestamp", [float("nan"), float("inf"), "not-a-time"])
+def test_authoritative_boundary_rejects_invalid_timestamp_before_kernel(
+    monkeypatch, timestamp,
+) -> None:
+    called = False
+
+    def forbidden(_kernel_input):
+        nonlocal called
+        called = True
+        raise AssertionError("kernel must not run for malformed evidence")
+
+    monkeypatch.setattr(kernel_mapper, "run_kernel", forbidden)
+    with pytest.raises(ValueError, match="timestamp must be a finite number"):
+        kernel_mapper.run_authoritative_judgment(
+            [_claim(timestamp)],
+            pit_epoch=100.0,
+            coin="BTC",
+            query="BTC",
+            direction=_direction(),
+            offline=True,
+        )
+    assert called is False
+
+
 def test_production_entrypoints_do_not_call_legacy_judgment_producers() -> None:
     root = Path(__file__).parents[1] / "src" / "trustforge"
     for relative in ("agent/orchestrator.py", "analysis_flow.py"):
         tree = ast.parse((root / relative).read_text())
-        calls = {
-            node.func.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        }
-        assert "score" not in calls, relative
-        assert "aggregate" not in calls, relative
+        forbidden = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name):
+                forbidden.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                forbidden.add(node.func.attr)
+        assert "score" not in forbidden, relative
+        assert "aggregate" not in forbidden, relative

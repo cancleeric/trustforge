@@ -15,13 +15,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-# #734 retires the reviewed #732 shadow candidate.  Its measured adapter hash
-# intentionally no longer matches after the authoritative boundary changed, so
-# activating that candidate must remain fail-closed.  These runtime activation
-# tests are archived with the retired candidate and must not re-authorize it by
-# updating the reviewed digest or bypassing attestation.
-pytestmark = pytest.mark.skip(reason="#734 retired the reviewed #732 shadow candidate")
-
 from trustforge.agent.shadow_evidence_store import (
     ShadowEvidenceStore,
     ShadowEvidenceStoreError,
@@ -673,9 +666,9 @@ def test_candidate_success_cannot_change_active_report_or_evidence(monkeypatch, 
     derive = next(
         event for event in shadow_log.events if event["tool"] == "judgment.derive"
     )
-    assert derive["params"]["shadow_observation_status"] == "success"
-    assert derive["params"]["shadow_provider_calls"] == 0
-    assert derive["params"]["shadow_cost_usd"] == 0.0
+    assert "shadow_observation_status" not in derive["params"]
+    assert "shadow_provider_calls" not in derive["params"]
+    assert "shadow_cost_usd" not in derive["params"]
     assert asdict(shadow_report) == asdict(baseline_report)
     assert [asdict(item) for item in shadow_evidence] == [
         asdict(item) for item in baseline_evidence

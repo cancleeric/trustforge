@@ -594,7 +594,7 @@ def test_claim_extraction_fail_closed_when_gate_raises(tmp_path, monkeypatch):
 def test_trust_reasoning_passes_client_offline_state_to_score(tmp_path, monkeypatch):
     """Step2 resolution 的 ``offline`` 必須反映 Step1 真實狀態。"""
     captured = {}
-    from trustforge.agent import kernel_mapper
+    from trustforge.agent import authoritative_kernel_mapper as kernel_mapper
     real_resolver = kernel_mapper.resolve_kernel_run_resolution
 
     def _capturing_resolver(claims, now, **kwargs):

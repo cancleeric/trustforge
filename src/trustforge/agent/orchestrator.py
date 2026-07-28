@@ -28,7 +28,8 @@ from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..term_annotations import annotate_terms
 from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 from . import narrative_locale as _loc
-from .kernel_mapper import run_authoritative_judgment, to_kernel_claim
+from .authoritative_kernel_mapper import run_authoritative_judgment
+from .kernel_mapper import to_kernel_claim
 from .kernel_projection import KernelJudgment
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
@@ -1521,17 +1522,10 @@ def run_agent_pipeline(
     # `tests/test_stance_budget_sharing.py`）。小樣本守門（<3 獨立佐證來源
     # 強制 α=1，見 `scoring.py` `_iterate_source_reputation`）本身就是失效
     # 安全，故不做 feature flag，直接預設開。
-    semantic_provider = None
-    if not getattr(client, "offline", False):
-        from ..semantic_direction import analyze_direction
-
-        def semantic_provider(evidence):
-            return analyze_direction(evidence, client)
     resolved_direction = resolve_direction(
         tuple(to_kernel_claim(claim) for claim in claims),
         coin=coin,
         pit_epoch=now_ts,
-        semantic_provider=semantic_provider,
     )
     kernel_output, scored, brief, kernel_judgment = run_authoritative_judgment(
         claims,
