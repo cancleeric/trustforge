@@ -1192,7 +1192,11 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         latency_ms: float,
         error_kind: str,
     ) -> RoutingSnapshot:
-        for _attempt in range(4):
+        # A successful reservation can have its terminal append invalidated by
+        # every other in-flight candidate.  Keep this retry budget above the
+        # router's documented small canary concurrency so ordinary contention
+        # does not manufacture an unrecordable outcome and trip emergency stop.
+        for _attempt in range(8):
             control_records = self._records()
             deployment_ledger_id = control_records[0]["ledger_id"]
             records = self._outcome_records(deployment_ledger_id)

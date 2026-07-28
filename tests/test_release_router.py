@@ -534,13 +534,12 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             clock=lambda: now,
         )
         assert 1 <= restarted.routing_snapshot().candidate_requests <= 5
+        assert restarted.routing_snapshot().phase == "canary"
         assert sum(response.release == "B" for response in responses) <= 5
-        while restarted.routing_snapshot().candidate_requests < 5:
-            router.route(
-                stable_subject=(
-                    f"fill-{restarted.routing_snapshot().candidate_requests}"
-                )
-            )
+        for attempt in range(1_000):
+            if restarted.routing_snapshot().candidate_requests >= 5:
+                break
+            router.route(stable_subject=f"fill-{attempt}")
         assert restarted.routing_snapshot().candidate_requests == 5
         b_handler.fail = True
         failed = router.route(stable_subject="failure-subject")
