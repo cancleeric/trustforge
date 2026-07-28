@@ -23,10 +23,19 @@ def test_supported_coins_uses_canonical_pool():
 
 
 def test_invoke_payload_validates_required_fields():
-    with pytest.raises(ValueError, match="coin is required"):
+    with pytest.raises(ValueError, match="coin must be a string"):
         invoke_payload({"query": "市場如何"})
-    with pytest.raises(ValueError, match="query is required"):
+    with pytest.raises(ValueError, match="query must be a string"):
         invoke_payload({"coin": "BTC"})
+
+
+def test_invoke_payload_rejects_non_string_and_oversized_values():
+    with pytest.raises(ValueError, match="coin must be a string"):
+        invoke_payload({"coin": ["BTC"], "query": "市場如何"})
+    with pytest.raises(ValueError, match="query must be a string"):
+        invoke_payload({"coin": "BTC", "query": {"text": "市場如何"}})
+    with pytest.raises(ValueError, match="query is too long"):
+        invoke_payload({"coin": "BTC", "query": "x" * 4001})
 
 
 def test_analyze_market_delegates_to_governed_pipeline():
@@ -81,4 +90,3 @@ def test_memory_factory_receives_scoped_identity(monkeypatch):
         actor_id="actor-1",
         session_id="session-1",
     )
-

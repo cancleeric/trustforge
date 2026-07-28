@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from .agentcore_adapter import invoke_agent
+from .agentcore_adapter import agentcore_status, invoke_agent
 
 
 def newest_mtime(path: Path) -> float:
@@ -48,16 +48,25 @@ def run_changed_analyses(
     previous: dict[str, float] | None = None,
     query_template: str = "分析 {coin} 最新多來源市場訊號",
     invoke: Callable[..., dict[str, Any]] = invoke_agent,
+    status: Callable[[], dict[str, Any]] = agentcore_status,
 ) -> dict[str, Any]:
     """Invoke AgentCore once per changed coin and return an auditable receipt."""
 
+    if status().get("state") != "configured":
+        raise RuntimeError("AgentCore provider and runtime ARN must be selected")
     changed, snapshot = changed_coins(sources, previous)
     results = []
     for coin in changed:
         result = invoke(
             "hermes",
             query_template.format(coin=coin),
-            session_id=f"scheduled-{coin.lower()}",
+            runtime_payload={
+                "coin": coin,
+                "query": query_template.format(coin=coin),
+                "question_type": "multi_source",
+                "data_mode": "live",
+                "llm_mode": "bedrock",
+            },
         )
         results.append({"coin": coin, "result": result})
     return {
@@ -66,4 +75,3 @@ def run_changed_analyses(
         "snapshot": snapshot,
         "results": results,
     }
-

@@ -15,15 +15,19 @@ def invoke_agent(
     input_text: str,
     *,
     session_id: str | None = None,
+    runtime_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Invoke through the selected provider using one stable response shape."""
 
     if get_provider("llm") == "agentcore":
-        return _agentcore_invoke(
-            agent_name=agent_name,
-            input_text=input_text,
-            session_id=session_id,
-        )
+        kwargs: dict[str, Any] = {
+            "agent_name": agent_name,
+            "input_text": input_text,
+            "session_id": session_id,
+        }
+        if runtime_payload is not None:
+            kwargs["runtime_payload"] = runtime_payload
+        return _agentcore_invoke(**kwargs)
     return _builtin_invoke(
         agent_name=agent_name,
         input_text=input_text,
@@ -71,6 +75,7 @@ def _agentcore_invoke(
     agent_name: str,
     input_text: str,
     session_id: str | None = None,
+    runtime_payload: dict[str, Any] | None = None,
     client: Any | None = None,
 ) -> dict[str, Any]:
     """Invoke the documented ``bedrock-agentcore`` runtime API.
@@ -107,25 +112,37 @@ def _agentcore_invoke(
             ),
         )
 
-    payload = json.dumps(
-        {"prompt": input_text, "agent_name": agent_name},
-        ensure_ascii=False,
-    ).encode("utf-8")
+    request_payload = dict(runtime_payload or {})
+    request_payload.setdefault("prompt", input_text)
+    request_payload["agent_name"] = agent_name
+    payload = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
+    runtime_session_id = session_id or str(uuid.uuid4())
+    if len(runtime_session_id) < 33:
+        return {
+            "run_id": "",
+            "status": "failed",
+            "output": {"error": "AgentCore session ID is invalid"},
+        }
     try:
         response = client.invoke_agent_runtime(
             agentRuntimeArn=runtime_arn,
-            runtimeSessionId=session_id or str(uuid.uuid4()),
+            runtimeSessionId=runtime_session_id,
             contentType="application/json",
             accept="application/json",
             payload=payload,
         )
         raw = _read_stream(response.get("response"))
-        output = json.loads(raw.decode("utf-8")) if raw else {}
+        status_code = response.get("statusCode")
+        if not isinstance(status_code, int) or not 200 <= status_code < 300:
+            raise ValueError("AgentCore response has no successful status code")
+        if not raw:
+            raise ValueError("AgentCore response body is empty")
+        output = json.loads(raw.decode("utf-8"))
+        if not isinstance(output, dict) or not output:
+            raise ValueError("AgentCore response body is invalid")
         return {
             "run_id": str(response.get("runtimeSessionId", "")),
-            "status": "succeeded"
-            if int(response.get("statusCode", 200)) < 400
-            else "failed",
+            "status": "succeeded",
             "output": output,
         }
     except Exception as exc:

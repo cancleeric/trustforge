@@ -64,12 +64,26 @@ def invoke_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
-    coin = str(payload.get("coin", "")).strip()
-    query = str(payload.get("query") or payload.get("prompt") or "").strip()
+    coin_value = payload.get("coin")
+    query_value = payload.get("query") or payload.get("prompt")
+    if not isinstance(coin_value, str):
+        raise ValueError("coin must be a string")
+    if not isinstance(query_value, str):
+        raise ValueError("query must be a string")
+    coin = coin_value.strip()
+    query = query_value.strip()
     if not coin:
         raise ValueError("coin is required")
     if not query:
         raise ValueError("query is required")
+    if len(coin) > 10:
+        raise ValueError("coin is too long")
+    if len(query) > 4000:
+        raise ValueError("query is too long")
+    for key in ("question_type", "data_mode", "llm_mode"):
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
     return analyze_market(
         coin,
         query,
@@ -79,4 +93,3 @@ def invoke_payload(payload: dict[str, Any]) -> dict[str, Any]:
         data_mode=str(payload.get("data_mode", "live")),
         llm_mode=str(payload.get("llm_mode", "bedrock")),
     )
-

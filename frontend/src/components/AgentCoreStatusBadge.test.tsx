@@ -21,18 +21,18 @@ test('shows configured state returned by the same-origin API', async () => {
     },
   })
 
-  render(<AgentCoreStatusBadge />)
+  render(<AgentCoreStatusBadge locale="en" />)
 
   await waitFor(() =>
     expect(screen.getByTestId('agentcore-status')).toHaveTextContent(
-      'AgentCore configured',
+      'AgentCore selected',
     ),
   )
 })
 
 test('does not claim a connection when the API fails', async () => {
   vi.mocked(endpoints.getAgentCoreStatus).mockRejectedValue(new Error('offline'))
-  render(<AgentCoreStatusBadge />)
+  render(<AgentCoreStatusBadge locale="en" />)
   await waitFor(() =>
     expect(screen.getByTestId('agentcore-status')).toHaveTextContent(
       'Runtime unavailable',

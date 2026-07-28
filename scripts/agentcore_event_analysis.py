@@ -11,11 +11,20 @@ from trustforge.agent.agentcore_event import changed_coins, run_changed_analyses
 from trustforge.safe_fs import write_atomic
 
 
-def _successful(receipt: dict) -> bool:
-    return all(
-        item.get("result", {}).get("status") == "succeeded"
-        for item in receipt.get("results", [])
-    )
+def _checkpoint(previous: dict[str, float], receipt: dict) -> dict[str, float]:
+    """Advance only successful coins so retries never repeat paid successes."""
+
+    checkpoint = dict(previous)
+    snapshot = receipt.get("snapshot", {})
+    for item in receipt.get("results", []):
+        coin = item.get("coin")
+        if (
+            isinstance(coin, str)
+            and item.get("result", {}).get("status") == "succeeded"
+            and coin in snapshot
+        ):
+            checkpoint[coin] = float(snapshot[coin])
+    return checkpoint
 
 
 def main() -> int:
@@ -58,10 +67,10 @@ def main() -> int:
             "snapshot": snapshot,
             "results": [],
         }
-    if args.execute and args.state_file and _successful(receipt):
+    if args.execute and args.state_file:
         write_atomic(
             args.state_file,
-            json.dumps(receipt["snapshot"], sort_keys=True).encode("utf-8"),
+            json.dumps(_checkpoint(previous, receipt), sort_keys=True).encode("utf-8"),
             immutable=False,
         )
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))

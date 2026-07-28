@@ -4369,10 +4369,6 @@
   }
 }
 .agentcore-status {
-  position: fixed;
-  top: 4.2rem;
-  right: 1rem;
-  z-index: 45;
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
@@ -4393,8 +4389,7 @@
 }
 
 .agentcore-status--configured span {
-  background: #3fd39d;
-  box-shadow: 0 0 0.5rem rgba(63, 211, 157, 0.7);
+  background: #e8b34d;
 }
 
 .agentcore-status--misconfigured span,
@@ -4404,8 +4399,12 @@
 
 @media (max-width: 720px) {
   .agentcore-status {
-    position: static;
-    margin: 0.5rem 0.75rem 0 auto;
-    width: fit-content;
+    padding: 0.25rem;
+    font-size: 0;
+  }
+
+  .agentcore-status span {
+    width: 0.5rem;
+    height: 0.5rem;
   }
 }

@@ -5,7 +5,7 @@
 
 | 封存內容 | 處理 | 現行落點／理由 |
 |---|---|---|
-| pipeline wrapper、支援幣種 tool | 移植 | `trustforge.agent.agentcore_runtime`，直接呼叫現行受控 pipeline |
+| pipeline wrapper、支援幣種 tool | 已接線 | `app/TrustForge/main.py` → `agentcore_runtime` → 現行受控 pipeline |
 | AgentCore Memory session | 移植 | `trustforge.agent.agentcore_memory`，預設關閉且不硬依賴 SDK |
 | Online evaluation 設定 | 保留現行設定 | `agentcore/agentcore.json` 已有 QualityMonitor |
 | Flask BFF 與重複 HTML frontend | 不直接移植 | 現行 React frontend 與 API 已取代；保留於封存分支供追溯 |

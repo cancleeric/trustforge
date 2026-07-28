@@ -16,6 +16,7 @@ dependencies = [
     # 手寫解析不可行。pypdf 是純 Python、無 C 相依，可直接在生產基底
     # python:3.12-slim 上跑，不需額外系統套件。
     "pypdf>=5,<7",
+    "bedrock-agentcore>=1.9.1",
 ]
 
 [project.optional-dependencies]

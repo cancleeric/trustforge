@@ -3,7 +3,11 @@ import { getAgentCoreStatus, type AgentCoreStatusData } from '../lib/endpoints'
 
 type ViewState = AgentCoreStatusData['state'] | 'checking' | 'unavailable'
 
-export default function AgentCoreStatusBadge() {
+export default function AgentCoreStatusBadge({
+  locale,
+}: {
+  locale: 'zh-TW' | 'en'
+}) {
   const [state, setState] = useState<ViewState>('checking')
 
   useEffect(() => {
@@ -18,14 +22,24 @@ export default function AgentCoreStatusBadge() {
 
   const label =
     state === 'configured'
-      ? 'AgentCore configured'
+      ? locale === 'zh-TW'
+        ? 'AgentCore 已選用'
+        : 'AgentCore selected'
       : state === 'misconfigured'
-        ? 'AgentCore needs setup'
+        ? locale === 'zh-TW'
+          ? 'AgentCore 尚未設定'
+          : 'AgentCore needs setup'
         : state === 'inactive'
-          ? 'Builtin runtime'
+          ? locale === 'zh-TW'
+            ? '內建執行層'
+            : 'Builtin runtime'
           : state === 'checking'
-            ? 'Runtime checking'
-            : 'Runtime unavailable'
+            ? locale === 'zh-TW'
+              ? '檢查執行層'
+              : 'Runtime checking'
+            : locale === 'zh-TW'
+              ? '執行層狀態無法取得'
+              : 'Runtime unavailable'
 
   return (
     <div
