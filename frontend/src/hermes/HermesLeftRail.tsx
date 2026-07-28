@@ -182,8 +182,11 @@ export default function HermesLeftRail({
             輸入框一路推到畫面底部——老闆原話「這設計根本有問題 排盤很有問題」
             「最多多一個按鈕 做個彈出」。改成預設闔起的 <details>：平常只佔
             一行（summary 就是那顆按鈕），要用才展開。五張卡片仍在 DOM 裡，
-            展開即用，不動 i18n 也不動既有 grid 斷點規則
-            （`.hermes-intent-picker>div` 的 1fr/1fr → 1fr 覆寫照舊生效）。 */}
+            展開即用，不動 i18n。
+            N78：基礎規則原本硬寫 `1fr 1fr`，≥1280px 左軌拆出獨立選單欄後
+            每顆鈕只剩 55px、標題被壓成 3 行，已改成
+            `repeat(auto-fit, minmax(118px, 1fr))` 由容器決定欄數；
+            窄視窗 @media 的 `1fr !important` 覆寫照舊生效。 */}
         {beginnerMode && (
           <details className="hermes-intent-picker">
             <summary className="hermes-intent-title" style={{ cursor: 'pointer', minHeight: 24, display: 'flex', alignItems: 'center' }}>{t('whatToDo')}</summary>
@@ -274,7 +277,20 @@ export default function HermesLeftRail({
            composer 就被擠到這個框自己的捲軸下面，畫面上等同輸入不見了。
            300 是量出來的：標頭 + 一則訊息 + composer 剛好露出。
            空間真的不夠時左軌自己是 overflow-y:auto，讓左軌滾，不壓扁這裡。 */
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 300, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
+        /* N76 第二刀：`overflowY` 從 'auto' 改成 'hidden'。
+           原本這個 pane 自己會捲，於是標頭＋訊息串＋composer 一超過 pane 高度
+           就整塊一起捲走——composer 被捲到 pane 的捲軸下面，畫面上等同輸入不見
+           了（實測 1279x900 / 1024x600 / 900x560：pane 剛好卡在 300px 樓地板、
+           內容 339~347px）。訂樓地板追不上這個問題，因為內容長度本來就會變，
+           上面那段「300 是量出來的」只是把同一個 bug 推到更窄的視窗才發作。
+           正解是一般 agent 介面的配置：pane 不捲，訊息串（flex:1）自己捲，
+           composer `flexShrink:0` 永遠釘在底部。
+           ⚠️ 光改這裡不夠，實測過：pane 改 hidden 之後 6 個尺寸照樣 RED
+           （對話區 clientHeight 298、內容 347），因為訊息串自己有
+           `minHeight: 140` 的樓地板，撐住不縮，composer 就被推到 hidden 的
+           裁切線外——比原本更糟（原本至少還捲得到）。兩處要一起改，見下方
+           訊息串的 `minHeight: 0`。 */
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 300, overflowY: 'hidden', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
           <div style={{ position: 'relative', width: 24, height: 24, flexShrink: 0, animation: 'hermes-hermes-breathe 3.2s ease-in-out infinite' }}>
@@ -305,7 +321,13 @@ export default function HermesLeftRail({
         <div
           ref={transcriptRef}
           aria-label={t('agentOutput')}
-          style={{ flex: 1, minHeight: 140, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10, paddingRight: 2 }}
+          /* N76：`minHeight` 從 140 改成 0。訊息串是 pane 裡唯一該被壓縮的
+             東西——它自己就是 `overflowY: auto`，壓短了只是少露幾行、捲一下
+             就有；composer 被擠掉卻是功能不見。140 的樓地板讓它壓不下去，
+             於是 pane（已改 hidden）把 composer 裁掉，實測 960x800 /
+             1024x900 / 1100x950 / 1279x900 / 1024x600 / 900x560 六個尺寸
+             全 RED。0 之後 flex:1 才真的能收縮，composer 永遠留在畫面上。 */
+          style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10, paddingRight: 2 }}
         >
           {(() => {
             const history = (questionContext?.conversation ?? [])

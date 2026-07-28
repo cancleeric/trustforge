@@ -27,6 +27,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REGION="${REGION:-ap-southeast-2}"
+MODEL="${BEDROCK_MODEL_ID-}"
 DRY_RUN=0
 TARGET=""
 OWNER_ID=""
@@ -39,6 +40,16 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  echo "[activate] ERROR: BEDROCK_MODEL_ID contains invalid characters" >&2
+  exit 2
+fi
+
+MODEL_RECONCILE_COMMAND="true"
+if [ -n "$MODEL" ]; then
+  MODEL_RECONCILE_COMMAND="if grep -q '^Environment=BEDROCK_MODEL_ID=' /etc/systemd/system/trustforge.service; then sed -i 's|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID=${MODEL}|' /etc/systemd/system/trustforge.service; else sed -i '/^Environment=PYTHONPATH=/a Environment=BEDROCK_MODEL_ID=${MODEL}' /etc/systemd/system/trustforge.service; fi"
+fi
 
 if [ -z "$TARGET" ]; then
   echo "usage: $0 --target <iid>" >&2
@@ -150,6 +161,7 @@ write_receipt_to_s3(receipt, region='${REGION}')
 # ---- ROLLBACK -----------------------------------------------------------------
 ROLLBACK_TRIGGERED=0
 ROLLBACK_OK=0
+UNIT_BACKUP_CAPTURED=0
 ROLLBACK() {
   local ec="${1:-1}"
   trap - ERR
@@ -158,11 +170,31 @@ ROLLBACK() {
 
   local rb_ok=1
 
+  # Restore the captured service configuration independently of artifact
+  # history. First activations may not have an active digest yet.
+  if [ "$UNIT_BACKUP_CAPTURED" -eq 1 ]; then
+    URCMD=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
+      --document-name AWS-RunShellScript --parameters commands='["set -e","cp -p /opt/trustforge/.activation-trustforge.service.bak /etc/systemd/system/trustforge.service","systemctl daemon-reload","systemctl restart trustforge"]' \
+      --query 'Command.CommandId' --output text 2>/dev/null || echo "")
+    if [ -n "$URCMD" ] && [ "$URCMD" != "None" ]; then
+      urstatus=$(poll_ssm_terminal_status "$URCMD" "$TARGET" 120 5) || true
+      if [ "$urstatus" != "Success" ]; then
+        echo "[activate] rollback: service configuration restore FAILED (Status=$urstatus)" >&2
+        rb_ok=0
+      fi
+    else
+      echo "[activate] rollback: service configuration restore FAILED (SSM send-command failed)" >&2
+      rb_ok=0
+    fi
+  else
+    echo "[activate] rollback: service configuration unchanged (no captured backup)"
+  fi
+
   # Re-download previous artifact and restart
   if [ -n "$ACTIVE_DIGEST" ] && [ "$ACTIVE_DIGEST" != "unknown" ]; then
     echo "[activate] rollback: restoring previous active ($ACTIVE_DIGEST)"
     RBCMD=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-      --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","echo \"[activate] rollback restore completed\""]' \
+      --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","rm -f /opt/trustforge/.activation-trustforge.service.bak","echo \"[activate] rollback restore completed\""]' \
       --query 'Command.CommandId' --output text 2>/dev/null || echo "")
     if [ -n "$RBCMD" ] && [ "$RBCMD" != "None" ]; then
       rbstatus=$(poll_ssm_terminal_status "$RBCMD" "$TARGET" 120 5) || true
@@ -317,7 +349,7 @@ trap 'ROLLBACK $?' ERR
 # Step 3: Download candidate to target
 echo "[activate] Step 3: downloading candidate artifact to target..."
 CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'manifest.json ./manifest.json --region '"$REGION"'","echo \"[activate] candidate artifact downloaded\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","cp -p /etc/systemd/system/trustforge.service /opt/trustforge/.activation-trustforge.service.bak","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'manifest.json ./manifest.json --region '"$REGION"'","echo \"[activate] candidate artifact downloaded\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
   echo "[activate] ERROR: download send-command failed" >&2
@@ -331,6 +363,7 @@ if [ "$SSM_STATUS" != "Success" ]; then
   exit 1
 fi
 echo "[activate] candidate artifact downloaded"
+UNIT_BACKUP_CAPTURED=1
 
 # Step 4: Verify artifact integrity on target
 echo "[activate] Step 4: verifying artifact integrity..."
@@ -353,7 +386,7 @@ echo "[activate] artifact verified"
 # Step 5: Restart service (zero-downtime)
 echo "[activate] Step 5: restarting service..."
 RCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","echo \"[activate] service restarted\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","echo \"[activate] service restarted\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$RCMDID" ] || [ "$RCMDID" = "None" ]; then
   echo "[activate] ERROR: restart send-command failed" >&2
@@ -383,13 +416,30 @@ verify_web_healthz "$TARGET"
 verify_fetch_scheduler "$TARGET"
 echo "[activate] post-verify passed"
 
-# Step 8: Write receipt
+# Step 8: Write receipt while rollback state is still intact.
 echo "[activate] Step 8: writing receipt..."
 write_receipt "completed" ""
 
+# Commit the transaction before deleting rollback-only state. A cleanup polling
+# timeout must not trigger a rollback after the remote backup may already be gone.
+trap - ERR
+
+# Remove the transaction-only unit backup after commit. Cleanup is best-effort:
+# activation and its receipt are already complete.
+CCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","rm -f /opt/trustforge/.activation-trustforge.service.bak"]' \
+  --query 'Command.CommandId' --output text 2>/dev/null || echo "")
+if [ -z "$CCMDID" ] || [ "$CCMDID" = "None" ]; then
+  echo "[activate] WARNING: unit backup cleanup send-command failed" >&2
+else
+  CS_STATUS=$(poll_ssm_terminal_status "$CCMDID" "$TARGET" 120 5) || true
+  if [ "$CS_STATUS" != "Success" ]; then
+    echo "[activate] WARNING: unit backup cleanup unconfirmed (Status=$CS_STATUS)" >&2
+  fi
+fi
+
 # Step 9: Release lock
 echo "[activate] Step 9: releasing lock..."
-trap - ERR
 release_lock
 
 echo "[activate] ACTIVATION COMPLETE: target=$TARGET candidate=${CANDIDATE_DIGEST}"

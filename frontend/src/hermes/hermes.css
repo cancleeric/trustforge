@@ -367,6 +367,22 @@
      選單只縮不長，剩下的空間全歸對話區。 */
   flex: 0 1 auto; overflow-y: auto;
 }
+/* N78：左軌的 `<details>` 關起來之後，內容照樣排版、照樣看得見。
+   實測 1440x900 開啟工作區：「相似歷史」那個 details 是 `open=false`、
+   自己的盒子只有 32px（＝summary 高度），但它的兩個子 DIV 仍然被排在
+   y=546→685，直接壓在下面的 `.hermes-focus-derived`（563→613）與
+   `.hermes-analysis-expectation`（623→662）上，變成文字疊文字——
+   n78 探針在來源狀態／成本兩個模組各抓到 5 筆。
+   瀏覽器原生的「收合就不顯示內容」在這個 flex 直欄裡沒有生效
+   （子元素 assignedSlot 是 none、display 仍是 block），所以明寫出來。
+   這就是原生語意，不是特效：關著 = 不佔位、不可見。
+   （先前誤判成 flex-shrink 把子項壓扁，加 `.hermes-rail-menu>*{flex:0 0 auto}`
+   完全沒用，一筆都沒少，已移除。） */
+.hermes-rail-menu>details:not([open])>*:not(summary) { display: none; }
+/* 備忘：曾經加過 `.hermes-rail-menu>* { flex: 0 0 auto; }`，假設「子項被
+   flex 壓扁、內容溢出疊到下一塊」。實測推翻：加上之後 1440x900 的重疊一筆
+   都沒少（來源狀態、成本兩個模組照樣 5 筆）。病因不在 flex-shrink，別再走
+   這條路；要動之前先拿到有鑑別力的 RED。 */
 /* `min-width: 0` 是必要的：flex item 預設 `min-width: auto`，長字串會撐爆它。
    N76：對話區裡有輸入框，是這一軌唯一「非按不可」的東西，必須永遠看得到。
    原本它沒有 flex 宣告、被壓成 200px 高，而內容有 326px——輸入框就被擠到
@@ -1322,13 +1338,24 @@
 }
 
 .hermes-energy-copy small {
-  display: block;
+  /* N80：原本是 `white-space: nowrap` + ellipsis，一列放不下就直接切掉。
+     但這一列放的是引擎狀態串（「0 待命 · 排隊 5 · 重試 0」、「150 已掃描」），
+     5 欄站點在 1280 寬每欄只有 ~76px，實測被吃掉 42%～72%——螢幕上只看得到
+     「0 待…」，使用者根本不知道排隊幾筆、重試幾次。
+     跟上面的 `strong` 用同一套解法（見 N12）：改成最多兩列的 line-clamp，
+     放得下就全顯示，放不下才截。站點高 82px，strong 兩列 24px + 這裡兩列
+     20px 仍有餘裕。另外在 StageBar 補了 `title`，兩列還不夠時可以停留看全文。 */
+  display: -webkit-box;
   margin-top: 5px;
   overflow: hidden;
   color: var(--color-hermes-tx3);
   font-size: 8px;
+  line-height: 1.25;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .hermes-energy-copy small b {
@@ -2913,7 +2940,13 @@
   .hermes-energy-index {
     position: absolute;
     left: 50%;
-    top: 7px;
+    /* N78：原本是 `top: 7px`，跟 `.hermes-engine-activity`（絕對定位、
+       `top: 7px`、z-index 5）搶同一條橫向車道，兩邊都是文字，直接疊在一起——
+       實測 375x667 站點編號「03」[155,594 12x12] 壓在狀態列的「風險評估」
+       [133,586 45x15] 上 12x8px，430x932 是「02」壓「BTC」，七個模組全中。
+       站點高 72px、junction 置中，下緣是空的，編號改掛底部就各據一方。 */
+    top: auto;
+    bottom: 5px;
     transform: translateX(-50%);
   }
 
@@ -3985,7 +4018,15 @@
 
 .hermes-intent-picker>div {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* N78：原本硬寫 `1fr 1fr`。≥1280px 左軌會拆成獨立選單欄，寬度只有
+     clamp(124px,10vw,160px)，硬塞兩欄會讓每顆鈕只剩 55px，`<b>` 標題
+     實測被壓到 39px 寬、8 個中文字硬換行成 3 行（1280x800 量到 55px/39px/3行，
+     1440x900 是 63px/47px/3行）。改完同尺寸是 118px/102px/1行。
+     既有的 `is-module-open` 隱藏規則只補到「開工作區」那一半，沒開一樣壞。
+     改成 auto-fit：容器塞不下兩欄就自動變一欄，不再跟斷點玩打地鼠——
+     這個檔案已經為了 `1fr 1fr` 被 cascade 咬過一次（見上方 !important 註解）。
+     118px = 9.5px 中文標題 8 字 + 左右 padding 7px + 邊框的實測下限。 */
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   gap: 5px;
 }
 
@@ -4779,3 +4820,28 @@
    選單本來就該自己縮，不該要人去按。實際修法在 `.hermes-rail-menu` /
    `.hermes-rail-chat` 的 flex 宣告（選單 `0 1 auto` 只縮不長，
    對話區 `1 1 auto` + min-height 保底）。 */
+
+/* N80：頂欄系統代號在窄螢幕讓位。見 HermesTopBar.tsx 同編號註解——
+   品牌加了 `flexShrink: 0` 之後，英文版 375/390/430/540/561 五個寬度
+   都把「Switch language」擠出視窗（375 en 溢出 82px）。頂欄放不下就得有人走，
+   走的是代號不是版號。 */
+@media (max-width: 640px) {
+  .hermes-topbar-sysid { display: none; }
+}
+
+/* N80：窄螢幕品牌只留「HERMES」。見 HermesTopBar.tsx 同編號註解——
+   375 英文版頂欄內容總寬 457px 塞不進 373px，品牌 149px 是最大的一格。
+   收前綴不是縮字，是換一個在手機上讀得完整的寫法。 */
+@media (max-width: 640px) {
+  .hermes-brand-prefix { display: none; }
+  /* 備忘：曾經想用 `.hermes-topbar { gap: 9px !important; padding: 0 12px !important }`
+     再擠出 3px。實測反而更寬（語言鈕右緣 377 → 383），已移除。頂欄裡有幾個
+     零寬子元素，改 gap 之後各段落點跟著位移，淨效果是負的。不要再走這條。 */
+}
+
+/* N80：窄螢幕遙測膠囊只留數字。見 HermesTopBar.tsx 同編號註解——
+   375 英文版頂欄總寬 376px 塞不進 373px，這一格的標題文字是最大的一塊。
+   不動膠囊本身，只收標題；名字由 button 的 aria-label 提供。 */
+@media (max-width: 640px) {
+  .hermes-telemetry-chip-label { display: none; }
+}

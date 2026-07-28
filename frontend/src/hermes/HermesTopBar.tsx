@@ -98,19 +98,36 @@ export default function HermesTopBar({
       {/* N70：品牌從 <button onClick={onHome}> 改回純顯示。「能按的都移到左邊欄」
           包含這顆——回首頁的入口在左軌控制區第一項（HERMES 主控）。
           原本 N29 為它加的 24px 最小點擊目標隨按鈕一起移到左軌那顆。 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+      {/* N80：加 `flexShrink: 0`。光把字級改成 clamp 不夠——實測 375 寬時這格
+          反而從 115px 被壓到 100px、320 寬只剩 71px，因為它是頂欄 flex 裡預設
+          可壓縮的一員。字級縮多少都沒用，容器一直在收。產品名是識別資訊，不該
+          是被犧牲的那一個；要讓位的是右邊那些狀態格。 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0 }}>
         <div style={{ width: 16, height: 16, position: 'relative', transform: 'rotate(45deg)', border: '1.5px solid var(--color-hermes-cyan)', borderRadius: 2 }}>
           <div style={{ position: 'absolute', inset: 3, background: 'var(--color-hermes-cyan)', opacity: 0.85 }} />
         </div>
-        <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '1.6px', color: 'var(--color-hermes-tx)' }}>
-          TRUSTFORGE <span style={{ color: 'var(--color-hermes-cyan)' }}>HERMES</span>
+        {/* N80：品牌字原本固定 13px + 1.6px 字距，需要 160px；375 寬的手機上
+            這格只分到 115px，「TRUSTFORGE HERMES」被切掉 28%，畫面上是
+            「TRUSTFORGE HERM…」。產品名被切一半比字小一點難看得多，所以字級
+            與字距都改成隨視窗收斂，寬螢幕維持原本的 13px/1.6px 不變。 */}
+        <span style={{ fontWeight: 700, fontSize: 'clamp(10px, 2.4vw, 13px)', letterSpacing: 'clamp(.3px, .35vw, 1.6px)', whiteSpace: 'nowrap', color: 'var(--color-hermes-tx)' }}>
+          {/* N80：窄螢幕只留「HERMES」。375 英文版頂欄實測內容總寬 457px、
+              可用只有 373px，一定要有東西讓位；品牌自己佔 149px 是最大的一格。
+              把產品名切成「TRUSTFORGE HERM…」最糟，收掉前綴則是手機上常見且
+              可讀的做法，而且不必砍掉任何狀態顯示。 */}
+          <span className="hermes-brand-prefix">TRUSTFORGE </span>
+          <span style={{ color: 'var(--color-hermes-cyan)' }}>HERMES</span>
         </span>
       </div>
       {/* 版號與系統代號原本吃 --color-hermes-tx3（#526375），在頂欄那層
           rgba(10,16,24,.62) 疊 #02040a 的底上實測只有 3.2:1，而且字級只有
           9~10px——CEO 直接回報「版號在哪裡？我怎麼畫面看不到」。改吃 tx2
           （#7f97ab，6.4:1）。這兩格是識別資訊，不是裝飾文字，不該用最淡的階。 */}
-      <span style={{ fontSize: 9, color: 'var(--color-hermes-tx2)', letterSpacing: 1 }}>✛ {systemId}</span>
+      {/* N80：加 class 讓窄螢幕收掉這一格。品牌不再被壓縮之後，頂欄在英文版
+          375~561 寬會把最右邊的語言切換鈕擠出視窗（實測 375 en 溢出 82px）。
+          總寬度不夠時一定要有人讓位——讓位的該是系統代號：CEO 當初要求看得到的
+          是「版號」，代號只是識別用的裝飾資訊，收掉不影響任何操作。 */}
+      <span className="hermes-topbar-sysid" style={{ fontSize: 9, color: 'var(--color-hermes-tx2)', letterSpacing: 1 }}>✛ {systemId}</span>
       <span
         title={isUnbuiltVersion ? t('versionDevHint') : undefined}
         style={{ fontSize: 10, color: isUnbuiltVersion ? 'var(--color-hermes-amber)' : 'var(--color-hermes-tx2)', border: `1px solid ${isUnbuiltVersion ? 'rgba(232,179,77,.4)' : 'var(--color-hermes-bd2)'}`, borderRadius: 4, padding: '2px 7px' }}
@@ -134,6 +151,9 @@ export default function HermesTopBar({
           onClick={() => setTelemetryOpen((v) => !v)}
           aria-expanded={telemetryOpen}
           aria-controls="hermes-telemetry-panel"
+          /* N80：窄螢幕會把標題文字收掉（見下方 span），所以名字改由 aria-label 提供，
+             否則螢幕閱讀器只會念到兩個數字。 */
+          aria-label={t('telemetry')}
           style={{
             display: 'flex', alignItems: 'center', gap: 7, minHeight: 24, cursor: 'pointer',
             fontFamily: 'inherit', fontSize: 10, color: 'var(--color-hermes-tx2)',
@@ -141,7 +161,15 @@ export default function HermesTopBar({
             borderRadius: 4, padding: '2px 8px',
           }}
         >
-          <span style={{ letterSpacing: 1 }}>{t('telemetry')}</span>
+          {/* N80：窄螢幕收掉標題文字，只留數字。實測 375 英文版頂欄內容 376px、
+              可用 373px，語言切換鈕被擠出視窗；這一格「GALAXY TELEMETRY」佔 125px，
+              是頂欄最大的一塊。
+              先試過縮 padding / gap，量出來反而更寬（pad12 → 378、gap10 → 384）：
+              這一格是可伸縮的 flex 子元素，空間讓出來就被它吃掉，所以刪空白沒有用，
+              必須讓內容自己變短。收掉之後 scrollWidth 373 = 可用寬，剛好進得去。
+              膠囊本身（可點、會展開面板）完整保留，符合「能按的不能藏」；名字改掛
+              aria-label。 */}
+          <span className="hermes-telemetry-chip-label" style={{ letterSpacing: 1 }}>{t('telemetry')}</span>
           <span style={{ color: 'var(--color-hermes-tx)' }}>{trackedCount}</span>
           {/* 注意/警示不為 0 時才上色——全綠的時候不需要吸引注意力。 */}
           {tierCounts.moderate > 0 && <span style={{ color: TIER_COLOR.moderate }}>▲{tierCounts.moderate}</span>}
