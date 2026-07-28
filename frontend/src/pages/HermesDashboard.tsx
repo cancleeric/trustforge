@@ -25,6 +25,8 @@ import { defaultQuestionTypeForFocus, isAnalysisFocusId, isQuestionTypeId, type 
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 import HermesFirstRun from '../hermes/HermesFirstRun'
 import { useReducedMotion } from '../lib/useReducedMotion'
+import { useAdaptiveQuality } from '../hermes/useAdaptiveQuality'
+import FpsMeter from '../hermes/FpsMeter'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
@@ -115,6 +117,7 @@ export default function HermesDashboard() {
   const [costLedger, setCostLedger] = useState<number | null>(null)
   const [startupComplete, setStartupComplete] = useState(qaMode)
   const { reducedMotion, toggle: toggleReducedMotion } = useReducedMotion()
+  const { fps, quality, measuring } = useAdaptiveQuality()
   const isRightRailCollapsed = useIsNarrowViewport(HERMES_RIGHT_RAIL_BREAKPOINT)
   const [serviceMonitor, setServiceMonitor] = useState<Record<string, ServiceMonitorState>>({
     overview: 'checking', health: 'checking', sources: 'checking', history: 'checking', costs: 'checking',
@@ -731,6 +734,8 @@ export default function HermesDashboard() {
         )}
 
         <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
+
+        <FpsMeter fps={fps} quality={quality} measuring={measuring} />
 
       </div>
     </div>
