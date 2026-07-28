@@ -151,6 +151,23 @@ def test_timeout_error_cost_and_latency_fail_closed(mutation, expected_action, b
     assert ShadowBlocker(blocker) in decision.aggregate.blockers
 
 
+def test_observed_p95_above_policy_threshold_blocks_promotion():
+    observations = [
+        replace(observation, elapsed_ms=300.0)
+        for observation in _observations()
+    ]
+
+    decision = evaluate_shadow(
+        observations,
+        load_policy(),
+        now="2026-07-28T01:00:00+00:00",
+    )
+
+    assert decision.aggregate.latency_p95_ms == 300.0
+    assert decision.action is ShadowDecisionAction.CONTINUE_OBSERVATION
+    assert ShadowBlocker.LATENCY_P95 in decision.aggregate.blockers
+
+
 def test_aggregate_parity_threshold_allows_ten_percent_failures():
     observations = _observations()
     for index in range(3):
