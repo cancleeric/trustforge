@@ -54,7 +54,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Callable, Literal, Protocol, runtime_checkable
 
 # 15 分鐘租約 TTL —— D2.5「15 分鐘 deadline-aware」的具體上界：
 # 重複計費風險窗口 / 單一 key 最多被計算一次的間隔上界（正常結束會立即
@@ -334,8 +334,14 @@ class JsonLeaseBackend(LeaseBackend):
     """本地 JSON 檔案實作，靠 `fcntl.flock` 包住整段 read-modify-write
     保證跨行程原子（單機多實例也安全）。預設 backend（dev/CI/單實例）。"""
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
+    ):
         self.path = Path(path) if path is not None else self._default_path()
+        self._clock = clock
 
     @staticmethod
     def _default_path() -> Path:
@@ -394,7 +400,7 @@ class JsonLeaseBackend(LeaseBackend):
         with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                now = time.time()
+                now = self._clock()
                 data = self._load()
                 existing = data.get(key)
                 if existing is not None and now < float(existing.get("expires_at", 0.0)):
@@ -435,7 +441,7 @@ class JsonLeaseBackend(LeaseBackend):
         existing = self._load().get(key)
         if existing is None:
             return False
-        return time.time() < float(existing.get("expires_at", 0.0))
+        return self._clock() < float(existing.get("expires_at", 0.0))
 
 
 class DynamoDBLeaseBackend(LeaseBackend):

@@ -69,6 +69,7 @@ _QUERY_TERMS = (
 )
 _REQUEST_DELAY_SECONDS = 0.1
 _MAX_DOCS = 20
+_sleep = time.sleep
 
 
 class RegulatoryFTSUnavailable(RuntimeError):
@@ -270,7 +271,7 @@ class SECFullTextSearchSource(Source):
                     docs.append(doc)
 
             if idx < len(_QUERY_TERMS) - 1:
-                time.sleep(_REQUEST_DELAY_SECONDS)
+                _sleep(_REQUEST_DELAY_SECONDS)
 
         self._record_fetch_stats(attempts, failed_terms, len(docs))
 

@@ -47,6 +47,27 @@ def _isolate_connector_cache(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_idempotency_lease(tmp_path_factory):
+    """Give every pytest worker its own real JSON lease backend.
+
+    The production default is repository-scoped. Under xdist, unrelated tests
+    in different worker processes otherwise contend for the same analyze key
+    and intermittently turn expected 200/502 responses into lease-busy 429s.
+    A worker-scoped path preserves the actual atomic lease behavior without
+    rebuilding and swapping the process-global backend for every test.
+
+    Tests that exercise lease persistence or failure modes inject their own
+    backend explicitly and therefore remain independent of this suite guard.
+    """
+    from trustforge.idempotency_lease import JsonLeaseBackend, set_lease_backend
+
+    lease_dir = tmp_path_factory.mktemp("idempotency-lease")
+    set_lease_backend(JsonLeaseBackend(lease_dir / "analyze_leases.json"))
+    yield
+    set_lease_backend(None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_scheduler_run_log(tmp_path, monkeypatch):
     """排程 run log（Phase3 `scheduler_log.py`）測試隔離：預設寫入 tmp_path，

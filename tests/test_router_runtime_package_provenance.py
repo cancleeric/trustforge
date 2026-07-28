@@ -6,16 +6,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = Path(sys.executable).resolve()
+PYTHON = Path(sys.executable)
 
 
 def test_actual_router_runtime_is_provenance_complete_and_importable(tmp_path):
     output = tmp_path / "build"
-    # Exercise the explicit-interpreter contract from a path that has no
-    # virtualenv-style sibling `bin/python`. This covers pre-push's system
-    # Python fallback as well as externally managed/shared virtualenvs.
-    interpreter = tmp_path / "standalone-python"
-    interpreter.symlink_to(PYTHON)
+    # Exercise the explicit-interpreter contract with pytest's actual
+    # interpreter. It may live in the repository venv, a shared venv, or a
+    # system environment, but its path must retain the environment metadata
+    # that makes the declared runtime distributions importable.
+    interpreter = PYTHON
     subprocess.run(
         [
             str(interpreter),

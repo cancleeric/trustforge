@@ -28,7 +28,7 @@ from trustforge.signed_event_ledger import SignedEventLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = Path(sys.executable).resolve()
+PYTHON = Path(sys.executable)
 
 
 def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:

@@ -44,7 +44,35 @@ if [ "$NODE_MAJOR" -lt "$NODE_MIN_MAJOR" ] || { [ "$NODE_MAJOR" -eq "$NODE_MIN_M
   exit 1
 fi
 
-run_gate "backend tests" env PYTHONPATH=src "$PYTHON" -m pytest --cov-fail-under=75 -q
+PYTEST_WORKERS="${TRUSTFORGE_PYTEST_WORKERS:-4}"
+run_gate "backend coverage reset" "$PYTHON" -m coverage erase
+case "$PYTEST_WORKERS" in
+  0)
+    echo "[pre-push] pytest workers: 0 (serial fallback)"
+    run_gate \
+      "backend tests (serial fallback)" \
+      env PYTHONPATH=src "$PYTHON" -m pytest --cov-fail-under=75 -q
+    ;;
+  ''|*[!0-9]*)
+    echo "[pre-push] FAILED: TRUSTFORGE_PYTEST_WORKERS must be a non-negative integer (got '$PYTEST_WORKERS')." >&2
+    exit 1
+    ;;
+  *)
+    echo "[pre-push] pytest workers: ${PYTEST_WORKERS} (fixed, worksteal)"
+    run_gate \
+      "backend tests (parallel lane)" \
+      env PYTHONPATH=src "$PYTHON" -m pytest -q \
+        -m "not serial" -n "$PYTEST_WORKERS" --dist worksteal \
+        --cov-report= --cov-fail-under=0
+    run_gate \
+      "backend tests (serial lane)" \
+      env PYTHONPATH=src "$PYTHON" -m pytest -q \
+        -m "serial" -n 0 --cov-append --cov-report= --cov-fail-under=0
+    run_gate \
+      "backend coverage" \
+      "$PYTHON" -m coverage report --show-missing --fail-under=75
+    ;;
+esac
 run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
 run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json
 run_gate "competition QA" env TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 "$PYTHON" scripts/run_question_bank.py --limit 24 --out out/pre-push/question-bank-results.json
