@@ -117,7 +117,10 @@ def _agentcore_invoke(
     request_payload["agent_name"] = agent_name
     payload = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
     runtime_session_id = session_id or str(uuid.uuid4())
-    if len(runtime_session_id) < 33:
+    if (
+        not isinstance(runtime_session_id, str)
+        or not 33 <= len(runtime_session_id) <= 256
+    ):
         return {
             "run_id": "",
             "status": "failed",

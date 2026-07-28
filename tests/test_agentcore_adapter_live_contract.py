@@ -78,6 +78,21 @@ def test_agentcore_invoke_rejects_short_session_id(monkeypatch):
     client.invoke_agent_runtime.assert_not_called()
 
 
+def test_agentcore_invoke_rejects_oversized_session_id(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_AGENTCORE_RUNTIME_ARN", "arn:test:runtime")
+    client = mock.Mock()
+
+    result = _agentcore_invoke(
+        agent_name="hermes",
+        input_text="hello",
+        session_id="x" * 257,
+        client=client,
+    )
+
+    assert result["status"] == "failed"
+    client.invoke_agent_runtime.assert_not_called()
+
+
 def test_status_does_not_expose_runtime_arn(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "TRUSTFORGE_BACKEND_REGISTRY_PATH", str(tmp_path / "providers.json")

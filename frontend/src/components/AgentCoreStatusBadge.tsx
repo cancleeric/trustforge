@@ -40,6 +40,24 @@ export default function AgentCoreStatusBadge({
             : locale === 'zh-TW'
               ? '執行層狀態無法取得'
               : 'Runtime unavailable'
+  const shortLabel =
+    state === 'configured'
+      ? 'AgentCore'
+      : state === 'misconfigured'
+        ? locale === 'zh-TW'
+          ? '需設定'
+          : 'Setup'
+        : state === 'inactive'
+          ? locale === 'zh-TW'
+            ? '內建'
+            : 'Builtin'
+          : state === 'checking'
+            ? locale === 'zh-TW'
+              ? '檢查中'
+              : 'Checking'
+            : locale === 'zh-TW'
+              ? '無狀態'
+              : 'Unknown'
 
   return (
     <div
@@ -47,9 +65,13 @@ export default function AgentCoreStatusBadge({
       role="status"
       aria-live="polite"
       data-testid="agentcore-status"
+      title={label}
     >
-      <span aria-hidden="true" />
-      {label}
+      <span className="agentcore-status-dot" aria-hidden="true" />
+      <span className="agentcore-status-label">{label}</span>
+      <span className="agentcore-status-short" aria-hidden="true">
+        {shortLabel}
+      </span>
     </div>
   )
 }

@@ -28,6 +28,10 @@ test('shows configured state returned by the same-origin API', async () => {
       'AgentCore selected',
     ),
   )
+  expect(screen.getByTestId('agentcore-status')).toHaveAttribute(
+    'title',
+    'AgentCore selected',
+  )
 })
 
 test('does not claim a connection when the API fails', async () => {
