@@ -510,3 +510,30 @@ def test_budget_guard_backend_down_metric_cooldown(monkeypatch):
 
     sent = [c for c in fake_cw.calls if c.get("MetricData")]
     assert len(sent) == 2, f"冷卻內只應送 2 次，實際 {len(sent)}"
+
+
+def test_batch_preflight_is_read_only_and_counts_local_reservations(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "local")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "0.5")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", "0.1")
+    bg._reset_reservation_for_tests()
+    held = bg.try_reserve_request_budget()
+    assert held == 0.1
+
+    before = bg._RESERVATION._reserved
+    assert bg.request_budget_available(5) is False
+    assert bg._RESERVATION._reserved == before
+    bg.release_request_budget(held)
+
+
+def test_batch_preflight_fails_closed_when_shared_backend_unreadable(monkeypatch):
+    from trustforge import budget_counter
+
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "1.0")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", "0.1")
+    monkeypatch.setattr(
+        budget_counter, "_default_counter", lambda: _BrokenBudgetCounter()
+    )
+
+    assert bg.request_budget_available(5) is False

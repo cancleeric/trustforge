@@ -5437,6 +5437,63 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
     }
 
 
+def _handle_api_multi_angle_get(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/multi-angle?coin=BTC[&snapshot_id=xxx]`：五角度綜合分析結果（#809）。"""
+    if not qs or "coin" not in qs:
+        return 400, _json_envelope_err("missing_param", "必須提供 coin 參數")
+    coin = qs["coin"][0].strip().upper() if isinstance(qs["coin"], list) else str(qs["coin"]).strip().upper()
+    snapshot_id = None
+    if "snapshot_id" in qs:
+        snapshot_id = qs["snapshot_id"][0] if isinstance(qs["snapshot_id"], list) else str(qs["snapshot_id"])
+    try:
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow(readonly=True) as flow:
+            result = flow.multi_angle_status(coin, snapshot_id)
+        if result is None:
+            return 200, _json_envelope_ok({"multi_angle": None, "message": "尚無五角度綜合分析結果"})
+        return 200, _json_envelope_ok({"multi_angle": result})
+    except Exception:
+        logging.exception("TrustForge /api/multi-angle GET error")
+        return 502, _json_envelope_err("upstream_error", "五角度綜合分析結果暫時無法讀取")
+
+
+def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, str]:
+    """`POST /api/multi-angle`：觸發五角度綜合分析（#809）。"""
+    try:
+        content_length = int(headers.get("Content-Length", 0))
+        body = json.loads(rfile.read(content_length)) if content_length else {}
+    except (json.JSONDecodeError, ValueError):
+        return 400, _json_envelope_err("invalid_json", "請求 body 須為有效 JSON")
+    coin = str(body.get("coin", "")).strip().upper()
+    question = str(body.get("question", "")).strip()
+    locale = str(body.get("locale", "zh-Hant"))
+    if not coin:
+        return 400, _json_envelope_err("missing_param", "必須提供 coin")
+    from .schema import COIN_POOL
+    if coin not in COIN_POOL:
+        return 400, _json_envelope_err("invalid_coin", f"coin 須為 {COIN_POOL} 之一")
+    if not question:
+        question = f"評估{coin}整體信任狀態，多角度綜合分析。"
+    try:
+        from .analysis_flow import (
+            AnalysisFlow,
+            MultiAngleBudgetError,
+            MultiAngleCapacityError,
+        )
+        with AnalysisFlow() as flow:
+            result = flow.submit_multi_angle(coin, question, locale=locale)
+        return 200, _json_envelope_ok(result)
+    except MultiAngleBudgetError as exc:
+        return 409, _json_envelope_err("multi_angle_budget_unavailable", str(exc))
+    except MultiAngleCapacityError as exc:
+        return 503, _json_envelope_err("multi_angle_queue_unavailable", str(exc))
+    except ValueError as exc:
+        return 400, _json_envelope_err("validation_error", str(exc))
+    except Exception:
+        logging.exception("TrustForge /api/multi-angle POST error")
+        return 502, _json_envelope_err("upstream_error", "五角度分析提交失敗")
+
+
 def _handle_api_training_status() -> tuple[int, str]:
     """GET /api/training-status — 訓練資料累積狀態儀表板（Issue #333）。
 
@@ -8169,6 +8226,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/eco-link":
             code, body = _handle_api_eco_link(qs)
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/multi-angle":
+            code, body = _handle_api_multi_angle_get(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
         # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
         # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封
         # （回的是 spec 文件本身），不設限流（零依賴讀檔，比照 `/api/health`）。
@@ -8502,6 +8562,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-requeue":
             code, body = _handle_api_analysis_requeue(getattr(self, "headers", {}), self.rfile, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/multi-angle":
+            code, body = _handle_api_multi_angle_post(getattr(self, "headers", {}), self.rfile, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
         return self._send(405, _json_envelope_err("method_not_allowed", "此路徑不支援 POST"),
                           "application/json; charset=utf-8", extra_headers={"Allow": "GET"})
