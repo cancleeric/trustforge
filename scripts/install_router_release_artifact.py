@@ -335,7 +335,12 @@ def _publish_marker(root: Path, root_fd: int, digest: str, expected_uid: int) ->
         0o400,
     )
     try:
-        os.write(fd, raw)
+        view = memoryview(raw)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short router published marker write")
+            view = view[written:]
         os.fchmod(fd, 0o444)
         os.fsync(fd)
     finally:
@@ -347,6 +352,14 @@ def _publish_marker(root: Path, root_fd: int, digest: str, expected_uid: int) ->
         if temporary.exists():
             temporary.unlink()
     _verify_published_marker(marker, digest, expected_uid)
+
+
+def _remove_marker(path: Path, root_fd: int, expected_uid: int) -> None:
+    info = os.lstat(path)
+    if info.st_uid != expected_uid or stat.S_ISDIR(info.st_mode):
+        raise SystemExit("router published marker has unsafe metadata")
+    os.unlink(path)
+    os.fsync(root_fd)
 
 
 def _remove_unpublished_target(target: Path, expected_uid: int) -> None:
@@ -421,11 +434,20 @@ def main() -> int:
         try:
             marker = _marker_path(args.releases_root, release_digest)
             if os.path.lexists(marker):
-                _verify_published_marker(marker, release_digest, expected_uid)
-                _verify_tree(target, expected, expected_dirs, expected_uid)
-                _verify_runtime_lock(target, runtime_lock, tree_digest)
-                print(target)
-                return 0
+                try:
+                    _verify_published_marker(marker, release_digest, expected_uid)
+                except (OSError, SystemExit):
+                    if os.path.lexists(target):
+                        raise
+                    _remove_marker(marker, parent_fd, expected_uid)
+                else:
+                    if not os.path.lexists(target):
+                        _remove_marker(marker, parent_fd, expected_uid)
+                    else:
+                        _verify_tree(target, expected, expected_dirs, expected_uid)
+                        _verify_runtime_lock(target, runtime_lock, tree_digest)
+                        print(target)
+                        return 0
             if os.path.lexists(target):
                 try:
                     _verify_tree(target, expected, expected_dirs, expected_uid)
@@ -538,6 +560,7 @@ def main() -> int:
             _verify_runtime_lock(stage, runtime_lock, tree_digest)
             os.chmod(stage, 0o700)
             os.replace(stage, target)
+            os.fsync(parent_fd)
             os.chmod(target, 0o555)
             _verify_tree(target, expected, expected_dirs, expected_uid)
             _verify_runtime_lock(target, runtime_lock, tree_digest)

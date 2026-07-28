@@ -1118,3 +1118,64 @@ def test_router_publish_faults_leave_no_consumable_target_and_retry(
     }
     assert stat.S_IMODE(marker.stat().st_mode) == 0o444
     assert install_router_release_artifact.main() == 0
+
+
+def test_router_publish_recovers_marker_when_target_was_not_durable(
+    tmp_path, monkeypatch
+):
+    _, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
+    releases = tmp_path / "releases"
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    target = releases / digest
+    marker = releases / f".published-{digest}.json"
+    arguments = [
+        "install_router_release_artifact.py",
+        "--archive",
+        str(archive),
+        "--tree-manifest",
+        str(manifest),
+        "--runtime-lock",
+        str(runtime_lock),
+        "--releases-root",
+        str(releases),
+    ]
+    monkeypatch.setattr(sys, "argv", arguments)
+    assert install_router_release_artifact.main() == 0
+    install_router_release_artifact._remove_unpublished_target(target, os.geteuid())
+    assert marker.is_file() and not target.exists()
+
+    assert install_router_release_artifact.main() == 0
+    assert target.is_dir() and marker.is_file()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o555
+
+
+def test_router_published_marker_write_handles_short_writes(tmp_path, monkeypatch):
+    _, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
+    releases = tmp_path / "releases"
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    marker = releases / f".published-{digest}.json"
+    arguments = [
+        "install_router_release_artifact.py",
+        "--archive",
+        str(archive),
+        "--tree-manifest",
+        str(manifest),
+        "--runtime-lock",
+        str(runtime_lock),
+        "--releases-root",
+        str(releases),
+    ]
+    real_write = os.write
+    monkeypatch.setattr(
+        install_router_release_artifact.os,
+        "write",
+        lambda descriptor, value: real_write(descriptor, value[:3]),
+    )
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    assert install_router_release_artifact.main() == 0
+    assert json.loads(marker.read_text()) == {
+        "schema": "trustforge.router-published-release/v1",
+        "digest": digest,
+        "target": digest,
+    }
