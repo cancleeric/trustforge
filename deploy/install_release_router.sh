@@ -60,27 +60,38 @@ fi
 mkdir -p "$(dirname "$UNIT_TARGET")" "$(dirname "$NGINX_TARGET")" \
   "$(dirname "$SYSUSERS_TARGET")" "$(dirname "$TMPFILES_TARGET")" \
   "$DEST_ROOT/var/tmp"
-NGINX_BACKUP="$(mktemp "$DEST_ROOT/var/tmp/trustforge-router-nginx.XXXXXX")"
-chmod 0600 "$NGINX_BACKUP"
-NGINX_EXISTED=false
+BACKUP_DIR="$(mktemp -d "$DEST_ROOT/var/tmp/trustforge-router-install.XXXXXX")"
+chmod 0700 "$BACKUP_DIR"
+TARGETS=("$UNIT_TARGET" "$NGINX_TARGET" "$SYSUSERS_TARGET" "$TMPFILES_TARGET")
+EXISTED=()
+for index in "${!TARGETS[@]}"; do
+  target="${TARGETS[$index]}"
+  if [[ -f "$target" && ! -L "$target" ]]; then
+    cp -p "$target" "$BACKUP_DIR/$index"
+    EXISTED[$index]=true
+  else
+    EXISTED[$index]=false
+  fi
+done
 SERVICE_WAS_ACTIVE=false
-[[ -f "$NGINX_TARGET" && ! -L "$NGINX_TARGET" ]] && {
-  cp -p "$NGINX_TARGET" "$NGINX_BACKUP"
-  NGINX_EXISTED=true
-}
 systemctl is-active --quiet trustforge-release-router.service && SERVICE_WAS_ACTIVE=true
+OLD_MAIN_PID="$(systemctl show -p MainPID --value trustforge-release-router.service 2>/dev/null || echo 0)"
 rollback_install() {
   status=$?
-  if ! $SERVICE_WAS_ACTIVE; then
-    systemctl stop trustforge-release-router.service >/dev/null 2>&1 || true
-  fi
-  if $NGINX_EXISTED; then
-    install -o root -g root -m 0644 "$NGINX_BACKUP" "$NGINX_TARGET"
-  else
-    rm -f -- "$NGINX_TARGET"
-  fi
+  systemctl stop trustforge-release-router.service >/dev/null 2>&1 || true
+  for index in "${!TARGETS[@]}"; do
+    if ${EXISTED[$index]}; then
+      install -o root -g root -m 0644 "$BACKUP_DIR/$index" "${TARGETS[$index]}"
+    else
+      rm -f -- "${TARGETS[$index]}"
+    fi
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
   nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
-  rm -f -- "$NGINX_BACKUP"
+  if $SERVICE_WAS_ACTIVE; then
+    systemctl start trustforge-release-router.service >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$BACKUP_DIR"
   exit "$status"
 }
 trap rollback_install ERR INT TERM
@@ -91,6 +102,9 @@ install -o root -g root -m 0644 "$SYSUSERS_SOURCE" "$SYSUSERS_TARGET"
 install -o root -g root -m 0644 "$TMPFILES_SOURCE" "$TMPFILES_TARGET"
 systemd-sysusers "$SYSUSERS_TARGET"
 systemd-tmpfiles --create "$TMPFILES_TARGET"
+# Deliberate non-reversible host mutations: sysusers may create the two service
+# identities/group and usermod may add nginx to trustforge-release. Rollback
+# restores service artifacts/state but never deletes identities or memberships.
 NGINX_CONFIG="$(nginx -T 2>&1)"
 NGINX_WORKER_USER="$(
   awk '$1 == "user" {gsub(/;/, "", $2); print $2; exit}' <<<"$NGINX_CONFIG"
@@ -124,7 +138,20 @@ setpriv \
 }
 systemctl daemon-reload
 nginx -t
-systemctl start trustforge-release-router.service
+if $SERVICE_WAS_ACTIVE; then
+  systemctl restart trustforge-release-router.service
+else
+  systemctl start trustforge-release-router.service
+fi
+NEW_MAIN_PID="$(systemctl show -p MainPID --value trustforge-release-router.service)"
+[[ "$NEW_MAIN_PID" =~ ^[1-9][0-9]*$ ]] || {
+  echo "release router did not expose a live MainPID" >&2
+  false
+}
+if $SERVICE_WAS_ACTIVE && [[ "$NEW_MAIN_PID" == "$OLD_MAIN_PID" ]]; then
+  echo "release router upgrade did not replace the running process" >&2
+  false
+fi
 systemctl reload nginx
 setpriv \
   "--reuid=$NGINX_WORKER_USER" \
@@ -158,4 +185,4 @@ curl --fail --silent --show-error --netrc-file /dev/fd/9 \
 exec 9<&-
 systemctl enable trustforge-release-router.service
 trap - ERR INT TERM
-rm -f -- "$NGINX_BACKUP"
+rm -rf -- "$BACKUP_DIR"

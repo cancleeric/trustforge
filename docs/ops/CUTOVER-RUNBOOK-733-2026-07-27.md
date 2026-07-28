@@ -254,3 +254,10 @@ private key. A failed or interrupted provision/migration must be rerun so the
 transaction journal can restore the prior authenticated state. Do not enable
 the router until `install_release_router.sh` authenticates both ledgers and
 completes the Unix-socket and nginx HTTP smoke tests.
+
+Installer rollback restores the unit, nginx snippet, sysusers/tmpfiles
+artifacts, daemon state, and the prior router service running state. Creation
+of the `trustforge-operator`, `trustforge-router`, and `trustforge-release`
+identities and addition of the nginx worker to `trustforge-release` are
+intentional non-reversible host mutations; rollback does not delete users,
+groups, or memberships.

@@ -9,6 +9,7 @@ import grp
 import json
 import os
 import pwd
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -51,6 +52,24 @@ def _fsync_tree(root: Path) -> None:
         os.close(fd)
 
 
+def _remove_direct_directory(path: Path) -> None:
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            "/" in path.name
+            or not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_dev != os.fstat(parent_fd).st_dev
+        ):
+            raise SystemExit("unsafe migration recovery directory")
+        shutil.rmtree(path.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def _write_journal(path: Path, state: str, stage: Path, backup: Path) -> None:
     temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
     encoded = (
@@ -72,7 +91,7 @@ def _write_journal(path: Path, state: str, stage: Path, backup: Path) -> None:
         0o600,
     )
     try:
-        os.fchown(fd, 0, 0)
+        os.fchown(fd, os.geteuid(), os.getegid())
         os.fchmod(fd, 0o600)
         os.write(fd, encoded)
         os.fsync(fd)
@@ -87,8 +106,16 @@ def _write_journal(path: Path, state: str, stage: Path, backup: Path) -> None:
 def _recover(journal: Path, target: Path, stage: Path, backup: Path) -> None:
     if not journal.exists():
         return
-    info = os.lstat(journal)
-    raw = journal.read_bytes()
+    journal_fd = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(journal_fd)
+        if info.st_size > 4096:
+            raise SystemExit("unknown migration recovery journal")
+        raw = os.read(journal_fd, 4097)
+        if len(raw) != info.st_size:
+            raise SystemExit("migration journal changed during read")
+    finally:
+        os.close(journal_fd)
     payload = json.loads(raw)
     expected_names = (target.name + ".staging", target.name + ".rollback")
     if (
@@ -108,16 +135,37 @@ def _recover(journal: Path, target: Path, stage: Path, backup: Path) -> None:
     # Until a committed journal exists, the authenticated old target wins.
     if state != "committed" and backup.exists():
         if target.exists():
-            __import__("shutil").rmtree(target)
+            _remove_direct_directory(target)
         os.replace(backup, target)
     if stage.exists():
-        __import__("shutil").rmtree(stage)
+        _remove_direct_directory(stage)
     if backup.exists() and target.exists():
-        __import__("shutil").rmtree(backup)
+        _remove_direct_directory(backup)
     journal.unlink()
     parent_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
     os.fsync(parent_fd)
     os.close(parent_fd)
+
+
+def _publish_swap(stage: Path, target: Path, backup: Path, journal: Path) -> None:
+    _write_journal(journal, "staged", stage, backup)
+    if target.exists():
+        os.replace(target, backup)
+        _write_journal(journal, "old-backed-up", stage, backup)
+    try:
+        os.replace(stage, target)
+        _write_journal(journal, "published", stage, backup)
+        _fsync_tree(target)
+        _write_journal(journal, "committed", stage, backup)
+        if backup.exists():
+            _remove_direct_directory(backup)
+        journal.unlink()
+        parent_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        os.fsync(parent_fd)
+        os.close(parent_fd)
+    except BaseException:
+        _recover(journal, target, stage, backup)
+        raise
 
 
 def _keys(path: Path) -> dict[str, bytes]:
@@ -204,6 +252,43 @@ def _copy_ledger(source: Path, target: Path, owner: int, group: int) -> None:
             os.close(descriptor)
 
 
+def _copy_public_receipt(source_root: Path, stage: Path) -> None:
+    source = source_root / "provision-receipt.json"
+    if not source.exists():
+        return
+    info = os.lstat(source)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != 0
+        or stat.S_IMODE(info.st_mode) != 0o644
+        or info.st_size > 4096
+    ):
+        raise SystemExit("unsafe provisioning receipt during migration")
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    target_fd = os.open(
+        stage / "provision-receipt.json",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o644,
+    )
+    try:
+        raw = os.read(source_fd, 4097)
+        if len(raw) != info.st_size:
+            raise SystemExit("provisioning receipt changed during migration")
+        os.fchown(target_fd, 0, 0)
+        os.fchmod(target_fd, 0o644)
+        remaining = memoryview(raw)
+        while remaining:
+            written = os.write(target_fd, remaining)
+            if written <= 0:
+                raise OSError("short provisioning receipt write")
+            remaining = remaining[written:]
+        os.fsync(target_fd)
+    finally:
+        os.close(source_fd)
+        os.close(target_fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", type=Path, required=True)
@@ -264,11 +349,7 @@ def main() -> int:
         same_root = args.target_root.exists() and os.path.samestat(
             os.stat(args.source_root), os.stat(args.target_root)
         )
-        if same_root:
-            # In-place migration is already authenticated under both fixed-order
-            # writer locks; never re-open/re-lock the same ledgers.
-            return 0
-        if args.target_root.exists():
+        if args.target_root.exists() and not same_root:
             # Never replace an unknown target: the rollback candidate must itself
             # be a fully authenticated pair of ledgers.
             for directory, keys, domain, kinds in (
@@ -295,6 +376,7 @@ def main() -> int:
             router_uid,
             release_gid,
         )
+        _copy_public_receipt(args.source_root, stage)
         staged_heads = []
         for directory, keys, domain, kinds in (
             ("control", control_keys, "release-control", CONTROL_KINDS),
@@ -305,24 +387,7 @@ def main() -> int:
         if staged_heads != source_heads:
             raise SystemExit("authenticated source heads changed during migration")
         _fsync_tree(stage)
-        _write_journal(journal, "staged", stage, backup)
-        if args.target_root.exists():
-            os.replace(args.target_root, backup)
-            _write_journal(journal, "old-backed-up", stage, backup)
-        try:
-            os.replace(stage, args.target_root)
-            _write_journal(journal, "published", stage, backup)
-            _fsync_tree(args.target_root)
-            _write_journal(journal, "committed", stage, backup)
-            if backup.exists():
-                __import__("shutil").rmtree(backup)
-            journal.unlink()
-            parent_fd = os.open(args.target_root.parent, os.O_RDONLY | os.O_DIRECTORY)
-            os.fsync(parent_fd)
-            os.close(parent_fd)
-        except BaseException:
-            _recover(journal, args.target_root, stage, backup)
-            raise
+        _publish_swap(stage, args.target_root, backup, journal)
     finally:
         for fd in reversed(event_fds):
             fcntl.flock(fd, fcntl.LOCK_UN)

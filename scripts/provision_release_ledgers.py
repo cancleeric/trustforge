@@ -45,6 +45,7 @@ JOURNAL_SCHEMA = "trustforge.release-ledger-provision/v2"
 JOURNAL_STATES = frozenset(
     {
         "staged",
+        "publishing",
         "old-backed-up",
         "committed",
         "control-consuming",
@@ -54,6 +55,34 @@ JOURNAL_STATES = frozenset(
     }
 )
 RECEIPT = "provision-receipt.json"
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(fd, remaining)
+        if written <= 0:
+            raise OSError("short transaction write")
+        remaining = remaining[written:]
+
+
+def _remove_direct_directory(parent: Path, name: str, expected_uid: int = 0) -> None:
+    if not name or "/" in name or name in {".", ".."}:
+        raise SystemExit("unsafe transaction directory name")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != expected_uid
+            or info.st_dev != os.fstat(parent_fd).st_dev
+        ):
+            raise SystemExit("unsafe transaction directory metadata")
+        shutil.rmtree(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def _seed_file(path: Path) -> tuple[int, int, int, int]:
@@ -83,16 +112,21 @@ def _consume_seed(path: Path, parent_fd: int, device: int, inode: int) -> None:
 
 
 def _read_provision_journal(journal: Path, root_name: str) -> dict[str, object]:
-    info = os.lstat(journal)
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or stat.S_ISLNK(info.st_mode)
-        or info.st_uid != os.geteuid()
-        or stat.S_IMODE(info.st_mode) != 0o600
-        or info.st_size > 4096
-    ):
-        raise SystemExit("unsafe provisioning transaction journal")
-    raw = journal.read_bytes()
+    fd = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > 4096
+        ):
+            raise SystemExit("unsafe provisioning transaction journal")
+        raw = os.read(fd, 4097)
+        if len(raw) != info.st_size:
+            raise SystemExit("provisioning transaction journal changed during read")
+    finally:
+        os.close(fd)
     payload = json.loads(raw)
     if (
         not isinstance(payload, dict)
@@ -138,14 +172,24 @@ def _recover_provision(root: Path, journal: Path) -> dict[str, object] | None:
         "outcome-consuming",
         "outcome-consumed",
     }
+    if payload["state"] == "publishing" and not backup.exists() and root.exists():
+        info = os.lstat(root)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_dev != os.stat(root.parent).st_dev
+        ):
+            raise SystemExit("unsafe fresh provision recovery target")
+        _remove_direct_directory(root.parent, root.name, os.geteuid())
     if payload["state"] not in committed_states and backup.exists():
         if root.exists():
-            shutil.rmtree(root)
+            _remove_direct_directory(root.parent, root.name, os.geteuid())
         os.replace(backup, root)
     if stage.exists():
-        shutil.rmtree(stage)
+        _remove_direct_directory(stage.parent, stage.name, os.geteuid())
     if backup.exists() and root.exists():
-        shutil.rmtree(backup)
+        _remove_direct_directory(backup.parent, backup.name, os.geteuid())
     if payload["state"] not in committed_states:
         journal.unlink()
     parent_fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -171,7 +215,7 @@ def _write_receipt(
     try:
         os.fchown(fd, 0, 0)
         os.fchmod(fd, 0o644)
-        os.write(
+        _write_all(
             fd,
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n",
         )
@@ -290,7 +334,9 @@ def _write_provision_journal(
         0o600,
     )
     try:
-        os.write(fd, data)
+        os.fchown(fd, 0, 0)
+        os.fchmod(fd, 0o600)
+        _write_all(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -579,6 +625,15 @@ def main() -> int:
                 control_public,
                 outcome_public,
             )
+        else:
+            _write_provision_journal(
+                journal,
+                "publishing",
+                stage,
+                backup,
+                control_public,
+                outcome_public,
+            )
         try:
             os.replace(stage, args.root)
             dirfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -591,24 +646,64 @@ def main() -> int:
         except BaseException:
             if backup.exists():
                 if args.root.exists():
-                    shutil.rmtree(args.root)
+                    _remove_direct_directory(parent, args.root.name)
                 os.replace(backup, args.root)
                 rollback_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
                 os.fsync(rollback_fd)
                 os.close(rollback_fd)
             raise
         if backup.exists():
-            shutil.rmtree(backup)
-        # Re-enter the committed recovery path; it journals each seed independently.
-        os.close(control_seed[0])
-        os.close(control_seed[1])
-        os.close(outcome_seed[0])
-        os.close(outcome_seed[1])
-        control_seed = outcome_seed = None
-        os.execv(sys.executable, [sys.executable, *sys.argv])
+            _remove_direct_directory(parent, backup.name)
+        # Finish in this process while retaining the stable coordination lock.
+        # No exec/re-lock boundary exists, so fresh provisioning cannot self-deadlock.
+        _write_provision_journal(
+            journal,
+            "control-consuming",
+            stage,
+            backup,
+            control_public,
+            outcome_public,
+        )
+        _consume_seed(
+            args.control_key, control_seed[1], control_seed[2], control_seed[3]
+        )
+        _write_provision_journal(
+            journal,
+            "control-consumed",
+            stage,
+            backup,
+            control_public,
+            outcome_public,
+        )
+        _write_provision_journal(
+            journal,
+            "outcome-consuming",
+            stage,
+            backup,
+            control_public,
+            outcome_public,
+        )
+        _consume_seed(
+            args.outcome_bootstrap_key,
+            outcome_seed[1],
+            outcome_seed[2],
+            outcome_seed[3],
+        )
+        _write_provision_journal(
+            journal,
+            "outcome-consumed",
+            stage,
+            backup,
+            control_public,
+            outcome_public,
+        )
+        journal.unlink()
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        os.fsync(parent_fd)
+        os.close(parent_fd)
     except BaseException:
         if stage.exists():
-            shutil.rmtree(stage)
+            _remove_direct_directory(parent, stage.name)
         raise
     finally:
         if control_seed is not None:

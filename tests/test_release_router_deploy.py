@@ -138,6 +138,7 @@ def test_root_provisioner_separates_bootstrap_signers_and_consumes_outcome_key()
     assert "os.fsync(parent_fd)" in source
     assert "router-outcome-bootstrap-1" in source
     assert "router-outcome-runtime-1" in source
+    assert "os.execv" not in source
     main = source[source.index("def main()") :]
     assert main.index('pwd.getpwnam("trustforge-operator")') < main.index("_run_as(")
 
@@ -154,8 +155,9 @@ def test_migration_authenticates_both_chains_before_staging_or_swap():
     assert "ALLOWED_FIXED_FILES" in source
     assert "_write_journal" in source
     assert "_recover(" in source
-    assert "os.replace(args.target_root, backup)" in source
-    assert "os.replace(stage, args.target_root)" in source
+    assert "_publish_swap(stage, args.target_root, backup, journal)" in source
+    assert "os.replace(target, backup)" in source
+    assert "os.replace(stage, target)" in source
 
 
 def test_operator_emergency_paths_are_artifact_and_extra_key_independent():
@@ -218,7 +220,10 @@ def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
     command(
         "systemctl",
         f'echo "$*" >>"{trace}"\n'
-        'if [ "${1:-}" = "is-active" ]; then exit 1; fi\nexit 0\n',
+        'if [ "${1:-}" = "is-active" ]; then exit 0; fi\n'
+        f'if [ "${{1:-}}" = "show" ]; then '
+        f'if [ -f "{tmp_path}/pid-seen" ]; then echo 222; '
+        f'else touch "{tmp_path}/pid-seen"; echo 111; fi; fi\nexit 0\n',
     )
     command("setpriv", "exit 0\n")
     command("python3", "exit 0\n")
@@ -275,6 +280,8 @@ def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
     assert trace.exists(), result.stderr
     recorded = trace.read_text()
     assert "stop trustforge-release-router.service" in recorded
+    assert "restart trustforge-release-router.service" in recorded
+    assert "start trustforge-release-router.service" in recorded
     assert "enable trustforge-release-router.service" not in recorded
     assert "--netrc-file /dev/fd/9" in recorded
     assert "--insecure" not in recorded
