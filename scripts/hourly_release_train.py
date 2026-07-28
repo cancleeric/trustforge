@@ -27,6 +27,12 @@ def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
+def process_birth(pid: int) -> str:
+    if os.environ.get("TRUSTFORGE_GATE_SANDBOX") == "1":
+        return f"sandbox:{pid}"
+    return run(["ps", "-o", "lstart=", "-p", str(pid)], capture=True).strip()
+
+
 def record(receipt: dict) -> Path:
     OUT.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = OUT / f"{receipt['run_id']}.json"
@@ -59,7 +65,7 @@ def lease() -> Iterable[None]:
             owner_data = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
             owner = int(owner_data["pid"])
             os.kill(owner, 0)
-            birth = run(["ps", "-o", "lstart=", "-p", str(owner)], capture=True).strip()
+            birth = process_birth(owner)
             if birth != owner_data.get("birth"):
                 raise ProcessLookupError
         except (FileNotFoundError, ProcessLookupError, ValueError, KeyError, TypeError, json.JSONDecodeError):
@@ -73,7 +79,7 @@ def lease() -> Iterable[None]:
         else:
             raise RuntimeError("another release train owns the lease") from exc
     try:
-        birth = run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture=True).strip()
+        birth = process_birth(os.getpid())
         (lock / "owner.json").write_text(
             json.dumps({"pid": os.getpid(), "birth": birth, "token": token}) + "\n",
             encoding="utf-8",
@@ -94,6 +100,12 @@ def require_clean_root() -> None:
 
 
 def gate(worktree: Path) -> None:
+    trusted_venv = ROOT / ".venv"
+    trusted_modules = ROOT / "frontend" / "node_modules"
+    if not trusted_venv.is_dir() or not trusted_modules.is_dir():
+        raise RuntimeError("trusted gate dependencies are not installed")
+    (worktree / ".venv").symlink_to(trusted_venv, target_is_directory=True)
+    (worktree / "frontend" / "node_modules").symlink_to(trusted_modules, target_is_directory=True)
     trusted_hook = run(["git", "show", "origin/main:.githooks/pre-push"], capture=True)
     hook = worktree / ".git-trusted-pre-push"
     hook.write_text(trusted_hook, encoding="utf-8")
@@ -112,8 +124,8 @@ def gate(worktree: Path) -> None:
         profile = (
             f'(version 1)(allow default){rules}'
             f'(deny file-write* (subpath "{home}"))'
-            '(deny network*)(allow network* (local ip "localhost:*"))'
-            '(allow network* (remote ip "localhost:*"))'
+            '(deny network-outbound (require-not (remote ip "localhost:*")))'
+            '(deny network-inbound (require-not (local ip "localhost:*")))'
             '(deny process-exec (literal "/usr/bin/security"))'
             '(deny mach-lookup (global-name "com.apple.securityd"))'
         )
@@ -122,8 +134,11 @@ def gate(worktree: Path) -> None:
     for key in tuple(env):
         if key.startswith(("AWS_", "GH_", "GITHUB_")):
             env.pop(key)
+    env["TRUSTFORGE_GATE_SANDBOX"] = "1"
     subprocess.run(command, cwd=worktree, env=env, check=True)
     hook.unlink()
+    (worktree / "frontend" / "node_modules").unlink()
+    (worktree / ".venv").unlink()
 
 
 def production_identity() -> tuple[str, str]:
