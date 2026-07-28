@@ -24,6 +24,9 @@ OUT = ROOT / "out" / "release-train"
 PRODUCTION_ACCOUNT = "795930814369"
 PRODUCTION_REGION = "ap-southeast-2"
 PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
+VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)\Z")
+
+
 def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
     result = subprocess.run(command, cwd=cwd, text=True, check=True, capture_output=capture)
     return result.stdout if capture else ""
@@ -99,6 +102,54 @@ def lease() -> Iterable[None]:
 def require_clean_root() -> None:
     if run(["git", "status", "--porcelain"], capture=True).strip():
         raise RuntimeError("repository working tree is dirty")
+
+
+def bump_patch_version(worktree: Path) -> str:
+    """Synchronize backend and frontend package metadata to the next patch."""
+    pyproject = worktree / "pyproject.toml"
+    match = re.search(
+        r'(?m)^version = "(?P<version>[^"]+)"$',
+        pyproject.read_text(encoding="utf-8"),
+    )
+    if not match or not VERSION_PATTERN.fullmatch(match.group("version")):
+        raise RuntimeError("pyproject release version is not strict SemVer")
+    current = match.group("version")
+    parsed = VERSION_PATTERN.fullmatch(current)
+    assert parsed is not None
+    next_version = (
+        f"{parsed.group('major')}.{parsed.group('minor')}."
+        f"{int(parsed.group('patch')) + 1}"
+    )
+    replacements = {
+        "pyproject.toml": (f'version = "{current}"', f'version = "{next_version}"', 1),
+        "src/trustforge/__init__.py": (
+            f'__version__ = "{current}"',
+            f'__version__ = "{next_version}"',
+            1,
+        ),
+        "src/trustforge/_version.py": (
+            f'VERSION = "{current}"',
+            f'VERSION = "{next_version}"',
+            1,
+        ),
+        "frontend/package.json": (
+            f'"version": "{current}"',
+            f'"version": "{next_version}"',
+            1,
+        ),
+        "frontend/package-lock.json": (
+            f'"version": "{current}"',
+            f'"version": "{next_version}"',
+            2,
+        ),
+    }
+    for relative, (old, new, expected) in replacements.items():
+        target = worktree / relative
+        body = target.read_text(encoding="utf-8")
+        if body.count(old) != expected:
+            raise RuntimeError(f"{relative} is not synchronized to {current}")
+        target.write_text(body.replace(old, new), encoding="utf-8")
+    return next_version
 
 
 def gate(worktree: Path) -> None:
@@ -254,6 +305,23 @@ def execute(args: argparse.Namespace) -> Path:
                     run(["git", "worktree", "add", "--detach", str(main_tree), "origin/main"])
                     if develop_only:
                         run(["git", "merge", "--no-edit", "--no-ff", develop_sha], cwd=main_tree)
+                        release_version = bump_patch_version(main_tree)
+                        run(
+                            [
+                                "git", "add",
+                                "pyproject.toml",
+                                "src/trustforge/__init__.py",
+                                "src/trustforge/_version.py",
+                                "frontend/package.json",
+                                "frontend/package-lock.json",
+                            ],
+                            cwd=main_tree,
+                        )
+                        run(
+                            ["git", "commit", "-m", f"release: bump version to {release_version}"],
+                            cwd=main_tree,
+                        )
+                        receipt["steps"].append({"release_version": release_version})
                     gate(main_tree)
                     main_sha = run(["git", "rev-parse", "HEAD"], cwd=main_tree, capture=True).strip()
                     release_branch = f"release/auto-{run_id[:8]}"

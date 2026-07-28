@@ -8,6 +8,7 @@ import base64
 import csv
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tarfile
@@ -80,6 +81,15 @@ def main() -> int:
             ).strip()
         )
         distributions: dict[str, dict[str, str]] = {}
+        package_metadata = (args.source_root / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        package_match = re.search(
+            r'(?m)^version = "([^"]+)"$', package_metadata
+        )
+        if not package_match:
+            raise SystemExit("cannot resolve trustforge package version")
+        package_version = package_match.group(1)
         for name in ("trustforge", "cryptography", "cffi"):
             candidates = sorted(
                 source_site.glob(name.replace("-", "_") + "-*.dist-info")
@@ -91,10 +101,11 @@ def main() -> int:
                 shutil.copytree(
                     args.source_root / "src/trustforge_core", site / "trustforge_core"
                 )
-                dist = site / "trustforge-0.18.1.dist-info"
+                dist = site / f"trustforge-{package_version}.dist-info"
                 dist.mkdir()
                 (dist / "METADATA").write_text(
-                    "Metadata-Version: 2.1\nName: trustforge\nVersion: 0.18.1\n"
+                    "Metadata-Version: 2.1\nName: trustforge\n"
+                    f"Version: {package_version}\n"
                 )
             else:
                 if len(candidates) != 1:

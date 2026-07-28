@@ -8,6 +8,27 @@ import pytest
 from scripts import hourly_release_train as train
 
 
+def test_patch_bump_synchronizes_backend_and_frontend_versions(tmp_path):
+    files = {
+        "pyproject.toml": '[project]\nversion = "1.2.3"\n',
+        "src/trustforge/__init__.py": '__version__ = "1.2.3"\n',
+        "src/trustforge/_version.py": 'VERSION = "1.2.3"\n',
+        "frontend/package.json": '{"version": "1.2.3"}\n',
+        "frontend/package-lock.json": (
+            '{"version": "1.2.3", "packages": {"": {"version": "1.2.3"}}}\n'
+        ),
+    }
+    for relative, body in files.items():
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+
+    assert train.bump_patch_version(tmp_path) == "1.2.4"
+    for relative in files:
+        assert "1.2.3" not in (tmp_path / relative).read_text(encoding="utf-8")
+        assert "1.2.4" in (tmp_path / relative).read_text(encoding="utf-8")
+
+
 def test_backup_receipt_requires_archive_and_restore_verification(tmp_path, monkeypatch):
     train.OUT = tmp_path
     archive = tmp_path / "backup.tar.gz"
