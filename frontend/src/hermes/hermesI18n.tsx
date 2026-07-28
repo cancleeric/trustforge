@@ -174,6 +174,7 @@ const messages = {
     pmLoadingTemplate: '讀取 {asset} 同層比較資料中…', pmEmptyStateTemplate: '目前無 {asset} 的同層比較資料。',
     assetIdLabel: '資產識別碼', assetIdPlaceholder: '輸入資產識別碼，例如 asset:arb',
     elTitle: 'EcoLink 影響路徑', elDesc: '查詢官方升級事件與依賴資產之間的可能相關性——不是已證實的因果關係。',
+    elScopeNote: '以上為 ETH L2 生態的示範資產，不是比賽指定的五種官方幣種；EcoLink 只採信 Arbitrum／Optimism／Ethereum 官方網域的來源。',
     // N34-1: HermesOnboarding
     ob1Eyebrow: '第一次使用 · 1 / 3', ob1Title: '先選一個幣，再問一個問題',
     ob1Body: '點中央的幣種，左側選擇分析方式並輸入問題，按「交付 Hermes 執行」即可。第一次建議直接使用預設問題。',
@@ -316,6 +317,7 @@ const messages = {
     elipConfidenceTitle: 'confidence 分數（非因果證明）', elipDirectionPrefix: '方向：',
     elipOfficialSource: '官方來源', elipInvalidLink: '官方來源（連結格式無效）',
     elipInsufficientData: '資料不足，無法判定。', elipTitle: 'EcoLink 影響路徑',
+    elipInsufficientWhy: '這不是查詢失敗：目前沒有收錄該資產的官方依賴邊與升級事件，或雖有依賴邊但 confidence 低於 0.4 門檻，因此不列出可能路徑。',
     // /help 說明中心：整頁原本硬寫中文，en 語系下標題、五階段、色帶、FAQ 全部
     // 仍是中文（實測 /help?qa=1 en 320x568 起整頁未翻）。以下補齊頁面框架文案；
     // glossaryCatalog 的 32 條詞條資料是跨頁共用資料層，另案處理。
@@ -527,6 +529,7 @@ const messages = {
     pmLoadingTemplate: 'Loading peer comparison data for {asset}…', pmEmptyStateTemplate: 'No peer comparison data available for {asset} yet.',
     assetIdLabel: 'Asset ID', assetIdPlaceholder: 'Enter an asset ID, e.g. asset:arb',
     elTitle: 'EcoLink Impact Path', elDesc: 'Look up possible correlation between official upgrade events and dependent assets — not confirmed causation.',
+    elScopeNote: 'These are illustrative ETH L2 assets, not the five official contest coins; EcoLink only accepts sources from the Arbitrum / Optimism / Ethereum official domains.',
     // N34-1: HermesOnboarding
     ob1Eyebrow: 'First time · 1 / 3', ob1Title: 'Pick a coin, then ask a question',
     ob1Body: 'Click a coin at the center, choose an analysis mode and enter a question on the left, then press "Transmit to Hermes". First time, using the default question is recommended.',
@@ -669,6 +672,7 @@ const messages = {
     elipConfidenceTitle: 'Confidence score (not proof of causation)', elipDirectionPrefix: 'Direction: ',
     elipOfficialSource: 'Official source', elipInvalidLink: 'Official source (invalid link format)',
     elipInsufficientData: 'Insufficient data to determine.', elipTitle: 'EcoLink impact paths',
+    elipInsufficientWhy: 'This is not a failed lookup: no official dependency edge or upgrade event is on record for this asset, or an edge exists but its confidence falls below the 0.4 threshold, so no possible path is listed.',
     helpKicker: 'HERMES · User guide',
     helpTitle: 'Help center',
     helpIntro: 'HERMES tells you how trustworthy a coin\'s market data is — not a price prediction, and not investment advice. This page collects plain-language definitions, how the system works, and frequently asked questions.',

@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
@@ -53,6 +55,39 @@ describe('EcoLinkPage', () => {
     })
     renderPage('/eco-link?asset=asset:op')
     expect(await screen.findByText('資料不足，無法判定。')).toBeInTheDocument()
+  })
+
+  /** N67：CEO 回報「只有 ARB 有東西 其他也是空的」。原本 chip 掛了
+   * asset:sol / asset:bnb，但 EcoLink 的官方來源 allowlist 只放行
+   * arbitrum / optimism / ethereum 網域，這兩個資產永遠不可能有合法資料——
+   * 是被 UI 推銷出來的死路。這條把 chip 綁回 fixture 實際收錄的資產，
+   * 之後誰再加一個查不到東西的 chip 就會紅。 */
+  it('快速建議只列出 fixture 真的收錄的資產，不推銷死路', () => {
+    // 「查得動」的定義必須跟後端 `impact_paths_for` 一致：該資產要是某個升級
+    // 事件的主體，而且它與該事件的受影響資產之間存在依賴邊。只出現在
+    // impacted_asset_ids（asset:matic）或只當邊的另一端（asset:eth）都不算——
+    // 那兩個查下去一樣是空的。信心度門檻不納入，asset:op 是刻意保留的
+    // 「門檻有在擋」示範。
+    const root = path.join(__dirname, '..', '..', '..', 'data')
+    const edges = JSON.parse(readFileSync(path.join(root, 'ecolink_dependency_edges.json'), 'utf8'))
+    const events = JSON.parse(readFileSync(path.join(root, 'ecolink_upgrade_events.json'), 'utf8'))
+    const hasEdge = (a: string, b: string) =>
+      edges.some(
+        (e: { source_asset_id: string; target_asset_id: string }) =>
+          (e.source_asset_id === a && e.target_asset_id === b) ||
+          (e.source_asset_id === b && e.target_asset_id === a),
+      )
+    const covered = new Set<string>()
+    for (const event of events) {
+      for (const impacted of event.impacted_asset_ids) {
+        if (impacted !== event.asset_id && hasEdge(event.asset_id, impacted)) covered.add(event.asset_id)
+      }
+    }
+    const page = readFileSync(path.join(__dirname, 'EcoLinkPage.tsx'), 'utf8')
+    const chips = /const SUGGESTIONS = \[([^\]]*)\]/.exec(page)?.[1] ?? ''
+    const listed = [...chips.matchAll(/'([^']+)'/g)].map((m) => m[1])
+    expect(listed.length).toBeGreaterThan(0)
+    for (const chip of listed) expect([chip, covered.has(chip)]).toEqual([chip, true])
   })
 
   it('API 錯誤時顯示 ErrorState', async () => {
