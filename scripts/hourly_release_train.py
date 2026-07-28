@@ -226,11 +226,17 @@ def execute(args: argparse.Namespace) -> Path:
             main_sha_remote = run(["git", "rev-parse", "origin/main"], capture=True).strip()
             production_sha, production_digest = production_identity()
             receipt["production_before"] = {"git_sha": production_sha, "artifact_digest": production_digest}
+            runtime_in_sync = False
+            try:
+                verify_runtime_identity(production_digest)
+                runtime_in_sync = True
+            except Exception as drift:
+                receipt["runtime_drift"] = str(drift)
             if args.dry_run:
                 receipt["status"] = "dry-run"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
-            if develop_only == 0 and production_sha == main_sha_remote:
+            if develop_only == 0 and production_sha == main_sha_remote and runtime_in_sync:
                 receipt["status"] = "no-op"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
