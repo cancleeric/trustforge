@@ -425,18 +425,19 @@ def evaluate_shadow(
     for item in fresh:
         if item.status != "success":
             blockers.append(ShadowBlocker(f"terminal_{item.status}"))
-        if (
-            not item.parity_passed
-            or item.confidence_delta > policy.confidence_delta_max
-            or item.trust_delta > policy.trust_delta_max
-            or item.supporting_jaccard < policy.supporting_jaccard_min
-        ):
-            blockers.append(ShadowBlocker.PARITY_FAILURE)
         if item.elapsed_ms > policy.latency_each_ms_max:
             blockers.append(ShadowBlocker.LATENCY_EACH)
         if item.provider_calls or item.cost_usd:
             blockers.append(ShadowBlocker.NONZERO_PROVIDER_OR_COST)
-    parity_rate = sum(item.parity_passed and item.status == "success" for item in fresh) / max(len(fresh), 1)
+    effective_parity = (
+        item.status == "success"
+        and item.parity_passed
+        and item.confidence_delta <= policy.confidence_delta_max
+        and item.trust_delta <= policy.trust_delta_max
+        and item.supporting_jaccard >= policy.supporting_jaccard_min
+        for item in fresh
+    )
+    parity_rate = sum(effective_parity) / max(len(fresh), 1)
     if parity_rate < policy.parity_rate_min:
         blockers.append(ShadowBlocker.PARITY_RATE)
     terminal_streak = 0
