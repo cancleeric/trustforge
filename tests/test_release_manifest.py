@@ -45,6 +45,15 @@ def test_compute_manifest_fields(tmp_path: Path) -> None:
     assert manifest.config_snapshot_identity == expected_config_id
 
 
+def test_compute_manifest_uses_explicit_release_git_sha(tmp_path: Path) -> None:
+    manifest = compute_manifest(
+        _make_test_zip(tmp_path),
+        b"{}",
+        git_sha="a" * 40,
+    )
+    assert manifest.git_sha == "a" * 40
+
+
 def test_manifest_roundtrip() -> None:
     manifest = ReleaseManifest(
         artifact_digest="sha256:abc123",

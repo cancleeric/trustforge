@@ -8001,7 +8001,10 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET_impl(self, u, qs, client_ip):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
-        if u.path == "/.well-known/trustforge-release-manifest":
+        if u.path in {
+            "/.well-known/trustforge-release-manifest",
+            "/api/.well-known/trustforge-release-manifest",
+        }:
             if _ENDPOINT_MANIFEST_BODY is None:
                 return self._send(404, "not found", "text/plain; charset=utf-8")
             return self._send(
