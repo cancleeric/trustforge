@@ -7,7 +7,7 @@ There is no missing-row bootstrap path in application code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 import hashlib
 import json
@@ -32,6 +32,7 @@ CONTROL_KIND = "preview_admission_quarantine"
 CONTROL_SCHEMA_VERSION = 1
 FINGERPRINT_VERSION = 1
 _DOMAIN = b"TrustForge/PAP1/admission-write-plan/v1\x00"
+_HANDLE_DOMAIN = b"TrustForge/PAP1/admission-handle/v1\x00"
 _MAX_GENERATION = 10**38 - 1
 
 
@@ -63,6 +64,7 @@ class DispatchBinding:
     generation: int = field(repr=False)
     reservation_id: str = field(repr=False)
     plan_fingerprint: str = field(repr=False)
+    handle_fingerprint: str = field(repr=False)
     dispatch_lower: int = field(repr=False)
     dispatch_upper: int = field(repr=False)
 
@@ -72,6 +74,7 @@ class DispatchBinding:
             or not 1 <= self.generation <= _MAX_GENERATION
             or not _uuid(self.reservation_id)
             or not _digest(self.plan_fingerprint)
+            or not _digest(self.handle_fingerprint)
             or type(self.dispatch_lower) is not int
             or type(self.dispatch_upper) is not int
             or not 0 <= self.dispatch_lower <= self.dispatch_upper
@@ -248,6 +251,7 @@ class DurableAdmissionGate:
                     current.generation + 1,
                     plan.handle.reservation_id,
                     fingerprint,
+                    admission_handle_fingerprint(plan.handle),
                     dispatch_lower,
                     dispatch_upper,
                 )
@@ -314,7 +318,9 @@ class DurableAdmissionGate:
                     "#pk=:pk AND #sk=:sk AND #kind=:kind AND #schema=:schema "
                     "AND #state=:state AND #generation=:generation "
                     "AND #version=:version AND #reservation=:reservation "
-                    "AND #fingerprint=:fingerprint AND #lower=:lower AND #upper=:upper"
+                    "AND #fingerprint=:fingerprint "
+                    "AND #handle_fingerprint=:handle_fingerprint "
+                    "AND #lower=:lower AND #upper=:upper"
                 ),
                 "ExpressionAttributeNames": _NAMES,
                 "ExpressionAttributeValues": _expected_values(current),
@@ -434,6 +440,8 @@ class DurableAdmissionGate:
             or handle.created_lower != binding.dispatch_lower
             or handle.created_upper != binding.dispatch_upper
             or handle.lease_until != lease_until
+            or admission_handle_fingerprint(handle)
+            != binding.handle_fingerprint
         ):
             return unresolved
         with self._lock:
@@ -795,6 +803,16 @@ def admission_plan_fingerprint(plan: CompiledAdmissionPlan) -> str:
     return hashlib.sha256(_DOMAIN + encoded).hexdigest()
 
 
+def admission_handle_fingerprint(handle: AdmissionHandle) -> str:
+    if type(handle) is not AdmissionHandle:
+        raise ValueError("invalid admission handle")
+    handle.__post_init__()
+    encoded = json.dumps(
+        asdict(handle), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    return hashlib.sha256(_HANDLE_DOMAIN + encoded).hexdigest()
+
+
 def append_quarantine_action(
     plan: CompiledAdmissionPlan, gate: DurableAdmissionGate, binding: DispatchBinding
 ) -> dict[str, object]:
@@ -817,6 +835,7 @@ _NAMES = {
     "#version": "version",
     "#reservation": "reservation_id",
     "#fingerprint": "plan_fingerprint",
+    "#handle_fingerprint": "handle_fingerprint",
     "#lower": "dispatch_lower",
     "#upper": "dispatch_upper",
 }
@@ -841,6 +860,7 @@ def _control_item(
             {
                 "reservation_id": {"S": binding.reservation_id},
                 "plan_fingerprint": {"S": binding.plan_fingerprint},
+                "handle_fingerprint": {"S": binding.handle_fingerprint},
                 "dispatch_lower": {"N": str(binding.dispatch_lower)},
                 "dispatch_upper": {"N": str(binding.dispatch_upper)},
             }
@@ -862,6 +882,7 @@ def _put_request(
                 if expected.binding is None
                 else (
                     " AND #reservation=:reservation AND #fingerprint=:fingerprint "
+                    "AND #handle_fingerprint=:handle_fingerprint "
                     "AND #lower=:lower AND #upper=:upper"
                 )
             )
@@ -871,7 +892,10 @@ def _put_request(
             for key, value in _NAMES.items()
             if expected.binding is not None
             or key
-            not in {"#reservation", "#fingerprint", "#lower", "#upper"}
+            not in {
+                "#reservation", "#fingerprint", "#handle_fingerprint",
+                "#lower", "#upper",
+            }
         },
         "ExpressionAttributeValues": _expected_values(expected),
     }
@@ -892,6 +916,7 @@ def _expected_values(control: _Control) -> dict[str, object]:
             {
                 ":reservation": {"S": control.binding.reservation_id},
                 ":fingerprint": {"S": control.binding.plan_fingerprint},
+                ":handle_fingerprint": {"S": control.binding.handle_fingerprint},
                 ":lower": {"N": str(control.binding.dispatch_lower)},
                 ":upper": {"N": str(control.binding.dispatch_upper)},
             }
@@ -908,7 +933,8 @@ def _decode_control(item: object) -> _Control | None:
     try:
         state = GateState(_s(item["state"]))
         expected = base if state is GateState.OPEN else base | {
-            "reservation_id", "plan_fingerprint", "dispatch_lower", "dispatch_upper"
+            "reservation_id", "plan_fingerprint", "handle_fingerprint",
+            "dispatch_lower", "dispatch_upper"
         }
         if (
             set(item) != expected
@@ -928,6 +954,7 @@ def _decode_control(item: object) -> _Control | None:
                 generation,
                 _s(item["reservation_id"]),
                 _s(item["plan_fingerprint"]),
+                _s(item["handle_fingerprint"]),
                 _n(item["dispatch_lower"]),
                 _n(item["dispatch_upper"]),
             )

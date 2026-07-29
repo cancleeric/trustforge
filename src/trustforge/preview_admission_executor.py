@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
 from enum import StrEnum
-import hashlib
-import json
 import math
 import re
 import threading
-from typing import Mapping, Protocol
+from typing import Protocol
 
 from trustforge.preview_admission_compiler import (
     AdmissionCompileDenied,
@@ -178,7 +176,7 @@ class PreviewAdmissionExecutor:
     @property
     def latched_closed(self) -> bool:
         with self._write_gate:
-            return self._latched_closed
+            return self._latched_closed or not self._durable_gate.ready
 
     def resolve_ambiguity(self, resolver: AdmissionAmbiguityResolver) -> bool:
         """Resolve under the same gate as writes; false/exception remains closed."""
@@ -311,18 +309,18 @@ class PreviewAdmissionExecutor:
                     if not self._durable_gate.confirm_rejected(binding):
                         self._latched_closed = True
                     return _UNAVAILABLE
-                self._latch(plan.handle, request.interval, write_request)
+                self._latch(plan.handle, request.interval, binding)
                 self._durable_gate.close()
                 return _UNAVAILABLE
             if not _confirmed_success(response):
-                self._latch(plan.handle, request.interval, write_request)
+                self._latch(plan.handle, request.interval, binding)
                 self._durable_gate.close()
                 return _UNAVAILABLE
             if (
                 binding is None
                 or not self._durable_gate.confirm_admitted(binding, plan.handle)
             ):
-                self._latch(plan.handle, request.interval, write_request)
+                self._latch(plan.handle, request.interval, binding)
                 return _UNAVAILABLE
             return AdmissionExecutionResult(
                 AdmissionOutcome.ADMITTED, handle=plan.handle
@@ -332,15 +330,12 @@ class PreviewAdmissionExecutor:
         self,
         handle: AdmissionHandle,
         interval: TrustedUtcInterval,
-        write_request: Mapping[str, object],
+        binding: DispatchBinding,
     ) -> None:
         # Called only while _write_gate is held.
-        canonical = json.dumps(
-            write_request, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        ).encode("ascii")
         self._ambiguity = AdmissionAmbiguity(
             handle=handle,
-            write_fingerprint=hashlib.sha256(canonical).hexdigest(),
+            write_fingerprint=binding.plan_fingerprint,
             interval=interval,
         )
         self._latched_closed = True

@@ -74,6 +74,8 @@ class RecoveryClient(Protocol):
     def get_item(self, **kwargs: object) -> object: ...
     def query(self, **kwargs: object) -> object: ...
     def put_item(self, **kwargs: object) -> object: ...
+    def transact_get_items(self, **kwargs: object) -> object: ...
+    def transact_write_items(self, **kwargs: object) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,15 +227,22 @@ class PreviewLeaseRecovery:
             return RecoveryResult(RecoveryOutcome.UNAVAILABLE, 0, 0)
 
     def _fence_allows_uncertain(self) -> bool:
+        return self._read_open_control() is not None
+
+    def _read_open_control(self) -> object:
         response = self._client.get_item(
             TableName=self._table,
             Key=ADMISSION_CONTROL_KEY,
             ConsistentRead=True,
         )
         if type(response) is not dict or set(response) < {"Item"}:
-            return False
+            return None
         control = _decode_control(response["Item"])
-        return control is not None and control.state is GateState.OPEN
+        return (
+            control
+            if control is not None and control.state is GateState.OPEN
+            else None
+        )
 
     def _read_watermark(self) -> _Watermark:
         response = self._client.get_item(
@@ -272,11 +281,14 @@ class PreviewLeaseRecovery:
         if following.shard > MAX_EPOCH_MINUTE:
             raise ValueError("watermark exhausted")
         item = _watermark_item(following)
+        control = self._read_open_control()
+        if control is None:
+            raise ValueError("admission fence is not open")
         try:
-            response = self._client.put_item(
-                TableName=self._table,
-                Item=_ddb_map(item),
-                ConditionExpression=(
+            checkpoint = {
+                "TableName": self._table,
+                "Item": _ddb_map(item),
+                "ConditionExpression": (
                     "#kind=:kind AND #schema=:schema AND #version=:version "
                     "AND #shard=:shard"
                     + (
@@ -285,14 +297,14 @@ class PreviewLeaseRecovery:
                         else " AND attribute_not_exists(#last)"
                     )
                 ),
-                ExpressionAttributeNames={
+                "ExpressionAttributeNames": {
                     "#kind": "kind",
                     "#schema": "schema_version",
                     "#version": "version",
                     "#shard": "shard",
                     "#last": "last_sk",
                 },
-                ExpressionAttributeValues=_ddb_map(
+                "ExpressionAttributeValues": _ddb_map(
                     {
                         ":kind": "preview_recovery_watermark",
                         ":schema": SCHEMA_VERSION,
@@ -305,13 +317,54 @@ class PreviewLeaseRecovery:
                         ),
                     }
                 ),
+            }
+            response = self._client.transact_write_items(
+                TransactItems=[
+                    {"Put": checkpoint},
+                    {"ConditionCheck": _open_condition(self._table, control)},
+                ]
             )
             if not _confirmed(response):
                 raise ValueError("ambiguous watermark")
             return following
         except Exception:
             # Response loss is safe only when a strong read proves this exact CAS.
-            return following if self._read_watermark() == following else (_raise())
+            return (
+                following
+                if self._prove_checkpoint_and_open(following, control)
+                else (_raise())
+            )
+
+    def _prove_checkpoint_and_open(
+        self, expected: _Watermark, control: object
+    ) -> bool:
+        try:
+            response = self._client.transact_get_items(
+                TransactItems=[
+                    {
+                        "Get": {
+                            "TableName": self._table,
+                            "Key": _ddb_map({"pk": CONTROL_PK, "sk": CONTROL_SK}),
+                        }
+                    },
+                    {
+                        "Get": {
+                            "TableName": self._table,
+                            "Key": ADMISSION_CONTROL_KEY,
+                        }
+                    },
+                ]
+            )
+            responses = response["Responses"]
+            if type(responses) is not list or len(responses) != 2:
+                return False
+            watermark = _decode_watermark(
+                _decode_map(responses[0]["Item"])
+            )
+            actual_control = _decode_control(responses[1]["Item"])
+            return watermark == expected and actual_control == control
+        except Exception:
+            return False
 
     def _now(self) -> float:
         value = self._monotonic()
@@ -355,7 +408,7 @@ class PreviewAmbiguityRecovery:
     ) -> AdmissionAmbiguityResolution | None:
         return (
             _confirmed_ambiguity_resolution(ambiguity)
-            if self._recover(ambiguity.handle)
+            if self._recover(ambiguity)
             else None
         )
 
@@ -364,12 +417,26 @@ class PreviewAmbiguityRecovery:
 
         return self._recover(None)
 
-    def _recover(self, expected: AdmissionHandle | None) -> bool:
+    def _recover(self, expected: AdmissionAmbiguity | None) -> bool:
         try:
+            binding = self._gate.pending_binding
+            if binding is None:
+                return False
             proof = self._gate.prove_pending_present()
             if (
                 proof.disposition is not ProofDisposition.PRESENT
-                or (expected is not None and proof.handle != expected)
+                or (
+                    expected is not None
+                    and (
+                        proof.handle != expected.handle
+                        or expected.write_fingerprint
+                        != binding.plan_fingerprint
+                        or expected.interval.earliest
+                        != binding.dispatch_lower
+                        or expected.interval.latest
+                        != binding.dispatch_upper
+                    )
+                )
             ):
                 return False
             authority = self._gate.pre_provider_abort_authority(proof)
@@ -498,6 +565,39 @@ def _watermark_item(value: _Watermark) -> dict[str, object]:
         "version": value.version,
         "shard": value.shard,
         **({"last_sk": value.last_sk} if value.last_sk is not None else {}),
+    }
+
+
+def _open_condition(table: str, control: object) -> dict[str, object]:
+    if (
+        getattr(control, "state", None) is not GateState.OPEN
+        or type(getattr(control, "generation", None)) is not int
+        or type(getattr(control, "version", None)) is not int
+    ):
+        raise ValueError("invalid open control")
+    return {
+        "TableName": table,
+        "Key": ADMISSION_CONTROL_KEY,
+        "ConditionExpression": (
+            "#kind=:kind AND #schema=:schema AND #state=:open "
+            "AND #generation=:generation AND #version=:version"
+        ),
+        "ExpressionAttributeNames": {
+            "#kind": "kind",
+            "#schema": "schema_version",
+            "#state": "state",
+            "#generation": "generation",
+            "#version": "version",
+        },
+        "ExpressionAttributeValues": _ddb_map(
+            {
+                ":kind": "preview_admission_quarantine",
+                ":schema": 1,
+                ":open": "open",
+                ":generation": control.generation,
+                ":version": control.version,
+            }
+        ),
     }
 
 

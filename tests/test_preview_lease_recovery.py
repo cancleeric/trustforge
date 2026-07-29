@@ -129,9 +129,24 @@ class Client:
         }
 
     def transact_get_items(self, **kwargs):
-        raise AssertionError("unexpected D1 read")
+        return {
+            "Responses": [
+                {"Item": self.item},
+                {"Item": self.admission_control},
+            ]
+        }
 
     def transact_write_items(self, **kwargs):
+        actions = kwargs["TransactItems"]
+        if len(actions) == 2 and "ConditionCheck" in actions[1]:
+            self.item = actions[0]["Put"]["Item"]
+            self.puts.append(actions[0]["Put"])
+            return {
+                "ResponseMetadata": {
+                    "HTTPStatusCode": 200,
+                    "RequestId": "checkpoint",
+                }
+            }
         raise AssertionError("unexpected D1 write")
 
 
@@ -359,6 +374,10 @@ def test_moto_real_query_paginates_and_resumes_101_terminal_rows():
         ],
         BillingMode="PAY_PER_REQUEST",
     )
+    client.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
     base = _handle()
     client.put_item(
         TableName="preview-store",
@@ -459,6 +478,10 @@ def test_late_known_wins_or_uncertain_wins_without_fact_rewrite():
     _create(client)
     request = _request()
     handle = _admit(client, request)
+    client.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
     interval = TrustedUtcInterval(
         handle.expiry_shard * 60 + 60, handle.expiry_shard * 60 + 61
     )
@@ -605,7 +628,11 @@ def test_two_real_reapers_converge_without_double_release_or_skip():
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(run, range(2)))
 
-    assert {result.outcome for result in results} == {
+    # The CAS loser may also report progressed only after its transactional
+    # proof observes the exact same following watermark and unchanged OPEN.
+    outcomes = {result.outcome for result in results}
+    assert RecoveryOutcome.PROGRESSED in outcomes
+    assert outcomes <= {
         RecoveryOutcome.PROGRESSED,
         RecoveryOutcome.UNAVAILABLE,
     }
