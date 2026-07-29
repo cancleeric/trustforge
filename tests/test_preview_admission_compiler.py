@@ -14,7 +14,6 @@ from trustforge.preview_admission_compiler import (
     AdmissionSnapshots,
     AdmissionCompileDenied,
     AdmissionCompileRequest,
-    AdmissionDeniedReason,
     build_counter_specs,
     compile_admission,
     decode_counter_item,
@@ -302,7 +301,7 @@ def test_handle_and_reservation_item_have_exact_safe_parity():
     assert type(handle) is AdmissionHandle
     assert handle == AdmissionHandle(
         RESERVATION, OWNER, DIGEST_A, DIGEST_B, 1, "19700101", 512, 1000,
-        60, 61, 76, 1, None, 1, 1, 1,
+        60, 61, 76, 1, POLICY, None, 1, 1, 1,
     )
     item = plan.write_request["TransactItems"][-1]["Put"]["Item"]
     expected = {
@@ -310,7 +309,7 @@ def test_handle_and_reservation_item_have_exact_safe_parity():
         "owner_digest", "identity_digest", "previous_identity_digest",
         "epoch_minute", "utc_day", "reserved_tokens", "reserved_micro_usd",
         "created_lower", "created_upper", "lease_until", "expiry_shard",
-        "policy_version", "key_version", "schema_version",
+        "policy_digest", "policy_version", "key_version", "schema_version",
     }
     assert set(item) == expected
     for field in expected - {"pk", "sk", "kind", "status", "version", "ttl"}:
@@ -571,6 +570,7 @@ def test_admission_snapshots_rejects_malformed_circuit_key_grammar():
         ("created_upper", 121),
         ("lease_until", 75),
         ("expiry_shard", 2),
+        ("policy_digest", "d" * 63),
         ("circuit_half_open_owner", DIGEST_B),
         ("policy_version", True),
         ("policy_version", 2),

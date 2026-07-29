@@ -151,6 +151,7 @@ class AdmissionHandle:
     created_upper: int
     lease_until: int
     expiry_shard: int
+    policy_digest: str
     circuit_half_open_owner: str | None
     policy_version: int
     key_version: int
@@ -191,6 +192,7 @@ class AdmissionHandle:
             or self.lease_until > MAX_EPOCH_SECOND
             or type(self.expiry_shard) is not int
             or self.expiry_shard != self.lease_until // 60
+            or not _digest(self.policy_digest)
             or (
                 self.circuit_half_open_owner is not None
                 and (
@@ -643,7 +645,7 @@ def _build_handle(
         request.previous_identity_digest, request.buckets.epoch_minute,
         request.buckets.utc_day, request.reserved_tokens,
         request.reserved_micro_usd, created_lower, created_upper, lease_until,
-        lease_until // 60, half_open_owner, request.policy_version,
+        lease_until // 60, request.policy_digest, half_open_owner, request.policy_version,
         request.key_version, request.schema_version,
     )
 
@@ -661,6 +663,7 @@ def _reservation_put(handle: AdmissionHandle, table: str) -> dict[str, object]:
         "reserved_micro_usd": handle.reserved_micro_usd,
         "created_lower": handle.created_lower, "created_upper": handle.created_upper,
         "lease_until": handle.lease_until, "expiry_shard": handle.expiry_shard,
+        "policy_digest": handle.policy_digest,
         "policy_version": handle.policy_version, "key_version": handle.key_version,
         "schema_version": handle.schema_version,
     }
