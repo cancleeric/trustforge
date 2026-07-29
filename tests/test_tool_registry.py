@@ -224,6 +224,19 @@ class TestSecurityChecks:
         """Unknown tool → requires approval (fail-closed)."""
         assert repo.requires_approval("ghost-tool") is True
 
+    def test_assert_executable_blocks_read_only_always_approval(
+        self, repo: ToolRegistryRepository
+    ):
+        repo.register_tool(
+            _make_cap(
+                tool_id="approved-read-tool",
+                side_effect_class="read_only",
+                approval_requirement="always",
+            )
+        )
+        with pytest.raises(PermissionError, match="requires human approval"):
+            repo.assert_executable("approved-read-tool")
+
     def test_can_produce_evidence_none(self, repo: ToolRegistryRepository):
         repo.register_tool(_make_cap(tool_id="ev-none", evidence_class="none"))
         assert repo.can_produce_evidence("ev-none") is False

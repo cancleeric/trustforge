@@ -214,6 +214,40 @@ def test_snapshot_does_not_execute_when_receipt_persistence_fails(
     assert called is False
 
 
+def test_snapshot_postprocessing_failure_completes_receipt(
+    tmp_path, monkeypatch
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    completed = []
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(flow, "_agos_begin_tool", lambda *args: "inv-postprocess")
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs()
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.doc_to_dict",
+        lambda _doc: (_ for _ in ()).throw(ValueError("serialize failed")),
+    )
+
+    with pytest.raises(ValueError, match="serialize failed"):
+        flow.create_snapshot("BTC")
+
+    assert completed == [
+        {
+            "invocation_id": "inv-postprocess",
+            "status": "failed",
+            "error": "serialize failed",
+        }
+    ]
+
+
 def test_same_snapshot_matrix_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")

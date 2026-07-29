@@ -1808,35 +1808,41 @@ class AnalysisFlow:
                 invocation_id, status="failed", error=str(exc)
             )
             raise
-        raw = [doc_to_dict(doc) for doc in docs]
-        encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        revision = hashlib.sha256(encoded.encode()).hexdigest()
-        snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
-        if invocation_id is not None:
-            try:
+        try:
+            raw = [doc_to_dict(doc) for doc in docs]
+            encoded = json.dumps(
+                raw, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            revision = hashlib.sha256(encoded.encode()).hexdigest()
+            snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
+            if invocation_id is not None:
                 self._get_agos_runtime().associate_tool_invocation_run(
                     invocation_id, snapshot_id
                 )
-            except Exception as exc:
-                self._agos_complete_tool(
-                    invocation_id, status="failed", error=str(exc)
+            cursor = self._conn().execute(
+                "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
+                (snapshot_id, coin, time.time(), revision, encoded, len(raw)),
+            )
+            if cursor.rowcount:
+                self._append_lineage(
+                    "snapshot_created", entity_type="snapshot",
+                    entity_id=snapshot_id, snapshot_id=snapshot_id,
+                    metadata={
+                        "coin": coin,
+                        "source_revision": revision,
+                        "document_count": len(raw),
+                    },
                 )
-                raise
+        except Exception as exc:
+            self._agos_complete_tool(
+                invocation_id, status="failed", error=str(exc)
+            )
+            raise
         self._agos_complete_tool(
             invocation_id,
             output=raw,
             status="success",
         )
-        cursor = self._conn().execute(
-            "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
-            (snapshot_id, coin, time.time(), revision, encoded, len(raw)),
-        )
-        if cursor.rowcount:
-            self._append_lineage(
-                "snapshot_created", entity_type="snapshot", entity_id=snapshot_id,
-                snapshot_id=snapshot_id,
-                metadata={"coin": coin, "source_revision": revision, "document_count": len(raw)},
-            )
         return snapshot_id
 
     def enqueue_matrix(self, snapshot_id: str, *, questions: dict[str, str] | None = None) -> list[str]:

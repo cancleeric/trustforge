@@ -376,10 +376,12 @@ class ToolRegistryRepository:
                 f"tool '{tool_id}' is not registered; unknown tools cannot execute"
             )
         tool = self.get_tool(tool_id)
-        if tool and tool.side_effect_class in _HIGH_RISK_SIDE_EFFECTS:
+        if self.requires_approval(tool_id):
             raise PermissionError(
                 f"tool '{tool_id}' requires human approval "
-                f"(side_effect_class={tool.side_effect_class}); "
+                f"(side_effect_class={tool.side_effect_class if tool else 'unknown'}, "
+                f"approval_requirement="
+                f"{tool.approval_requirement if tool else 'unknown'}); "
                 f"cannot auto-execute"
             )
 
