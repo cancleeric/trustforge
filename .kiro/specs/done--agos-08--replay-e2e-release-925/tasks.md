@@ -76,16 +76,17 @@
 - [x] 真 `web.Handler`／TCP／外層 `X-Admin-Token` 未授權契約：401
 - [x] 真 `web.Handler` authenticated success 契約：AGOS route 以 `str`
   傳入 `_send()`；授權成功回應為 200 且 JSON contract 通過
-- [ ] 人工 desktop/mobile Eye scan — open CPO blocker
-- [ ] harper CISO disposition — pending; no self-approval
-- [x] gray CPO disposition — BLOCKED pending docs/Eye closeout
+- [x] Browser Eye：desktop `1440x1000`、mobile `390x844` 全部狀態通過
+- [x] Eye CLI：exact PR range breaking changes `0 critical / 0 warning`
+- [x] harper CISO disposition — APPROVED for exact HEAD；無未解 security finding
+- [x] gray CPO disposition — APPROVED for exact HEAD
+- [x] Codex CLI adversarial review — clean
 - [x] DB authorization receipt — Eric created
   `/tmp/eric-auth-20260729-trustforge-agos-schema-closeout.token`; the exact
   receipt was verified without production DB access
 
-### Explicitly open mandatory scope
+### Mandatory scope closeout
 
 Replay tamper/memory-hash coverage, AGOS-on/off non-regression, lineage
-consistency, security guards, and the repository-local release gate now have
-concrete test/pre-push evidence. Remaining mandatory gates are the manual
-desktop/mobile Eye scan and commit-bound CISO/CPO re-review.
+consistency, security guards, repository-local release gate, Browser Eye,
+Eye CLI、Codex adversarial review 與 commit-bound CISO/CPO re-review 均完成。
