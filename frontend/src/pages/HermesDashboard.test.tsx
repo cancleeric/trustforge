@@ -440,4 +440,17 @@ describe('N70 控制項位置', () => {
     fireEvent.click(toggle)
     expect(container.querySelector('.hermes-beginner-narrative')).not.toBeNull()
   })
+
+  it('比較工作區開啟時保留不可互動的低干擾星系背景', () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={['/?qa=1&workspace=compare&experience=full']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+      </MemoryRouter>,
+    )
+    const galaxy = container.querySelector("[data-region='galaxy']")
+    expect(galaxy).not.toBeNull()
+    expect(galaxy).toHaveClass('hermes-galaxy-background')
+    expect(galaxy).toHaveAttribute('aria-hidden', 'true')
+    expect(galaxy).toHaveAttribute('inert')
+  })
 })
