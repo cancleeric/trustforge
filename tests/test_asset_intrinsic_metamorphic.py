@@ -271,7 +271,7 @@ def test_no_real_symbol_leaks_into_synthetic_manifest_sections(token: str) -> No
 
 # Coverage completeness: every dimension status, dimension reason_code, and gate
 # reason_code the assessor can emit is exercised by the benchmark corpus plus
-# the conflicted direct-view probe.
+# the conflicted canonical PIT probe.
 def test_coverage_completeness_all_statuses_and_reason_codes_triggered() -> None:
     records = bm.load_corpus(BENCHMARK_CORPUS, Path(__file__).parents[1])
     manifest = bm.run_benchmark_from_records(records, pit_cutoff=PIT_CUTOFF, seed=bm.DEFAULT_SEED)
