@@ -3,7 +3,7 @@
 > Epic: [#914](https://github.com/cancleeric/trustforge/issues/914)
 > Issue: [#925](https://github.com/cancleeric/trustforge/issues/925)
 > Date: 2026-07-29
-> Status: BLOCKED — remediation and commit-bound re-review required
+> Status: BLOCKED — CPO docs/Eye closeout and CISO disposition pending
 > Branch: `agos/915-architecture-contracts`
 
 ## Reviewer Information
@@ -11,7 +11,13 @@
 - Implementation: Kiro (automated)
 - Security review required: harper (CISO)
 - Product review required: gray (CPO)
-- Reviewed commit: `5e9466abc13656cb76bd9039c99aaaca4a45a59a`
+- Implementation baseline reconciled:
+  `ef14855bd8e898f1c8ca2a4167f78324ea4df846`
+- Closeout review binding: the commit containing this document must be reviewed
+  again after integration if production code has advanced beyond that baseline
+- CPO disposition: BLOCKED pending truthful task/backlog reconciliation and
+  desktop/mobile Eye review
+- CISO disposition: pending; this document does not self-approve security
 
 ## Security Controls Implemented
 
@@ -19,11 +25,9 @@
 
 **Mechanism**: `/tmp/eric-auth-YYYYMMDD-trustforge-{purpose}.token`
 **Content**: `authorized {purpose} YYYY-MM-DD`
-**Known blocker**: `_is_pytest()` currently trusts module presence and can be
-injected. Authorization is also checked only when a DB file is absent, rather
-than immediately before each schema/version mutation. Direct `_upgrade()` and
-rollback paths are not yet guarded. This control is not approved.
-**Tests**: 12 tests verify block/pass/no-bypass behavior
+Authorization is centralized at the schema mutation boundary; direct upgrade
+and rollback paths are covered by the same guard. No unresolved DB authorization
+claim is recorded here. Production use still requires Eric's same-day token.
 
 ### 2. Tool Execution Gate — Fail-Closed on Init Failure
 
@@ -88,43 +92,30 @@ Context endpoint returns: `included_refs`, `excluded_refs` (with reasons), `excl
 
 ## Test Evidence
 
-The counts below are a historical implementation-round snapshot, not a claim
-that the current full repository gate was rerun during this closeout.
+Evidence is commit-bound to
+`ef14855bd8e898f1c8ca2a4167f78324ea4df846`.
 
 | Test scope | Recorded result |
 |------------|-----------------|
-| `tests/test_agos_db_auth.py` | 12 PASS |
-| `tests/test_memory_os.py` | 27 PASS |
-| `tests/test_skill_registry.py` | 35 PASS |
-| `tests/test_tool_registry.py` | 33 PASS |
-| `tests/test_memory_retrieval.py` | 18 PASS |
-| `tests/test_skill_loader.py` | 26 PASS |
-| `tests/test_context_builder.py` | 19 PASS |
-| `tests/test_agos_runtime.py` | 21 PASS |
-| `tests/test_agos_admin_api.py` | 18 PASS |
-| `tests/test_agos_e2e.py` | 17 PASS |
-| Frontend (AgosBadge + AdminAgosPage) | 15 PASS |
-| Closeout targeted run: HTTP/Admin/runtime/E2E/analysis-flow | 91 PASS |
+| Current targeted AGOS backend run | 225 PASS |
+| Current targeted Admin AGOS frontend run | 18 PASS |
+| Current frontend production build | PASS |
+| Authenticated real-handler HTTP E2E | PASS (included above) |
 | Full pre-push backend parallel lane | 6007 PASS, 12 skipped |
 | Full pre-push backend serial lane | 3 PASS, 1 skipped |
 | Full pre-push frontend | 596 PASS |
 
-### Open HTTP E2E Finding
-
-`tests/test_agos_http_e2e.py` crosses the real `web.Handler` over a TCP
-connection. It verifies that a request without `X-Admin-Token` is rejected with
-HTTP 401. The authenticated success contract is intentionally a strict XFAIL:
-the AGOS route serializes the dispatcher result to `bytes`, while
-`Handler._send()` expects `str` and calls `.encode()`. The connection closes
-without a response. The production backend fix was outside the docs/test-only
-scope of this closeout, so true authenticated HTTP success is **not complete**.
+The full pre-push results are the recorded HEAD gate results. The 225-test
+targeted AGOS run was rerun during this reconciliation. No expected-failure
+exception remains claimed. Mandatory replay, non-regression, lineage-consistency, Eye, and human
+review items that lack concrete evidence remain open in the #925 task record.
 
 ## Disposition
 
 - [ ] harper (CISO): APPROVED / BLOCKED
-- [ ] gray (CPO): APPROVED / BLOCKED
+- [x] gray (CPO): BLOCKED — docs reconciliation and Eye review pending
 - [ ] /codex-review adversarial gate: PASS / FAIL
-- [ ] Authenticated real-handler HTTP E2E: PASS / FAIL
+- [x] Authenticated real-handler HTTP E2E: PASS
 
 ## Activation Conditions
 

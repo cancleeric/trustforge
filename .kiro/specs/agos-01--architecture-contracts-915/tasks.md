@@ -13,8 +13,8 @@
   - 定義 memory_link schema（relationship edges）
   - 定義 retrieval lineage 欄位（run_id, rank, reason）
   - 定義 validity window 語義
-- [ ] Cross-link to TRUST-KERNEL-BOUNDARY.md
-- [ ] Cross-link to Epic #914
+- [x] Cross-link to TRUST-KERNEL-BOUNDARY.md
+- [x] Cross-link to Epic #914
 
 ## Task 2: 撰寫 Task Skill Contract
 
@@ -27,8 +27,8 @@
   - 定義 lifecycle status enum（draft → staged → active → frozen → retired）
   - 明確列出與既有 5 outer-policy family 的共存關係
   - 明確禁止 skill output 覆寫 Trust Kernel / security / cost / deploy
-- [ ] Cross-link to Memory OS Contract + Tool Capability Contract
-- [ ] Cross-link to existing `SKILL-CHANGE-CONTROL.md`
+- [x] Cross-link to Memory OS Contract + Tool Capability Contract
+- [x] Cross-link to existing `SKILL-CHANGE-CONTROL.md`
 
 ## Task 3: 撰寫 Tool Capability Contract
 
@@ -40,7 +40,7 @@
   - 明確 `external_write` + `deploy_or_release` → always human approval
   - 明確 `context_only` output 不可進入 Evidence
   - 定義 timeout / retry policy 欄位
-- [ ] Cross-link to Task Skill Contract + Context Manifest Contract
+- [x] Cross-link to Task Skill Contract + Context Manifest Contract
 
 ## Task 4: 撰寫 Context Manifest Contract
 
@@ -51,7 +51,7 @@
   - 定義 immutability guarantee（freeze-on-create）
   - 定義 deterministic hash 計算方式
   - 定義 Report / Admin summary 揭露義務
-- [ ] Cross-link to all other three contracts
+- [x] Cross-link to all other three contracts
 
 ## Task 5: 建立 Backlog Index
 
@@ -63,14 +63,20 @@
   - H-36: Memory Retrieval / RAG Adapter (#919)
   - H-37: Skill Loader / Governance (#920)
   - H-38: Context Builder (#921)
-- [ ] 每筆含 ID, title, status, issue ref, priority, dependencies, safety boundary
-- [ ] Link to Epic #914 and development plan
+- [x] 每筆含 ID, title, status, issue ref, priority, dependencies, safety boundary
+- [x] Link to Epic #914 and development plan
 
 ## Task 6: Cross-linking 與驗證
 
-- [ ] 四份 contract 互相 cross-link 確認（相對路徑正確）
-- [ ] 各 contract link back to `TRUST-KERNEL-BOUNDARY.md`
-- [ ] 各 contract link back to Epic #914
-- [ ] Backlog entries link to 對應 contract
-- [ ] 確認 markdown lint 通過
-- [ ] 確認 pre-push gate 通過
+- [x] 四份 contract 互相 cross-link 確認（相對路徑正確）
+- [x] 各 contract link back to `TRUST-KERNEL-BOUNDARY.md`
+- [x] 各 contract link back to Epic #914
+- [x] Backlog entries link to 對應 contract
+- [x] 確認 markdown lint 通過
+- [x] 確認 pre-push gate 通過
+
+### HEAD evidence
+
+Contracts and links are present under `docs/contracts/`; the backlog links each
+deliverable. Recorded HEAD gates are listed in
+`docs/audit/AGOS-SECURITY-DISPOSITION.md`.

@@ -21,7 +21,7 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 | Field | Value |
 |-------|-------|
 | Issue | [#916](https://github.com/cancleeric/trustforge/issues/916) |
-| Status | Open |
+| Status | Implemented / in review |
 | Priority | P0 |
 | Depends on | #915 (this doc) |
 | Contract | [MEMORY-OS-CONTRACT](../contracts/MEMORY-OS-CONTRACT.md) |
@@ -35,7 +35,7 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 | Field | Value |
 |-------|-------|
 | Issue | [#917](https://github.com/cancleeric/trustforge/issues/917) |
-| Status | Open |
+| Status | Implemented / in review |
 | Priority | P0 |
 | Depends on | #915 (this doc) |
 | Contract | [TASK-SKILL-CONTRACT](../contracts/TASK-SKILL-CONTRACT.md) |
@@ -49,7 +49,7 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 | Field | Value |
 |-------|-------|
 | Issue | [#918](https://github.com/cancleeric/trustforge/issues/918) |
-| Status | Open |
+| Status | Implemented / in review |
 | Priority | P0 |
 | Depends on | #915 (this doc) |
 | Contract | [TOOL-CAPABILITY-CONTRACT](../contracts/TOOL-CAPABILITY-CONTRACT.md) |
@@ -63,7 +63,7 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 | Field | Value |
 |-------|-------|
 | Issue | [#919](https://github.com/cancleeric/trustforge/issues/919) |
-| Status | Open |
+| Status | Implemented / in review |
 | Priority | P0 |
 | Depends on | #916 |
 | Contract | [MEMORY-OS-CONTRACT](../contracts/MEMORY-OS-CONTRACT.md) §5 Retrieval Lineage |
@@ -77,7 +77,7 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 | Field | Value |
 |-------|-------|
 | Issue | [#920](https://github.com/cancleeric/trustforge/issues/920) |
-| Status | Open |
+| Status | Implemented / in review |
 | Priority | P0 |
 | Depends on | #917 |
 | Contract | [TASK-SKILL-CONTRACT](../contracts/TASK-SKILL-CONTRACT.md) §7 Frozen Manifest |
@@ -91,7 +91,7 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 | Field | Value |
 |-------|-------|
 | Issue | [#921](https://github.com/cancleeric/trustforge/issues/921) |
-| Status | Open |
+| Status | Implemented / in review |
 | Priority | P0 |
 | Depends on | #916, #917, #918, #920 |
 | Contract | [CONTEXT-MANIFEST-CONTRACT](../contracts/CONTEXT-MANIFEST-CONTRACT.md) |
@@ -124,7 +124,10 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 
 | ID | Item | Status |
 |----|------|--------|
-| H-39 | Runtime Integration | [#922](https://github.com/cancleeric/trustforge/issues/922) — depends #919, #920, #921 |
-| H-40 | Admin Summary API | [#923](https://github.com/cancleeric/trustforge/issues/923) — depends #922 |
-| H-41 | Admin UI Rails | [#924](https://github.com/cancleeric/trustforge/issues/924) — depends #923 |
-| H-42 | Replay/E2E/Release | [#925](https://github.com/cancleeric/trustforge/issues/925) — depends #922, #924 |
+| H-39 | Runtime Integration | Implemented / in review — [#922](https://github.com/cancleeric/trustforge/issues/922); mandatory regression and lineage gates remain open |
+| H-40 | Admin Summary API | Implemented / in review — [#923](https://github.com/cancleeric/trustforge/issues/923); real-handler auth success is covered |
+| H-41 | Admin UI Rails | Implemented / in review — [#924](https://github.com/cancleeric/trustforge/issues/924); desktop/mobile Eye review remains open |
+| H-42 | Replay/E2E/Release | In review / blocked — [#925](https://github.com/cancleeric/trustforge/issues/925); replay, regression, lineage, CISO, and Eye gates are not complete |
+
+Statuses are implementation states, not release approval. No item above is `Done`
+until all mandatory #925 gates and human dispositions are complete.

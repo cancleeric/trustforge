@@ -5,7 +5,7 @@ skill manifest, tool invocation, and context manifest queries.
 
 Design principles:
   - Read-only: all endpoints are GET, no mutation
-  - Authorization-gated: TRUSTFORGE_ADMIN_TOKEN as Bearer token
+- Authorization-gated by outer web handler using `X-Admin-Token`
   - Content redaction: sensitive memory content redacted by default
   - Typed envelopes: consistent response format
   - Zero third-party dependencies

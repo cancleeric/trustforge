@@ -75,7 +75,16 @@
 - [x] 真 `web.Handler`／TCP／外層 `X-Admin-Token` 未授權契約：401
 - [x] 真 `web.Handler` authenticated success 契約：AGOS route 以 `str`
   傳入 `_send()`；授權成功回應為 200 且 JSON contract 通過
-- [ ] 人工 desktop/mobile Eye scan
-- [ ] harper CISO disposition
-- [ ] gray CPO disposition
-- [ ] DB authorization receipt
+- [ ] 人工 desktop/mobile Eye scan — open CPO blocker
+- [ ] harper CISO disposition — pending; no self-approval
+- [x] gray CPO disposition — BLOCKED pending docs/Eye closeout
+- [ ] DB authorization receipt — deferred until production activation; the
+  centralized schema guard is implemented/tested, but no production token is
+  claimed
+
+### Explicitly open mandatory scope
+
+Replay tamper/memory-hash coverage, AGOS-on/off non-regression, lineage
+consistency, and release meta-gates above remain unchecked because HEAD has no
+concrete replacement evidence. Passing focused tests do not imply epic or
+release completion.
