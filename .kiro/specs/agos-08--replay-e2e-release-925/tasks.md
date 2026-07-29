@@ -73,9 +73,8 @@
 ### Closeout 補充（2026-07-29）
 
 - [x] 真 `web.Handler`／TCP／外層 `X-Admin-Token` 未授權契約：401
-- [ ] 真 `web.Handler` authenticated success 契約：目前 strict XFAIL；AGOS
-  route 傳 `bytes` 給預期 `str` 的 `_send()`，production backend 修正不在本
-  docs/test-only closeout 權限內
+- [x] 真 `web.Handler` authenticated success 契約：AGOS route 以 `str`
+  傳入 `_send()`；授權成功回應為 200 且 JSON contract 通過
 - [ ] 人工 desktop/mobile Eye scan
 - [ ] harper CISO disposition
 - [ ] gray CPO disposition

@@ -3,7 +3,7 @@
 > Epic: [#914](https://github.com/cancleeric/trustforge/issues/914)
 > Issue: [#925](https://github.com/cancleeric/trustforge/issues/925)
 > Date: 2026-07-29
-> Status: AWAITING CISO/CPO REVIEW (harper + gray must sign off)
+> Status: BLOCKED — remediation and commit-bound re-review required
 > Branch: `agos/915-architecture-contracts`
 
 ## Reviewer Information
@@ -11,7 +11,7 @@
 - Implementation: Kiro (automated)
 - Security review required: harper (CISO)
 - Product review required: gray (CPO)
-- Commit: (to be filled after push)
+- Reviewed commit: `5e9466abc13656cb76bd9039c99aaaca4a45a59a`
 
 ## Security Controls Implemented
 
@@ -19,8 +19,10 @@
 
 **Mechanism**: `/tmp/eric-auth-YYYYMMDD-trustforge-{purpose}.token`
 **Content**: `authorized {purpose} YYYY-MM-DD`
-**Bypass**: Only `_is_pytest()` (detects pytest module in sys.modules; cannot be faked by env var)
-**Enforcement**: Called at top of `memory_os.upgrade()`, `skill_registry.upgrade()`, `tool_registry.upgrade()`
+**Known blocker**: `_is_pytest()` currently trusts module presence and can be
+injected. Authorization is also checked only when a DB file is absent, rather
+than immediately before each schema/version mutation. Direct `_upgrade()` and
+rollback paths are not yet guarded. This control is not approved.
 **Tests**: 12 tests verify block/pass/no-bypass behavior
 
 ### 2. Tool Execution Gate — Fail-Closed on Init Failure
@@ -102,7 +104,10 @@ that the current full repository gate was rerun during this closeout.
 | `tests/test_agos_admin_api.py` | 18 PASS |
 | `tests/test_agos_e2e.py` | 17 PASS |
 | Frontend (AgosBadge + AdminAgosPage) | 15 PASS |
-| Closeout targeted run: `test_agos_http_e2e.py`, `test_agos_admin_api.py`, `test_agos_e2e.py` | 36 PASS, 1 strict XFAIL |
+| Closeout targeted run: HTTP/Admin/runtime/E2E/analysis-flow | 91 PASS |
+| Full pre-push backend parallel lane | 6007 PASS, 12 skipped |
+| Full pre-push backend serial lane | 3 PASS, 1 skipped |
+| Full pre-push frontend | 596 PASS |
 
 ### Open HTTP E2E Finding
 
