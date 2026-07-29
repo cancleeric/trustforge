@@ -28,7 +28,12 @@ CONTROL_KINDS = frozenset(
     }
 )
 OUTCOME_KINDS = frozenset(
-    {"candidate_reservation", "candidate_result", "router_emergency_stop"}
+    {
+        "candidate_reservation",
+        "candidate_result",
+        "candidate_cost_reconciliation",
+        "router_emergency_stop",
+    }
 )
 DEFAULT_COORDINATION_LOCK = Path("/run/trustforge-release-control/coordination.lock")
 ALLOWED_FIXED_FILES = frozenset({"bootstrap.json", "events.jsonl", "head.json"})
@@ -277,18 +282,44 @@ def _copy_public_receipt(source_root: Path, stage: Path) -> None:
     ):
         raise SystemExit("unsafe provisioning receipt during migration")
     source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        raw = os.read(source_fd, 4097)
+        if len(raw) != info.st_size:
+            raise SystemExit("provisioning receipt changed during migration")
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("invalid provisioning receipt during migration") from exc
+    finally:
+        os.close(source_fd)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema")
+        not in {
+            "trustforge.release-ledger-provision-receipt/v1",
+            "trustforge.release-ledger-provision-receipt/v2",
+        }
+        or not isinstance(payload.get("control_public"), dict)
+        or not isinstance(payload.get("outcome_public"), dict)
+    ):
+        raise SystemExit("invalid provisioning receipt during migration")
+    migrated = {
+        "schema": "trustforge.release-ledger-provision-receipt/v2",
+        "control_public": payload["control_public"],
+        "outcome_public": payload["outcome_public"],
+        "outcome_event_kinds": sorted(OUTCOME_KINDS),
+    }
+    encoded = (
+        json.dumps(migrated, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
     target_fd = os.open(
         stage / "provision-receipt.json",
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
         0o644,
     )
     try:
-        raw = os.read(source_fd, 4097)
-        if len(raw) != info.st_size:
-            raise SystemExit("provisioning receipt changed during migration")
         os.fchown(target_fd, 0, 0)
         os.fchmod(target_fd, 0o644)
-        remaining = memoryview(raw)
+        remaining = memoryview(encoded)
         while remaining:
             written = os.write(target_fd, remaining)
             if written <= 0:
@@ -296,7 +327,6 @@ def _copy_public_receipt(source_root: Path, stage: Path) -> None:
             remaining = remaining[written:]
         os.fsync(target_fd)
     finally:
-        os.close(source_fd)
         os.close(target_fd)
 
 

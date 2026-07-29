@@ -110,6 +110,7 @@ class _Ledger:
         self.subjects = []
         self.reservations = set()
         self.emergency = False
+        self.cost_budgets = []
 
     def routing_snapshot(self):
         return RoutingSnapshot(
@@ -123,11 +124,20 @@ class _Ledger:
             candidate_requests=self.requests,
             consecutive_errors=self.errors,
             stop_after_errors=self.stop_after,
-            ledger_head=self.head,
+            control_event_head="sha256:" + "c" * 64,
+            outcome_head=self.head,
         )
 
-    def reserve_candidate(self, *, expected_head, reservation_id):
+    def reserve_candidate(
+        self,
+        *,
+        expected_head,
+        reservation_id,
+        cost_budget=None,
+        request_binding_digest=None,
+    ):
         assert expected_head == self.head
+        self.cost_budgets.append(cost_budget)
         self.reservations.add(reservation_id)
         self.requests += 1
         self.head = (
@@ -197,13 +207,22 @@ def test_real_separate_http_releases_route_limited_b_without_core_import():
             pinned_a_fallback=a,
             manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
-        response = router.route(stable_subject="stable-user")
-        assert response.release == "B"
-        assert response.body == b"B"
-        assert ledger.requests == 1
+        expected_control_head = ledger.routing_snapshot().control_event_head
+        first = router.route(
+            stable_subject="stable-user",
+            expected_control_head=expected_control_head,
+        )
+        second = router.route(
+            stable_subject="stable-user",
+            expected_control_head=expected_control_head,
+        )
+        assert first.release == second.release == "B"
+        assert first.body == second.body == b"B"
+        assert ledger.requests == 2
         assert "trustforge_core" not in __import__("inspect").getsource(
             __import__("trustforge.release_router", fromlist=["*"])
         )
+        assert ledger.cost_budgets == [None, None]
     finally:
         a_server.shutdown()
         b_server.shutdown()
@@ -479,6 +498,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
                     {
                         "candidate_reservation",
                         "candidate_result",
+                        "candidate_cost_reconciliation",
                         "router_emergency_stop",
                     }
                 )

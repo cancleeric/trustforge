@@ -1,0 +1,257 @@
+{
+  "schema_version": "trustforge.issue998.criterion-ledger.v1",
+  "audit_issue": 998,
+  "parent_issue": 748,
+  "baseline_commit": "003ad3568366471945b80dff16f34ccb0a2d5f12",
+  "collected_at": "2026-07-30",
+  "phase": 1,
+  "phase_scope": "inventory_only_no_fresh_review",
+  "result_semantics": "HISTORICAL_GAP means at least one required contemporaneous review artifact is absent; it is not a fresh acceptance verdict.",
+  "summary": {
+    "tracks": 11,
+    "criteria_rows": 70,
+    "merge_shas_verified_as_baseline_ancestors": 11,
+    "github_formal_reviews_found": 0,
+    "author_attestation_comments_found": 11,
+    "rows_with_historical_gap": 70,
+    "programmatic_rows": 54,
+    "external_or_elapsed_observation_rows": 16
+  },
+  "tracks": [
+    {
+      "track": "A",
+      "issue": 869,
+      "pr": 891,
+      "merge_sha": "46cd3f04e1626785fa59fc4beb02e9a4b73bb790",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/869",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/891",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/891#issuecomment-5111414731",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO", "Harper", "/codex-review"],
+      "historical_gaps": ["gray"],
+      "criteria": [
+        {"criterion_id":"A-1","acceptance_criterion":"Define reproducible measurement and 0..1 normalization for all five dimensions.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #891 body, methodology contract and tests; replay deferred to Phase 2.","evidence_commit":"46cd3f04e1626785fa59fc4beb02e9a4b73bb790","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No contemporaneous gray record; author attestation claims Harper and /codex-review.","remediation_issue":998},
+        {"criterion_id":"A-2","acceptance_criterion":"Define stale windows, conflicted handling, source-family eligibility, PIT and unknown rules.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #891 body and attestation URL; replay deferred to Phase 2.","evidence_commit":"46cd3f04e1626785fa59fc4beb02e9a4b73bb790","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No contemporaneous gray record.","remediation_issue":998},
+        {"criterion_id":"A-3","acceptance_criterion":"Formula reads verified facts only and does not branch on symbol, display name or issuer category.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #891 body and attestation URL; source/metamorphic replay deferred to Phase 2.","evidence_commit":"46cd3f04e1626785fa59fc4beb02e9a4b73bb790","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No contemporaneous gray record.","remediation_issue":998},
+        {"criterion_id":"A-4","acceptance_criterion":"Explicitly forbid price, popularity, lost-key estimates, address-equals-entity and Wall Street ownership inference.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #891 body and attestation URL; forbidden-inference replay deferred to Phase 2.","evidence_commit":"46cd3f04e1626785fa59fc4beb02e9a4b73bb790","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No contemporaneous gray record.","remediation_issue":998},
+        {"criterion_id":"A-5","acceptance_criterion":"Metamorphic tests prove identical facts remain identical after asset ID and symbol rename.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #891 body and attestation URL; tests deferred to Phase 2.","evidence_commit":"46cd3f04e1626785fa59fc4beb02e9a4b73bb790","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No contemporaneous gray record.","remediation_issue":998},
+        {"criterion_id":"A-6","acceptance_criterion":"Existing v1 records remain backward compatible or have an explicit migration contract.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #891 body and attestation URL; compatibility replay deferred to Phase 2.","evidence_commit":"46cd3f04e1626785fa59fc4beb02e9a4b73bb790","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No contemporaneous gray record.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "B",
+      "issue": 873,
+      "pr": 900,
+      "merge_sha": "67ecc12efaf67e89c18df37267ead319ef5cfc12",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/873",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/900",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/900#issuecomment-5112016220",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["gray", "Harper", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"B-1","acceptance_criterion":"Emit pinned revision, SHA-256 content hash, source coordinates, PIT timestamps, validity and coverage.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #900 body and attestation URL; replay deferred to Phase 2.","evidence_commit":"67ecc12efaf67e89c18df37267ead319ef5cfc12","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"PR body says Harper and /codex-review pending; no gray record.","remediation_issue":998},
+        {"criterion_id":"B-2","acceptance_criterion":"At least two different protocol types have reproducible fixtures.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #900 body and attestation URL; fixture replay deferred to Phase 2.","evidence_commit":"67ecc12efaf67e89c18df37267ead319ef5cfc12","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"B-3","acceptance_criterion":"Offline rebuild is byte-stable and uses no runtime network.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #900 body and attestation URL; replay deferred to Phase 2.","evidence_commit":"67ecc12efaf67e89c18df37267ead319ef5cfc12","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"B-4","acceptance_criterion":"Future, stale and conflicted facts fail closed with exact zero contribution.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #900 body and attestation URL; adversarial replay deferred to Phase 2.","evidence_commit":"67ecc12efaf67e89c18df37267ead319ef5cfc12","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"B-5","acceptance_criterion":"Identical facts under a different asset ID produce identical results.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #900 body and attestation URL; metamorphic replay deferred to Phase 2.","evidence_commit":"67ecc12efaf67e89c18df37267ead319ef5cfc12","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"B-6","acceptance_criterion":"Whether BTC ranks above BNB is not an acceptance criterion.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"Issue #873 and PR #900 body; source audit deferred to Phase 2.","evidence_commit":"67ecc12efaf67e89c18df37267ead319ef5cfc12","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "C",
+      "issue": 870,
+      "pr": 904,
+      "merge_sha": "a8e54461a566df918e8cc0fb54566c9ff965716a",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/870",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/904",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/904#issuecomment-5112203991",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["gray", "Harper", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"C-1","acceptance_criterion":"Separate validator, miner, node and governance control planes.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #904 body and attestation URL; replay deferred to Phase 2.","evidence_commit":"a8e54461a566df918e8cc0fb54566c9ff965716a","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"PR body says Harper and /codex-review pending; no gray record.","remediation_issue":998},
+        {"criterion_id":"C-2","acceptance_criterion":"Documentation statements must not be treated as entity-control proof.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"Issue #870 and PR #904; source audit deferred to Phase 2.","evidence_commit":"a8e54461a566df918e8cc0fb54566c9ff965716a","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"C-3","acceptance_criterion":"Eligibility requires at least two source families; missing evidence remains unknown.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #904 body and attestation URL; gate replay deferred to Phase 2.","evidence_commit":"a8e54461a566df918e8cc0fb54566c9ff965716a","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"C-4","acceptance_criterion":"Conflicting sources produce conflicted status and exact zero contribution.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #904 body and attestation URL; adversarial replay deferred to Phase 2.","evidence_commit":"a8e54461a566df918e8cc0fb54566c9ff965716a","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"C-5","acceptance_criterion":"Include PIT replay, source withdrawal and freshness-expiry tests.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #904 body mentions PIT replay only; full test mapping deferred to Phase 2.","evidence_commit":"a8e54461a566df918e8cc0fb54566c9ff965716a","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Contemporaneous text does not independently identify withdrawal and expiry evidence; reviews missing.","remediation_issue":998},
+        {"criterion_id":"C-6","acceptance_criterion":"No symbol, name or issuer-label scoring branches.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #904 body and attestation URL; source audit deferred to Phase 2.","evidence_commit":"a8e54461a566df918e8cc0fb54566c9ff965716a","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "D",
+      "issue": 872,
+      "pr": 902,
+      "merge_sha": "31a69be645bc49c9473b585cec508379adf6ddc2",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/872",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/902",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/902#issuecomment-5112016451",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["gray", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"D-1","acceptance_criterion":"Document cross-chain, custodian, bridge, burn, locked and lost-key deduplication requirements.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #902 body and attestation URL; document audit deferred to Phase 2.","evidence_commit":"31a69be645bc49c9473b585cec508379adf6ddc2","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+/codex-review","finding_or_blocker":"No contemporaneous gray or /codex-review record.","remediation_issue":998},
+        {"criterion_id":"D-2","acceptance_criterion":"Top-address concentration must not be presented as holder concentration.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #902 body and attestation URL; document audit deferred to Phase 2.","evidence_commit":"31a69be645bc49c9473b585cec508379adf6ddc2","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"D-3","acceptance_criterion":"If entity-resolved history is unavailable, disposition is unknown with no numeric value.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #902 reports zero eligible free sources and need_paid_source; current availability requires external reconciliation in Phase 4.","evidence_commit":"31a69be645bc49c9473b585cec508379adf6ddc2","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+/codex-review","finding_or_blocker":"Historical review gap; real entity-resolved history remains an external dependency.","remediation_issue":998},
+        {"criterion_id":"D-4","acceptance_criterion":"Identify data licensing, freshness and reproducibility limits.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #902 body and attestation URL; document audit deferred to Phase 2.","evidence_commit":"31a69be645bc49c9473b585cec508379adf6ddc2","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"D-5","acceptance_criterion":"If paid data is required, open a separate cost-sensitive issue and make no purchase here.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #902 says cost-sensitive issue draft; existence/status of follow-up and purchase state require Phase 4 reconciliation.","evidence_commit":"31a69be645bc49c9473b585cec508379adf6ddc2","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+/codex-review; Harper if cost action exists","finding_or_blocker":"No contemporaneous gray or /codex-review record; follow-up issue not evidenced by the attestation URL.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "E",
+      "issue": 871,
+      "pr": 903,
+      "merge_sha": "f92810c30319cc4f89cdeb1834dca71b34ea7511",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/871",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/903",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/903#issuecomment-5112016707",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["gray", "Harper", "Eye", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"E-1","acceptance_criterion":"Record baseline/candidate trust, delta, facts hash/schema/as-of, gate reason, known/source-family counts and release identity.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #903 body and attestation URL; schema replay deferred to Phase 2.","evidence_commit":"f92810c30319cc4f89cdeb1834dca71b34ea7511","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye+/codex-review","finding_or_blocker":"PR body says Harper and /codex-review pending; no gray/Eye artifact.","remediation_issue":998},
+        {"criterion_id":"E-2","acceptance_criterion":"Shadow never changes official confidence, calibrated confidence, decision state, direction or market judgment.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #903 body and attestation URL; byte/behavior replay deferred to Phase 2.","evidence_commit":"f92810c30319cc4f89cdeb1834dca71b34ea7511","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"E-3","acceptance_criterion":"Retries are idempotent; malformed and nonfinite inputs fail closed.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #903 body and attestation URL; adversarial replay deferred to Phase 2.","evidence_commit":"f92810c30319cc4f89cdeb1834dca71b34ea7511","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"E-4","acceptance_criterion":"Sensitive URL queries and credentials are excluded from events.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #903 body and attestation URL; sanitization replay deferred to Phase 2.","evidence_commit":"f92810c30319cc4f89cdeb1834dca71b34ea7511","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"E-5","acceptance_criterion":"Dashboard exposes coverage, missing, stale, conflict and delta distributions.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #903 body and attestation URL; data contract and actual UI Eye deferred.","evidence_commit":"f92810c30319cc4f89cdeb1834dca71b34ea7511","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye+/codex-review","finding_or_blocker":"No contemporaneous actual-branch Eye evidence.","remediation_issue":998},
+        {"criterion_id":"E-6","acceptance_criterion":"Flag OFF causes no writes and no behavior difference.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #903 body and attestation URL; replay deferred to Phase 2.","evidence_commit":"f92810c30319cc4f89cdeb1834dca71b34ea7511","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "F",
+      "issue": 874,
+      "pr": 910,
+      "merge_sha": "71bfaebee9cc4f9b79becf16f0567fd9a23e8850",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/874",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/910",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/910#issuecomment-5112460930",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["gray", "Harper", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"F-1","acceptance_criterion":"Include at least 5 assets or 5 anonymous profiles.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #910 body and attestation URL; corpus replay deferred to Phase 2.","evidence_commit":"71bfaebee9cc4f9b79becf16f0567fd9a23e8850","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"PR body says Harper and /codex-review pending; no gray record.","remediation_issue":998},
+        {"criterion_id":"F-2","acceptance_criterion":"Cover known, unknown, stale and conflicted states for every dimension.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #910 body notes conflicted PIT path is unreachable and direct-view probe was used; full mapping deferred to Phase 2.","evidence_commit":"71bfaebee9cc4f9b79becf16f0567fd9a23e8850","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Potential acceptance gap explicitly noted in PR; required reviews missing.","remediation_issue":998},
+        {"criterion_id":"F-3","acceptance_criterion":"Identity rename and input permutation metamorphic tests pass.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #910 body and attestation URL; replay deferred to Phase 2.","evidence_commit":"71bfaebee9cc4f9b79becf16f0567fd9a23e8850","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"F-4","acceptance_criterion":"Measure factual-distance versus score spread, coverage bias, extreme-value sensitivity and single-source manipulation sensitivity.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #910 body and attestation URL; calculation replay deferred to Phase 2.","evidence_commit":"71bfaebee9cc4f9b79becf16f0567fd9a23e8850","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"F-5","acceptance_criterion":"Store baseline, candidate, data version, PIT cutoff and deterministic seed.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #910 body and attestation URL; manifest replay deferred to Phase 2.","evidence_commit":"71bfaebee9cc4f9b79becf16f0567fd9a23e8850","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"F-6","acceptance_criterion":"No assertion says BTC must rank above BNB.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #910 body reports ranking=null and no-leak grep; fresh audit deferred to Phase 2.","evidence_commit":"71bfaebee9cc4f9b79becf16f0567fd9a23e8850","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"F-7","acceptance_criterion":"If real coverage remains insufficient, final disposition is remain-shadow.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #910 reports remain-shadow for insufficient ETH/BNB coverage; current real coverage requires Phase 4 observation reconciliation.","evidence_commit":"71bfaebee9cc4f9b79becf16f0567fd9a23e8850","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Historical reviews missing; current real coverage not established in Phase 1.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "G",
+      "issue": 875,
+      "pr": 961,
+      "merge_sha": "bf1b41dcd1c8500eda078b87eea48377fc4cad01",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/875",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/961",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/961#issuecomment-5116459207",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["gray", "Harper", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"G-1","acceptance_criterion":"Minimum evidence is 200 PIT observations, at least 5 assets and at least 30 days.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #961 reports 3 observations, 3 assets and 2 days, therefore BLOCK; current counts require Phase 4.","evidence_commit":"bf1b41dcd1c8500eda078b87eea48377fc4cad01","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Threshold was not met at merge and required reviews were missing.","remediation_issue":998},
+        {"criterion_id":"G-2","acceptance_criterion":"Every promotion-eligible assessment has at least 3/5 known dimensions and 2 source families; insufficient evidence is BLOCK.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #961 body and attestation URL; policy replay deferred to Phase 2.","evidence_commit":"bf1b41dcd1c8500eda078b87eea48377fc4cad01","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"PR body says Harper and /codex-review pending; no gray record.","remediation_issue":998},
+        {"criterion_id":"G-3","acceptance_criterion":"Absolute delta is capped at 0.08; nonfinite tolerance is zero; identical facts across symbols are invariant.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #961 body and attestation URL; adversarial replay deferred to Phase 2.","evidence_commit":"bf1b41dcd1c8500eda078b87eea48377fc4cad01","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"G-4","acceptance_criterion":"Define stop thresholds for direction/decision flips, coverage disparity, missingness, sensitivity and single-source dependency.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #961 body and attestation URL; policy replay deferred to Phase 2.","evidence_commit":"bf1b41dcd1c8500eda078b87eea48377fc4cad01","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"G-5","acceptance_criterion":"With mature labels, Brier and ECE degrade no more than 0.01; without labels, no calibration-improvement claim is allowed.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #961 records withheld_no_mature_labels; label maturity and metrics require Phase 4.","evidence_commit":"bf1b41dcd1c8500eda078b87eea48377fc4cad01","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No mature-label evidence at merge; required reviews missing.","remediation_issue":998},
+        {"criterion_id":"G-6","acceptance_criterion":"Thresholds are versioned before evaluating results.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #961 body and attestation URL; digest/order replay deferred to Phase 2.","evidence_commit":"bf1b41dcd1c8500eda078b87eea48377fc4cad01","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"G-7","acceptance_criterion":"Emit commit-bound policy and decision receipt; no manual conversion from BLOCK to PASS.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #961 body and attestation URL; receipt verification deferred to Phase 2.","evidence_commit":"bf1b41dcd1c8500eda078b87eea48377fc4cad01","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "H",
+      "issue": 876,
+      "pr": 976,
+      "merge_sha": "472183430c7227df6afdbe3ccf4b20aaafb43cd0",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/876",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/976",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/976#issuecomment-5117206892",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO", "Harper"],
+      "historical_gaps": ["gray", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"H-1","acceptance_criterion":"Candidate is applied only in canonical core, never as web/orchestrator post-processing.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 body and attestation URL; architecture replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"No contemporaneous gray or distinct /codex-review record.","remediation_issue":998},
+        {"criterion_id":"H-2","acceptance_criterion":"Formula reads eligible PIT facts only and computes clamped base trust plus delta.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 body and attestation URL; replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required review artifacts incomplete.","remediation_issue":998},
+        {"criterion_id":"H-3","acceptance_criterion":"Candidate does not directly change direction.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 body and attestation URL; source replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required review artifacts incomplete.","remediation_issue":998},
+        {"criterion_id":"H-4","acceptance_criterion":"Calibration or decision-state effects flow through the existing canonical chain and are recorded in shadow diff.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 body and attestation URL; integration replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required review artifacts incomplete.","remediation_issue":998},
+        {"criterion_id":"H-5","acceptance_criterion":"Flag OFF preserves Report and kernel output byte-for-byte.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 body and attestation URL; byte parity replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required review artifacts incomplete.","remediation_issue":998},
+        {"criterion_id":"H-6","acceptance_criterion":"Missing, stale, future or conflicted facts produce exact zero delta.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 body and attestation URL; adversarial replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required review artifacts incomplete.","remediation_issue":998},
+        {"criterion_id":"H-7","acceptance_criterion":"Flag ON remains shadow-only until separate release promotion.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 records G=BLOCK and no promotion path; current replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"#876 declared dependency on #875 PASS, but merge evidence records #875 BLOCK; historical review artifacts incomplete.","remediation_issue":998},
+        {"criterion_id":"H-8","acceptance_criterion":"Contract, regression, metamorphic and byte-parity tests pass.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #976 body and attestation URL; current test replay deferred to Phase 2.","evidence_commit":"472183430c7227df6afdbe3ccf4b20aaafb43cd0","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required review artifacts incomplete.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "I",
+      "issue": 878,
+      "pr": 981,
+      "merge_sha": "2ffe69fd239b5fd7dd27a2056f20663842aea3fb",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/878",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/981",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/981#issuecomment-5117651057",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["named reviewer", "gray", "Harper", "Eye", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"I-1","acceptance_criterion":"Clearly separate Asset Structure from Evidence Trust and market direction/confidence.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #981 body and attestation URL; UI/content review deferred to Phase 3.","evidence_commit":"2ffe69fd239b5fd7dd27a2056f20663842aea3fb","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"named reviewer+gray+Harper+Eye+/codex-review","finding_or_blocker":"Only author/CEO attestation exists; required roles absent.","remediation_issue":998},
+        {"criterion_id":"I-2","acceptance_criterion":"Shadow state states that it does not affect the official score.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #981 body and attestation URL; UI/content review deferred to Phase 3.","evidence_commit":"2ffe69fd239b5fd7dd27a2056f20663842aea3fb","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"named reviewer+gray+Harper+Eye+/codex-review","finding_or_blocker":"Required roles absent contemporaneously.","remediation_issue":998},
+        {"criterion_id":"I-3","acceptance_criterion":"Official state is driven by release capability and promotion receipt, not a frontend constant.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #981 body and attestation URL; integration replay deferred to Phase 2.","evidence_commit":"2ffe69fd239b5fd7dd27a2056f20663842aea3fb","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"named reviewer+gray+Harper+Eye+/codex-review","finding_or_blocker":"Required roles absent contemporaneously.","remediation_issue":998},
+        {"criterion_id":"I-4","acceptance_criterion":"Five dimensions use plain language and preserve unknown, source and limitation details.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #981 body and attestation URL; actual UI review deferred to Phase 3.","evidence_commit":"2ffe69fd239b5fd7dd27a2056f20663842aea3fb","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"named reviewer+gray+Harper+Eye+/codex-review","finding_or_blocker":"No contemporaneous actual-branch Eye evidence.","remediation_issue":998},
+        {"criterion_id":"I-5","acceptance_criterion":"No conclusion-first text such as BTC should be higher.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #981 body and attestation URL; content audit deferred to Phase 3.","evidence_commit":"2ffe69fd239b5fd7dd27a2056f20663842aea3fb","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"named reviewer+gray+Harper+Eye+/codex-review","finding_or_blocker":"Required roles absent contemporaneously.","remediation_issue":998},
+        {"criterion_id":"I-6","acceptance_criterion":"Legacy payload remains compatible; malformed payload fails closed.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #981 body and attestation URL; adversarial replay deferred to Phase 2.","evidence_commit":"2ffe69fd239b5fd7dd27a2056f20663842aea3fb","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"named reviewer+gray+Harper+Eye+/codex-review","finding_or_blocker":"Required roles absent contemporaneously.","remediation_issue":998},
+        {"criterion_id":"I-7","acceptance_criterion":"Run actual-branch Eye for zh-TW/en, desktop/mobile, 200% zoom, long provenance, overflow and error states.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #981 attestation explicitly says Eye would occur after merge; no contemporaneous completion URL found.","evidence_commit":"2ffe69fd239b5fd7dd27a2056f20663842aea3fb","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"named reviewer+gray+Harper+Eye+/codex-review","finding_or_blocker":"Explicit historical Eye gap; requires fresh actual-branch Eye in Phase 3.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "J",
+      "issue": 877,
+      "pr": 980,
+      "merge_sha": "fbd01340d99c8f9d51e80addf3d9621207779e72",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/877",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/980",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/980#issuecomment-5117644663",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO"],
+      "historical_gaps": ["gray", "Harper", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"J-1","acceptance_criterion":"A is current scorer and B intrinsic candidate; both have immutable release artifact digests.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #980 reports hermetic artifacts; authenticity as real immutable release artifacts requires Phase 4.","evidence_commit":"fbd01340d99c8f9d51e80addf3d9621207779e72","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"PR says Harper and /codex-review pending; hermetic evidence cannot prove real release artifacts.","remediation_issue":998},
+        {"criterion_id":"J-2","acceptance_criterion":"Reuse the existing release router rather than creating a second control plane.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #980 body and attestation URL; architecture replay deferred to Phase 2.","evidence_commit":"fbd01340d99c8f9d51e80addf3d9621207779e72","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"J-3","acceptance_criterion":"Replay identical PIT inputs against A and B.","evidence_class":"PROGRAMMATIC","evidence_uri_or_command":"PR #980 body and attestation URL; deterministic replay deferred to Phase 2.","evidence_commit":"fbd01340d99c8f9d51e80addf3d9621207779e72","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Required reviews missing contemporaneously.","remediation_issue":998},
+        {"criterion_id":"J-4","acceptance_criterion":"In non-production, perform A→B→injected regression→A within rollback SLO.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #980 explicitly calls its drill hermetic; real non-production release drill evidence requires Phase 4.","evidence_commit":"fbd01340d99c8f9d51e80addf3d9621207779e72","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Synthetic/hermetic timing is not real release evidence; required reviews missing.","remediation_issue":998},
+        {"criterion_id":"J-5","acceptance_criterion":"Receipt records actor, reason, from/to releases, artifact digests, config and timestamps.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #980 claims receipt fields; real signed receipt/artifact binding requires Phase 4.","evidence_commit":"fbd01340d99c8f9d51e80addf3d9621207779e72","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Historical evidence is hermetic and required reviews are missing.","remediation_issue":998},
+        {"criterion_id":"J-6","acceptance_criterion":"No irreversible migration; A artifact remains available and healthy after rollback.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #980 claims hermetic A health; real artifact availability/health requires Phase 4.","evidence_commit":"fbd01340d99c8f9d51e80addf3d9621207779e72","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Real post-rollback A health not evidenced by the historical comment.","remediation_issue":998},
+        {"criterion_id":"J-7","acceptance_criterion":"Observation history and receipts survive rollback.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #980 claims hermetic persistence; real release persistence requires Phase 4.","evidence_commit":"fbd01340d99c8f9d51e80addf3d9621207779e72","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+/codex-review","finding_or_blocker":"Real rollback persistence not evidenced; required reviews missing.","remediation_issue":998}
+      ]
+    },
+    {
+      "track": "K",
+      "issue": 879,
+      "pr": 984,
+      "merge_sha": "ff8db7bb521c89e32da5725b7aea82fd66ce509e",
+      "merge_sha_is_baseline_ancestor": true,
+      "issue_url": "https://github.com/cancleeric/trustforge/issues/879",
+      "pr_url": "https://github.com/cancleeric/trustforge/pull/984",
+      "attestation_url": "https://github.com/cancleeric/trustforge/pull/984#issuecomment-5118088414",
+      "github_formal_review_count": 0,
+      "contemporaneous_claims": ["CEO", "Harper"],
+      "historical_gaps": ["gray", "/codex-review"],
+      "criteria": [
+        {"criterion_id":"K-1","acceptance_criterion":"Exact authenticated nginx ingress and Linux AF_UNIX peer identity are proven; direct spoof is A-only.","evidence_class":"EXTERNAL","evidence_uri_or_command":"Current issue #879 parent acceptance; PR #984 only reports hermetic controller tests and no real topology evidence.","evidence_commit":"ff8db7bb521c89e32da5725b7aea82fd66ce509e","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye-if-UI+/codex-review","finding_or_blocker":"Original merged PR did not prove current real-topology criterion; fresh/external evidence required.","remediation_issue":998},
+        {"criterion_id":"K-2","acceptance_criterion":"Allowlist installation, rollback and evidence are root-only, atomic and digest-bound.","evidence_class":"EXTERNAL","evidence_uri_or_command":"Current issue #879 parent acceptance; PR #984 predates secure provisioning remediation and supplies no root/topology receipt.","evidence_commit":"ff8db7bb521c89e32da5725b7aea82fd66ce509e","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye-if-UI+/codex-review","finding_or_blocker":"Not established by historical merge evidence.","remediation_issue":998},
+        {"criterion_id":"K-3","acceptance_criterion":"Unknown/duplicate and unauthorized cost-bearing query modes remain A-only.","evidence_class":"EXTERNAL","evidence_uri_or_command":"Current issue #879 parent acceptance; PR #984 has no real HTTP/query-budget evidence.","evidence_commit":"ff8db7bb521c89e32da5725b7aea82fd66ce509e","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye-if-UI+/codex-review","finding_or_blocker":"Not established by historical merge evidence; depends on later K2 remediation.","remediation_issue":998},
+        {"criterion_id":"K-4","acceptance_criterion":"Signed per-ramp request, model-call and monetary caps reconcile across restart.","evidence_class":"EXTERNAL","evidence_uri_or_command":"Current issue #879 parent acceptance; PR #984 has no signed budget/restart reconciliation evidence.","evidence_commit":"ff8db7bb521c89e32da5725b7aea82fd66ce509e","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye-if-UI+/codex-review","finding_or_blocker":"Not established by historical merge evidence; external/restart evidence required.","remediation_issue":998},
+        {"criterion_id":"K-5","acceptance_criterion":"Real two-release ingress proves B success/failure and 100% A recovery; synthetic artifacts never satisfy release evidence.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #984 explicitly reports hermetic/synthetic behavior and G=BLOCK; current issue #879 requires real two-release ingress.","evidence_commit":"ff8db7bb521c89e32da5725b7aea82fd66ce509e","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye-if-UI+/codex-review","finding_or_blocker":"Historical PR cannot satisfy real release criterion; #879 remains open.","remediation_issue":998}
+      ]
+    }
+  ]
+}

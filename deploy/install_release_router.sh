@@ -21,7 +21,9 @@ NGINX_TARGET="$DEST_ROOT/etc/nginx/snippets/trustforge-release-router.conf"
 SYSUSERS_TARGET="$DEST_ROOT/etc/sysusers.d/trustforge-release-router.conf"
 TMPFILES_TARGET="$DEST_ROOT/etc/tmpfiles.d/trustforge-release-router.conf"
 CONFIG_ROOT="$DEST_ROOT/etc/trustforge"
+ALLOWLIST_TARGET="$CONFIG_ROOT/release-router-allowlist.json"
 LEDGER_ROOT="$DEST_ROOT/var/lib/trustforge/security-ledger"
+ROLLBACK_EVIDENCE="$DEST_ROOT/var/lib/trustforge/release-install-rollback-failed.json"
 
 for source in "$UNIT_SOURCE" "$NGINX_SOURCE" "$SYSUSERS_SOURCE" "$TMPFILES_SOURCE"; do
   [[ -f "$source" && ! -L "$source" ]] || {
@@ -30,10 +32,12 @@ for source in "$UNIT_SOURCE" "$NGINX_SOURCE" "$SYSUSERS_SOURCE" "$TMPFILES_SOURC
   }
 done
 EXPECTED_UNIT_SHA256="$(sha256sum "$UNIT_SOURCE" | awk '{print $1}')"
+EXPECTED_NGINX_SHA256="$(sha256sum "$NGINX_SOURCE" | awk '{print $1}')"
 
 if $DRY_RUN; then
   printf '%s\n' \
     "python3 scripts/verify_release_install_evidence.py # bind unit/runtime/keys/A/B/manifests" \
+    "python3 scripts/provision_release_http_canary_allowlist.py # exact nginx/auth/control-bound root:root 0600" \
     "install -o root -g root -m 0644 $UNIT_SOURCE $UNIT_TARGET" \
     "install -o root -g root -m 0644 $NGINX_SOURCE $NGINX_TARGET" \
     "install -o root -g root -m 0644 $SYSUSERS_SOURCE $SYSUSERS_TARGET" \
@@ -59,6 +63,8 @@ fi
   echo "installation requires root" >&2
   exit 77
 }
+python3 "$ROOT_DIR/scripts/check_release_rollback_evidence.py" \
+  --evidence "$ROLLBACK_EVIDENCE"
 
 RELEASE_EVIDENCE="${TRUSTFORGE_EXPECTED_RELEASE_EVIDENCE:?set root-only release evidence receipt}"
 RELEASE_EVIDENCE_KEYS="${TRUSTFORGE_RELEASE_EVIDENCE_KEYS:?set release evidence public keyring}"
@@ -68,8 +74,30 @@ ENDPOINT_MANIFESTS="${TRUSTFORGE_ENDPOINT_MANIFESTS:?set signed endpoint manifes
 ROUTER_ARCHIVE="${TRUSTFORGE_ROUTER_ARCHIVE:?set immutable router application archive}"
 ROUTER_TREE_MANIFEST="${TRUSTFORGE_ROUTER_TREE_MANIFEST:?set router tree manifest}"
 RUNTIME_LOCK="${TRUSTFORGE_RUNTIME_LOCK:?set exact Python/runtime lock}"
+CANARY_REQUEST="${TRUSTFORGE_CANARY_ALLOWLIST_REQUEST:?set root-only canary allowlist request}"
 UNIT_SOURCE="${TRUSTFORGE_SIGNED_UNIT:?set signed content-addressed systemd unit}"
 EXPECTED_UNIT_SHA256="$(sha256sum "$UNIT_SOURCE" | awk '{print $1}')"
+EXPECTED_NGINX_SHA256="$(sha256sum "$NGINX_SOURCE" | awk '{print $1}')"
+mkdir -p "$DEST_ROOT/var/tmp" "$CONFIG_ROOT"
+ALLOWLIST_STAGE="$(mktemp "$DEST_ROOT/var/tmp/trustforge-canary-allowlist.XXXXXX")"
+chmod 0600 "$ALLOWLIST_STAGE"
+cleanup_allowlist_stage() {
+  rm -f -- "$ALLOWLIST_STAGE"
+  [[ -z "${SMOKE_HEADERS:-}" ]] || rm -f -- "$SMOKE_HEADERS"
+}
+trap cleanup_allowlist_stage EXIT
+python3 "$ROOT_DIR/scripts/provision_release_http_canary_allowlist.py" \
+  --request "$CANARY_REQUEST" \
+  --runtime "$CONFIG_ROOT/release-router-runtime.json" \
+  --keys "$CONFIG_ROOT/release-router-runtime-keys.json" \
+  --control-bootstrap "$LEDGER_ROOT/control/bootstrap.json" \
+  --control-events "$LEDGER_ROOT/control/events.jsonl" \
+  --control-head "$LEDGER_ROOT/control/head.json" \
+  --nginx-snippet "$NGINX_TARGET" \
+  --expected-nginx-snippet-sha256 "$EXPECTED_NGINX_SHA256" \
+  --coordination-lock "$DEST_ROOT/run/trustforge-release-control/coordination.lock" \
+  --output "$ALLOWLIST_STAGE" >/dev/null
+ALLOWLIST_VERIFY_PATH="$ALLOWLIST_STAGE"
 verify_release_inputs() {
   python3 "$ROOT_DIR/scripts/verify_release_install_evidence.py" \
     --evidence "$RELEASE_EVIDENCE" \
@@ -86,7 +114,8 @@ verify_release_inputs() {
     --endpoint-manifests "$ENDPOINT_MANIFESTS" \
     --router-archive "$ROUTER_ARCHIVE" \
     --router-tree-manifest "$ROUTER_TREE_MANIFEST" \
-    --runtime-lock "$RUNTIME_LOCK" >/dev/null
+    --runtime-lock "$RUNTIME_LOCK" \
+    --canary-allowlist "$ALLOWLIST_VERIFY_PATH" >/dev/null
 }
 verify_release_inputs
 
@@ -103,6 +132,15 @@ RELEASE_EVIDENCE_SHA256="$(sha256sum "$RELEASE_EVIDENCE" | awk '{print $1}')"
 [[ "$RELEASE_DIR" == "$RELEASES_ROOT/$ARCHIVE_SHA256" ]] || {
   echo "router release directory is not content addressed" >&2
   exit 83
+}
+"$RELEASE_DIR/.venv/bin/python" -I -c \
+  'import platform, socket, sys
+if sys.platform != "linux" or platform.system() != "Linux":
+    raise SystemExit("release evidence BLOCK: release router requires Linux")
+if not hasattr(socket, "SO_PEERCRED"):
+    raise SystemExit("release evidence BLOCK: SO_PEERCRED is unavailable")' || {
+  echo "release evidence BLOCK: exact release Python lacks Linux SO_PEERCRED" >&2
+  exit 88
 }
 grep -Fx "WorkingDirectory=$RELEASE_DIR" "$UNIT_SOURCE" >/dev/null || {
   echo "signed unit WorkingDirectory does not match release digest" >&2
@@ -127,10 +165,16 @@ grep -Fx "Environment=TRUSTFORGE_RELEASE_DIGEST=$ARCHIVE_SHA256" \
 mkdir -p "$(dirname "$UNIT_TARGET")" "$(dirname "$NGINX_TARGET")" \
   "$(dirname "$SYSUSERS_TARGET")" "$(dirname "$TMPFILES_TARGET")" \
   "$DEST_ROOT/var/tmp" "$DEST_ROOT/var/lib/trustforge"
-ROLLBACK_EVIDENCE="$DEST_ROOT/var/lib/trustforge/release-install-rollback-failed.json"
 BACKUP_DIR="$(mktemp -d "$DEST_ROOT/var/tmp/trustforge-router-install.XXXXXX")"
 chmod 0700 "$BACKUP_DIR"
-TARGETS=("$UNIT_TARGET" "$NGINX_TARGET" "$SYSUSERS_TARGET" "$TMPFILES_TARGET")
+TARGETS=(
+  "$UNIT_TARGET"
+  "$NGINX_TARGET"
+  "$SYSUSERS_TARGET"
+  "$TMPFILES_TARGET"
+  "$ALLOWLIST_TARGET"
+)
+TARGET_MODES=(0644 0644 0644 0644 0600)
 EXISTED=()
 for index in "${!TARGETS[@]}"; do
   target="${TARGETS[$index]}"
@@ -148,6 +192,7 @@ PREFLIGHT_INPUT_SHA256="$(
     "$LEDGER_ROOT/control/bootstrap.json" \
     "$LEDGER_ROOT/router-outcomes/bootstrap.json"
 )"
+PREFLIGHT_ALLOWLIST_SHA256="$(sha256sum "$ALLOWLIST_STAGE" | awk '{print $1}')"
 SERVICE_WAS_ACTIVE=false
 systemctl is-active --quiet trustforge-release-router.service && SERVICE_WAS_ACTIVE=true
 OLD_MAIN_PID="$(systemctl show -p MainPID --value trustforge-release-router.service 2>/dev/null || echo 0)"
@@ -161,6 +206,10 @@ PRIOR_UNIT_SHA256="absent"
 if ${EXISTED[0]}; then
   PRIOR_UNIT_SHA256="$(sha256sum "$BACKUP_DIR/0" | awk '{print $1}')"
 fi
+PRIOR_ALLOWLIST_SHA256="absent"
+if ${EXISTED[4]}; then
+  PRIOR_ALLOWLIST_SHA256="$(sha256sum "$BACKUP_DIR/4" | awk '{print $1}')"
+fi
 rollback_install() {
   status=$?
   rollback_failed=false
@@ -173,7 +222,8 @@ rollback_install() {
   artifact_restore_failed=false
   for index in "${!TARGETS[@]}"; do
     if ${EXISTED[$index]}; then
-      install -o root -g root -m 0644 "$BACKUP_DIR/$index" "${TARGETS[$index]}" ||
+      install -o root -g root -m "${TARGET_MODES[$index]}" \
+        "$BACKUP_DIR/$index" "${TARGETS[$index]}" ||
         artifact_restore_failed=true
       cmp -s "$BACKUP_DIR/$index" "${TARGETS[$index]}" ||
         artifact_restore_failed=true
@@ -239,6 +289,8 @@ rollback_install() {
       --prior-release "$OLD_RELEASE_DIR" \
       --target-unit-sha256 "$EXPECTED_UNIT_SHA256" \
       --prior-unit-sha256 "$PRIOR_UNIT_SHA256" \
+      --target-allowlist-sha256 "$PREFLIGHT_ALLOWLIST_SHA256" \
+      --prior-allowlist-sha256 "$PRIOR_ALLOWLIST_SHA256" \
       --target-pid "${NEW_MAIN_PID:-0}" \
       --restored-pid "${restored_pid:-0}"
     rm -rf -- "$BACKUP_DIR"
@@ -255,6 +307,20 @@ install -o root -g root -m 0644 "$UNIT_SOURCE" "$UNIT_TARGET"
 install -o root -g root -m 0644 "$NGINX_SOURCE" "$NGINX_TARGET"
 install -o root -g root -m 0644 "$SYSUSERS_SOURCE" "$SYSUSERS_TARGET"
 install -o root -g root -m 0644 "$TMPFILES_SOURCE" "$TMPFILES_TARGET"
+python3 "$ROOT_DIR/scripts/provision_release_http_canary_allowlist.py" \
+  --request "$CANARY_REQUEST" \
+  --runtime "$CONFIG_ROOT/release-router-runtime.json" \
+  --keys "$CONFIG_ROOT/release-router-runtime-keys.json" \
+  --control-bootstrap "$LEDGER_ROOT/control/bootstrap.json" \
+  --control-events "$LEDGER_ROOT/control/events.jsonl" \
+  --control-head "$LEDGER_ROOT/control/head.json" \
+  --nginx-snippet "$NGINX_TARGET" \
+  --expected-nginx-snippet-sha256 "$EXPECTED_NGINX_SHA256" \
+  --coordination-lock "$DEST_ROOT/run/trustforge-release-control/coordination.lock" \
+  --output "$ALLOWLIST_TARGET" >/dev/null
+cmp -s "$ALLOWLIST_STAGE" "$ALLOWLIST_TARGET"
+[[ "$(stat -c '%U:%G:%a:%h' "$ALLOWLIST_TARGET")" == "root:root:600:1" ]]
+ALLOWLIST_VERIFY_PATH="$ALLOWLIST_TARGET"
 systemd-sysusers "$SYSUSERS_TARGET"
 systemd-tmpfiles --create "$TMPFILES_TARGET"
 # Deliberate non-reversible host mutations: sysusers may create the two service
@@ -352,6 +418,11 @@ curl --fail --silent --show-error --unix-socket /run/trustforge/release-router.s
 SMOKE_NETRC="${TRUSTFORGE_SMOKE_NETRC:?set path to root-only smoke netrc}"
 SMOKE_CA="${TRUSTFORGE_SMOKE_CA:?set path to pinned CA bundle}"
 SMOKE_HOST="${TRUSTFORGE_SMOKE_HOST:?set authenticated TLS hostname}"
+SMOKE_CANARY_PATH="${TRUSTFORGE_CANARY_SMOKE_PATH:?set allowlisted Analyze/Compare path}"
+[[ "$SMOKE_CANARY_PATH" == /api/analyze\?* && "$SMOKE_CANARY_PATH" != *$'\n'* ]] || {
+  echo "release evidence BLOCK: canary smoke path is invalid" >&2
+  false
+}
 for secret_file in "$SMOKE_NETRC" "$SMOKE_CA"; do
   [[ -f "$secret_file" && ! -L "$secret_file" && "$(stat -c %u "$secret_file")" == 0 ]] || {
     echo "smoke credential/CA file is unsafe" >&2
@@ -370,6 +441,39 @@ exec 9<"$SMOKE_NETRC"
 curl --fail --silent --show-error --netrc-file /dev/fd/9 \
   --cacert "$SMOKE_CA" --resolve "$SMOKE_HOST:443:127.0.0.1" \
   "https://$SMOKE_HOST/healthz" >/dev/null
+UNAUTH_STATUS="$(
+  curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --cacert "$SMOKE_CA" --resolve "$SMOKE_HOST:443:127.0.0.1" \
+    "https://$SMOKE_HOST$SMOKE_CANARY_PATH"
+)"
+[[ "$UNAUTH_STATUS" == 401 ]] || {
+  echo "release evidence BLOCK: unauthenticated nginx canary was not HTTP 401" >&2
+  false
+}
+SMOKE_HEADERS="$(mktemp "$DEST_ROOT/var/tmp/trustforge-canary-smoke.XXXXXX")"
+chmod 0600 "$SMOKE_HEADERS"
+curl --fail --silent --show-error --output /dev/null --dump-header "$SMOKE_HEADERS" \
+  --netrc-file /dev/fd/9 --cacert "$SMOKE_CA" \
+  --resolve "$SMOKE_HOST:443:127.0.0.1" \
+  -H 'X-TrustForge-Stable-Subject: attacker-controlled' \
+  -H 'X-TrustForge-Trusted-Subject: attacker-controlled' \
+  -H 'X-TrustForge-Trusted-Identity: attacker-controlled' \
+  "https://$SMOKE_HOST$SMOKE_CANARY_PATH"
+grep -Eiq '^X-TrustForge-Release-Path:[[:space:]]*B[[:space:]]*$' \
+  "$SMOKE_HEADERS" || {
+  echo "release evidence BLOCK: authenticated nginx principal did not reach B" >&2
+  false
+}
+: >"$SMOKE_HEADERS"
+curl --fail --silent --show-error --output /dev/null --dump-header "$SMOKE_HEADERS" \
+  --unix-socket /run/trustforge/release-router.sock \
+  -H 'X-TrustForge-Trusted-Identity: attacker-controlled' \
+  "http://localhost$SMOKE_CANARY_PATH"
+grep -Eiq '^X-TrustForge-Release-Path:[[:space:]]*A[[:space:]]*$' \
+  "$SMOKE_HEADERS" || {
+  echo "release evidence BLOCK: direct identity spoof was not forced to A" >&2
+  false
+}
 exec 9<&-
 setpriv \
   --reuid=trustforge-operator \
@@ -384,6 +488,11 @@ setpriv \
     "$LEDGER_ROOT/router-outcomes/bootstrap.json"
 )" == "$PREFLIGHT_INPUT_SHA256" ]] || {
   echo "signed release inputs changed during installation" >&2
+  false
+}
+[[ "$(sha256sum "$ALLOWLIST_TARGET" | awk '{print $1}')" == \
+  "$PREFLIGHT_ALLOWLIST_SHA256" ]] || {
+  echo "canary allowlist changed during installation" >&2
   false
 }
 # Reopen and reauthenticate every signed artifact and the complete control

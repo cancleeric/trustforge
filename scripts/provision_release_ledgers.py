@@ -36,7 +36,12 @@ CONTROL_KINDS = frozenset(
     }
 )
 OUTCOME_KINDS = frozenset(
-    {"candidate_reservation", "candidate_result", "router_emergency_stop"}
+    {
+        "candidate_reservation",
+        "candidate_result",
+        "candidate_cost_reconciliation",
+        "router_emergency_stop",
+    }
 )
 
 
@@ -203,9 +208,10 @@ def _write_receipt(
 ) -> None:
     receipt = root / RECEIPT
     payload = {
-        "schema": "trustforge.release-ledger-provision-receipt/v1",
+        "schema": "trustforge.release-ledger-provision-receipt/v2",
         "control_public": control_public,
         "outcome_public": outcome_public,
+        "outcome_event_kinds": sorted(OUTCOME_KINDS),
     }
     fd = os.open(
         receipt,
@@ -232,9 +238,10 @@ def _verify_receipt(root: Path, payload: dict[str, object]) -> None:
     info = os.lstat(receipt)
     raw = receipt.read_bytes()
     expected = {
-        "schema": "trustforge.release-ledger-provision-receipt/v1",
+        "schema": "trustforge.release-ledger-provision-receipt/v2",
         "control_public": payload["control_public"],
         "outcome_public": payload["outcome_public"],
+        "outcome_event_kinds": sorted(OUTCOME_KINDS),
     }
     if (
         not stat.S_ISREG(info.st_mode)

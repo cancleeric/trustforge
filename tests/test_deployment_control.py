@@ -18,6 +18,11 @@ from trustforge.activation_lock import (
 )
 from trustforge.agent.shadow_contracts import canonical_json
 from trustforge.authenticated_ledger import LedgerError
+from trustforge.canary_cost_budget import (
+    BUDGET_DOMAIN,
+    BUDGET_VERSION,
+    CanaryCostBudget,
+)
 from trustforge.deployment_control import (
     ActivationCompletionReceipt,
     DeploymentAuthorization,
@@ -32,6 +37,7 @@ AUTH_KEY = b"a" * 32
 COMPLETE_KEY = b"c" * 32
 CONTROL_KEY = b"l" * 32
 OUTCOME_KEY = b"o" * 32
+BUDGET_KEY = b"b" * 32
 
 
 def _public(seed):
@@ -120,9 +126,10 @@ def _control(tmp_path, *, clock=lambda: NOW):
         event_permissions={
             "release-router-outcome": frozenset(
                 {
-                    "candidate_reservation",
-                    "candidate_result",
-                    "router_emergency_stop",
+            "candidate_reservation",
+            "candidate_result",
+            "candidate_cost_reconciliation",
+            "router_emergency_stop",
                 }
             )
         },
@@ -146,11 +153,49 @@ def _control(tmp_path, *, clock=lambda: NOW):
         policy=_policy(),
         evidence_bundle_digest=_digest("e"),
         stop_after_errors=2,
+        cost_budget_keys={"budget-1": _public(BUDGET_KEY)},
         require_distributed_lock=False,
         clock=clock,
     )
     control.initialize()
     return control
+
+
+def _cost_budget(
+    control,
+    *,
+    request_digest=_digest("a"),
+    calls=2,
+    cost=100,
+    **binding_overrides,
+):
+    snapshot = control.routing_snapshot()
+    unsigned = {
+        "deployment_ledger_id": snapshot.ledger_id,
+        "canary_epoch": snapshot.canary_epoch,
+        "active_artifact_digest": control.active.release_digest,
+        "candidate_artifact_digest": control.candidate.release_digest,
+        "ramp_id": control.policy.ramp_id,
+        "routing_policy_digest": control.policy.policy_digest,
+        "ramp_budget_id": _digest("f"),
+        "request_binding_digest": request_digest,
+        "model_call_cap": 4,
+        "monetary_cap_microusd": 200,
+        "per_request_model_calls": calls,
+        "per_request_cost_microusd": cost,
+        "issued_at": (NOW - timedelta(minutes=1)).isoformat(),
+        "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        "nonce": f"budget-{request_digest[-4:]}",
+        "key_id": "budget-1",
+        "receipt_version": BUDGET_VERSION,
+    }
+    unsigned.update(binding_overrides)
+    signature = (
+        Ed25519PrivateKey.from_private_bytes(BUDGET_KEY)
+        .sign(BUDGET_DOMAIN + canonical_json(unsigned))
+        .hex()
+    )
+    return CanaryCostBudget(**unsigned, signature=signature)
 
 
 def _authorization(control, action, nonce):
@@ -313,10 +358,10 @@ def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path)
     control.complete(_completion(control, prepared, "start", "complete-start"), now=NOW)
     first = control.routing_snapshot()
     reserved = control.reserve_candidate(
-        expected_head=first.ledger_head, reservation_id="1" * 32
+        expected_head=first.outcome_head, reservation_id="1" * 32
     )
     control.record_candidate_result(
-        expected_head=reserved.ledger_head,
+        expected_head=reserved.outcome_head,
         reservation_id="1" * 32,
         ok=False,
         status_code=503,
@@ -326,10 +371,10 @@ def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path)
     second = control.routing_snapshot()
     assert second.phase == "canary"
     reserved2 = control.reserve_candidate(
-        expected_head=second.ledger_head, reservation_id="2" * 32
+        expected_head=second.outcome_head, reservation_id="2" * 32
     )
     stopped = control.record_candidate_result(
-        expected_head=reserved2.ledger_head,
+        expected_head=reserved2.outcome_head,
         reservation_id="2" * 32,
         ok=False,
         status_code=503,
@@ -339,6 +384,241 @@ def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path)
     assert stopped.phase == "stopped"
     serialized = canonical_json([item["event"] for item in control.ledger.read()])
     assert b"subject" not in serialized
+
+
+def test_signed_cost_budget_caps_model_calls_and_money_under_concurrency(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "signed-cost")
+    budget = _cost_budget(control)
+    outcomes = []
+
+    def reserve(index):
+        for _attempt in range(4):
+            try:
+                control.reserve_candidate(
+                    expected_head=control.routing_snapshot().outcome_head,
+                    reservation_id=f"{index:032x}",
+                    cost_budget=budget,
+                    request_binding_digest=budget.request_binding_digest,
+                )
+                outcomes.append("reserved")
+                return
+            except LedgerError as exc:
+                if "exhausted" in str(exc):
+                    break
+        outcomes.append("blocked")
+
+    workers = [threading.Thread(target=reserve, args=(index,)) for index in range(3)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert sorted(outcomes) == ["blocked", "reserved", "reserved"]
+    state = control.routing_snapshot()
+    assert state.candidate_requests == 2
+    assert state.candidate_model_calls == 4
+    assert state.candidate_cost_microusd == 200
+    assert state.outstanding_cost_reservations == 2
+
+
+def test_stale_signed_cost_reservation_is_conservatively_reconciled_after_restart(
+    tmp_path,
+):
+    current = [NOW]
+    control = _control(tmp_path, clock=lambda: current[0])
+    _start_canary(control, "cost-restart")
+    budget = _cost_budget(control)
+    control.reserve_candidate(
+        expected_head=control.routing_snapshot().outcome_head,
+        reservation_id="9" * 32,
+        cost_budget=budget,
+        request_binding_digest=budget.request_binding_digest,
+    )
+    current[0] = NOW + timedelta(minutes=2)
+    restarted = DeploymentControlLedger(
+        control.ledger,
+        outcome_ledger=control.outcome_ledger,
+        authorization_keys={"auth-1": _public(AUTH_KEY)},
+        completion_keys={"complete-1": _public(COMPLETE_KEY)},
+        target=control.target,
+        target_confirmation=control.target_confirmation,
+        active=control.active,
+        candidate=control.candidate,
+        policy=control.policy,
+        evidence_bundle_digest=control.evidence_bundle_digest,
+        stop_after_errors=2,
+        cost_budget_keys={"budget-1": _public(BUDGET_KEY)},
+        require_distributed_lock=False,
+        clock=lambda: current[0],
+    )
+    assert restarted.routing_snapshot().outstanding_cost_reservations == 1
+    competing = DeploymentControlLedger(
+        control.ledger,
+        outcome_ledger=control.outcome_ledger,
+        authorization_keys={"auth-1": _public(AUTH_KEY)},
+        completion_keys={"complete-1": _public(COMPLETE_KEY)},
+        target=control.target,
+        target_confirmation=control.target_confirmation,
+        active=control.active,
+        candidate=control.candidate,
+        policy=control.policy,
+        evidence_bundle_digest=control.evidence_bundle_digest,
+        stop_after_errors=2,
+        cost_budget_keys={"budget-1": _public(BUDGET_KEY)},
+        require_distributed_lock=False,
+        clock=lambda: current[0],
+    )
+    results = []
+
+    def reconcile(instance):
+        results.append(
+            instance.reconcile_stale_cost_reservations(
+                now=current[0], stale_after=timedelta(minutes=1)
+            )
+        )
+
+    workers = [
+        threading.Thread(target=reconcile, args=(instance,))
+        for instance in (restarted, competing)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert sorted(results) == [0, 1]
+    assert restarted.routing_snapshot().outstanding_cost_reservations == 0
+    encoded = canonical_json(
+        [item["event"] for item in restarted.outcome_ledger.read()]
+    )
+    assert b"raw secret query" not in encoded
+    assert b"operator@example.test" not in encoded
+
+
+def test_request_count_is_not_model_call_or_monetary_cost(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "zero-cost")
+    reserved = control.reserve_candidate(
+        expected_head=control.routing_snapshot().outcome_head,
+        reservation_id="8" * 32,
+    )
+    settled = control.record_candidate_result(
+        expected_head=reserved.outcome_head,
+        reservation_id="8" * 32,
+        ok=True,
+        status_code=200,
+        latency_ms=1,
+        error_kind="",
+    )
+    assert settled.candidate_requests == 1
+    assert settled.candidate_model_calls == 0
+    assert settled.candidate_cost_microusd == 0
+    assert settled.outstanding_cost_reservations == 0
+
+
+def test_one_signed_ramp_cap_is_shared_across_distinct_query_bindings(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "query-isolation")
+    first_budget = _cost_budget(control, request_digest=_digest("1"))
+    second_budget = _cost_budget(control, request_digest=_digest("2"))
+    first = control.reserve_candidate(
+        expected_head=control.routing_snapshot().outcome_head,
+        reservation_id="6" * 32,
+        cost_budget=first_budget,
+        request_binding_digest=first_budget.request_binding_digest,
+    )
+    control.reserve_candidate(
+        expected_head=first.outcome_head,
+        reservation_id="7" * 32,
+        cost_budget=second_budget,
+        request_binding_digest=second_budget.request_binding_digest,
+    )
+    with pytest.raises(LedgerError, match="exhausted"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="5" * 32,
+            cost_budget=first_budget,
+            request_binding_digest=first_budget.request_binding_digest,
+        )
+
+
+@pytest.mark.parametrize(
+    "budget_overrides",
+    [
+        {"candidate_artifact_digest": _digest("d")},
+        {"ramp_id": "other-ramp"},
+    ],
+)
+def test_signed_cost_budget_cannot_replay_across_release_or_ramp(
+    tmp_path, budget_overrides
+):
+    control = _control(tmp_path)
+    _start_canary(control, "binding-replay")
+    budget = _cost_budget(control, **budget_overrides)
+    with pytest.raises(LedgerError, match="cost budget is invalid"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="4" * 32,
+            cost_budget=budget,
+            request_binding_digest=budget.request_binding_digest,
+        )
+
+
+def test_router_computed_request_binding_must_match_signed_budget(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "query-replay")
+    budget = _cost_budget(control, request_digest=_digest("1"))
+    with pytest.raises(LedgerError, match="request binding"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="3" * 32,
+            cost_budget=budget,
+            request_binding_digest=_digest("2"),
+        )
+
+
+def test_stop_start_same_ramp_does_not_reset_durable_cost_cap(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "durable-cap-1")
+    first_budget = _cost_budget(control)
+    first = control.reserve_candidate(
+        expected_head=control.routing_snapshot().outcome_head,
+        reservation_id="1" * 32,
+        cost_budget=first_budget,
+        request_binding_digest=first_budget.request_binding_digest,
+    )
+    control.reserve_candidate(
+        expected_head=first.outcome_head,
+        reservation_id="2" * 32,
+        cost_budget=first_budget,
+        request_binding_digest=first_budget.request_binding_digest,
+    )
+    control.prepare(
+        "stop",
+        _authorization(control, "stop", "stop-durable-cap"),
+        now=NOW,
+    )
+    _start_canary(control, "durable-cap-2")
+    restarted_state = control.routing_snapshot()
+    assert restarted_state.candidate_model_calls == 4
+    assert restarted_state.candidate_cost_microusd == 200
+    next_epoch_budget = _cost_budget(control)
+    with pytest.raises(LedgerError, match="exhausted"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="3" * 32,
+            cost_budget=next_epoch_budget,
+            request_binding_digest=next_epoch_budget.request_binding_digest,
+        )
+    rotated_budget_id = _cost_budget(
+        control, ramp_budget_id=_digest("e")
+    )
+    with pytest.raises(LedgerError, match="identity changed"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="4" * 32,
+            cost_budget=rotated_budget_id,
+            request_binding_digest=rotated_budget_id.request_binding_digest,
+        )
 
 
 def _start_canary(control, suffix):
@@ -362,7 +642,7 @@ def test_stop_wins_coordination_lock_before_reservation_deterministically(tmp_pa
         attempted.set()
         try:
             control.reserve_candidate(
-                expected_head=before.ledger_head, reservation_id="a" * 32
+                expected_head=before.outcome_head, reservation_id="a" * 32
             )
         except Exception as exc:  # asserted below
             result["error"] = exc
@@ -386,10 +666,10 @@ def test_restart_canary_epoch_excludes_old_ramp_outcomes(tmp_path):
     _start_canary(control, "epoch-1")
     first = control.routing_snapshot()
     reserved = control.reserve_candidate(
-        expected_head=first.ledger_head, reservation_id="b" * 32
+        expected_head=first.outcome_head, reservation_id="b" * 32
     )
     control.record_candidate_result(
-        expected_head=reserved.ledger_head,
+        expected_head=reserved.outcome_head,
         reservation_id="b" * 32,
         ok=False,
         status_code=503,
@@ -836,7 +1116,7 @@ def test_candidate_connection_rechecks_stop_before_network_start(tmp_path):
     state = control.routing_snapshot()
     reservation_id = "d" * 32
     control.reserve_candidate(
-        expected_head=state.ledger_head,
+        expected_head=state.outcome_head,
         reservation_id=reservation_id,
     )
     control.prepare(
@@ -863,7 +1143,7 @@ def test_connect_handoff_orders_stop_and_does_not_lock_hanging_response(
     state = control.routing_snapshot()
     reservation_id = "e" * 32
     control.reserve_candidate(
-        expected_head=state.ledger_head, reservation_id=reservation_id
+        expected_head=state.outcome_head, reservation_id=reservation_id
     )
     epoch = control._canary_epoch(control._records())
     assert epoch is not None
@@ -936,7 +1216,7 @@ def test_candidate_connect_uses_hard_nonblocking_select_deadline(tmp_path, monke
     state = control.routing_snapshot()
     reservation_id = "f" * 32
     control.reserve_candidate(
-        expected_head=state.ledger_head, reservation_id=reservation_id
+        expected_head=state.outcome_head, reservation_id=reservation_id
     )
 
     class StalledSocket:
