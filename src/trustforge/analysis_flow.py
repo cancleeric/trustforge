@@ -513,6 +513,8 @@ class AnalysisFlow:
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
+        self._agos_runtimes: list[Any] = []
+        self._agos_runtimes_lock = threading.Lock()
         # Every stage boundary is a safe handoff point. Priority queues preserve
         # manual priority through the complete flow without interrupting work
         # that is already executing.
@@ -1787,21 +1789,60 @@ class AnalysisFlow:
         coin = coin.upper()
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
-        docs = collect(query, coin=coin, offline=False)
-        raw = [doc_to_dict(doc) for doc in docs]
-        encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        revision = hashlib.sha256(encoded.encode()).hexdigest()
-        snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
-        cursor = self._conn().execute(
-            "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
-            (snapshot_id, coin, time.time(), revision, encoded, len(raw)),
-        )
-        if cursor.rowcount:
-            self._append_lineage(
-                "snapshot_created", entity_type="snapshot", entity_id=snapshot_id,
-                snapshot_id=snapshot_id,
-                metadata={"coin": coin, "source_revision": revision, "document_count": len(raw)},
+        # ── Agent OS pre-execution gate for ingestion ──
+        audit_run_id = f"snapshot-pending-{uuid.uuid4()}"
+        _gate_package = {"job": {"job_id": audit_run_id}}
+        if not self._agos_assert_tool_allowed(_gate_package, "ingestion-collect"):
+            # Tool blocked — cannot collect, return empty snapshot
+            raise PermissionError(
+                f"Agent OS blocked ingestion-collect for {coin}: "
+                f"tool not registered or requires approval"
             )
+        invocation_id = self._agos_begin_tool(
+            _gate_package, "ingestion-collect", {"coin": coin, "query": query}
+        )
+        try:
+            docs = collect(query, coin=coin, offline=False)
+        except Exception as exc:
+            self._agos_complete_tool(
+                invocation_id, status="failed", error=str(exc)
+            )
+            raise
+        try:
+            raw = [doc_to_dict(doc) for doc in docs]
+            encoded = json.dumps(
+                raw, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            revision = hashlib.sha256(encoded.encode()).hexdigest()
+            snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
+            if invocation_id is not None:
+                self._get_agos_runtime().associate_tool_invocation_run(
+                    invocation_id, snapshot_id
+                )
+            cursor = self._conn().execute(
+                "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
+                (snapshot_id, coin, time.time(), revision, encoded, len(raw)),
+            )
+            if cursor.rowcount:
+                self._append_lineage(
+                    "snapshot_created", entity_type="snapshot",
+                    entity_id=snapshot_id, snapshot_id=snapshot_id,
+                    metadata={
+                        "coin": coin,
+                        "source_revision": revision,
+                        "document_count": len(raw),
+                    },
+                )
+        except Exception as exc:
+            self._agos_complete_tool(
+                invocation_id, status="failed", error=str(exc)
+            )
+            raise
+        self._agos_complete_tool(
+            invocation_id,
+            output=raw,
+            status="success",
+        )
         return snapshot_id
 
     def enqueue_matrix(self, snapshot_id: str, *, questions: dict[str, str] | None = None) -> list[str]:
@@ -1925,9 +1966,22 @@ class AnalysisFlow:
                WHERE j.state='completed'"""
         ).fetchall()
         recovered = 0
-        authority = self._atomic_store()
+        if not rows:
+            authority = None
+        else:
+            try:
+                authority = self._atomic_store()
+            except MultiAngleAuthorityError:
+                logging.getLogger(__name__).warning(
+                    "atomic_terminal_recovery_skipped authority_unavailable "
+                    "completed_rows=%s",
+                    len(rows),
+                    exc_info=True,
+                )
+                rows = []
         for row in rows:
             try:
+                assert authority is not None
                 authority.record_job_terminal(
                     batch_id=row["batch_id"], mode=row["mode"],
                     job_id=row["job_id"], owner_token=row["owner_token"],
@@ -1986,7 +2040,10 @@ class AnalysisFlow:
         ).fetchall()
         for terminal_batch in terminal_batches:
             try:
-                authority.settle_batch(batch_id=terminal_batch["batch_id"])
+                settlement_authority = authority or self._atomic_store()
+                settlement_authority.settle_batch(
+                    batch_id=terminal_batch["batch_id"]
+                )
             except Exception:
                 logging.getLogger(__name__).warning(
                     "atomic_failure_settlement_recovery_failed batch_id=%s",
@@ -2320,12 +2377,6 @@ class AnalysisFlow:
                 events = len(package.get("log").events) if package.get("log") else 0
                 duration = time.time() - started
                 self._checkpoint(job_id, stage, "completed", started=started, duration=duration, events=events)
-                if stage == "report_delivery":
-                    # Publish a batch synthesis only after the final stage's
-                    # durable checkpoint is visible.  Otherwise clients can
-                    # observe the synthesis while report_delivery still says
-                    # "running".
-                    self._finalize_report_delivery(package)
                 self._append_lineage(
                     "stage_completed", entity_type="stage_run", entity_id=f"{job_id}:{stage}",
                     snapshot_id=job["snapshot_id"], job_id=job_id, stage=stage,
@@ -2455,6 +2506,20 @@ class AnalysisFlow:
         job = self._job(package["job_id"])
         snap = self._conn().execute("SELECT * FROM analysis_snapshots WHERE snapshot_id=?", (job["snapshot_id"],)).fetchone()
         package.update(job=job, docs=[doc_from_dict(x) for x in json.loads(snap["docs_json"])], log=ExecutionLog(run_id=job["job_id"]))
+        ingestion_lineage_id = self._agos_begin_tool(
+            package,
+            "ingestion-collect",
+            {"snapshot_id": job["snapshot_id"], "lineage_only": True},
+        )
+        self._agos_complete_tool(
+            ingestion_lineage_id,
+            output={
+                "snapshot_id": job["snapshot_id"],
+                "document_count": snap["document_count"],
+                "revision": snap["source_revision"],
+            },
+            status="success",
+        )
         package["log"].record("ingestion.collect", params={"coin": job["coin"], "snapshot_id": job["snapshot_id"]}, summary=f"locked {snap['document_count']} documents")
         package["retrieval_context"] = self.question_context(job["coin"], job["mode"], job["question"], limit=5)["matches"]
         package["log"].record(
@@ -2462,11 +2527,29 @@ class AnalysisFlow:
             params={"engine": "sqlite_char_bigram_v1", "snapshot_id": job["snapshot_id"]},
             summary=f"retrieved {len(package['retrieval_context'])} historical question contexts; non-evidentiary",
         )
+        # ── Agent OS hook: build context manifest at run start ──
+        self._agos_build_context(package)
         return package
 
     def _stage_claim_extraction(self, package: dict) -> dict:
         log = package["log"]
         job = package["job"]
+        # ── Agent OS pre-execution gate: check Bedrock authorization ──
+        if not self._agos_assert_tool_allowed(
+            package, "bedrock-claim-extraction"
+        ):
+            log.record(
+                "agos.tool_blocked",
+                params={"tool_id": "bedrock-claim-extraction"},
+                summary="Bedrock blocked by Agent OS tool gate; forcing offline",
+            )
+            client = BedrockClient(offline=True)
+            package["client"] = client
+            package["claims"] = client.extract_claims_with_llm(
+                package["docs"], log=log
+            )
+            return package
+
         batch_id = job.get("atomic_batch_id") if isinstance(job, dict) else job["atomic_batch_id"]
         batch_allocation = bool(batch_id)
         if batch_allocation:
@@ -2533,32 +2616,54 @@ class AnalysisFlow:
 
         if batch_allocation:
             log._atomic_accounting_callback = record_claim_cost
-        with _bedrock_live_attempt(
-            log, batch_allocation=batch_allocation,
-        ) as live:
-            client = BedrockClient(offline=not live)
-            package["client"] = client
-            prompt_docs = (
-                _bounded_multi_angle_documents(package["docs"])
-                if batch_allocation else package["docs"]
-            )
-            if batch_allocation:
-                doc_block = "\n".join(
-                    _multi_angle_doc_line(doc) for doc in prompt_docs
-                )
-                if (
-                    len(doc_block.encode("utf-8"))
-                    > MULTI_ANGLE_DOC_BLOCK_MAX_BYTES
-                ):
-                    raise MultiAngleAuthorityError(
-                        "claim document block exceeds authority byte cap"
+        invocation_id = None
+        try:
+            with _bedrock_live_attempt(
+                log, batch_allocation=batch_allocation,
+            ) as live:
+                client = BedrockClient(offline=not live)
+                package["client"] = client
+                if live:
+                    invocation_id = self._agos_begin_tool(
+                        package,
+                        "bedrock-claim-extraction",
+                        {"step": 1, "doc_count": len(package["docs"])},
                     )
-            package["claims"] = client.extract_claims_with_llm(
-                prompt_docs,
-                log=log,
+                prompt_docs = (
+                    _bounded_multi_angle_documents(package["docs"])
+                    if batch_allocation else package["docs"]
+                )
+                if batch_allocation:
+                    doc_block = "\n".join(
+                        _multi_angle_doc_line(doc) for doc in prompt_docs
+                    )
+                    if (
+                        len(doc_block.encode("utf-8"))
+                        > MULTI_ANGLE_DOC_BLOCK_MAX_BYTES
+                    ):
+                        raise MultiAngleAuthorityError(
+                            "claim document block exceeds authority byte cap"
+                        )
+                package["claims"] = client.extract_claims_with_llm(
+                    prompt_docs, log=log
+                )
+                llm_active = not client.offline and bool(client.config.model_id)
+        except Exception as exc:
+            self._agos_complete_tool(
+                invocation_id, status="failed", error=str(exc)
             )
-            llm_active = not client.offline and bool(client.config.model_id)
+            raise
         log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
+        self._agos_complete_tool(
+            invocation_id,
+            output=[
+                dataclasses.asdict(claim)
+                if dataclasses.is_dataclass(claim)
+                else claim
+                for claim in package["claims"]
+            ],
+            status="success" if package["claims"] else "failed",
+        )
         return package
 
     def _stage_trust_reasoning(self, package: dict) -> dict:
@@ -2615,8 +2720,12 @@ class AnalysisFlow:
                 locale=package.get("locale", DEFAULT_NARRATIVE_LOCALE),
             )
 
+        narrative_tool_id = "bedrock-narrative-generation"
+        narrative_allowed = self._agos_assert_tool_allowed(
+            package, narrative_tool_id
+        )
         batch_allocation = bool(package.get("batch_allocation"))
-        if batch_allocation:
+        if narrative_allowed and batch_allocation:
             config_version = os.getenv(
                 "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
             ).strip() or "local-v1"
@@ -2651,7 +2760,15 @@ class AnalysisFlow:
                 },
             )
 
-        if client.offline and not batch_allocation:
+        if not narrative_allowed:
+            log.record(
+                "agos.tool_blocked",
+                params={"tool_id": narrative_tool_id},
+                summary="Narrative Bedrock blocked by Agent OS tool gate; forcing offline",
+            )
+            client.offline = True
+            package["report"], package["evidence"] = _build_report()
+        elif client.offline and not batch_allocation:
             # Step1 已判離線（未 live 資格 / 預留失敗）：Step3 narrative 不會
             # 憑空變成 live，維持離線、不需要再走一次閘。
             package["report"], package["evidence"] = _build_report()
@@ -2667,7 +2784,44 @@ class AnalysisFlow:
                 log, batch_allocation=batch_allocation,
             ) as live:
                 client.offline = not live
-                package["report"], package["evidence"] = _build_report()
+                invocation_id = (
+                    self._agos_begin_tool(
+                        package,
+                        narrative_tool_id,
+                        {"step": 3, "question_type": job["question_type"]},
+                    )
+                    if live
+                    else None
+                )
+                try:
+                    package["report"], package["evidence"] = _build_report()
+                except Exception as exc:
+                    self._agos_complete_tool(
+                        invocation_id, status="failed", error=str(exc)
+                    )
+                    raise
+                else:
+                    evidence_refs = [
+                        str(ref)
+                        for item in package["evidence"]
+                        for ref in [getattr(item, "source_url", None)]
+                        if ref
+                    ]
+                    self._agos_complete_tool(
+                        invocation_id,
+                        output={
+                            "report": (
+                                dataclasses.asdict(package["report"])
+                                if dataclasses.is_dataclass(package["report"])
+                                else package["report"]
+                            ),
+                            "evidence_count": len(package["evidence"]),
+                        },
+                        evidence_refs=evidence_refs,
+                        status="success",
+                    )
+        # ── Agent OS: mark evidence-eligible memories as actually used ──
+        self._agos_mark_evidence_used(package)
         return package
 
     def _stage_report_delivery(self, package: dict) -> dict:
@@ -2677,13 +2831,16 @@ class AnalysisFlow:
         from .agent.orchestrator import aggregate_trust_by_kind
         from .web import VERSION, _aggregate_trust_components, _price_provenance_data, _public_evidence_dict
         evidence = package["evidence"]
+        memory_counts = self._agos_memory_counts(job["job_id"])
         payload = {"version": VERSION, "report": dataclasses.asdict(package["report"]),
                    "evidence": [_public_evidence_dict(e) for e in evidence],
                    "trust_radar": aggregate_trust_by_kind(evidence),
                    "trust_components_aggregate": _aggregate_trust_components(evidence),
                    "price_provenance": _price_provenance_data(evidence),
+                   "agent_os_memory_counts": memory_counts,
                    "retrieval_context": package.get("retrieval_context", []),
                    "execution": log.manifest(), "execution_log": log.events, "snapshot_id": job["snapshot_id"], "mode": job["mode"]}
+        payload["report"]["memory_lineage"] = memory_counts
         now = time.time()
         self._conn().execute("BEGIN IMMEDIATE")
         try:
@@ -2720,11 +2877,6 @@ class AnalysisFlow:
             self._conn().execute("COMMIT")
         except Exception:
             self._conn().execute("ROLLBACK"); raise
-        return package
-
-    def _finalize_report_delivery(self, package: dict) -> None:
-        """Settle and synthesize after report_delivery is durably completed."""
-        job = package["job"]
         if job["atomic_batch_id"]:
             try:
                 authority = self._atomic_store()
@@ -2773,6 +2925,261 @@ class AnalysisFlow:
                     "for snapshot=%s coin=%s",
                     job["snapshot_id"], job["coin"], exc_info=True,
                 )
+        # ── Agent OS hook: finalize lineage at run end ──
+        self._agos_finalize(package)
+        return package
+
+    # ─── Agent OS Integration Hooks ──────────────────────────────────────
+
+    def _agos_build_context(self, package: dict) -> None:
+        """Build Agent OS context manifest at run start (fail-soft).
+
+        Performs:
+          1. Memory retrieval — maps question context to formal memory refs
+          2. Skill selection — discovers and freezes active analysis skills
+          3. Context manifest — builds immutable manifest with all refs
+        """
+        try:
+            from .agos_runtime import AgosRuntime, agos_enabled
+            if not agos_enabled():
+                return
+            job = package["job"]
+            runtime = self._get_agos_runtime()
+            runtime._ensure_init()
+
+            # 1. Memory retrieval: register retrieval_context as formal memory
+            memory_refs = None
+            if runtime._retrieval_adapter and package.get("retrieval_context"):
+                items = [
+                    {"content": str(ctx.get("question", "")), "published_at": ctx.get("timestamp")}
+                    for ctx in package["retrieval_context"]
+                ]
+                if items:
+                    memory_refs = runtime._retrieval_adapter.retrieve_from_source(
+                        items,
+                        run_id=job["job_id"],
+                        source_provider="question_context_history",
+                        kind="episodic",
+                        reason="question_context_retrieval",
+                        promote_to_evidence=False,
+                    )
+
+            # 2. Skill selection: discover active analysis skills
+            skill_ids = None
+            if runtime._skill_loader:
+                active_skills = runtime._skill_loader.discover(family="analysis")
+                if active_skills:
+                    skill_ids = [s.skill_id for s in active_skills]
+
+            # 3. Tool inventory: list registered tools for this run
+            tool_ids = None
+            if runtime._tool_registry:
+                tools = runtime._tool_registry.list_tools()
+                tool_ids = [t.tool_id for t in tools]
+
+            # 4. Policy refs: capture active outer-policy revisions
+            policy_refs = None
+            try:
+                from .skills import resolve_active_skills
+                active_policies = resolve_active_skills()
+                if active_policies:
+                    policy_refs = [
+                        {"policy_id": f"outer-{p['family']}", "revision_hash": p["revision"]}
+                        for p in active_policies
+                    ]
+            except Exception:
+                pass  # fail-soft: policies unavailable doesn't block
+
+            # 5. Build context manifest
+            manifest = runtime.build_context(
+                job["job_id"],
+                question=job["question"],
+                snapshot_ref=job["snapshot_id"],
+                memory_refs=memory_refs,
+                skill_ids=skill_ids,
+                tool_ids=tool_ids,
+                policy_refs=policy_refs,
+            )
+            if manifest:
+                package["agos_manifest"] = manifest
+                package["log"].record(
+                    "agos.context_manifest",
+                    params={
+                        "manifest_id": manifest.manifest_id,
+                        "content_hash": manifest.content_hash,
+                        "memory_count": len(manifest.included_refs.memory_refs),
+                        "skill_count": len(manifest.included_refs.skill_refs),
+                        "tool_count": len(manifest.included_refs.tool_refs),
+                    },
+                    summary=(
+                        f"Agent OS context: {len(manifest.included_refs.memory_refs)} memories, "
+                        f"{len(manifest.included_refs.skill_refs)} skills, "
+                        f"{len(manifest.included_refs.tool_refs)} tools "
+                        f"({manifest.token_used}/{manifest.token_budget} tokens)"
+                    ),
+                )
+        except Exception as e:
+            logging.getLogger(__name__).warning("Agent OS context build failed (fail-soft): %s", e)
+
+    def _agos_finalize(self, package: dict) -> None:
+        """Finalize Agent OS lineage at run end (fail-soft)."""
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return
+            job = package["job"]
+            runtime = self._get_agos_runtime()
+            runtime.finalize_run(job["job_id"])
+        except Exception as e:
+            logging.getLogger(__name__).warning("Agent OS finalize failed (fail-soft): %s", e)
+
+    def _get_agos_runtime(self) -> "AgosRuntime":
+        """Return a thread-local runtime for thread-bound SQLite repositories."""
+        runtime = getattr(self._local, "agos_runtime", None)
+        if runtime is None:
+            from .agos_runtime import AgosRuntime
+            runtime = AgosRuntime()
+            self._local.agos_runtime = runtime
+            with self._agos_runtimes_lock:
+                self._agos_runtimes.append(runtime)
+        return runtime
+
+    def _agos_begin_tool(self, package: dict, tool_id: str, args: dict) -> str | None:
+        """Persist a pending receipt before an allowed external execution."""
+        from .agos_runtime import agos_enabled
+
+        if not agos_enabled():
+            return None
+        job = package.get("job")
+        if not job:
+            raise RuntimeError(f"cannot audit tool {tool_id}: run identity missing")
+        invocation_id = self._get_agos_runtime().record_tool_invocation(
+            job["job_id"], tool_id, args
+        )
+        if invocation_id is None:
+            raise RuntimeError(
+                f"cannot execute allowed tool {tool_id}: invocation receipt "
+                "could not be persisted"
+            )
+        return invocation_id
+
+    def _agos_complete_tool(
+        self,
+        invocation_id: str | None,
+        *,
+        output: Any = None,
+        status: str,
+        error: str | None = None,
+        evidence_refs: list[str] | None = None,
+    ) -> None:
+        """Bind the actual result to its receipt; audit errors are observable."""
+        if invocation_id is None:
+            return
+        self._get_agos_runtime().complete_tool_invocation(
+            invocation_id,
+            output=output,
+            status=status,
+            error=error,
+            evidence_refs=evidence_refs,
+        )
+
+    def _agos_assert_tool_allowed(self, package: dict, tool_id: str) -> bool:
+        """Pre-execution gate: check if tool is allowed to run.
+
+        Returns True if tool may execute, False if blocked.
+        When AGOS is disabled, always returns True (backward-compatible).
+        When AGOS is enabled but tool is unknown/high-risk → blocks.
+        Any internal error blocks execution (fail-closed).
+        """
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return True
+            runtime = self._get_agos_runtime()
+            runtime._ensure_init()
+            if runtime._tool_registry is None:
+                # Registry failed to init → fail-closed
+                logging.getLogger(__name__).warning(
+                    "Agent OS tool registry unavailable; blocking tool %s (fail-closed)", tool_id
+                )
+                return False
+            if not runtime._tool_registry.is_known(tool_id):
+                # Unknown tool → blocked (but fail-soft for pipeline:
+                # log warning, don't crash the entire analysis)
+                logging.getLogger(__name__).warning(
+                    "Agent OS: tool %s not registered, execution blocked", tool_id
+                )
+                return False
+            # Check if requires approval (high-risk)
+            if runtime._tool_registry.requires_approval(tool_id):
+                logging.getLogger(__name__).warning(
+                    "Agent OS: tool %s requires approval, execution blocked", tool_id
+                )
+                return False
+            return True
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Agent OS tool gate error (fail-closed, blocking): %s", e
+            )
+            return False
+
+    def _agos_memory_counts(self, run_id: str) -> dict[str, int]:
+        """Disclose persisted memory lineage without inferring usage."""
+        empty = {"historical": 0, "evidence": 0, "used_as_evidence": 0}
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return empty
+            return self._get_agos_runtime().memory_counts(run_id)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Agent OS memory count disclosure failed: %s", e
+            )
+            return empty
+
+    def _agos_mark_evidence_used(self, package: dict) -> None:
+        """Mark memory entries that were actually consumed by Trust scoring.
+
+        Correlates the final Evidence list (from build_report/scoring) with
+        memory entries via content_hash. Only memories whose content matches
+        an actual Evidence item are marked as used_as_evidence — not all
+        eligible memories in the manifest.
+        """
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return
+            job = package.get("job")
+            evidence_list = package.get("evidence")
+            manifest = package.get("agos_manifest")
+            if not job or not evidence_list or not manifest:
+                return
+            runtime = self._get_agos_runtime()
+            if runtime._memory_repo is None:
+                return
+
+            # Build set of content hashes from actual Evidence items
+            evidence_hashes = set()
+            for ev in evidence_list:
+                # Evidence objects have content_reference field
+                ref = getattr(ev, "content_reference", None) or ""
+                if ref:
+                    from .memory_os import memory_content_hash
+                    evidence_hashes.add(memory_content_hash(ref))
+
+            # Only mark memories whose hash matches actual evidence
+            for mref in manifest.included_refs.memory_refs:
+                if not mref.get("evidence_eligible"):
+                    continue
+                entry = runtime._memory_repo.get(mref["memory_id"])
+                if entry and entry.content_hash in evidence_hashes:
+                    runtime._memory_repo.mark_used_as_evidence(
+                        entry.memory_id, job["job_id"]
+                    )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Agent OS mark_used_as_evidence failed (fail-soft): %s", e
+            )
 
     def status(self) -> dict[str, Any]:
         if self._readonly_store_missing():
@@ -2985,6 +3392,14 @@ class AnalysisFlow:
         self.close()
 
     def close(self) -> None:
+        with self._agos_runtimes_lock:
+            agos_runtimes, self._agos_runtimes = self._agos_runtimes, []
+        for runtime in agos_runtimes:
+            try:
+                runtime.close()
+            except Exception:
+                pass
+        self._local.agos_runtime = None
         with self._connections_lock:
             connections, self._connections = self._connections, []
         for conn in connections:

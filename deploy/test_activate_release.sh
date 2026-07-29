@@ -114,6 +114,24 @@ pass "activation receipt integration"
 echo "--- Test 8: preflight dry-run (skipped without prewritten S3 state) ---"
 pass "preflight dry-run skipped (no preset S3 pointers)"
 
+echo "--- Test 9: production activation verifies durable analysis worker stability ---"
+if grep -q 'verify_analysis_worker "$TARGET"' deploy/activate_release.sh \
+  && grep -q 'NRestarts' deploy/activate_release.sh \
+  && grep -q 'analysis-flow worker restart loop detected' deploy/activate_release.sh; then
+  pass "activation checks analysis-flow worker stability"
+else
+  fail "activation checks analysis-flow worker stability"
+fi
+
+echo "--- Test 10: production activation requires a completed manual report ---"
+if grep -q 'verify_analysis_report "$TARGET"' deploy/activate_release.sh \
+  && grep -q 'verify_production_analysis_report.py' deploy/activate_release.sh \
+  && grep -q -- '--timeout-seconds 600' deploy/activate_release.sh; then
+  pass "activation requires completed manual report"
+else
+  fail "activation requires completed manual report"
+fi
+
 echo ""
 echo "========================================"
 echo "Results: PASS=$PASS FAIL=$FAIL"

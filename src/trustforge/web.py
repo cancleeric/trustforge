@@ -8490,6 +8490,31 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/admin/hermes-upgrades":
                     code, body = _handle_api_admin_upgrade_queue()
                     return self._send(code, body, "application/json; charset=utf-8")
+                # ── Agent OS Admin API ──
+                if (u.path + "/").startswith("/api/admin/agos/"):
+                    from .agos_admin_api import dispatch_admin_agos
+                    from .agos_runtime import AgosRuntime
+                    # HTTPServer dispatches requests on different threads.
+                    # Reuse only the configured data directory, never an
+                    # initialized runtime's thread-bound SQLite connections.
+                    _seed_rt = getattr(self.server, "_agos_runtime", None)
+                    _agos_rt = AgosRuntime(
+                        data_dir=getattr(_seed_rt, "_data_dir", None),
+                        bootstrap_tools=False,
+                        read_only=True,
+                    )
+                    headers_dict = {k: v for k, v in getattr(self, "headers", {}).items()}
+                    try:
+                        code, body = dispatch_admin_agos(
+                            u.path, u.query or "", headers_dict, _agos_rt
+                        )
+                    finally:
+                        _agos_rt.close()
+                    return self._send(
+                        code,
+                        json.dumps(body, ensure_ascii=False),
+                        "application/json; charset=utf-8",
+                    )
                 # 已認證但打到不存在的 admin 子路徑 → JSON 404
                 return self._send(
                     404,

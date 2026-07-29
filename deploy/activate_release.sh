@@ -131,6 +131,50 @@ verify_fetch_scheduler() {
   echo "[activate] fetch-scheduler probe passed"
 }
 
+# ---- durable analysis worker verify ------------------------------------------
+verify_analysis_worker() {
+  local iid="$1"
+  local wcmdid
+  wcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","before=$(systemctl show trustforge-analysis-flow.service -p NRestarts --value)","systemctl is-active --quiet trustforge-analysis-flow.service","sleep 15","systemctl is-active --quiet trustforge-analysis-flow.service","after=$(systemctl show trustforge-analysis-flow.service -p NRestarts --value)","test \"$before\" = \"$after\" || { echo \"[activate] analysis-flow worker restart loop detected: before=$before after=$after\" >&2; journalctl -u trustforge-analysis-flow.service -n 80 --no-pager >&2; exit 1; }","echo \"[activate] analysis-flow worker stable\""]' \
+    --query 'Command.CommandId' --output text)
+  if [ -z "$wcmdid" ] || [ "$wcmdid" = "None" ]; then
+    echo "[activate] ERROR: analysis-flow worker check send-command failed" >&2
+    return 1
+  fi
+  local wstatus
+  wstatus=$(poll_ssm_terminal_status "$wcmdid" "$iid" 90 5) || true
+  if [ "$wstatus" != "Success" ]; then
+    echo "[activate] ERROR: analysis-flow worker unstable (Status=${wstatus})" >&2
+    aws ssm get-command-invocation --region "$REGION" --command-id "$wcmdid" --instance-id "$iid" \
+      --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
+    return 1
+  fi
+  echo "[activate] analysis-flow worker stable on $iid"
+}
+
+# ---- real manual report E2E ---------------------------------------------------
+verify_analysis_report() {
+  local iid="$1"
+  local rcmdid
+  rcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","/usr/bin/python3.11 scripts/verify_production_analysis_report.py --base-url http://localhost --timeout-seconds 600 --poll-seconds 5"]' \
+    --query 'Command.CommandId' --output text)
+  if [ -z "$rcmdid" ] || [ "$rcmdid" = "None" ]; then
+    echo "[activate] ERROR: analysis report E2E send-command failed" >&2
+    return 1
+  fi
+  local rstatus
+  rstatus=$(poll_ssm_terminal_status "$rcmdid" "$iid" 660 5) || true
+  if [ "$rstatus" != "Success" ]; then
+    echo "[activate] ERROR: analysis report E2E failed (Status=${rstatus})" >&2
+    aws ssm get-command-invocation --region "$REGION" --command-id "$rcmdid" --instance-id "$iid" \
+      --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
+    return 1
+  fi
+  echo "[activate] analysis report E2E passed on $iid"
+}
+
 # ---- receipt helper -----------------------------------------------------------
 write_receipt() {
   local status="$1" error="${2:-}"
@@ -414,6 +458,8 @@ echo "[activate] active.json promoted to $CANDIDATE_DIGEST"
 echo "[activate] Step 7: post-verify..."
 verify_web_healthz "$TARGET"
 verify_fetch_scheduler "$TARGET"
+verify_analysis_worker "$TARGET"
+verify_analysis_report "$TARGET"
 echo "[activate] post-verify passed"
 
 # Step 8: Write receipt while rollback state is still intact.

@@ -5,6 +5,15 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _authorize_agos_schema_for_tests(monkeypatch):
+    """Keep AGOS schema authorization an explicit test-boundary override."""
+    monkeypatch.setattr(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        lambda purpose: None,
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_cost_ledger(tmp_path, monkeypatch):
     """成本帳本測試隔離：預設寫入 tmp_path，而非真實 repo 的 `out/cost_ledger.jsonl`。
 

@@ -51,7 +51,7 @@ from typing import Any, Callable, Mapping
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from trustforge.asset_intrinsic_candidate import CandidateShadow
+from trustforge_core import CandidateShadow
 from trustforge.asset_intrinsic_promotion import (
     IntrinsicPromotionDecision,
     IntrinsicPromotionPolicy,
@@ -138,7 +138,9 @@ class CanaryScope:
             raise CanaryControlError("canary allowlist must be a non-empty frozenset")
         for subject in self.allowlist:
             if not isinstance(subject, str) or not subject:
-                raise CanaryControlError("canary allowlist subject must be non-empty str")
+                raise CanaryControlError(
+                    "canary allowlist subject must be non-empty str"
+                )
         if not isinstance(self.target, str) or not self.target:
             raise CanaryControlError("canary target must be a non-empty string")
         lowered = self.target.strip().lower()
@@ -148,9 +150,7 @@ class CanaryScope:
                     "canary target must not be a production target"
                 )
         if "canary" not in lowered and "sandbox" not in lowered:
-            raise CanaryControlError(
-                "canary target must carry a canary/sandbox marker"
-            )
+            raise CanaryControlError("canary target must carry a canary/sandbox marker")
 
     def eligible(self, subject: str) -> bool:
         return subject in self.allowlist
@@ -179,9 +179,11 @@ class CanaryObservation:
     def __post_init__(self) -> None:
         if not isinstance(self.subject, str) or not self.subject:
             raise CanaryControlError("observation subject must be a non-empty str")
-        if isinstance(self.coverage_disparity, bool) or not isinstance(
-            self.coverage_disparity, int
-        ) or self.coverage_disparity < 0:
+        if (
+            isinstance(self.coverage_disparity, bool)
+            or not isinstance(self.coverage_disparity, int)
+            or self.coverage_disparity < 0
+        ):
             raise CanaryControlError("coverage_disparity must be a non-negative int")
         for name in ("missingness_rate", "source_concentration"):
             value = getattr(self, name)
@@ -688,9 +690,7 @@ class CanaryController:
         *,
         g_receipt: IntrinsicPromotionReceipt,
     ) -> PromotionDecision:
-        return self._gate.authorize(
-            request, g_receipt=g_receipt, monitor=self._monitor
-        )
+        return self._gate.authorize(request, g_receipt=g_receipt, monitor=self._monitor)
 
 
 # ---------------------------------------------------------------------------
@@ -750,9 +750,7 @@ def build_disposition(
         g_decision=decision.g_decision,
         stop_triggered=stop_reason is not None,
         stop_signal=stop_reason.signal if stop_reason else None,
-        stop_g_reason=(
-            stop_reason.g_reason.value if stop_reason else None
-        ),
+        stop_g_reason=(stop_reason.g_reason.value if stop_reason else None),
         final_phase=final_phase,
         executed_at=executed_at,
     )
@@ -890,9 +888,7 @@ def load_g_receipt(
     raw = json.loads(path.read_bytes())
     receipt_payload = raw["receipt"]
     decision = IntrinsicPromotionDecision(receipt_payload["decision"])
-    reasons = tuple(
-        IntrinsicPromotionReason(r) for r in receipt_payload["reasons"]
-    )
+    reasons = tuple(IntrinsicPromotionReason(r) for r in receipt_payload["reasons"])
     receipt = IntrinsicPromotionReceipt(
         receipt_domain_version=receipt_payload["receipt_domain_version"],
         policy_digest=receipt_payload["policy_digest"],

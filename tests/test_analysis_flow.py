@@ -12,7 +12,12 @@ import pytest
 
 from trustforge import budget_guard
 from trustforge import analysis_flow as analysis_flow_module
-from trustforge.analysis_flow import AnalysisFlow, MODES, STAGES
+from trustforge.analysis_flow import (
+    AnalysisFlow,
+    MODES,
+    MultiAngleAuthorityError,
+    STAGES,
+)
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 
@@ -26,6 +31,44 @@ def _docs() -> list[Document]:
     return [
         Document(id="a", kind="price", source="source-a", text="BTC 價格盤整。", url="https://a.test", ts=now, meta={}),
         Document(id="b", kind="news", source="source-b", text="BTC 市場成交量保持穩定。", url="https://b.test", ts=now, meta={}),
+    ]
+
+
+def test_empty_ingestion_is_a_successful_tool_invocation(tmp_path, monkeypatch):
+    flow = AnalysisFlow(tmp_path / "empty-ingestion.sqlite3")
+    completed: list[dict[str, object]] = []
+    associations: list[tuple[str, str]] = []
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: [])
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(flow, "_agos_begin_tool", lambda *args: "inv-empty")
+    monkeypatch.setattr(
+        flow,
+        "_get_agos_runtime",
+        lambda: type(
+            "Runtime",
+            (),
+            {
+                "associate_tool_invocation_run": (
+                    lambda self, invocation_id, run_id: associations.append(
+                        (invocation_id, run_id)
+                    )
+                )
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+
+    snapshot_id = flow.create_snapshot("BTC")
+
+    assert associations == [("inv-empty", snapshot_id)]
+    assert completed == [
+        {"invocation_id": "inv-empty", "output": [], "status": "success"}
     ]
 
 
@@ -58,6 +101,48 @@ def test_matrix_is_snapshot_isolated_and_atomically_published(tmp_path, monkeypa
     ]
 
 
+def test_source_ingestion_links_snapshot_receipt_to_consuming_run(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs()
+    )
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    job_id = flow.enqueue_job(snapshot, "risk", "BTC risk")
+    completed = []
+    monkeypatch.setattr(
+        flow, "_agos_begin_tool", lambda package, tool_id, args: "inv-ingestion"
+    )
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+
+    flow._stage_source_ingestion({"job_id": job_id})
+
+    assert completed == [
+        {
+            "invocation_id": "inv-ingestion",
+            "output": {
+                "snapshot_id": snapshot,
+                "document_count": 2,
+                "revision": flow._conn()
+                .execute(
+                    "SELECT source_revision FROM analysis_snapshots "
+                    "WHERE snapshot_id=?",
+                    (snapshot,),
+                )
+                .fetchone()[0],
+            },
+            "status": "success",
+        }
+    ]
+
+
 def test_lineage_snapshot_event_is_idempotent_and_events_are_immutable(tmp_path, monkeypatch):
     docs = _docs()
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: docs)
@@ -71,6 +156,101 @@ def test_lineage_snapshot_event_is_idempotent_and_events_are_immutable(tmp_path,
             "UPDATE analysis_lineage_events SET entity_id='changed' WHERE event_id=?",
             (events[0]["event_id"],),
         )
+
+
+def test_snapshot_persists_receipt_before_external_collection(tmp_path, monkeypatch):
+    events = []
+    docs = _docs()
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(
+        flow,
+        "_agos_begin_tool",
+        lambda *args: events.append("receipt") or "inv-1",
+    )
+    monkeypatch.setattr(
+        flow,
+        "_get_agos_runtime",
+        lambda: type(
+            "Runtime",
+            (),
+            {"associate_tool_invocation_run": lambda self, *_args: None},
+        )(),
+    )
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda *args, **kwargs: events.append(("complete", kwargs)),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect",
+        lambda *args, **kwargs: events.append("collect") or docs,
+    )
+
+    flow.create_snapshot("BTC")
+
+    assert events[0:2] == ["receipt", "collect"]
+    assert events[2][0] == "complete"
+    assert events[2][1]["output"] == [
+        analysis_flow_module.doc_to_dict(doc) for doc in docs
+    ]
+
+
+def test_snapshot_does_not_execute_when_receipt_persistence_fails(
+    tmp_path, monkeypatch
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(
+        flow,
+        "_agos_begin_tool",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
+    )
+    called = False
+
+    def collect_must_not_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return _docs()
+
+    monkeypatch.setattr("trustforge.analysis_flow.collect", collect_must_not_run)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        flow.create_snapshot("BTC")
+    assert called is False
+
+
+def test_snapshot_postprocessing_failure_completes_receipt(
+    tmp_path, monkeypatch
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    completed = []
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(flow, "_agos_begin_tool", lambda *args: "inv-postprocess")
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs()
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.doc_to_dict",
+        lambda _doc: (_ for _ in ()).throw(ValueError("serialize failed")),
+    )
+
+    with pytest.raises(ValueError, match="serialize failed"):
+        flow.create_snapshot("BTC")
+
+    assert completed == [
+        {
+            "invocation_id": "inv-postprocess",
+            "status": "failed",
+            "error": "serialize failed",
+        }
+    ]
 
 
 def test_same_snapshot_matrix_is_idempotent(tmp_path, monkeypatch):
@@ -498,6 +678,68 @@ def test_runtime_reconciles_orphaned_intermediate_stage_from_snapshot(tmp_path, 
     flow.stop()
 
 
+def test_runtime_reconcile_does_not_require_atomic_authority_without_terminals(
+    tmp_path, monkeypatch,
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_spawn_worker", lambda *_args: None)
+
+    def unavailable_authority():
+        raise MultiAngleAuthorityError("production authority is not configured")
+
+    monkeypatch.setattr(flow, "_atomic_store", unavailable_authority)
+
+    repaired = flow.reconcile_runtime()
+
+    assert repaired["atomic_terminals"] == 0
+    flow.stop()
+
+
+def test_atomic_terminal_recovery_is_fail_soft_when_authority_is_unavailable(
+    tmp_path, monkeypatch, caplog,
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+
+    class Cursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class Connection:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _sql, _params=()):
+            self.calls += 1
+            if self.calls == 1:
+                return Cursor(
+                    [{
+                        "job_id": "flow-1",
+                        "batch_id": "batch-1",
+                        "mode": "risk",
+                        "owner_token": "owner-1",
+                        "snapshot_id": "snapshot-1",
+                        "coin": "BTC",
+                    }]
+                )
+            return Cursor([])
+
+    connection = Connection()
+    monkeypatch.setattr(flow, "_conn", lambda: connection)
+    monkeypatch.setattr(
+        flow,
+        "_atomic_store",
+        lambda: (_ for _ in ()).throw(
+            MultiAngleAuthorityError("production authority is not configured")
+        ),
+    )
+
+    assert flow._recover_atomic_terminals() == 0
+    assert "atomic_terminal_recovery_skipped" in caplog.text
+
+
 def test_stale_running_job_is_requeued_with_locale_preserved(tmp_path, monkeypatch):
     # N16: a job whose worker thread is still `is_alive()` but hung (or whose
     # owning process crashed and never restarted) is left with state='running'
@@ -678,6 +920,49 @@ def test_claim_extraction_goes_live_when_gate_open_and_budget_available(tmp_path
     llm_event = next(e for e in package["log"].events if e["tool"] == "bedrock.complete")
     assert llm_event["params"]["llm_active"] is True
     assert budget_guard.daily_cost_usd() == pytest.approx(0.01)
+
+
+def test_claim_extraction_finalizes_audit_when_accounting_exit_fails(
+    tmp_path, monkeypatch
+):
+    """A successful provider call followed by accounting failure must not leave
+    its persisted Agent OS invocation in the pending state."""
+
+    class AccountingFailure:
+        def __enter__(self):
+            return True
+
+        def __exit__(self, exc_type, exc, traceback):
+            raise RuntimeError("durable accounting failed")
+
+    completed = []
+    monkeypatch.setattr(
+        "trustforge.analysis_flow._bedrock_live_attempt",
+        lambda *args, **kwargs: AccountingFailure(),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient
+    )
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_agos_begin_tool", lambda *args: "inv-accounting")
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="durable accounting failed"):
+        flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert completed == [
+        {
+            "invocation_id": "inv-accounting",
+            "status": "failed",
+            "error": "durable accounting failed",
+        }
+    ]
 
 
 def test_claim_extraction_forced_offline_when_daily_cap_exceeded(tmp_path, monkeypatch):

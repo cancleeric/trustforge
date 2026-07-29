@@ -79,70 +79,202 @@ CORPUS: list[tuple[str, tuple[KernelClaim, ...], float, str, str]] = [
     (
         "support_multi",
         (
-            _claim("c1", "BTC ETF inflows expanded", _doc("d1", "news", "reuters.com", "BTC ETF inflows expanded", 900.0), direction="bullish"),
-            _claim("c2", "BTC exchange reserves fell", _doc("d2", "onchain", "glassnode.com", "BTC exchange reserves fell", 910.0), direction="bullish"),
-            _claim("c3", "BTC price broke resistance", _doc("d3", "price", "coingecko.com", "BTC price broke resistance", 920.0), direction="bullish"),
+            _claim(
+                "c1",
+                "BTC ETF inflows expanded",
+                _doc("d1", "news", "reuters.com", "BTC ETF inflows expanded", 900.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c2",
+                "BTC exchange reserves fell",
+                _doc(
+                    "d2",
+                    "onchain",
+                    "glassnode.com",
+                    "BTC exchange reserves fell",
+                    910.0,
+                ),
+                direction="bullish",
+            ),
+            _claim(
+                "c3",
+                "BTC price broke resistance",
+                _doc(
+                    "d3", "price", "coingecko.com", "BTC price broke resistance", 920.0
+                ),
+                direction="bullish",
+            ),
         ),
-        1000.0, "BTC", "BTC outlook",
+        1000.0,
+        "BTC",
+        "BTC outlook",
     ),
     (
         "abstain_single_social",
         (
-            _claim("c1", "BTC pump guaranteed", _doc("d1", "social", "anon.example", "BTC pump guaranteed profit", 900.0), direction="bullish"),
+            _claim(
+                "c1",
+                "BTC pump guaranteed",
+                _doc(
+                    "d1", "social", "anon.example", "BTC pump guaranteed profit", 900.0
+                ),
+                direction="bullish",
+            ),
         ),
-        1000.0, "BTC", "BTC outlook",
+        1000.0,
+        "BTC",
+        "BTC outlook",
     ),
     (
         "single_high_trust_news",
         (
-            _claim("c1", "BTC ETF approved", _doc("d1", "news", "reuters.com", "BTC ETF approved", 900.0), direction="bullish"),
+            _claim(
+                "c1",
+                "BTC ETF approved",
+                _doc("d1", "news", "reuters.com", "BTC ETF approved", 900.0),
+                direction="bullish",
+            ),
         ),
-        1000.0, "BTC", "BTC outlook",
+        1000.0,
+        "BTC",
+        "BTC outlook",
     ),
     (
         "reason_codes_same_source",
         (
-            _claim("c1", "BTC old news", _doc("d1", "news", "reuters.com", "BTC old news", 100.0), direction="bullish"),
-            _claim("c2", "BTC fresh news", _doc("d2", "news", "reuters.com", "BTC fresh news", 999.0), direction="bullish"),
+            _claim(
+                "c1",
+                "BTC old news",
+                _doc("d1", "news", "reuters.com", "BTC old news", 100.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c2",
+                "BTC fresh news",
+                _doc("d2", "news", "reuters.com", "BTC fresh news", 999.0),
+                direction="bullish",
+            ),
         ),
-        1000.0, "BTC", "BTC outlook",
+        1000.0,
+        "BTC",
+        "BTC outlook",
     ),
     (
         "contrarian_heavy",
         (
-            _claim("c1", "BTC ETF inflows", _doc("d1", "news", "reuters.com", "BTC ETF inflows", 900.0), direction="bullish"),
-            _claim("c2", "BTC whale dumping", _doc("d2", "social", "anon.example", "BTC whale dumping now", 910.0), direction="bearish"),
-            _claim("c3", "BTC hack rumor", _doc("d3", "social", "spam.example", "BTC hack rumor sell", 920.0), direction="bearish"),
+            _claim(
+                "c1",
+                "BTC ETF inflows",
+                _doc("d1", "news", "reuters.com", "BTC ETF inflows", 900.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c2",
+                "BTC whale dumping",
+                _doc("d2", "social", "anon.example", "BTC whale dumping now", 910.0),
+                direction="bearish",
+            ),
+            _claim(
+                "c3",
+                "BTC hack rumor",
+                _doc("d3", "social", "spam.example", "BTC hack rumor sell", 920.0),
+                direction="bearish",
+            ),
         ),
-        1000.0, "BTC", "BTC outlook",
+        1000.0,
+        "BTC",
+        "BTC outlook",
     ),
     (
         "multi_coin_eth",
         (
-            _claim("c1", "ETH staking inflows", _doc("d1", "onchain", "glassnode.com", "ETH staking inflows", 900.0), direction="bullish"),
-            _claim("c2", "ETH dev activity up", _doc("d2", "news", "reuters.com", "ETH dev activity up", 910.0), direction="bullish"),
-            _claim("c3", "ETH burn rate elevated", _doc("d3", "price", "coingecko.com", "ETH burn rate elevated", 920.0), direction="bullish"),
+            _claim(
+                "c1",
+                "ETH staking inflows",
+                _doc("d1", "onchain", "glassnode.com", "ETH staking inflows", 900.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c2",
+                "ETH dev activity up",
+                _doc("d2", "news", "reuters.com", "ETH dev activity up", 910.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c3",
+                "ETH burn rate elevated",
+                _doc("d3", "price", "coingecko.com", "ETH burn rate elevated", 920.0),
+                direction="bullish",
+            ),
         ),
-        1000.0, "ETH", "ETH outlook",
+        1000.0,
+        "ETH",
+        "ETH outlook",
     ),
     (
         "bearish_dominant",
         (
-            _claim("c1", "BTC regulatory crackdown", _doc("d1", "regulatory", "sec.gov", "BTC regulatory crackdown", 900.0), direction="bearish"),
-            _claim("c2", "BTC exchange outflow stalled", _doc("d2", "onchain", "glassnode.com", "BTC exchange outflow stalled", 910.0), direction="bearish"),
-            _claim("c3", "BTC ETF outflows", _doc("d3", "news", "reuters.com", "BTC ETF outflows", 920.0), direction="bearish"),
+            _claim(
+                "c1",
+                "BTC regulatory crackdown",
+                _doc("d1", "regulatory", "sec.gov", "BTC regulatory crackdown", 900.0),
+                direction="bearish",
+            ),
+            _claim(
+                "c2",
+                "BTC exchange outflow stalled",
+                _doc(
+                    "d2",
+                    "onchain",
+                    "glassnode.com",
+                    "BTC exchange outflow stalled",
+                    910.0,
+                ),
+                direction="bearish",
+            ),
+            _claim(
+                "c3",
+                "BTC ETF outflows",
+                _doc("d3", "news", "reuters.com", "BTC ETF outflows", 920.0),
+                direction="bearish",
+            ),
         ),
-        1000.0, "BTC", "BTC outlook",
+        1000.0,
+        "BTC",
+        "BTC outlook",
     ),
     (
         "mixed_kinds_four_sources",
         (
-            _claim("c1", "BTC news positive", _doc("d1", "news", "reuters.com", "BTC news positive", 900.0), direction="bullish"),
-            _claim("c2", "BTC onchain healthy", _doc("d2", "onchain", "glassnode.com", "BTC onchain healthy", 910.0), direction="bullish"),
-            _claim("c3", "BTC price stable", _doc("d3", "price", "coingecko.com", "BTC price stable", 920.0), direction="bullish"),
-            _claim("c4", "BTC regulation clear", _doc("d4", "regulatory", "sec.gov", "BTC regulation clear", 930.0), direction="bullish"),
+            _claim(
+                "c1",
+                "BTC news positive",
+                _doc("d1", "news", "reuters.com", "BTC news positive", 900.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c2",
+                "BTC onchain healthy",
+                _doc("d2", "onchain", "glassnode.com", "BTC onchain healthy", 910.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c3",
+                "BTC price stable",
+                _doc("d3", "price", "coingecko.com", "BTC price stable", 920.0),
+                direction="bullish",
+            ),
+            _claim(
+                "c4",
+                "BTC regulation clear",
+                _doc("d4", "regulatory", "sec.gov", "BTC regulation clear", 930.0),
+                direction="bullish",
+            ),
         ),
-        1000.0, "BTC", "BTC outlook",
+        1000.0,
+        "BTC",
+        "BTC outlook",
     ),
 ]
 
@@ -177,7 +309,9 @@ def _provenance() -> IntrinsicProvenance:
     )
 
 
-def _known_dim(name: IntrinsicDimensionName, value: float, *, as_of: datetime) -> IntrinsicDimension:
+def _known_dim(
+    name: IntrinsicDimensionName, value: float, *, as_of: datetime
+) -> IntrinsicDimension:
     return IntrinsicDimension(
         name=name,
         status=IntrinsicFactStatus.KNOWN,
@@ -190,7 +324,9 @@ def _known_dim(name: IntrinsicDimensionName, value: float, *, as_of: datetime) -
     )
 
 
-def _unknown_dim(name: IntrinsicDimensionName, *, as_of: datetime) -> IntrinsicDimension:
+def _unknown_dim(
+    name: IntrinsicDimensionName, *, as_of: datetime
+) -> IntrinsicDimension:
     return IntrinsicDimension(
         name=name,
         status=IntrinsicFactStatus.UNKNOWN,
@@ -203,7 +339,9 @@ def _unknown_dim(name: IntrinsicDimensionName, *, as_of: datetime) -> IntrinsicD
     )
 
 
-def _conflicted_dim(name: IntrinsicDimensionName, *, as_of: datetime) -> IntrinsicDimension:
+def _conflicted_dim(
+    name: IntrinsicDimensionName, *, as_of: datetime
+) -> IntrinsicDimension:
     return IntrinsicDimension(
         name=name,
         status=IntrinsicFactStatus.CONFLICTED,
@@ -244,9 +382,13 @@ def _missing_view() -> AssetIntrinsicView:
 def _insufficient_view() -> AssetIntrinsicView:
     """Only one known dim: coverage gate fails (known<3) -> exact-zero delta."""
     dims = [_unknown_dim(IntrinsicDimensionName.CONTROL_DISPERSION, as_of=_AS_OF)]
-    dims.append(_known_dim(IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, 1.0, as_of=_AS_OF))
+    dims.append(
+        _known_dim(IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, 1.0, as_of=_AS_OF)
+    )
     dims.append(_unknown_dim(IntrinsicDimensionName.SUPPLY_VERIFIABILITY, as_of=_AS_OF))
-    return AssetIntrinsicView(asset_id="asset:btc", as_of=_AS_OF, dimensions=tuple(dims))
+    return AssetIntrinsicView(
+        asset_id="asset:btc", as_of=_AS_OF, dimensions=tuple(dims)
+    )
 
 
 def _stale_view() -> AssetIntrinsicView:
@@ -255,7 +397,9 @@ def _stale_view() -> AssetIntrinsicView:
     return AssetIntrinsicView(
         asset_id="asset:btc",
         as_of=_AS_OF,
-        dimensions=tuple(_known_dim(n, 1.0, as_of=stale_as_of) for n in _KNOWN_DIM_NAMES),
+        dimensions=tuple(
+            _known_dim(n, 1.0, as_of=stale_as_of) for n in _KNOWN_DIM_NAMES
+        ),
     )
 
 
@@ -266,7 +410,9 @@ def _conflicted_view() -> AssetIntrinsicView:
         _unknown_dim(IntrinsicDimensionName.CONTROL_DISPERSION, as_of=_AS_OF),
         _unknown_dim(IntrinsicDimensionName.SUPPLY_VERIFIABILITY, as_of=_AS_OF),
     ]
-    return AssetIntrinsicView(asset_id="asset:btc", as_of=_AS_OF, dimensions=tuple(dims))
+    return AssetIntrinsicView(
+        asset_id="asset:btc", as_of=_AS_OF, dimensions=tuple(dims)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +425,13 @@ class TestByteParity:
 
     @pytest.mark.parametrize("case_id, claims, now, coin, query", CORPUS)
     def test_flag_off_vs_on_snapshot_is_identical(
-        self, monkeypatch, case_id, claims, now, coin, query,
+        self,
+        monkeypatch,
+        case_id,
+        claims,
+        now,
+        coin,
+        query,
     ):
         ki = KernelInput(claims=claims, pit_epoch=now, coin=coin, query=query)
 
@@ -316,7 +468,9 @@ class TestDeltaZeroControl:
 
     def test_zero_delta_keeps_calibrated_and_state_identical(self):
         claims = CORPUS[0][1]  # support_multi: small capped==uncapped corpus
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
 
         shadow = compute_candidate_shadow(ko, _missing_view(), query="BTC")
@@ -348,7 +502,9 @@ class TestExactZero:
     )
     def test_total_delta_is_exact_zero(self, label, view_fn):
         claims = CORPUS[0][1]
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         shadow = compute_candidate_shadow(ko, view_fn(), query="BTC")
         assert shadow.total_delta == 0.0, f"{label} view must produce exact-zero delta"
@@ -364,7 +520,9 @@ class TestCaps:
     """candidate_raw in [0,1] and |total_delta| <= 0.08 for every case."""
 
     @pytest.mark.parametrize("case_id, claims, now, coin, query", CORPUS)
-    def test_candidate_raw_and_delta_are_bounded(self, case_id, claims, now, coin, query):
+    def test_candidate_raw_and_delta_are_bounded(
+        self, case_id, claims, now, coin, query
+    ):
         ki = KernelInput(claims=claims, pit_epoch=now, coin=coin, query=query)
         ko = run_kernel(ki)
         shadow = compute_candidate_shadow(ko, _positive_delta_view(), query=query)
@@ -378,7 +536,9 @@ class TestCaps:
         # Guard against the corpus silently producing zero deltas, which would
         # make the cap test vacuous.
         claims = CORPUS[0][1]
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         shadow = compute_candidate_shadow(ko, _positive_delta_view(), query="BTC")
         assert shadow.total_delta > 0.0
@@ -395,7 +555,9 @@ class TestDirectionInvariance:
 
     def test_candidate_shadow_has_no_direction_field(self):
         claims = CORPUS[0][1]
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         shadow = compute_candidate_shadow(ko, _positive_delta_view(), query="BTC")
         assert isinstance(shadow, CandidateShadow)
@@ -406,7 +568,9 @@ class TestDirectionInvariance:
 
     def test_direction_of_kernel_output_is_independent_of_candidate(self):
         claims = CORPUS[6][1]  # bearish_dominant
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         before = ko.direction
         _ = compute_candidate_shadow(ko, _positive_delta_view(), query="BTC")
@@ -424,7 +588,9 @@ class TestFailClosed:
 
     def test_non_view_object_yields_zero_delta_without_raising(self):
         claims = CORPUS[0][1]
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         shadow = compute_candidate_shadow(ko, object(), query="BTC")  # type: ignore[arg-type]
         assert shadow.total_delta == 0.0
@@ -436,7 +602,9 @@ class TestFailClosed:
 
     def test_none_view_yields_zero_delta_without_raising(self):
         claims = CORPUS[0][1]
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         shadow = compute_candidate_shadow(ko, None, query="BTC")  # type: ignore[arg-type]
         assert shadow.total_delta == 0.0
@@ -451,7 +619,9 @@ class TestFailClosed:
             supporting = ()
             contrarian = ()
 
-        shadow = compute_candidate_shadow(_Broken(), _positive_delta_view(), query="BTC")  # type: ignore[arg-type]
+        shadow = compute_candidate_shadow(
+            _Broken(), _positive_delta_view(), query="BTC"
+        )  # type: ignore[arg-type]
         assert shadow.total_delta == 0.0
         assert shadow.calibrated_delta == 0.0
         assert shadow.decision_state_changed is False
@@ -465,7 +635,9 @@ class TestFailClosed:
 class TestSchema:
     def test_frozen_dataclass(self):
         claims = CORPUS[0][1]
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         shadow = compute_candidate_shadow(ko, _positive_delta_view(), query="BTC")
         with pytest.raises((dataclasses.FrozenInstanceError, AttributeError)):
@@ -473,7 +645,9 @@ class TestSchema:
 
     def test_facts_hash_is_stable_and_prefixed(self):
         claims = CORPUS[0][1]
-        ki = KernelInput(claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook")
+        ki = KernelInput(
+            claims=claims, pit_epoch=1000.0, coin="BTC", query="BTC outlook"
+        )
         ko = run_kernel(ki)
         view = _positive_delta_view()
         a = compute_candidate_shadow(ko, view, query="BTC")
@@ -496,7 +670,8 @@ class TestCoreImportBoundary:
     """AC7: trustforge_core must never import trustforge.asset_intrinsic*."""
 
     @pytest.mark.parametrize(
-        "path", sorted((REPO_ROOT / "src" / "trustforge_core").rglob("*.py")),
+        "path",
+        sorted((REPO_ROOT / "src" / "trustforge_core").rglob("*.py")),
     )
     def test_no_core_module_imports_app_asset_intrinsic(self, path):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -517,10 +692,8 @@ class TestCoreImportBoundary:
             f"{path.relative_to(REPO_ROOT)} imports app-layer modules: {offending}"
         )
 
-    def test_candidate_module_is_app_layer_only(self):
-        # The candidate lives in trustforge (app) and must not be re-exported
-        # from trustforge_core.
+    def test_candidate_composition_is_owned_by_core(self):
         import trustforge_core
 
-        assert not hasattr(trustforge_core, "compute_candidate_shadow")
-        assert not hasattr(trustforge_core, "CandidateShadow")
+        assert hasattr(trustforge_core, "compose_intrinsic_candidate")
+        assert hasattr(trustforge_core, "CandidateShadow")
