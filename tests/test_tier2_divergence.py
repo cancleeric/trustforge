@@ -48,10 +48,19 @@ from trustforge.agent.orchestrator import (
 )
 from trustforge.bedrock import BedrockClient, BedrockConfig
 from trustforge.execlog import ExecutionLog
-from trustforge.ingestion.base import Document
+from trustforge.ingestion.base import Document, OFFICIAL_OHLCV_DIR
 from trustforge.pipeline import run
 from trustforge.schema import QuestionType
 from trustforge.trust.scoring import Claim, ScoredClaim, aggregate, extract_claims, score
+
+
+def _has_official_full_history_fact(facts: list[str]) -> bool:
+    """Accept the canonical evidence reference in either supported presentation."""
+    return any(
+        "官方基準完整歷史涵蓋" in fact
+        or ("full-history" in fact and "daily bars" in fact)
+        for fact in facts
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -658,10 +667,16 @@ def test_eth_multi_source_evidence_facts_count_pinned():
     老闆校準（demo 可靠性 #32 第五輪）：移除強塞的 ETF 分歧樣本後，數量改回
     移除後的真實觀測值（本測試不再假設任何特定分歧樣本存在）。
     """
-    report, evidence, log = run("ETH", "ETH 現況", QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run(
+        "ETH",
+        "ETH 現況",
+        QuestionType.MULTI_SOURCE,
+        offline=True,
+        data_dir=OFFICIAL_OHLCV_DIR,
+    )
 
     assert len(report.facts) == 8
-    assert any("官方基準完整歷史涵蓋" in fact for fact in report.facts)
+    assert _has_official_full_history_fact(report.facts)
     assert len(evidence) == 14
     # 誠實反映真實（示範）資料：目前 demo 資料集裡 ETH 沒有真實跨源矛盾樣本，
     # 不應再出現任何背離訊號（無背離就是無，不強行製造）。
@@ -700,9 +715,15 @@ def test_eth_analysis_stable_across_query_wording(query: str):
     `test_stance_pairs_mechanism_triggers_divergence_with_injected_synthetic_claims`
     （用注入的合成矛盾 claim 驗證）。
     """
-    report, evidence, log = run("ETH", query, QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run(
+        "ETH",
+        query,
+        QuestionType.MULTI_SOURCE,
+        offline=True,
+        data_dir=OFFICIAL_OHLCV_DIR,
+    )
     assert len(report.facts) == 8, f"query={query!r} facts 數應穩定為 8，實得 {len(report.facts)}"
-    assert any("官方基準完整歷史涵蓋" in fact for fact in report.facts)
+    assert _has_official_full_history_fact(report.facts)
     assert len(evidence) == 14, f"query={query!r} evidence 數應穩定為 14，實得 {len(evidence)}"
     assert report.cross_source_signal is None, (
         f"query={query!r} 應誠實反映真實資料無背離，實得 {report.cross_source_signal}"
