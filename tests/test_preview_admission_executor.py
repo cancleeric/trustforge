@@ -24,6 +24,11 @@ from trustforge.preview_admission_executor import (
     PreviewAdmissionExecutor,
     _CONFIRMED_WRITE_REJECTION_CODES,
 )
+from trustforge.preview_durable_admission_gate import (
+    DurableAdmissionGate,
+    GateState,
+    _control_item,
+)
 from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
 
 
@@ -88,6 +93,18 @@ class FakeClient:
         self.denied_reason = denied_reason
         self.read_calls: list[dict[str, object]] = []
         self.write_calls: list[dict[str, object]] = []
+        self.control_item = _control_item(GateState.OPEN, 0, 0, None)
+        self.control_get_calls: list[dict[str, object]] = []
+        self.control_put_calls: list[dict[str, object]] = []
+
+    def get_item(self, **kwargs):
+        self.control_get_calls.append(kwargs)
+        return {"Item": self.control_item}
+
+    def put_item(self, **kwargs):
+        self.control_put_calls.append(kwargs)
+        self.control_item = kwargs["Item"]
+        return {"ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "gate"}}
 
     def transact_get_items(self, **kwargs):
         self.read_calls.append(kwargs)
@@ -103,7 +120,20 @@ class FakeClient:
             return self.write()
         if isinstance(self.write, Exception):
             raise self.write
+        if (
+            isinstance(self.write, dict)
+            and self.write.get("ResponseMetadata", {}).get("HTTPStatusCode") == 200
+        ):
+            self.control_item = kwargs["TransactItems"][-1]["Put"]["Item"]
         return self.write
+
+
+def _executor(client, table_name: str = "preview-store"):
+    return PreviewAdmissionExecutor(
+        client,
+        table_name,
+        durable_gate=DurableAdmissionGate(client, table_name),
+    )
 
 
 def _client_error(
@@ -138,7 +168,7 @@ def test_confirmed_success_returns_handle_and_canonical_token():
     request = _request()
     client = FakeClient(request)
 
-    result = PreviewAdmissionExecutor(client, "preview-store").execute(request)
+    result = _executor(client).execute(request)
 
     assert result.outcome is AdmissionOutcome.ADMITTED
     assert result.handle is not None
@@ -166,7 +196,7 @@ def test_each_counter_pre_read_denial_returns_safe_reason(reason):
     request = _request()
     client = FakeClient(request, denied_reason=reason)
 
-    result = PreviewAdmissionExecutor(client, "preview-store").execute(request)
+    result = _executor(client).execute(request)
 
     assert result.outcome is AdmissionOutcome.DENIED
     assert result.denied_reason is reason
@@ -201,7 +231,7 @@ def test_open_circuit_pre_read_denial_returns_safe_reason():
         "Responses": [{"Item": circuit_key}, *_responses(request)[1:]]
     }
 
-    result = PreviewAdmissionExecutor(client, "preview-store").execute(request)
+    result = _executor(client).execute(request)
 
     assert result.outcome is AdmissionOutcome.DENIED
     assert result.denied_reason is AdmissionDeniedReason.CIRCUIT_OPEN
@@ -214,7 +244,7 @@ def test_each_strict_confirmed_4xx_rejection_is_unavailable_without_latching(
 ):
     request = _request()
     client = FakeClient(request, _client_error(code))
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    executor = _executor(client)
 
     first = executor.execute(request)
     second = executor.execute(request)
@@ -250,7 +280,7 @@ def test_each_strict_confirmed_4xx_rejection_is_unavailable_without_latching(
 def test_allowlisted_code_with_contradictory_shape_latches(error):
     request = _request()
     client = FakeClient(request, error)
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    executor = _executor(client)
 
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
@@ -272,7 +302,7 @@ def test_malformed_cancellation_reasons_never_becomes_denied():
     )
     client = FakeClient(request, error)
 
-    result = PreviewAdmissionExecutor(client, "preview-store").execute(request)
+    result = _executor(client).execute(request)
 
     assert result.outcome is AdmissionOutcome.UNAVAILABLE
     assert result.denied_reason is None
@@ -294,7 +324,7 @@ def test_transport_failure_latches_instance_and_future_calls_do_zero_io(
 ):
     request = _request()
     client = FakeClient(request, transport_error)
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    executor = _executor(client)
 
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
@@ -315,7 +345,7 @@ def test_unknown_5xx_and_malformed_success_latch_closed():
     ):
         request = _request()
         client = FakeClient(request, response)
-        executor = PreviewAdmissionExecutor(client, "preview-store")
+        executor = _executor(client)
 
         assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
         assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
@@ -326,7 +356,7 @@ def test_malformed_read_is_unavailable_but_does_not_dispatch_or_latch():
     request = _request()
     client = FakeClient(request)
     client.transact_get_items = lambda **kwargs: {"Responses": []}
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    executor = _executor(client)
 
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
@@ -356,7 +386,7 @@ def test_read_exception_or_malformed_never_dispatches_write(read_result):
         return read_result
 
     client.transact_get_items = read
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    executor = _executor(client)
 
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
     assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
@@ -380,7 +410,7 @@ def test_write_gate_prevents_second_dispatch_crossing_ambiguity():
         raise TimeoutError("unknown disposition")
 
     client = FakeClient(request, ambiguous)
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    executor = _executor(client)
     results = []
     first = threading.Thread(target=lambda: results.append(executor.execute(request)))
     second = threading.Thread(target=lambda: results.append(executor.execute(request)))
@@ -446,6 +476,10 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
         ],
         BillingMode="PAY_PER_REQUEST",
     )
+    client.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
 
     class RaceClient:
         def __init__(self):
@@ -454,8 +488,14 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
         def transact_get_items(self, **kwargs):
             return client.transact_get_items(**kwargs)
 
+        def get_item(self, **kwargs):
+            return client.get_item(**kwargs)
+
+        def put_item(self, **kwargs):
+            return client.put_item(**kwargs)
+
         def transact_write_items(self, **kwargs):
-            reservation = kwargs["TransactItems"][-1]["Put"]["Item"]
+            reservation = kwargs["TransactItems"][-2]["Put"]["Item"]
             client.put_item(
                 TableName="preview-store",
                 Item={
@@ -470,12 +510,20 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
             return client.transact_write_items(**kwargs)
 
     race_client = RaceClient()
-    result = PreviewAdmissionExecutor(race_client, "preview-store").execute(request)
+    result = _executor(race_client).execute(request)
     after_rejected_transaction = client.scan(TableName="preview-store")["Items"]
 
     assert result.outcome is AdmissionOutcome.UNAVAILABLE
     assert race_client.before_rejected_transaction is not None
-    assert after_rejected_transaction == race_client.before_rejected_transaction
+    def without_control(items):
+        return [
+            item
+            for item in items
+            if item.get("pk", {}).get("S") != "PAP#1#CONTROL"
+        ]
+    assert without_control(after_rejected_transaction) == without_control(
+        race_client.before_rejected_transaction
+    )
 
 
 @mock_aws
@@ -495,6 +543,10 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
         ],
         BillingMode="PAY_PER_REQUEST",
     )
+    client.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
     reads_complete = threading.Barrier(2, timeout=3)
 
     class SameSnapshotClient:
@@ -507,13 +559,19 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
             reads_complete.wait()
             return response
 
+        def get_item(self, **kwargs):
+            return client.get_item(**kwargs)
+
+        def put_item(self, **kwargs):
+            return client.put_item(**kwargs)
+
         def transact_write_items(self, **kwargs):
             with self.lock:
                 self.write_attempts += 1
             return client.transact_write_items(**kwargs)
 
     shared_client = SameSnapshotClient()
-    executor = PreviewAdmissionExecutor(shared_client, "preview-store")
+    executor = _executor(shared_client)
     results = []
     results_lock = threading.Lock()
 
@@ -550,7 +608,7 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
     assert shared_client.write_attempts == 2
 
     items = client.scan(TableName="preview-store")["Items"]
-    assert len(items) == 10
+    assert len(items) == 11
     reservation_items = [
         item for item in items if item["kind"]["S"] == "preview_reservation"
     ]
@@ -569,7 +627,12 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
     }
     counter_items = [
         item for item in items if item["kind"]["S"].startswith("preview_")
-        and item["kind"]["S"] not in {"preview_reservation", "preview_circuit"}
+        and item["kind"]["S"]
+        not in {
+            "preview_reservation",
+            "preview_circuit",
+            "preview_admission_quarantine",
+        }
     ]
     assert len(counter_items) == len(expected_counters) == 8
     assert {

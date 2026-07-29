@@ -16,6 +16,11 @@ from trustforge.preview_admission_compiler import (
     compile_admission,
     decode_transact_get_responses,
 )
+from trustforge.preview_durable_admission_gate import (
+    DispatchBinding,
+    DurableAdmissionGate,
+    append_quarantine_action,
+)
 
 
 class DynamoAdmissionClient(Protocol):
@@ -81,7 +86,13 @@ _CONFIRMED_WRITE_REJECTION_CODES = frozenset(
 class PreviewAdmissionExecutor:
     """Execute canonical admission transactions with no retry or fallback."""
 
-    def __init__(self, client: DynamoAdmissionClient, table_name: str) -> None:
+    def __init__(
+        self,
+        client: DynamoAdmissionClient,
+        table_name: str,
+        *,
+        durable_gate: DurableAdmissionGate,
+    ) -> None:
         if not callable(getattr(client, "transact_get_items", None)) or not callable(
             getattr(client, "transact_write_items", None)
         ):
@@ -92,6 +103,13 @@ class PreviewAdmissionExecutor:
         self._table_name = table_name
         self._write_gate = threading.Lock()
         self._latched_closed = False
+        if (
+            type(durable_gate) is not DurableAdmissionGate
+            or durable_gate._client is not client
+            or durable_gate._table != table_name
+        ):
+            raise ValueError("invalid durable admission gate")
+        self._durable_gate = durable_gate
 
     @classmethod
     def from_boto3(cls, table_name: str, *, region_name: str | None = None) -> "PreviewAdmissionExecutor":
@@ -105,14 +123,18 @@ class PreviewAdmissionExecutor:
             region_name=region_name,
             config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
         )
-        return cls(client, table_name)
+        return cls(
+            client,
+            table_name,
+            durable_gate=DurableAdmissionGate(client, table_name),
+        )
 
     def execute(self, request: AdmissionCompileRequest) -> AdmissionExecutionResult:
         # A latched instance must perform zero further DynamoDB I/O. A concurrent
         # execution may finish its read, but the second check under the write gate
         # prevents its write from crossing an ambiguous predecessor.
         with self._write_gate:
-            if self._latched_closed:
+            if self._latched_closed or not self._durable_gate.ready:
                 return _UNAVAILABLE
 
         try:
@@ -131,6 +153,7 @@ class PreviewAdmissionExecutor:
         except Exception:  # noqa: BLE001 - all read/compiler failures fail closed
             return _UNAVAILABLE
 
+        binding: DispatchBinding | None = None
         write_request = plan.transact_write_items_request()
         if (
             plan.handle.reservation_id != request.reservation_id
@@ -140,16 +163,41 @@ class PreviewAdmissionExecutor:
         write_request["ClientRequestToken"] = request.reservation_id
 
         with self._write_gate:
-            if self._latched_closed:
+            if self._latched_closed or not self._durable_gate.ready:
+                return _UNAVAILABLE
+            binding = self._durable_gate.begin(
+                plan,
+                dispatch_lower=plan.handle.created_lower,
+                dispatch_upper=plan.handle.created_upper,
+            )
+            if binding is None:
+                self._latched_closed = True
+                return _UNAVAILABLE
+            try:
+                write_request = append_quarantine_action(
+                    plan, self._durable_gate, binding
+                )
+            except ValueError:
+                self._latched_closed = True
                 return _UNAVAILABLE
             try:
                 response = self._client.transact_write_items(**write_request)
             except Exception as exc:  # noqa: BLE001 - disposition is classified below
                 if _confirmed_write_rejection(exc):
+                    if not self._durable_gate.confirm_rejected(binding):
+                        self._latched_closed = True
                     return _UNAVAILABLE
                 self._latched_closed = True
+                self._durable_gate.close()
                 return _UNAVAILABLE
             if not _confirmed_success(response):
+                self._latched_closed = True
+                self._durable_gate.close()
+                return _UNAVAILABLE
+            if (
+                binding is None
+                or not self._durable_gate.confirm_admitted(binding, plan.handle)
+            ):
                 self._latched_closed = True
                 return _UNAVAILABLE
             return AdmissionExecutionResult(
