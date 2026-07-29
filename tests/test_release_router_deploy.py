@@ -194,7 +194,8 @@ def test_proxy_strips_external_identity_and_injects_authenticated_identity():
     config = (ROOT / "deploy/trustforge-release-router.nginx.conf").read_text()
     assert 'if ($remote_user = "") { return 401; }' in config
     assert 'proxy_set_header X-TrustForge-Stable-Subject "";' in config
-    assert "proxy_set_header X-TrustForge-Trusted-Subject $remote_user;" in config
+    assert 'proxy_set_header X-TrustForge-Trusted-Subject "";' in config
+    assert "proxy_set_header X-TrustForge-Trusted-Identity $remote_user;" in config
     assert "proxy_redirect off;" in config
     assert "unix:/run/trustforge/release-router.sock" in config
 
@@ -205,6 +206,7 @@ def test_systemd_uses_exact_runtime_inputs_and_bounded_resources():
     assert "Group=trustforge-release" in unit
     assert "ReadOnlyPaths=/etc/trustforge/release-router-runtime.json" in unit
     assert "ReadOnlyPaths=/etc/trustforge/release-router-runtime-keys.json" in unit
+    assert "ReadOnlyPaths=-/etc/trustforge/release-router-allowlist.json" in unit
     assert "ReadOnlyPaths=/etc/trustforge\n" not in unit
     assert "ReadOnlyPaths=/var/lib/trustforge/security-ledger/control" in unit
     assert "ReadWritePaths=/var/lib/trustforge/security-ledger/router-outcomes" in unit
