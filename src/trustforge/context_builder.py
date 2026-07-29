@@ -205,6 +205,13 @@ def get_evidence_eligible_memories(manifest: ContextManifest) -> list[dict[str, 
 
 
 def _ensure_manifest_table(conn: sqlite3.Connection) -> None:
+    existing = conn.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = 'context_manifests'"""
+    ).fetchone()
+    if existing is not None:
+        return
+
     from .agos_db_auth import AGOS_SCHEMA_AUTH_PURPOSE, verify_db_authorization
 
     verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)

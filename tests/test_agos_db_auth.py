@@ -114,6 +114,43 @@ def test_direct_upgrade_authorizes_before_empty_db_mutation(
 
 
 @pytest.mark.parametrize(
+    "module",
+    [memory_os, skill_registry, tool_registry],
+)
+def test_current_schema_does_not_require_fresh_authorization(module: object) -> None:
+    """Read-only startup of an already-current DB must survive receipt expiry."""
+    conn = sqlite3.connect(":memory:")
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        lambda purpose: None,
+    ):
+        module._upgrade(conn)  # type: ignore[attr-defined]
+
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        side_effect=DBAuthorizationError("expired"),
+    ) as authorize:
+        module._upgrade(conn)  # type: ignore[attr-defined]
+    authorize.assert_not_called()
+
+
+def test_existing_context_manifest_table_does_not_require_authorization() -> None:
+    conn = sqlite3.connect(":memory:")
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        lambda purpose: None,
+    ):
+        context_builder._ensure_manifest_table(conn)
+
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        side_effect=DBAuthorizationError("expired"),
+    ) as authorize:
+        context_builder._ensure_manifest_table(conn)
+    authorize.assert_not_called()
+
+
+@pytest.mark.parametrize(
     ("module", "purpose", "version_key"),
     [
         (memory_os, AGOS_SCHEMA_AUTH_PURPOSE, "memory_os_version"),

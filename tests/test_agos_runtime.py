@@ -76,6 +76,20 @@ class TestFeatureFlag:
 
 
 class TestContextBuild:
+    def test_initialization_failure_remains_retryable(
+        self, runtime: AgosRuntime
+    ):
+        """A transient schema/auth failure must not disable AGOS until restart."""
+        with patch(
+            "trustforge.memory_os.MemoryRepository.ensure_schema",
+            side_effect=[PermissionError("transient"), None],
+        ):
+            runtime._ensure_init()
+            assert runtime._initialized is False
+
+            runtime._ensure_init()
+            assert runtime._initialized is True
+
     def test_build_context_disabled_returns_none(self, runtime: AgosRuntime):
         with _disable_agos():
             result = runtime.build_context("run-1", question="BTC analysis")

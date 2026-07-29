@@ -193,8 +193,10 @@ class TestRetrievalAdapter:
         assert len(refs) >= 1
         assert refs[0].kind == "episodic"
 
-    def test_duplicate_retrieval_no_crash(self, adapter: MemoryRetrievalAdapter):
-        """Retrieving same content twice should not crash."""
+    def test_duplicate_retrieval_is_linked_to_each_run(
+        self, adapter: MemoryRetrievalAdapter, repo: MemoryRepository
+    ):
+        """Content deduplication must preserve per-run retrieval lineage."""
         items = [{"content": "duplicate content", "published_at": "2026-07-01T00:00:00Z"}]
 
         refs1 = adapter.retrieve_from_source(
@@ -206,6 +208,15 @@ class TestRetrievalAdapter:
 
         assert len(refs1) == 1
         assert len(refs2) == 1
+        assert refs1[0].memory_id == refs2[0].memory_id
+        assert [entry.memory_id for entry in repo.find_by_run("run-8a")] == [
+            refs1[0].memory_id
+        ]
+        second_run_entries = repo.find_by_run("run-8b")
+        assert [entry.memory_id for entry in second_run_entries] == [
+            refs2[0].memory_id
+        ]
+        assert second_run_entries[0].run_id == "run-8b"
 
 
 # ─── Execution Log Tests ─────────────────────────────────────────────────────

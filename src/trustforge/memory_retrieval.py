@@ -397,6 +397,7 @@ class MemoryRetrievalAdapter:
             # Find the existing record so we return the real persisted ID.
             existing = self._find_existing(provider, content_hash, kind)
             if existing is not None:
+                self._repo.record_retrieval(existing.memory_id, run_id)
                 return existing
             # If we truly can't find it, return the candidate
             # (evidence_eligible=False is safe default)

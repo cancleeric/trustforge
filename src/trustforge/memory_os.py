@@ -34,7 +34,7 @@ VALID_RELATIONS = frozenset({"derived_from", "supersedes", "contradicts", "suppo
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
-_MIGRATION_VERSION = 1
+_MIGRATION_VERSION = 2
 
 
 # ─── Dataclasses ─────────────────────────────────────────────────────────────
@@ -151,16 +151,16 @@ def _upgrade(conn: sqlite3.Connection) -> None:
 
     Authorization is checked here so direct callers cannot bypass the guard.
     """
+    current = _get_version(conn)
+    if current >= _MIGRATION_VERSION:
+        return
+
     from .agos_db_auth import AGOS_SCHEMA_AUTH_PURPOSE, verify_db_authorization
 
     verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
-
-    current = _get_version(conn)
-    if current >= _MIGRATION_VERSION:
-        return
 
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS memory_entries (
@@ -204,6 +204,19 @@ def _upgrade(conn: sqlite3.Connection) -> None:
             used_at TEXT NOT NULL,
             PRIMARY KEY (memory_id, run_id)
         );
+
+        CREATE TABLE IF NOT EXISTS memory_run_retrievals (
+            memory_id TEXT NOT NULL REFERENCES memory_entries(memory_id),
+            run_id TEXT NOT NULL,
+            retrieved_at TEXT NOT NULL,
+            PRIMARY KEY (memory_id, run_id)
+        );
+
+        INSERT OR IGNORE INTO memory_run_retrievals
+            (memory_id, run_id, retrieved_at)
+        SELECT memory_id, run_id, retrieved_at
+          FROM memory_entries
+         WHERE run_id IS NOT NULL;
     """)
 
     _set_version(conn, _MIGRATION_VERSION)
@@ -216,6 +229,7 @@ def rollback(conn: sqlite3.Connection) -> None:
 
     verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
     conn.executescript("""
+        DROP TABLE IF EXISTS memory_run_retrievals;
         DROP TABLE IF EXISTS memory_evidence_usage;
         DROP TABLE IF EXISTS memory_links;
         DROP TABLE IF EXISTS memory_entries;
@@ -303,6 +317,12 @@ class MemoryRepository:
                     entry.created_at,
                 ),
             )
+            if entry.run_id is not None:
+                conn.execute(
+                    """INSERT OR IGNORE INTO memory_run_retrievals
+                       (memory_id, run_id, retrieved_at) VALUES (?, ?, ?)""",
+                    (entry.memory_id, entry.run_id, entry.retrieved_at),
+                )
             conn.commit()
         except sqlite3.IntegrityError as e:
             conn.rollback()
@@ -331,13 +351,29 @@ class MemoryRepository:
         return [self._row_to_entry(r) for r in rows]
 
     def find_by_run(self, run_id: str) -> list[MemoryEntry]:
-        """Find all memory entries produced by a specific run."""
+        """Find all memory entries retrieved by a specific run."""
         conn = self._connect()
         rows = conn.execute(
-            "SELECT * FROM memory_entries WHERE run_id = ? ORDER BY created_at",
+            """SELECT e.memory_id, e.kind, e.provider, e.content_hash,
+                      e.content_ref, e.published_at, r.retrieved_at,
+                      e.expires_at, e.evidence_eligible, r.run_id, e.created_at
+                 FROM memory_run_retrievals AS r
+                 JOIN memory_entries AS e ON e.memory_id = r.memory_id
+                WHERE r.run_id = ?
+                ORDER BY r.retrieved_at, e.created_at""",
             (run_id,),
         ).fetchall()
         return [self._row_to_entry(r) for r in rows]
+
+    def record_retrieval(self, memory_id: str, run_id: str) -> None:
+        """Associate an existing content-addressed memory with a new run."""
+        conn = self._connect()
+        conn.execute(
+            """INSERT OR IGNORE INTO memory_run_retrievals
+               (memory_id, run_id, retrieved_at) VALUES (?, ?, ?)""",
+            (memory_id, run_id, _now_iso()),
+        )
+        conn.commit()
 
     def find_eligible_evidence(self, *, limit: int = 50) -> list[MemoryEntry]:
         """Find memory entries that are evidence-eligible."""

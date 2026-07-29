@@ -172,7 +172,6 @@ class AgosRuntime:
         """Lazy-initialize all Agent OS components."""
         if self._initialized:
             return
-        self._initialized = True
 
         try:
             self._memory_repo = MemoryRepository(db_path=self._data_dir / "memory_os.db")
@@ -205,7 +204,12 @@ class AgosRuntime:
             )
 
             self._retrieval_adapter = MemoryRetrievalAdapter(self._memory_repo)
+            # Publish the initialized state only after every governance
+            # component is ready.  A transient auth/I/O failure must remain
+            # retryable within the same process.
+            self._initialized = True
         except Exception as e:
+            self._initialized = False
             logger.warning(f"Agent OS initialization failed: {e}")
 
     @property
