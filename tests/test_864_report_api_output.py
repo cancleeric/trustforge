@@ -9,14 +9,17 @@
 """
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
 
 from trustforge.agent.orchestrator import build_report, detect_cross_source_signal
 from trustforge.bedrock import BedrockClient
+from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.schema import Evidence, QuestionType
+from trustforge import web
 from trustforge.trust.scoring import (
     Claim,
     ScoredClaim,
@@ -83,8 +86,8 @@ class TestReportCrossSourceSignal:
         assert signal["objective_direction"] == "bullish"
         assert signal["sentiment_direction"] == "bullish"
 
-    def test_signal_in_build_report_output(self):
-        """端到端 build_report：構造 TrustedBrief → Report 含 signal。"""
+    def test_signal_in_build_report_output(self, monkeypatch):
+        """build_report 結果經真實 API handler 序列化後仍含完整 signal。"""
         # 構造一組有分歧的 claims
         price_doc = _doc("price_001", "price", "ohlcv-csv",
                          "BTC 2025-06-14 C=68000", meta={"coin": "BTC", "close": 68000, "date": "2025-06-14"})
@@ -128,6 +131,28 @@ class TestReportCrossSourceSignal:
         assert report.cross_source_signal["type"] == "divergence"
         assert "summary" in report.cross_source_signal
         assert len(report.cross_source_signal.get("supporting_claim_ids", [])) > 0
+
+        # 通過 `/api/analyze` 實際使用的 handler 與 JSON envelope，而非只
+        # 檢查 dataclass。mock 僅隔離 connector/Bedrock，serialization、
+        # public report filtering 與 response envelope 都走 production code。
+        monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+        monkeypatch.setattr(
+            web,
+            "_do_analyze",
+            lambda _qs, **_kwargs: (report, evidence, ExecutionLog()),
+        )
+        code, body = web._handle_api_analyze(
+            {"coin": ["BTC"], "type": ["multi_source"], "q": ["#864 api evidence"]},
+            client_ip="198.51.100.864",
+        )
+        assert code == 200
+        payload = json.loads(body)
+        api_signal = payload["data"]["report"]["cross_source_signal"]
+        assert api_signal["type"] == "divergence"
+        assert api_signal["summary"] == report.cross_source_signal["summary"]
+        assert api_signal["supporting_claim_ids"] == (
+            report.cross_source_signal["supporting_claim_ids"]
+        )
 
     def test_summary_contains_direction_labels(self):
         """signal summary 含方向標籤（偏多/偏空）。"""
