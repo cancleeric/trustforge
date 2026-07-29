@@ -66,6 +66,24 @@ class TestClaimIdAllTraceable:
         assert result["claim_ids_count"] == 0
         assert result["all_traceable"] is True
 
+    def test_signal_ids_do_not_grant_themselves_trust(self):
+        """signal 引用的虛構 ID 不得繞過原始 claim provenance 驗證。"""
+        from scripts.verify_traceability import verify_claim_id_traceability
+
+        class MockReport:
+            inferences = ["訊號引用 fabricated_doc#7"]
+            market_judgment = "BTC 偏多"
+            cross_source_signal = {"supporting_claim_ids": ["fabricated_doc#7"]}
+            key_basis = []
+
+        result = verify_claim_id_traceability(
+            MockReport(),
+            [],
+            traceable_claim_ids={"real_doc#0"},
+        )
+        assert result["all_traceable"] is False
+        assert result["untraceable_ids"] == ["fabricated_doc#7"]
+
 
 # ===========================================================================
 # Test: verify_traceability BEDROCK_MODEL_ID exit code (FR-3)

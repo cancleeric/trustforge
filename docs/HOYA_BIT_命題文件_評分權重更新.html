@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>HOYA BIT 命題文件（評分權重更新版）</title>
+  <style>
+
+html {
+color: #1a1a1a;
+background-color: #fdfdfd;
+}
+body {
+margin: 0 auto;
+max-width: 36em;
+padding-left: 50px;
+padding-right: 50px;
+padding-top: 50px;
+padding-bottom: 50px;
+hyphens: auto;
+overflow-wrap: break-word;
+text-rendering: optimizeLegibility;
+font-kerning: normal;
+}
+@media (max-width: 600px) {
+body {
+font-size: 0.9em;
+padding: 12px;
+}
+h1 {
+font-size: 1.8em;
+}
+}
+@media print {
+html {
+background-color: white;
+}
+body {
+background-color: transparent;
+color: black;
+font-size: 12pt;
+}
+p, h2, h3 {
+orphans: 3;
+widows: 3;
+}
+h2, h3, h4 {
+page-break-after: avoid;
+}
+}
+p {
+margin: 1em 0;
+}
+a {
+color: #1a1a1a;
+}
+a:visited {
+color: #1a1a1a;
+}
+img {
+max-width: 100%;
+}
+svg {
+height: auto;
+max-width: 100%;
+}
+h1, h2, h3, h4, h5, h6 {
+margin-top: 1.4em;
+}
+h5, h6 {
+font-size: 1em;
+font-style: italic;
+}
+h6 {
+font-weight: normal;
+}
+ol, ul {
+padding-left: 1.7em;
+margin-top: 1em;
+}
+li > ol, li > ul {
+margin-top: 0;
+}
+blockquote {
+margin: 1em 0 1em 1.7em;
+padding-left: 1em;
+border-left: 2px solid #e6e6e6;
+color: #606060;
+}
+code {
+white-space: pre-wrap;
+font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+font-size: 85%;
+margin: 0;
+hyphens: manual;
+}
+pre {
+margin: 1em 0;
+overflow: auto;
+}
+pre code {
+padding: 0;
+overflow: visible;
+overflow-wrap: normal;
+}
+.sourceCode {
+background-color: transparent;
+overflow: visible;
+}
+hr {
+border: none;
+border-top: 1px solid #1a1a1a;
+height: 1px;
+margin: 1em 0;
+}
+table {
+margin: 1em 0;
+border-collapse: collapse;
+width: 100%;
+overflow-x: auto;
+display: block;
+font-variant-numeric: lining-nums tabular-nums;
+}
+table caption {
+margin-bottom: 0.75em;
+}
+tbody {
+margin-top: 0.5em;
+border-top: 1px solid #1a1a1a;
+border-bottom: 1px solid #1a1a1a;
+}
+th {
+border-top: 1px solid #1a1a1a;
+padding: 0.25em 0.5em 0.25em 0.5em;
+}
+td {
+padding: 0.125em 0.5em 0.25em 0.5em;
+}
+header {
+margin-bottom: 4em;
+text-align: center;
+}
+#TOC li {
+list-style: none;
+}
+#TOC ul {
+padding-left: 1.3em;
+}
+#TOC > ul {
+padding-left: 0;
+}
+#TOC a:not(:hover) {
+text-decoration: none;
+}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+
+ul.task-list[class]{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+font-size: inherit;
+width: 0.8em;
+margin: 0 0.8em 0.2em -1.6em;
+vertical-align: middle;
+}
+.display.math{display: block; text-align: center; margin: 0.5rem auto;}
+</style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">HOYA BIT 命題文件（評分權重更新版）</h1>
+</header>
+<p><strong>2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽</strong></p>
+<table>
+<colgroup>
+<col style="width: 100%" />
+</colgroup>
+<tbody>
+<tr>
+<td style="text-align: center;"><strong>命題單位</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;">HOYA BIT</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>公司介紹</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;">HOYA BIT（禾亞數位科技股份有限公司）
+是台灣合規加密貨幣交易所，由 HOYA BIT 創辦人彭云嫻於 2022
+年創立。持有金管會洗錢防制登記（金管證券字第 1140349566 號），並通過
+ISO/IEC 27001
+國際資安認證，致力成為可信賴且具前瞻性的虛擬資產入口。<br />
+<br />
+在人工智慧應用上，HOYA BIT 於 2026 年正式推出 AI 交易入口「AI Native
+Exchange OS」，並同步亮相功能
+IP「金寶」。首波版本整合六大核心功能，涵蓋入金引導、幣種即時報價與市場趨勢、個人資產總覽、閃兌與定期定額下單、日日生幣投入與歷史回測試算，及到價通知設定與訂單查詢，讓用戶可透過自然語言完成多項常用操作，減少在不同頁面之間切換的複雜流程。<br />
+<br />
+「AI Native Exchange
+OS」的定位不是代替用戶做投資決策，而是作為更直覺的操作入口，協助用戶在複雜的金融環境中，更有效率地取得資訊、理解步驟並完成操作。所有涉及金額異動的功能，均設有明確確認機制，確保每一筆交易皆經過用戶授權後才會執行。HOYA
+BIT 也成為首家台灣導入自然語言就能完成交易的加密貨幣交易所。</td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>命題類別</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>智慧交易</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>命題主題</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>加密市場分析 AI
+Agent：多源資訊的信任提煉</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>命題說明</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><p><strong>背景情境</strong>：加密貨幣市場全天運作，資訊高度碎片化，價格、新聞、鏈上數據、社群情緒與總體經濟事件經常互相牽動。要在這樣的環境中即時整合多源資料、辨識市場雜訊，並形成可解釋、可回溯的判斷，對人類分析師而言也是一項挑戰。</p>
+<p>隨著大型語言模型從單純對話逐漸發展到具備推理、工具調用與 Agent
+工作流程能力，本命題希望驗證參賽者是否能在有限時間與成本限制下，打造一套能產出真正有洞察分析報告的加密市場分析
+AI Agent。</p>
+<p>本題重點並非單篇新聞摘要，也不是單純技術指標回測，而是希望參賽者展現真正的多源整合能力、有層次的推理能力（事實
+→ 推論 → 結論）、對不確定性的清醒判斷，以及超越表面資訊的分析角度。</p>
+<p><strong>欲打造之應用</strong>：參賽者需打造一套「加密市場分析 AI
+Agent」。系統需針對主辦方指定之幣種與題目，在限定時間內蒐集、整理並分析相關資訊，產出具備證據支撐的市場分析報告。</p>
+<p>比賽當日將從題目池中抽選一題，並搭配指定幣種。參賽者需依題目要求，分析該幣種的當前市場狀況，並說明市場判斷、關鍵依據與信心限制。</p>
+<p><strong>參賽作品應展現以下能力</strong>：</p>
+<ol type="1">
+<li><p>多源資料整合能力：能整合價格資料、鏈上資料、新聞、官方公告、社群情緒、總體經濟或其他公開資料來源，而非僅針對單一文章進行摘要。</p></li>
+<li><p>有層次的推理能力：能清楚區分事實、推論與結論，並說明各項證據如何支持最終判斷。</p></li>
+<li><p>不確定性與限制說明：當資料不足、訊號矛盾或來源可信度有限時，需明確指出限制，而非硬給結論。</p></li>
+<li><p>可回溯的證據管理：所有關鍵結論需能回溯至具體資料來源，包含來源網址、取得時間與引用片段。</p></li>
+<li><p>具洞察的分析角度：鼓勵參賽者提出評審未必預期到的分析切入點，例如跨資料來源連結、反方證據、風險因子或非顯而易見的市場脈絡。</p></li>
+</ol>
+<p><strong>題目模板</strong>：</p>
+<p>請針對【幣種】，分析其當前市場狀況，並回答指定問題。</p>
+<p><strong>分析報告至少需包含</strong>：</p>
+<ol type="1">
+<li><p>市場判斷</p></li>
+<li><p>關鍵依據，需包含來源、時間與解釋</p></li>
+<li><p>信心說明，需包含已知限制</p></li>
+</ol>
+<p>正反方分析、風險與不確定性、後續觀察重點等內容不強制要求，但將納入評分時對推理品質與完整度的觀察。</p>
+<p>比賽當日將從題目池中隨機抽選一題，並搭配指定幣種。實際題目於競賽現場公布，參賽者無法事先得知確切題目內容。
+以下為部分題型的格式範例，供參賽者理解出題方向與能力要求。</p>
+<p>正式題目涵蓋但不限於以下範例題型，建議參賽者依據核心能力要求進行準備，而非針對特定題目設計固定解法。</p>
+<p><strong>範例一</strong>｜多源整合
+分析【幣種】過去兩週的市場表現，整合價格走勢、鏈上活躍度、主要新聞事件與社群討論熱度，給出整體市場狀態判斷，並說明各類資料之間的一致程度。</p>
+<p><strong>範例二</strong>｜假設驗證
+市場上有聲音認為【幣種】短期內將維持盤整、缺乏明確方向，請蒐集支持與反對此觀點的證據，並說明你最終的判斷與理由。</p>
+<p><strong>範例三</strong>｜比較分析 比較【幣種 A】與【幣種
+B】在當前宏觀環境下各自的市場位置與風險特徵，說明兩者在流動性、市場關注度或風險敞口上的主要差異，以及在什麼條件下各自更值得優先關注。</p>
+<p>無論抽到哪一題，參賽者的 Agent
+系統均應具備以下核心能力：多源資料整合、有層次的推理（事實 → 推論 →
+結論）、對矛盾訊號的識別與取捨，以及對不確定性與資料限制的清楚說明。</p>
+<p><strong>幣種池</strong>：</p>
+<p>BTC / ETH / SOL / BNB / XRP</p>
+<p>上述幣種皆為主流加密資產，具備相對充足的價格、新聞、鏈上與市場討論資料，可降低因資料稀缺造成的抽題難度差異，並提升評分基準的一致性。</p>
+<p><strong>提交項目</strong>：</p>
+<ol type="1">
+<li><p>分析報告（Final Report）：主要評分對象。格式自由，可為
+Markdown、PDF、HTML、Dashboard 或其他可閱讀形式。</p></li>
+<li><p>證據清單（Evidence List）：列出支撐重要結論的資料來源。可使用
+JSON、CSV、表格或其他等效格式。</p></li>
+<li><p>執行紀錄（Execution
+Log）：任意格式，需包含時間戳記、主要工具呼叫、資料取得紀錄與分析流程摘要。</p></li>
+<li><p>程式碼與配置（Source / Config）：包含 Agent
+程式碼、設定檔與必要的執行說明。</p></li>
+</ol>
+<p><strong>分析報告至少需包含</strong>：</p>
+<ol type="1">
+<li><p>結論 / 市場判斷：說明對指定幣種與指定題目的主要判斷。</p></li>
+<li><p>關鍵依據：需對應至 Evidence List
+中的資料來源，並說明該證據如何支撐判斷。</p></li>
+<li><p>信心說明：需說明判斷信心、已知限制、資料不足之處或可能推翻結論的條件。</p></li>
+</ol>
+<p>不強制要求固定章節結構、報告長度或排版形式。正反方分析、風險與不確定性、後續觀察重點等內容，將作為推理品質與完整度的觀察重點。</p>
+<p>每筆 Evidence 需提供足以回溯資料來源的資訊，至少包含：</p>
+<p>1. source：資料來源名稱或來源網址</p>
+<p>2. fetched_at：資料取得時間</p>
+<p>3.
+content_reference：引用片段、資料區間、查詢條件、指標數值或資料摘要</p>
+<p>4. related_claim：該證據對應的報告判斷或結論</p>
+<p>若資料來源為網頁、新聞或官方公告，建議提供 source_url
+與引用片段。</p>
+<p>若資料來源為 API、CSV、鏈上查詢、Dashboard
+或其他資料工具，需提供足以回溯的資訊，例如 API
+endpoint、查詢參數、資料時間範圍、交易對、鏈上地址、query
+名稱或原始資料檔案名稱。</p>
+<p>主辦方將視情況抽查 Evidence
+List，確認來源可回溯性、引用內容真實性，以及證據與結論之間的對應關係。</p>
+<p>執行限制：</p>
+<ol type="1">
+<li><p>執行時間最多 15
+分鐘。超時後主辦方可停止執行或不採計超時後產出。</p></li>
+<li><p>原則上每隊僅有一次正式執行機會。</p></li>
+<li><p>若因主辦方環境或不可歸責於參賽者之技術問題導致執行失敗，可允許重跑一次，並需保留重跑紀錄。</p></li>
+</ol></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>決賽交付內容</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><ol type="1">
+<li><p>提案簡報（需涵蓋：解題方向、AI 技術應用、數據資料應用、AWS
+架構圖）</p></li>
+<li><p>Live Demo 部署網址及現場執行錄製影片連結（若涉及私有 API
+金鑰，請附完整錄製影片，影片需清楚呈現完整執行流程與輸出結果）</p></li>
+<li><p>GitHub 連結：含完整原始碼、設定檔與執行說明</p></li>
+<li><p>數據與資源文件：包含 Evidence List、Execution Log
+及分析報告</p></li>
+</ol></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>數據與資源文件</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><p>提供以下共同基準資料：</p>
+<ol type="1">
+<li><p>BTC / ETH / SOL / BNB / XRP 近五年 Daily OHLCV 歷史資料</p></li>
+<li><p>資料格式：CSV</p></li>
+<li><p>資料來源：公開市場資料來源</p></li>
+<li><p>時間基準：UTC 日期</p></li>
+<li><p>價格單位：以資料包標示為準</p></li>
+</ol>
+<p>CSV 欄位如下：</p>
+<p>date, open, high, low, close, volume</p>
+<p>欄位說明：</p>
+<ul>
+<li><p>date：UTC 日期，格式為 YYYY-MM-DD</p></li>
+<li><p>open：當日開盤價</p></li>
+<li><p>high：當日最高價</p></li>
+<li><p>low：當日最低價</p></li>
+<li><p>close：當日收盤價</p></li>
+<li><p>volume：當日成交量</p></li>
+</ul>
+<p>正式提供資料時，主辦方將於資料包中標示實際資料來源、擷取日期、價格單位、交易對或價格基準。</p>
+<p>其餘新聞、官方公告、鏈上資料、社群情緒、總體經濟、政策與監管事件等資料，均由參賽者自行取得。</p>
+<p>可使用資料來源包含但不限於：</p>
+<ol type="1">
+<li><p>公開 API：如 CoinGecko、CryptoCompare、交易所公開 API 等</p></li>
+<li><p>公開新聞：如新聞媒體、官方公告、公開研究報告等</p></li>
+<li><p>公開社群：如 Reddit、X 公開內容、官方社群公告等</p></li>
+<li><p>鏈上資料：如 Etherscan、Solscan、Dune 公開
+query、區塊鏈瀏覽器等</p></li>
+<li><p>付費資料：可使用，但需揭露來源，且不得作為唯一關鍵依據</p></li>
+</ol>
+<p>參賽者可使用自備 API key
+存取公開或付費資料來源，包含市場行情、新聞、鏈上資料、社群資料、搜尋服務或模型推理服務。若使用付費資料或商業
+API，需於報告或 Evidence List 中揭露資料來源、取得時間與引用片段。</p>
+<p>外部資料服務可作為資料取得、檢索、整理或輔助分析用途，但不得將第三方服務已產出的完整市場判斷、交易訊號、買賣建議或投資分析報告，作為主要分析結果直接提交。參賽作品的核心判斷、推理鏈與最終報告，應由參賽者自行設計之
+Agent 流程產生，並需能說明資料如何被整合、取捨與推論。</p>
+<p>評分時將觀察：</p>
+<ol type="1">
+<li><p>來源類型是否多樣，例如價格、鏈上、新聞、情緒等</p></li>
+<li><p>來源是否具備獨立性，避免單一來源或同一文章重複引用</p></li>
+<li><p>是否過度依賴分析師文章，而缺乏自行推理與交叉驗證</p></li>
+<li><p>關鍵結論是否能回溯至具體資料來源</p></li>
+</ol></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>評分標準</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><p>• （15%）創意度：<br />
+是否提出具原創性的分析方法、資料來源使用方式或 Agent
+設計。評審將觀察參賽者是否能提出非表面化、非單純摘要的市場洞察，並能從多源資料中建立有價值的分析角度。</p>
+<p>• （20%）技術可行性：<br />
+系統是否具備可運行的 Agent
+架構，能完成資料蒐集、工具調用、資料整理、推理分析、報告生成與執行紀錄保存。若使用
+AWS 服務或其他 Agent framework，需展現合理的架構設計與穩定執行能力。</p>
+<p>• （25%）商業應用性：<br />
+產出內容是否能解決加密市場資訊分散、雜訊過多、判斷依據不透明等實際問題。分析結果是否具備可讀性、可採信性，並能協助使用者更有效率地理解市場狀況。</p>
+<p>• （30%）主題切合度：<br />
+是否切合「加密市場分析 AI
+Agent」主題。報告需能針對指定幣種與指定題目作答，並展現多源資料整合、證據回溯、矛盾訊號處理、信心校準與限制說明等能力。若作品高度依賴單一第三方分析服務產出的結論，而缺乏自有
+Agent 流程、證據整合與推理說明，將影響本項評分。</p>
+<p>• （10%）完成度：<br />
+系統功能是否完整，包含輸入題目與幣種後可順利完成分析流程，並產出完整報告、Evidence
+List、Execution Log 與必要程式碼或設定。Demo
+或提交成果需清楚、穩定且易於理解。</p>
+<p>加分項目：<br />
+（+10%）採用 AWS Kiro 作為 AI 整合開發環境之工具。</p></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>命題文件 聯繫窗口</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><p>姓名：Mars Li</p>
+<p>職稱：Head of AI Engineering</p>
+<p>Email：<mark>chengzheli@hoyabit.com</mark></p>
+<p>電話：0983083514</p></td>
+</tr>
+</tbody>
+</table>
+</body>
+</html>
