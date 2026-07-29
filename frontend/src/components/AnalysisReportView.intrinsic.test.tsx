@@ -73,7 +73,7 @@ describe('AnalysisReportView intrinsic shadow integration', () => {
   it('contains malformed optional payload and keeps the official report visible', () => {
     renderReport({ mode: 'shadow', affects_official_score: true })
     expect(screen.getByText('BTC')).toBeInTheDocument()
-    expect(screen.getByText(/Shadow 資料格式不相容/)).toBeInTheDocument()
+    expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
     expect(screen.queryByText('已驗證')).not.toBeInTheDocument()
   })
 })

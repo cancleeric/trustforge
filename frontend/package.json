@@ -14,6 +14,7 @@
     "test": "NODE_ENV=development vitest run",
     "setup:mobile-geometry": "playwright install chromium",
     "test:mobile-geometry": "node scripts/verify-mobile-geometry.mjs",
+    "test:intrinsic-eye": "node scripts/verify-asset-intrinsic-eye.mjs",
     "test:contrast": "node scripts/verify-contrast.mjs"
   },
   "dependencies": {
