@@ -20,7 +20,10 @@ from trustforge.asset_intrinsic_promotion_receipt import (
     FAILURE_EVENT_KIND,
     SIGNER_DOMAIN,
 )
-from trustforge.deployment_control import DeploymentAuthorization, DeploymentControlLedger
+from trustforge.deployment_control import (
+    DeploymentAuthorization,
+    DeploymentControlLedger,
+)
 from trustforge.release_manifest import ReleaseManifest
 from trustforge.release_router import ReleaseEndpoint, RoutingPolicy
 from trustforge.secure_keyring import (
@@ -69,8 +72,20 @@ def _digest(path: Path) -> str:
         if (
             not __import__("stat").S_ISREG(before.st_mode)
             or before.st_nlink != 1
-            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
         ):
             raise SystemExit("release manifest changed during read")
     finally:
@@ -89,9 +104,15 @@ def _identity(args):
     return {
         "root_uid": os.geteuid() if test else 0,
         "group": group,
-        "operator_uid": os.geteuid() if test else pwd.getpwnam("trustforge-operator").pw_uid,
-        "receipt_uid": os.geteuid() if test else pwd.getpwnam("trustforge-receipt").pw_uid,
-        "router_uid": os.geteuid() if test else pwd.getpwnam("trustforge-router").pw_uid,
+        "operator_uid": os.geteuid()
+        if test
+        else pwd.getpwnam("trustforge-operator").pw_uid,
+        "receipt_uid": os.geteuid()
+        if test
+        else pwd.getpwnam("trustforge-receipt").pw_uid,
+        "router_uid": os.geteuid()
+        if test
+        else pwd.getpwnam("trustforge-router").pw_uid,
     }
 
 
@@ -211,7 +232,12 @@ def _compose(args) -> tuple[VerifiedReceiptReleaseGate, dict[str, Any]]:
         public=outcome_public,
         domain=OUTCOME_DOMAIN,
         kinds=frozenset(
-            {"candidate_reservation", "candidate_result", "router_emergency_stop"}
+            {
+                "candidate_reservation",
+                "candidate_result",
+                "candidate_cost_reconciliation",
+                "router_emergency_stop",
+            }
         ),
         role="release-router-outcomes",
         owner_uid=identity["router_uid"],
@@ -286,7 +312,9 @@ def main() -> int:
     parser.add_argument("--control-public-keyring", type=Path)
     parser.add_argument("--audit-keyring", type=Path)
     parser.add_argument("--audit-public-keyring", type=Path)
-    parser.add_argument("--test-owner-current-user", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--test-owner-current-user", action="store_true", help=argparse.SUPPRESS
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run")
     run.add_argument("--operator-authorization", type=Path, required=True)
@@ -311,7 +339,15 @@ def main() -> int:
             operator_authorization=operator,
             now=datetime.now(timezone.utc),
         )
-        print(json.dumps({"transaction_id": result["event"]["transaction_id"], "status": "prepared"}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "transaction_id": result["event"]["transaction_id"],
+                    "status": "prepared",
+                },
+                sort_keys=True,
+            )
+        )
     elif args.command == "reconcile":
         print(json.dumps({"appended": len(gate.reconcile_audit())}, sort_keys=True))
     else:

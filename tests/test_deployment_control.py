@@ -122,6 +122,7 @@ def _control(tmp_path, *, clock=lambda: NOW):
                 {
                     "candidate_reservation",
                     "candidate_result",
+                    "candidate_cost_reconciliation",
                     "router_emergency_stop",
                 }
             )
@@ -313,10 +314,10 @@ def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path)
     control.complete(_completion(control, prepared, "start", "complete-start"), now=NOW)
     first = control.routing_snapshot()
     reserved = control.reserve_candidate(
-        expected_head=first.ledger_head, reservation_id="1" * 32
+        expected_head=first.outcome_head, reservation_id="1" * 32
     )
     control.record_candidate_result(
-        expected_head=reserved.ledger_head,
+        expected_head=reserved.outcome_head,
         reservation_id="1" * 32,
         ok=False,
         status_code=503,
@@ -326,10 +327,10 @@ def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path)
     second = control.routing_snapshot()
     assert second.phase == "canary"
     reserved2 = control.reserve_candidate(
-        expected_head=second.ledger_head, reservation_id="2" * 32
+        expected_head=second.outcome_head, reservation_id="2" * 32
     )
     stopped = control.record_candidate_result(
-        expected_head=reserved2.ledger_head,
+        expected_head=reserved2.outcome_head,
         reservation_id="2" * 32,
         ok=False,
         status_code=503,
@@ -339,6 +340,35 @@ def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path)
     assert stopped.phase == "stopped"
     serialized = canonical_json([item["event"] for item in control.ledger.read()])
     assert b"subject" not in serialized
+
+
+def test_control_and_outcome_heads_have_independent_cas_domains(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "head-domains")
+    initial = control.routing_snapshot()
+    reserved = control.reserve_candidate(
+        expected_head=initial.outcome_head,
+        reservation_id="d" * 32,
+    )
+    assert reserved.control_event_head == initial.control_event_head
+    assert reserved.outcome_head != initial.outcome_head
+    completed = control.record_candidate_result(
+        expected_head=reserved.outcome_head,
+        reservation_id="d" * 32,
+        ok=True,
+        status_code=200,
+        latency_ms=1,
+        error_kind="",
+    )
+    assert completed.control_event_head == initial.control_event_head
+    assert completed.outcome_head != reserved.outcome_head
+    control.prepare(
+        "stop",
+        _authorization(control, "stop", "auth-stop-head-domains"),
+        now=NOW,
+    )
+    transitioned = control.routing_snapshot()
+    assert transitioned.control_event_head != initial.control_event_head
 
 
 def _start_canary(control, suffix):
@@ -362,7 +392,7 @@ def test_stop_wins_coordination_lock_before_reservation_deterministically(tmp_pa
         attempted.set()
         try:
             control.reserve_candidate(
-                expected_head=before.ledger_head, reservation_id="a" * 32
+                expected_head=before.outcome_head, reservation_id="a" * 32
             )
         except Exception as exc:  # asserted below
             result["error"] = exc
@@ -386,10 +416,10 @@ def test_restart_canary_epoch_excludes_old_ramp_outcomes(tmp_path):
     _start_canary(control, "epoch-1")
     first = control.routing_snapshot()
     reserved = control.reserve_candidate(
-        expected_head=first.ledger_head, reservation_id="b" * 32
+        expected_head=first.outcome_head, reservation_id="b" * 32
     )
     control.record_candidate_result(
-        expected_head=reserved.ledger_head,
+        expected_head=reserved.outcome_head,
         reservation_id="b" * 32,
         ok=False,
         status_code=503,
@@ -836,7 +866,7 @@ def test_candidate_connection_rechecks_stop_before_network_start(tmp_path):
     state = control.routing_snapshot()
     reservation_id = "d" * 32
     control.reserve_candidate(
-        expected_head=state.ledger_head,
+        expected_head=state.outcome_head,
         reservation_id=reservation_id,
     )
     control.prepare(
@@ -863,7 +893,7 @@ def test_connect_handoff_orders_stop_and_does_not_lock_hanging_response(
     state = control.routing_snapshot()
     reservation_id = "e" * 32
     control.reserve_candidate(
-        expected_head=state.ledger_head, reservation_id=reservation_id
+        expected_head=state.outcome_head, reservation_id=reservation_id
     )
     epoch = control._canary_epoch(control._records())
     assert epoch is not None
@@ -936,7 +966,7 @@ def test_candidate_connect_uses_hard_nonblocking_select_deadline(tmp_path, monke
     state = control.routing_snapshot()
     reservation_id = "f" * 32
     control.reserve_candidate(
-        expected_head=state.ledger_head, reservation_id=reservation_id
+        expected_head=state.outcome_head, reservation_id=reservation_id
     )
 
     class StalledSocket:

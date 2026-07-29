@@ -22,13 +22,115 @@ from scripts.deployment_readiness import (
     _key_roles_for_command,
 )
 from scripts import install_router_release_artifact
-from trustforge.release_router_runtime import COORDINATION_LOCK_PATH
+from trustforge import release_router_runtime
+from trustforge.release_router_runtime import (
+    COORDINATION_LOCK_PATH,
+    RouterRuntimeError,
+)
 from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT
 from trustforge.signed_event_ledger import SignedEventLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
+
+
+def test_runtime_rejects_unmigrated_v1_ledger_permission_receipt(monkeypatch):
+    payload = {
+        "schema": "trustforge.release-ledger-provision-receipt/v1",
+        "control_public": {"key_id": "control"},
+        "outcome_public": {"key_id": "outcome"},
+    }
+    monkeypatch.setattr(
+        release_router_runtime,
+        "read_regular_file",
+        lambda *_args, **_kwargs: (
+            json.dumps(payload).encode(),
+            type(
+                "Info",
+                (),
+                {"st_uid": 0, "st_mode": stat.S_IFREG | 0o644, "st_nlink": 1},
+            )(),
+        ),
+    )
+    with pytest.raises(RouterRuntimeError, match="audited permission migration"):
+        release_router_runtime._provision_receipt(Path("/unused"))
+
+
+def test_typed_runtime_material_exposes_exact_public_cost_key_and_rejects_private():
+    payload = {
+        role: {f"{role}-1": f"{index:02x}" * 32}
+        for index, role in enumerate(
+            (
+                "control_event_public",
+                "router_outcome_public",
+                "router_outcome_private",
+                "routing",
+                "endpoint_manifest_public",
+                "authorization_public",
+                "completion_public",
+                "canary_cost_budget_public",
+            ),
+            start=1,
+        )
+    }
+    material = release_router_runtime.parse_runtime_key_material(payload)
+    assert dict(material.canary_cost_budget_public) == {
+        "canary_cost_budget_public-1": bytes.fromhex("08" * 32)
+    }
+    with pytest.raises(TypeError):
+        material.canary_cost_budget_public["other"] = b"x" * 32  # type: ignore[index]
+    payload["canary_cost_budget_private"] = {"forbidden": "09" * 32}
+    with pytest.raises(RouterRuntimeError, match="over-privileged"):
+        release_router_runtime.parse_runtime_key_material(payload)
+    payload.pop("canary_cost_budget_private")
+    payload["canary_cost_budget_public"] = {}
+    with pytest.raises(RouterRuntimeError, match="keys are absent"):
+        release_router_runtime.parse_runtime_key_material(payload)
+
+
+def test_rollback_v2_is_rejected_and_v3_requires_restore_digest(monkeypatch, tmp_path):
+    from scripts import check_release_rollback_evidence as rollback
+
+    evidence = tmp_path / "rollback.json"
+    monkeypatch.setattr(
+        rollback.os,
+        "fstat",
+        lambda fd: type(
+            "Info",
+            (),
+            {
+                "st_mode": stat.S_IFREG | 0o600,
+                "st_uid": 0,
+                "st_nlink": 1,
+                "st_size": os.stat(evidence).st_size,
+            },
+        )(),
+    )
+    evidence.write_text(
+        json.dumps(
+            {"schema": "trustforge.release-install-rollback-failed/v2"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    with pytest.raises(SystemExit, match="legacy rollback"):
+        rollback.inspect(evidence)
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema": rollback.SCHEMA,
+                "target_allowlist_sha256": "a" * 64,
+                "prior_allowlist_sha256": "not-a-digest",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    with pytest.raises(SystemExit, match="restore digest"):
+        rollback.inspect(evidence)
 
 
 def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -48,9 +150,7 @@ def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, P
     package = tmp_path / "__init__.py"
     package.write_text("__version__ = '0.0.test'\n")
     metadata = tmp_path / "METADATA"
-    metadata.write_text(
-        "Metadata-Version: 2.1\nName: trustforge\nVersion: 0.0.test\n"
-    )
+    metadata.write_text("Metadata-Version: 2.1\nName: trustforge\nVersion: 0.0.test\n")
 
     def record_hash(path: Path) -> str:
         digest = hashlib.sha256(path.read_bytes()).digest()
@@ -89,9 +189,7 @@ def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, P
     if runtime_library.is_file():
         runtime_library_copy = tmp_path / runtime_library.name
         shutil.copyfile(runtime_library, runtime_library_copy)
-        files[
-            Path(".venv/lib") / runtime_library.name
-        ] = (runtime_library_copy, "0444")
+        files[Path(".venv/lib") / runtime_library.name] = (runtime_library_copy, "0444")
     directories = sorted(
         {
             parent
@@ -394,8 +492,15 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
         "python3",
         f'case "${{1:-}}" in *write_release_rollback_evidence.py) '
         f'exec "{PYTHON}" "$@";; '
-        f'*install_router_release_artifact.py) mkdir -p "{fake_release}"; '
-        f'echo "{fake_release}";; esac\nexit 0\n',
+        f'*install_router_release_artifact.py) mkdir -p "{fake_release}/.venv/bin"; '
+        f'printf "#!/bin/sh\\nexit 0\\n" >"{fake_release}/.venv/bin/python"; '
+        f'chmod +x "{fake_release}/.venv/bin/python"; '
+        f'echo "{fake_release}";; '
+        f"*provision_release_http_canary_allowlist.py) "
+        'out=""; take=false; for arg in "$@"; do '
+        'if $take; then out="$arg"; take=false; fi; '
+        'if [ "$arg" = "--output" ]; then take=true; fi; done; '
+        'printf "%s\\n" "{\\"fixture\\":true}" >"$out";; esac\nexit 0\n',
     )
     command(
         "curl",
@@ -403,7 +508,8 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
     )
     command(
         "stat",
-        'case "$*" in *"%a"*) echo 600;; *) echo 0;; esac\n',
+        'case "$*" in *"%U:%G:%a:%h"*) echo root:root:600:1;; '
+        '*"%a"*) echo 600;; *) echo 0;; esac\n',
     )
     command(
         "install",
@@ -437,6 +543,7 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
     router_archive = tmp_path / "router.tar"
     tree_manifest = tmp_path / "tree-manifest.json"
     runtime_lock = tmp_path / "runtime.lock"
+    canary_request = tmp_path / "canary-request.json"
     signed_unit = tmp_path / "signed-router.service"
     for path in (
         evidence,
@@ -446,6 +553,7 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
         router_archive,
         tree_manifest,
         runtime_lock,
+        canary_request,
     ):
         path.write_text("{}")
     signed_unit.write_text(
@@ -466,6 +574,7 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
         "TRUSTFORGE_SMOKE_NETRC": str(netrc),
         "TRUSTFORGE_SMOKE_CA": str(ca),
         "TRUSTFORGE_SMOKE_HOST": "router.test",
+        "TRUSTFORGE_CANARY_SMOKE_PATH": "/api/analyze?coin=BTC",
         "TRUSTFORGE_EXPECTED_RELEASE_EVIDENCE": str(evidence),
         "TRUSTFORGE_RELEASE_EVIDENCE_KEYS": str(evidence_keys),
         "TRUSTFORGE_A_ARTIFACT": str(artifact_a),
@@ -474,6 +583,7 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
         "TRUSTFORGE_ROUTER_ARCHIVE": str(router_archive),
         "TRUSTFORGE_ROUTER_TREE_MANIFEST": str(tree_manifest),
         "TRUSTFORGE_RUNTIME_LOCK": str(runtime_lock),
+        "TRUSTFORGE_CANARY_ALLOWLIST_REQUEST": str(canary_request),
         "TRUSTFORGE_SIGNED_UNIT": str(signed_unit),
     }
 
@@ -501,7 +611,7 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
         assert result.returncode == 91
         assert evidence.stat().st_mode & 0o777 == 0o600
         payload = json.loads(evidence.read_text())
-        assert payload["schema"] == "trustforge.release-install-rollback-failed/v2"
+        assert payload["schema"] == "trustforge.release-install-rollback-failed/v3"
         assert payload["steps"] == [
             {
                 "attempted": True,
@@ -530,6 +640,11 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
         ]
         assert payload["target_archive_sha256"] == fake_archive_digest
         assert len(payload["target_evidence_sha256"]) == 64
+        assert payload["prior_allowlist_sha256"] == "absent"
+        assert (
+            payload["target_allowlist_sha256"]
+            == hashlib.sha256(b'{"fixture":true}\n').hexdigest()
+        )
     else:
         assert result.returncode == 22
         assert not evidence.exists()
@@ -550,11 +665,12 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
         "router-archive",
         "router-tree-manifest",
         "runtime-lock",
+        "canary-allowlist",
     )
     paths = {}
     private = Ed25519PrivateKey.generate()
     payload = {
-        "schema": "trustforge.release-install-evidence/v1",
+        "schema": "trustforge.release-install-evidence/v2",
         "key_id": "release-1",
     }
     for name in names:
@@ -688,14 +804,13 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
                 {
                     "candidate_reservation",
                     "candidate_result",
+                    "candidate_cost_reconciliation",
                     "router_emergency_stop",
                 }
             )
         },
         domain_keys={
-            "release-router-outcome": frozenset(
-                {"outcome-bootstrap-1", "outcome-1"}
-            )
+            "release-router-outcome": frozenset({"outcome-bootstrap-1", "outcome-1"})
         },
         signing_key_id="outcome-bootstrap-1",
         signing_private_key=outcome_bootstrap_private.private_bytes_raw(),
@@ -730,6 +845,12 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
                 },
                 "completion_public": {
                     "completion-1": Ed25519PrivateKey.generate()
+                    .public_key()
+                    .public_bytes(Encoding.Raw, PublicFormat.Raw)
+                    .hex()
+                },
+                "canary_cost_budget_public": {
+                    "cost-budget-1": Ed25519PrivateKey.generate()
                     .public_key()
                     .public_bytes(Encoding.Raw, PublicFormat.Raw)
                     .hex()
@@ -785,18 +906,18 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
     paths["runtime-lock"].write_text(
         json.dumps(
             {
-                    "schema": "trustforge.router-runtime-lock/v2",
-                    "tree_manifest_sha256": hashlib.sha256(
-                        paths["router-tree-manifest"].read_bytes()
-                    ).hexdigest(),
-                    "distributions": {
-                        "trustforge": {
-                            "version": "2026.7.28",
-                            "dist_info": "trustforge-2026.7.28.dist-info",
-                            "metadata_sha256": "1" * 64,
-                            "record_sha256": "2" * 64,
-                        }
-                    },
+                "schema": "trustforge.router-runtime-lock/v2",
+                "tree_manifest_sha256": hashlib.sha256(
+                    paths["router-tree-manifest"].read_bytes()
+                ).hexdigest(),
+                "distributions": {
+                    "trustforge": {
+                        "version": "2026.7.28",
+                        "dist_info": "trustforge-2026.7.28.dist-info",
+                        "metadata_sha256": "1" * 64,
+                        "record_sha256": "2" * 64,
+                    }
+                },
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -810,7 +931,7 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
             paths[name].read_bytes()
         ).hexdigest()
     signature = private.sign(
-        b"trustforge.release-install-evidence.v1\x00"
+        b"trustforge.release-install-evidence.v2\x00"
         + json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hex()
     payload["signature"] = signature
@@ -837,16 +958,56 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
         command.extend(("--" + name, str(paths[name])))
 
     subprocess.run(command, check=True)
+
+    def write_signed_evidence(
+        value, domain=b"trustforge.release-install-evidence.v2\x00"
+    ):
+        unsigned = {key: item for key, item in value.items() if key != "signature"}
+        value["signature"] = private.sign(
+            domain
+            + json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hex()
+        evidence.write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+
+    valid_payload = dict(payload)
+    legacy = dict(valid_payload)
+    legacy["schema"] = "trustforge.release-install-evidence/v1"
+    write_signed_evidence(legacy, b"trustforge.release-install-evidence.v1\x00")
+    assert subprocess.run(command, capture_output=True).returncode != 0
+
+    missing_allowlist = dict(valid_payload)
+    missing_allowlist.pop("canary_allowlist_sha256")
+    write_signed_evidence(missing_allowlist)
+    assert subprocess.run(command, capture_output=True).returncode != 0
+
+    runtime_keys_payload = json.loads(paths["keys"].read_text())
+    runtime_keys_payload["canary_cost_budget_private"] = {"forbidden": "1" * 64}
+    paths["keys"].write_text(
+        json.dumps(runtime_keys_payload, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    extra_private = dict(valid_payload)
+    extra_private["keys_sha256"] = hashlib.sha256(
+        paths["keys"].read_bytes()
+    ).hexdigest()
+    write_signed_evidence(extra_private)
+    assert subprocess.run(command, capture_output=True).returncode != 0
+    runtime_keys_payload.pop("canary_cost_budget_private")
+    paths["keys"].write_text(
+        json.dumps(runtime_keys_payload, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    payload = dict(valid_payload)
+    write_signed_evidence(payload)
+
     original_head = payload["control_ledger_head"]
     payload["control_ledger_head"] = "0" * 64
     unsigned_payload = {
         key: value for key, value in payload.items() if key != "signature"
     }
     payload["signature"] = private.sign(
-        b"trustforge.release-install-evidence.v1\x00"
-        + json.dumps(
-            unsigned_payload, sort_keys=True, separators=(",", ":")
-        ).encode()
+        b"trustforge.release-install-evidence.v2\x00"
+        + json.dumps(unsigned_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hex()
     evidence.write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
@@ -871,10 +1032,8 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
         key: value for key, value in payload.items() if key != "signature"
     }
     payload["signature"] = private.sign(
-        b"trustforge.release-install-evidence.v1\x00"
-        + json.dumps(
-            unsigned_payload, sort_keys=True, separators=(",", ":")
-        ).encode()
+        b"trustforge.release-install-evidence.v2\x00"
+        + json.dumps(unsigned_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hex()
     evidence.write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
@@ -969,9 +1128,7 @@ def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
     releases_link.symlink_to(releases, target_is_directory=True)
     symlink_command = command.copy()
     symlink_command[9] = str(releases_link)
-    unsafe_symlink = subprocess.run(
-        symlink_command, capture_output=True, text=True
-    )
+    unsafe_symlink = subprocess.run(symlink_command, capture_output=True, text=True)
     assert unsafe_symlink.returncode != 0
     assert "releases root" in unsafe_symlink.stderr
 
@@ -1057,9 +1214,7 @@ def test_content_addressed_router_artifact_bounds_directory_member_bomb(
     assert not any(releases.iterdir())
 
 
-@pytest.mark.parametrize(
-    "fault_point", ("rename", "chmod", "verify", "marker_fsync")
-)
+@pytest.mark.parametrize("fault_point", ("rename", "chmod", "verify", "marker_fsync"))
 def test_router_publish_faults_leave_no_consumable_target_and_retry(
     tmp_path, monkeypatch, fault_point
 ):
@@ -1122,8 +1277,7 @@ def test_router_publish_faults_leave_no_consumable_target_and_retry(
                 "fsync",
                 lambda descriptor: (
                     (_ for _ in ()).throw(OSError("marker fsync fault"))
-                    if marker.exists()
-                    and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    if marker.exists() and stat.S_ISDIR(os.fstat(descriptor).st_mode)
                     else real_fsync(descriptor)
                 ),
             )

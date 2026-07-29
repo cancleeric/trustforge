@@ -19,8 +19,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from trustforge.release_router import ReleaseRoutingError, RoutingPolicy
 from trustforge.signed_event_ledger import SignedEventLedger
 
-SCHEMA = "trustforge.release-install-evidence/v1"
-SIGNING_DOMAIN = b"trustforge.release-install-evidence.v1\x00"
+SCHEMA = "trustforge.release-install-evidence/v2"
+SIGNING_DOMAIN = b"trustforge.release-install-evidence.v2\x00"
 FIELDS = (
     "unit_sha256",
     "runtime_sha256",
@@ -35,6 +35,7 @@ FIELDS = (
     "router_archive_sha256",
     "router_tree_manifest_sha256",
     "runtime_lock_sha256",
+    "canary_allowlist_sha256",
 )
 IDENTITY_FIELDS = ("control_ledger_id", "control_ledger_head")
 
@@ -97,7 +98,12 @@ def _key_mapping(payload: dict, role: str) -> dict[str, bytes]:
     return decoded
 
 
-def _verified_control_history(args: argparse.Namespace, keys: dict) -> list[dict]:
+def _control_ledger(
+    args: argparse.Namespace,
+    keys: dict,
+    *,
+    coordination_lock_path: Path | None = None,
+) -> SignedEventLedger:
     control_keys = _key_mapping(keys, "control_event_public")
     directory = args.control_bootstrap.parent
     if (
@@ -108,7 +114,17 @@ def _verified_control_history(args: argparse.Namespace, keys: dict) -> list[dict
     root = directory.parent
     directory_info, root_info = os.lstat(directory), os.lstat(root)
     bootstrap_info = os.lstat(args.control_bootstrap)
-    ledger = SignedEventLedger(
+    coordination = (
+        {}
+        if coordination_lock_path is None
+        else {
+            "coordination_lock_path": coordination_lock_path,
+            "coordination_lock_mode": 0o660,
+            "coordination_lock_owner_uid": 0,
+            "coordination_lock_group": "trustforge-release",
+        }
+    )
+    return SignedEventLedger(
         directory=directory,
         verification_keys=control_keys,
         event_permissions={
@@ -130,8 +146,12 @@ def _verified_control_history(args: argparse.Namespace, keys: dict) -> list[dict
         directory_owner_uid=directory_info.st_uid,
         directory_mode=stat.S_IMODE(directory_info.st_mode),
         file_mode=stat.S_IMODE(bootstrap_info.st_mode),
+        **coordination,
     )
-    records = ledger.read()
+
+
+def _verified_control_history(args: argparse.Namespace, keys: dict) -> list[dict]:
+    records = _control_ledger(args, keys).read()
     if not records or records[0]["event"].get("kind") != "deployment_initialized":
         raise SystemExit("authenticated control ledger is not initialized")
     return records
@@ -151,6 +171,7 @@ def _verify_outcome_projection(args: argparse.Namespace, keys: dict) -> None:
                 {
                     "candidate_reservation",
                     "candidate_result",
+                    "candidate_cost_reconciliation",
                     "router_emergency_stop",
                 }
             )
@@ -216,9 +237,11 @@ def _verify_endpoint_semantics(args: argparse.Namespace, payload: dict) -> None:
         "endpoint_manifest_public",
         "authorization_public",
         "completion_public",
+        "canary_cost_budget_public",
     }:
         raise SystemExit("runtime key roles are incomplete or over-privileged")
     endpoint_runtime = _key_mapping(runtime_keys, "endpoint_manifest_public")
+    _key_mapping(runtime_keys, "canary_cost_budget_public")
     try:
         endpoint_bundle = {key: bytes.fromhex(value) for key, value in keys.items()}
     except (TypeError, ValueError) as exc:

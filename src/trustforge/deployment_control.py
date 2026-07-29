@@ -939,7 +939,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             candidate_requests=requests,
             consecutive_errors=errors,
             stop_after_errors=self.stop_after_errors,
-            ledger_head=(
+            control_event_head=records[-1]["event_hash"],
+            outcome_head=(
                 outcome_records[-1]["event_hash"] if outcome_records else GENESIS_HASH
             ),
             candidate_blocked=clock_rolled_back,
@@ -1018,9 +1019,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             )
             return self._prepare_locked("start", receipt, now=trusted_now)
 
-    def activation_transaction(
-        self, transaction_id: str
-    ) -> tuple[dict[str, Any], ...]:
+    def activation_transaction(self, transaction_id: str) -> tuple[dict[str, Any], ...]:
         """Return authenticated control records for one activation transaction."""
         return tuple(
             record
@@ -1231,7 +1230,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             raise DeploymentControlError("candidate reservation id is invalid")
         state = self.routing_snapshot()
         if (
-            state.ledger_head != expected_head
+            state.outcome_head != expected_head
             or state.phase != "canary"
             or state.desired_phase != "canary"
             or state.activation_status != "completed"

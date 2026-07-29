@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import pwd
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from types import MappingProxyType
+from typing import Callable, Mapping
 
 from trustforge.deployment_control import DeploymentControlLedger
 from trustforge.release_router import (
@@ -20,10 +22,30 @@ from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedg
 RUNTIME_CONFIG_PATH = Path("/etc/trustforge/release-router-runtime.json")
 RUNTIME_KEYS_PATH = Path("/etc/trustforge/release-router-runtime-keys.json")
 COORDINATION_LOCK_PATH = Path("/run/trustforge-release-control/coordination.lock")
+OUTCOME_EVENT_KINDS = frozenset(
+    {
+        "candidate_reservation",
+        "candidate_result",
+        "candidate_cost_reconciliation",
+        "router_emergency_stop",
+    }
+)
 
 
 class RouterRuntimeError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RouterRuntimeKeyMaterial:
+    control_event_public: Mapping[str, bytes]
+    router_outcome_public: Mapping[str, bytes]
+    router_outcome_private: Mapping[str, bytes]
+    routing: Mapping[str, bytes]
+    endpoint_manifest_public: Mapping[str, bytes]
+    authorization_public: Mapping[str, bytes]
+    completion_public: Mapping[str, bytes]
+    canary_cost_budget_public: Mapping[str, bytes]
 
 
 def _protected(path: Path) -> dict:
@@ -34,31 +56,55 @@ def _protected(path: Path) -> dict:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RouterRuntimeError("runtime input is invalid") from exc
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not value:
         raise RouterRuntimeError("runtime input must be an object")
+    return value
+
+
+def _provision_receipt(path: Path) -> dict:
+    raw, info = read_regular_file(path, maximum_bytes=4096)
+    if info.st_uid != 0 or info.st_mode & 0o777 != 0o644 or info.st_nlink != 1:
+        raise RouterRuntimeError("ledger provisioning receipt metadata is unsafe")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RouterRuntimeError("ledger provisioning receipt is invalid") from exc
+    if not isinstance(value, dict) or not value:
+        raise RouterRuntimeError("ledger provisioning receipt must be an object")
+    if (
+        set(value)
+        != {
+            "schema",
+            "control_public",
+            "outcome_public",
+            "outcome_event_kinds",
+        }
+        or value.get("schema") != "trustforge.release-ledger-provision-receipt/v2"
+        or value.get("outcome_event_kinds") != sorted(OUTCOME_EVENT_KINDS)
+        or any(
+            not isinstance(value.get(role), dict) or not value[role]
+            for role in ("control_public", "outcome_public")
+        )
+    ):
+        raise RouterRuntimeError("release ledgers require audited permission migration")
     return value
 
 
 def _keys(payload: dict, role: str) -> dict[str, bytes]:
     value = payload.get(role)
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not value:
         raise RouterRuntimeError(f"runtime {role} keys are absent")
     try:
         decoded = {key: bytes.fromhex(item) for key, item in value.items()}
     except (TypeError, ValueError) as exc:
         raise RouterRuntimeError(f"runtime {role} keys are invalid") from exc
-    if any(len(item) != 32 for item in decoded.values()):
+    if any(not key or len(item) != 32 for key, item in decoded.items()):
         raise RouterRuntimeError(f"runtime {role} keys must be 32 bytes")
     return decoded
 
 
-def build_runtime_router(
-    response_validator: Callable[[str, RoutedResponse], None] | None = None,
-) -> ReleaseABRouter:
-    """Load only ledger append, routing, and manifest verification material."""
-    runtime_config = _protected(RUNTIME_CONFIG_PATH)
-    key_file = _protected(RUNTIME_KEYS_PATH)
-    if set(key_file) != {
+def parse_runtime_key_material(payload: dict) -> RouterRuntimeKeyMaterial:
+    roles = {
         "control_event_public",
         "router_outcome_public",
         "router_outcome_private",
@@ -66,15 +112,38 @@ def build_runtime_router(
         "endpoint_manifest_public",
         "authorization_public",
         "completion_public",
-    }:
+        "canary_cost_budget_public",
+    }
+    if set(payload) != roles:
         raise RouterRuntimeError("runtime key roles are over-privileged or incomplete")
-    control_public = _keys(key_file, "control_event_public")
-    outcome_public = _keys(key_file, "router_outcome_public")
-    outcome_private = _keys(key_file, "router_outcome_private")
-    routing_keys = _keys(key_file, "routing")
-    public_keys = _keys(key_file, "endpoint_manifest_public")
-    authorization_public = _keys(key_file, "authorization_public")
-    completion_public = _keys(key_file, "completion_public")
+    decoded = {
+        role: MappingProxyType(_keys(payload, role))
+        for role in sorted(roles)
+    }
+    return RouterRuntimeKeyMaterial(**decoded)
+
+
+def load_runtime_key_material(
+    path: Path = RUNTIME_KEYS_PATH,
+) -> RouterRuntimeKeyMaterial:
+    """Expose exact typed runtime keys without admitting private cost material."""
+    return parse_runtime_key_material(_protected(path))
+
+
+def build_runtime_router(
+    response_validator: Callable[[str, RoutedResponse], None] | None = None,
+) -> ReleaseABRouter:
+    """Load only ledger append, routing, and manifest verification material."""
+    runtime_config = _protected(RUNTIME_CONFIG_PATH)
+    material = load_runtime_key_material()
+    _provision_receipt(SECURITY_LEDGER_ROOT / "provision-receipt.json")
+    control_public = material.control_event_public
+    outcome_public = material.router_outcome_public
+    outcome_private = material.router_outcome_private
+    routing_keys = material.routing
+    public_keys = material.endpoint_manifest_public
+    authorization_public = material.authorization_public
+    completion_public = material.completion_public
     operator_uid = pwd.getpwnam("trustforge-operator").pw_uid
     router_uid = pwd.getpwnam("trustforge-router").pw_uid
     ownership = {
@@ -99,15 +168,7 @@ def build_runtime_router(
             }
         )
     }
-    outcome_permissions = {
-        "release-router-outcome": frozenset(
-            {
-                "candidate_reservation",
-                "candidate_result",
-                "router_emergency_stop",
-            }
-        )
-    }
+    outcome_permissions = {"release-router-outcome": OUTCOME_EVENT_KINDS}
     ledger = SignedEventLedger(
         directory=SECURITY_LEDGER_ROOT / "control",
         verification_keys=control_public,
