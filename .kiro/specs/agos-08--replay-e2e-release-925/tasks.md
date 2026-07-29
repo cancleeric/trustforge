@@ -1,0 +1,91 @@
+# 實作任務：Agent OS Replay、E2E 與 Release-Hardening Gate
+
+> Issue: #925 | Epic: #914
+
+## Task 1: 實作 Replay Verification
+
+- [x] 建立 `tests/test_agos_replay.py`
+- [x] 實作 `verify_replay(manifest, memory_repo, skill_registry) -> ReplayResult`
+  - 可放在 `src/trustforge/agos_replay.py` 或直接在 test 中
+- [x] 測試：正常 manifest replay → hashes match
+- [x] 測試：tampered content → hash mismatch detected
+- [x] 測試：skill revision replay → hash reproducible
+- [x] 測試：memory content hash replay → reproducible
+
+## Task 2: 實作 Security Guard E2E Tests
+
+- [x] 建立 `tests/test_agos_e2e_guards.py`
+- [x] 測試：historical memory (hermes-* + semantic) cannot set evidence_eligible
+- [x] 測試：historical memory cannot enter scoring pipeline
+- [x] 測試：unknown skill cannot be selected into manifest
+- [x] 測試：stale skill (no active revision) → excluded
+- [x] 測試：retired skill → excluded
+- [x] 測試：unknown tool → is_known=False → cannot execute
+- [x] 測試：external_write tool without approval → rejected
+- [x] 測試：deploy_or_release capability → requires approval
+
+## Task 3: 實作 Non-Regression E2E Tests
+
+- [x] 建立 `tests/test_agos_e2e_regression.py`
+- [x] 測試：analysis pipeline same Trust scores with AGOS=0 vs AGOS=1
+- [x] 測試：Question RAG same results
+- [x] 測試：Dialogue workflow unchanged
+- [x] 測試：Report generation unchanged（structure + fields）
+- [x] 測試：Evidence.json output unchanged
+
+## Task 4: 實作 Lineage Consistency Tests
+
+- [x] 建立 `tests/test_agos_lineage_consistency.py`
+- [x] 測試：runtime context manifest == Admin API context
+- [x] 測試：runtime memory refs == Admin API memories
+- [x] 測試：runtime tool invocations == Admin API tools
+- [x] 測試：runtime skill manifest == Admin API skills
+
+## Task 5: 實作 Release Gate
+
+- [x] Release gate 由 `.githooks/pre-push` 實作；不在 pytest 內遞迴啟動
+  pytest／frontend build
+- [x] `.githooks/pre-push`：backend tests pass
+- [x] `.githooks/pre-push`：frontend tests pass
+- [x] `.githooks/pre-push`：frontend build success
+- [x] `.githooks/pre-push`：lint/type-check pass（warnings only）
+- [x] Replay tests pass
+- [x] Guard tests pass
+- [x] Regression tests pass
+- [x] Lineage consistency tests pass
+
+## Task 6: Security Disposition Document
+
+- [x] 建立 `docs/audit/AGOS-SECURITY-DISPOSITION.md`
+- [x] Security review checklist template
+- [x] Disposition fields（reviewer, date, commit, status）
+- [x] Notes section
+
+## Task 7: Final Verification
+
+- [x] 執行所有新增 E2E tests
+- [x] 執行完整 pytest suite 無回歸
+- [x] 執行前端 vitest 無回歸
+- [x] 執行前端 build 成功
+- [x] 執行 lint / type-check 通過（warnings only）
+- [x] 執行完整 pre-push gate 通過
+- [x] 確認 production deployment/activation 未被觸發
+
+### Closeout 補充（2026-07-29）
+
+- [x] 真 `web.Handler`／TCP／外層 `X-Admin-Token` 未授權契約：401
+- [x] 真 `web.Handler` authenticated success 契約：AGOS route 以 `str`
+  傳入 `_send()`；授權成功回應為 200 且 JSON contract 通過
+- [ ] 人工 desktop/mobile Eye scan — open CPO blocker
+- [ ] harper CISO disposition — pending; no self-approval
+- [x] gray CPO disposition — BLOCKED pending docs/Eye closeout
+- [x] DB authorization receipt — Eric created
+  `/tmp/eric-auth-20260729-trustforge-agos-schema-closeout.token`; the exact
+  receipt was verified without production DB access
+
+### Explicitly open mandatory scope
+
+Replay tamper/memory-hash coverage, AGOS-on/off non-regression, lineage
+consistency, security guards, and the repository-local release gate now have
+concrete test/pre-push evidence. Remaining mandatory gates are the manual
+desktop/mobile Eye scan and commit-bound CISO/CPO re-review.
