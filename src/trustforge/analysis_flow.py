@@ -1966,9 +1966,22 @@ class AnalysisFlow:
                WHERE j.state='completed'"""
         ).fetchall()
         recovered = 0
-        authority = self._atomic_store()
+        if not rows:
+            authority = None
+        else:
+            try:
+                authority = self._atomic_store()
+            except MultiAngleAuthorityError:
+                logging.getLogger(__name__).warning(
+                    "atomic_terminal_recovery_skipped authority_unavailable "
+                    "completed_rows=%s",
+                    len(rows),
+                    exc_info=True,
+                )
+                rows = []
         for row in rows:
             try:
+                assert authority is not None
                 authority.record_job_terminal(
                     batch_id=row["batch_id"], mode=row["mode"],
                     job_id=row["job_id"], owner_token=row["owner_token"],
@@ -2027,7 +2040,10 @@ class AnalysisFlow:
         ).fetchall()
         for terminal_batch in terminal_batches:
             try:
-                authority.settle_batch(batch_id=terminal_batch["batch_id"])
+                settlement_authority = authority or self._atomic_store()
+                settlement_authority.settle_batch(
+                    batch_id=terminal_batch["batch_id"]
+                )
             except Exception:
                 logging.getLogger(__name__).warning(
                     "atomic_failure_settlement_recovery_failed batch_id=%s",

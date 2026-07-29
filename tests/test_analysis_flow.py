@@ -12,7 +12,12 @@ import pytest
 
 from trustforge import budget_guard
 from trustforge import analysis_flow as analysis_flow_module
-from trustforge.analysis_flow import AnalysisFlow, MODES, STAGES
+from trustforge.analysis_flow import (
+    AnalysisFlow,
+    MODES,
+    MultiAngleAuthorityError,
+    STAGES,
+)
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 
@@ -671,6 +676,68 @@ def test_runtime_reconciles_orphaned_intermediate_stage_from_snapshot(tmp_path, 
         (job_id,),
     ).fetchone()[0] == 0
     flow.stop()
+
+
+def test_runtime_reconcile_does_not_require_atomic_authority_without_terminals(
+    tmp_path, monkeypatch,
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_spawn_worker", lambda *_args: None)
+
+    def unavailable_authority():
+        raise MultiAngleAuthorityError("production authority is not configured")
+
+    monkeypatch.setattr(flow, "_atomic_store", unavailable_authority)
+
+    repaired = flow.reconcile_runtime()
+
+    assert repaired["atomic_terminals"] == 0
+    flow.stop()
+
+
+def test_atomic_terminal_recovery_is_fail_soft_when_authority_is_unavailable(
+    tmp_path, monkeypatch, caplog,
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+
+    class Cursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class Connection:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _sql, _params=()):
+            self.calls += 1
+            if self.calls == 1:
+                return Cursor(
+                    [{
+                        "job_id": "flow-1",
+                        "batch_id": "batch-1",
+                        "mode": "risk",
+                        "owner_token": "owner-1",
+                        "snapshot_id": "snapshot-1",
+                        "coin": "BTC",
+                    }]
+                )
+            return Cursor([])
+
+    connection = Connection()
+    monkeypatch.setattr(flow, "_conn", lambda: connection)
+    monkeypatch.setattr(
+        flow,
+        "_atomic_store",
+        lambda: (_ for _ in ()).throw(
+            MultiAngleAuthorityError("production authority is not configured")
+        ),
+    )
+
+    assert flow._recover_atomic_terminals() == 0
+    assert "atomic_terminal_recovery_skipped" in caplog.text
 
 
 def test_stale_running_job_is_requeued_with_locale_preserved(tmp_path, monkeypatch):
