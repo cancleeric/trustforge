@@ -146,6 +146,17 @@ class TestRetrievalAdapter:
         assert len(refs) == 1
         assert refs[0].evidence_eligible is True
 
+    def test_historical_question_context_is_not_eligible(
+        self, adapter: MemoryRetrievalAdapter
+    ):
+        refs = adapter.retrieve_from_source(
+            [{"content": "Earlier question", "published_at": "2026-07-01T00:00:00Z"}],
+            run_id="run-question-history",
+            source_provider="question_context_history",
+            kind="episodic",
+        )
+        assert refs[0].evidence_eligible is False
+
     def test_retrieve_question_memory(self, adapter: MemoryRetrievalAdapter):
         refs = adapter.retrieve_question_memory("BTC 走勢分析", run_id="run-4")
 

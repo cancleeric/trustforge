@@ -137,6 +137,9 @@ def validate_evidence_eligible(entry: MemoryEntry) -> None:
             "historical conclusions (hermes-* provider) cannot be evidence"
         )
 
+    if entry.provider == "question_context_history":
+        errors.append("historical question context cannot be evidence")
+
     if errors:
         raise ValueError(
             f"evidence_eligible validation failed: {'; '.join(errors)}"

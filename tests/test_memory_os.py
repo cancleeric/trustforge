@@ -247,6 +247,16 @@ class TestEvidenceEligibility:
         with pytest.raises(ValueError, match="historical conclusions"):
             validate_evidence_eligible(entry)
 
+    def test_historical_question_context_fails(self):
+        entry = _make_entry(
+            kind="episodic",
+            provider="question_context_history",
+            published_at="2026-07-01T00:00:00Z",
+            evidence_eligible=True,
+        )
+        with pytest.raises(ValueError, match="historical question context"):
+            validate_evidence_eligible(entry)
+
     def test_save_with_evidence_eligible_validates(self, repo: MemoryRepository):
         """Save with evidence_eligible=True triggers validation."""
         entry = _make_entry(
