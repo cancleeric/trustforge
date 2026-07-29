@@ -59,8 +59,7 @@ function payload(long = false) {
 }
 
 function fixture(scenario: string) {
-  if (scenario === 'empty') return undefined
-  if (scenario === 'malformed' || scenario === 'error') return { mode: 'official', affects_official_score: true }
+  if (scenario === 'malformed') return { mode: 'official', affects_official_score: true }
   const value = payload(scenario === 'long')
   if (scenario === 'official') {
     return {
@@ -82,16 +81,13 @@ function fixture(scenario: string) {
 
 const params = new URLSearchParams(window.location.search)
 const scenario = params.get('scenario') ?? 'shadow'
-const loading = scenario === 'loading'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <HermesI18nProvider>
       <main className="min-h-screen overflow-x-hidden bg-tf-bg p-3 text-tf-text sm:p-8" data-eye-scenario={scenario}>
         <div className="mx-auto max-w-5xl">
-          {loading
-            ? <p role="status" className="rounded-lg border border-tf-border bg-tf-card p-4 text-sm text-tf-text2">Loading asset structure…</p>
-            : <AssetIntrinsicShadowPanel value={fixture(scenario)} />}
+          <AssetIntrinsicShadowPanel value={fixture(scenario)} />
         </div>
       </main>
     </HermesI18nProvider>

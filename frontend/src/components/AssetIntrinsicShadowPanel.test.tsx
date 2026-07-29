@@ -234,7 +234,7 @@ describe('AssetIntrinsicShadowPanel', () => {
     wrongReason.dimensions[0].reason_code = 'eligible'
     expect(parseIntrinsicAssessment(wrongReason)).toBeNull()
     renderPanel({ mode: 'shadow', affects_official_score: true })
-    expect(screen.getByText(/Shadow 資料格式不相容/)).toBeInTheDocument()
+    expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
     expect(screen.queryByText('已驗證')).not.toBeInTheDocument()
     expect(screen.queryByText('覆蓋閘已通過')).not.toBeInTheDocument()
   })
@@ -317,7 +317,7 @@ describe('AssetIntrinsicShadowPanel', () => {
     const { container } = renderPanel(officialAssessment())
     expect(container.querySelector('[data-intrinsic-mode="official"]')).not.toBeNull()
     expect(screen.getByText('OFFICIAL／已納入正式信任分')).toBeInTheDocument()
-    expect(screen.getByText(/只調整信任分，不直接改變市場方向/)).toBeInTheDocument()
+    expect(screen.getByText(/已記錄發行能力與 promotion receipt/)).toBeInTheDocument()
     expect(screen.getByText(/Promotion receipt: rc-001/)).toBeInTheDocument()
   })
 
@@ -357,7 +357,7 @@ describe('AssetIntrinsicShadowPanel', () => {
     expect(parseIntrinsicAssessment(unpromoted)).toBeNull()
     // all invalid official payloads downgrade to the unavailable notice
     renderPanel(blocked)
-    expect(screen.getByText(/Shadow 資料格式不相容/)).toBeInTheDocument()
+    expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
   })
 
   // -- AC5 banned-words audit ------------------------------------------------

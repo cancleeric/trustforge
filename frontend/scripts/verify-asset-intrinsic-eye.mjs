@@ -10,7 +10,7 @@ const viewports = [
   { name: 'mobile', width: 390, height: 844 },
   { name: 'desktop', width: 1440, height: 900 },
 ]
-const scenarios = ['shadow', 'official', 'long', 'loading', 'empty', 'malformed', 'error']
+const panelScenarios = ['shadow', 'official', 'long', 'malformed']
 const locales = ['zh-TW', 'en']
 const failures = []
 const evidence = []
@@ -28,7 +28,7 @@ try {
   try {
     for (const locale of locales) {
       for (const viewport of viewports) {
-        for (const scenario of scenarios) {
+        for (const scenario of panelScenarios) {
           for (const zoom of scenario === 'shadow' ? [1, 2] : [1]) {
             const context = await browser.newContext({
               viewport,
@@ -54,17 +54,16 @@ try {
             }
             if (scenario === 'shadow' && geometry.mode !== 'shadow') failures.push(`${label}: shadow panel missing`)
             if (scenario === 'official' && geometry.mode !== 'official') failures.push(`${label}: official panel missing`)
-            if ((scenario === 'malformed' || scenario === 'error') && !/不相容|incompatible/.test(geometry.bodyText)) {
+            if (scenario === 'malformed' && !/資產結構資料格式不相容|Asset Structure payload is incompatible/.test(geometry.bodyText)) {
               failures.push(`${label}: fail-closed error copy missing`)
             }
-            if (scenario === 'loading' && !/Loading asset structure/.test(geometry.bodyText)) failures.push(`${label}: loading state missing`)
-            if (scenario === 'empty' && geometry.mode !== null) failures.push(`${label}: empty legacy payload rendered a panel`)
             const screenshot = `${locale}-${viewport.name}-${scenario}-zoom-${zoom}.png`
             await page.screenshot({ path: new URL(screenshot, outputDir).pathname, fullPage: true })
             evidence.push({ locale, viewport, scenario, zoom, geometry, screenshot })
             await context.close()
           }
         }
+        await runProductionPageStates(browser, locale, viewport)
       }
     }
   } finally {
@@ -80,6 +79,58 @@ if (failures.length) {
   process.exit(1)
 }
 console.log(`Asset intrinsic Eye matrix OK: ${evidence.length} renderings; evidence=${outputDir.pathname}`)
+
+async function runProductionPageStates(browser, locale, viewport) {
+  const expected = {
+    'zh-TW': {
+      loading: 'Hermes 正在建立 BTC 的手動分析工作…',
+      empty: '尚無分析資料',
+      error: '連線異常',
+    },
+    en: {
+      loading: 'Hermes is creating a manual analysis job for BTC…',
+      empty: 'No analysis data yet',
+      error: 'Connection error',
+    },
+  }[locale]
+  for (const scenario of ['loading', 'empty', 'error']) {
+    const context = await browser.newContext({
+      viewport,
+      locale: locale === 'zh-TW' ? 'zh-TW' : 'en-US',
+    })
+    await context.addCookies([{ name: 'trustforge_hermes_locale', value: locale, url: baseUrl }])
+    const page = await context.newPage()
+    await page.route('**/api/**', (route) => {
+      if (scenario === 'loading') return
+      if (scenario === 'error') {
+        return route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({ ok: false, error: { code: 'network_error', message: 'eye fixture' } }),
+        })
+      }
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'offline', message: 'eye fixture' } }) })
+    })
+    const url = scenario === 'empty'
+      ? `http://${host}:${port}/?qa=1&workspace=analyze`
+      : `http://${host}:${port}/?qa=1&workspace=analyze&coin=BTC&type=multi_source&mode=risk&q=eye-878&sample=eye-878`
+    await page.goto(url, { waitUntil: 'domcontentloaded' })
+    const selector = scenario === 'loading' ? '.tf-loading-state' : scenario === 'error' ? '.tf-error-state' : '[role="status"]'
+    await page.locator(selector).filter({ hasText: expected[scenario] }).first().waitFor({ state: 'visible' })
+    const geometry = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      innerWidth: window.innerWidth,
+      bodyText: document.body.innerText,
+    }))
+    const label = `${locale}/${viewport.name}/production-${scenario}`
+    if (!geometry.bodyText.includes(expected[scenario])) failures.push(`${label}: localized production state missing`)
+    if (geometry.scrollWidth > geometry.innerWidth + 1) failures.push(`${label}: horizontal overflow ${geometry.scrollWidth}>${geometry.innerWidth}`)
+    const screenshot = `${locale}-${viewport.name}-production-${scenario}.png`
+    await page.screenshot({ path: new URL(screenshot, outputDir).pathname, fullPage: true })
+    evidence.push({ locale, viewport, scenario: `production-${scenario}`, zoom: 1, geometry, screenshot })
+    await context.close()
+  }
+}
 
 async function waitForServer(processHandle, url) {
   const started = Date.now()
