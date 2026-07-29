@@ -692,62 +692,30 @@ def _canonical_sweep_base(pit_cutoff: datetime) -> AssetIntrinsicView:
     )
 
 
-def _conflicted_probe_view(base_view: AssetIntrinsicView) -> AssetIntrinsicView:
-    """Construct a direct anon view that carries one conflicted dimension.
-
-    ``AssetIntrinsicRepository.pit_view`` does not surface conflicted facts at
-    this schema version (a conflicted fact is neither ``eligible_at`` nor
-    ``visible_unknown_at``), so the assessor's ``fact_conflicted`` branch is
-    unreachable through the PIT replay path.  This probe constructs a view
-    directly to exercise that branch for coverage completeness.  It carries no
-    real symbol identity and uses the same neutral provenance vocabulary.
-    """
-    if not base_view.dimensions:
-        raise ValueError("base view must expose at least one dimension")
-    probe_dims: list[IntrinsicDimension] = []
-    for index, dim in enumerate(base_view.dimensions):
-        if index != 2:
-            probe_dims.append(dim)
-            continue
-        conflicted_prov = IntrinsicProvenance(
-            source_urls=(
-                "https://bench-alpha.example/observation",
-                "https://bench-beta.example/observation",
-            ),
-            methodology=_METHODOLOGY_CONFLICTED,
-            content_hash=dim.provenance.content_hash,
-            coverage=_COVERAGE_CONFLICTED,
-            evidence_path=dim.provenance.evidence_path,
-            source_revision="bench-conflicted-probe",
-            evidence_kind="decision_record",
-            source_coordinates=_SOURCE_COORDINATES,
-        )
-        probe_dims.append(
-            IntrinsicDimension(
-                name=dim.name,
-                status=IntrinsicFactStatus.CONFLICTED,
-                value=None,
-                as_of=dim.as_of,
-                valid_from=dim.valid_from,
-                valid_until=dim.valid_until,
-                fetched_at=dim.fetched_at,
-                provenance=conflicted_prov,
+def _measurement_coverage_probe(
+    ordered: list[AssetIntrinsicRecord],
+    repo: AssetIntrinsicRepository,
+    pit_cutoff: datetime,
+) -> dict[str, Any]:
+    """Exercise conflicted coverage through the canonical PIT repository."""
+    probe_view = next(
+        (
+            view
+            for record in ordered
+            if (view := repo.pit_view(record.profile.asset_id, pit_cutoff)) is not None
+            and any(
+                dimension.status is IntrinsicFactStatus.CONFLICTED
+                for dimension in view.dimensions
             )
-        )
-    return AssetIntrinsicView(
-        asset_id="asset:bench-anon-conflicted-probe",
-        as_of=base_view.as_of,
-        dimensions=tuple(probe_dims),
+        ),
+        None,
     )
-
-
-def _measurement_coverage_probe(base_view: AssetIntrinsicView) -> dict[str, Any]:
-    """Exercise the assessor's conflicted branch via a direct anon view."""
-    probe_view = _conflicted_probe_view(base_view)
+    if probe_view is None:
+        raise ValueError("corpus must contain a PIT-visible conflicted fact")
     result = assess_intrinsic_shadow(probe_view)
     return {
-        "label": "anon-conflicted-direct-view",
-        "path": "direct AssetIntrinsicView (not pit_view)",
+        "label": "anon-conflicted-pit-replay",
+        "path": "AssetIntrinsicRepository.pit_view",
         "conflict_detected": result["conflict_detected"],
         "dimensions": [
             {
@@ -757,11 +725,7 @@ def _measurement_coverage_probe(base_view: AssetIntrinsicView) -> dict[str, Any]
             }
             for dim in result["dimensions"]
         ],
-        "note": (
-            "pit_view does not surface conflicted facts at this schema "
-            "version; this probe covers the fact_conflicted branch for "
-            "coverage completeness"
-        ),
+        "note": "conflicted fact replayed through the canonical PIT path",
     }
 
 
@@ -838,7 +802,7 @@ def run_benchmark_from_records(
         "single_source_manipulation": _measurement_single_source_manipulation(sweep_base_view),
     }
 
-    coverage_probe = _measurement_coverage_probe(sweep_base_view)
+    coverage_probe = _measurement_coverage_probe(ordered, repo, pit_cutoff)
 
     return {
         "benchmark_version": BENCHMARK_VERSION,

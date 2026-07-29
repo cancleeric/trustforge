@@ -17,23 +17,23 @@
       },
       {
         "name": "supply_verifiability",
+        "reason_code": "eligible",
+        "status": "known"
+      },
+      {
+        "name": "governance_capture_resistance",
         "reason_code": "fact_conflicted",
         "status": "conflicted"
       },
       {
-        "name": "governance_capture_resistance",
-        "reason_code": "eligible",
-        "status": "known"
-      },
-      {
         "name": "holder_concentration",
-        "reason_code": "eligible",
-        "status": "known"
+        "reason_code": "fact_unknown",
+        "status": "unknown"
       }
     ],
-    "label": "anon-conflicted-direct-view",
-    "note": "pit_view does not surface conflicted facts at this schema version; this probe covers the fact_conflicted branch for coverage completeness",
-    "path": "direct AssetIntrinsicView (not pit_view)"
+    "label": "anon-conflicted-pit-replay",
+    "note": "conflicted fact replayed through the canonical PIT path",
+    "path": "AssetIntrinsicRepository.pit_view"
   },
   "data_version": "sha256:cc76da3722102228eaee84dba87a76778808ab8987ecb21eed028180d1460986",
   "disposition": "remain-shadow",
@@ -351,7 +351,7 @@
       "total_delta": -0.0704
     },
     {
-      "conflict_detected": false,
+      "conflict_detected": true,
       "dimensions": [
         {
           "name": "issuance_predictability",
@@ -373,9 +373,9 @@
         },
         {
           "name": "governance_capture_resistance",
-          "reason_code": "fact_unavailable",
+          "reason_code": "fact_conflicted",
           "signed_delta": 0.0,
-          "status": "unknown"
+          "status": "conflicted"
         },
         {
           "name": "holder_concentration",
@@ -384,7 +384,7 @@
           "status": "unknown"
         }
       ],
-      "facts_hash": "sha256:d31d55f218d7e4434d53c1774be5885f8ee3bd2bd363dc38bb03772534bf50a9",
+      "facts_hash": "sha256:d631a716b758b2ff582b82182fd0b5336bc601865d7b0915b9e265895e6f60b4",
       "gate": {
         "known_count": 3,
         "passed": true,
@@ -394,7 +394,7 @@
         "source_family_count": 2
       },
       "label": "asset:bench-anon-conflicted",
-      "pit_visible_dimension_count": 4,
+      "pit_visible_dimension_count": 5,
       "total_delta": 0.024
     },
     {

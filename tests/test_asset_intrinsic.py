@@ -187,7 +187,7 @@ def test_repository_rejects_ambiguous_duplicate_identity() -> None:
         AssetIntrinsicRepository([record, record])
 
 
-def test_pit_view_omits_stale_conflicted_expired_and_future_dimensions() -> None:
+def test_pit_view_surfaces_conflicted_but_omits_stale_expired_and_future_dimensions() -> None:
     raw = copy.deepcopy(raw_records()[0])
     raw["profile"]["asset_id"] = "asset:test"
     dimensions = raw["profile"]["dimensions"]
@@ -204,6 +204,7 @@ def test_pit_view_omits_stale_conflicted_expired_and_future_dimensions() -> None
 
     assert view is not None
     assert [dimension.name for dimension in view.dimensions] == [
+        IntrinsicDimensionName.CONTROL_DISPERSION,
         IntrinsicDimensionName.HOLDER_CONCENTRATION
     ]
     assert view.eligible_dimensions == ()

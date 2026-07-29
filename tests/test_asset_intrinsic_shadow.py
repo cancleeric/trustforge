@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from trustforge.asset_intrinsic import (
     IntrinsicDimension,
     IntrinsicDimensionName,
     IntrinsicFactStatus,
+    parse_asset_intrinsic_record,
     IntrinsicProvenance,
     load_asset_intrinsic_records,
 )
@@ -285,6 +287,37 @@ def test_pit_replay_is_deterministic_for_same_asset_and_as_of() -> None:
     first_result = assess_intrinsic_shadow(first_view)
     second_result = assess_intrinsic_shadow(second_view)
     assert first_result == second_result
+
+
+@pytest.mark.parametrize("target_name", tuple(IntrinsicDimensionName))
+def test_conflicted_dimension_replays_through_canonical_pit_path(
+    target_name: IntrinsicDimensionName,
+) -> None:
+    raw = copy.deepcopy(json.loads(FIXTURE.read_text(encoding="utf-8"))[0])
+    raw["profile"]["asset_id"] = "asset:pit-conflicted"
+    target = next(
+        dimension
+        for dimension in raw["profile"]["dimensions"]
+        if dimension["name"] == target_name.value
+    )
+    target["status"] = "conflicted"
+    target["value"] = None
+    repository = AssetIntrinsicRepository([parse_asset_intrinsic_record(raw)])
+    as_of = datetime(2026, 7, 28, tzinfo=timezone.utc)
+
+    replay = repository.pit_view("asset:pit-conflicted", as_of)
+
+    assert replay is not None
+    assessment = assess_intrinsic_shadow(replay)
+    conflicted = next(
+        dimension
+        for dimension in assessment["dimensions"]
+        if dimension["name"] == target_name.value
+    )
+    assert conflicted["status"] == "conflicted"
+    assert conflicted["reason_code"] == "fact_conflicted"
+    assert conflicted["signed_delta"] == 0.0
+    assert assessment["conflict_detected"] is True
 
 
 def test_assessment_schema_accepts_output_and_report_field_remains_optional() -> None:

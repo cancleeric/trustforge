@@ -175,6 +175,17 @@ class IntrinsicDimension:
             and (self.valid_until is None or as_of < self.valid_until)
         )
 
+    def visible_conflicted_at(self, as_of: datetime) -> bool:
+        """Return whether a conflicted fact was knowable at the PIT cutoff."""
+        _ensure_aware(as_of, "as_of")
+        return (
+            self.status is IntrinsicFactStatus.CONFLICTED
+            and self.valid_from <= as_of
+            and self.fetched_at <= as_of
+            and self.as_of <= as_of
+            and (self.valid_until is None or as_of < self.valid_until)
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name.value,
@@ -303,7 +314,11 @@ class AssetIntrinsicRepository:
         dimensions = tuple(
             dimension
             for dimension in record.profile.dimensions
-            if dimension.eligible_at(as_of) or dimension.visible_unknown_at(as_of)
+            if (
+                dimension.eligible_at(as_of)
+                or dimension.visible_unknown_at(as_of)
+                or dimension.visible_conflicted_at(as_of)
+            )
         )
         return AssetIntrinsicView(asset_id=asset_id, as_of=as_of, dimensions=dimensions)
 
