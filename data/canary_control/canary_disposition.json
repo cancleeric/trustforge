@@ -1,0 +1,12 @@
+{
+  "schema": "trustforge.canary-disposition/v1",
+  "disposition": "remain_shadow",
+  "promote_path_exercised": false,
+  "g_receipt_id": "sha256:281f7e84dbc56bd1fd75b85a7fae0e2ec2b55953b1f59ade59fd0c6b51b44cf7",
+  "g_decision": "block",
+  "stop_triggered": true,
+  "stop_signal": "score_spread",
+  "stop_g_reason": "delta_exceeds_non_inferiority_margin",
+  "final_phase": "disabled",
+  "executed_at": "2026-07-29T12:53:05.175841+00:00"
+}
