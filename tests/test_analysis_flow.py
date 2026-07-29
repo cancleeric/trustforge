@@ -295,6 +295,76 @@ def test_nonretryable_failure_enters_dead_letter_with_attempt_history(tmp_path, 
     assert flow.requeue_dead_letter("missing") is False
 
 
+def test_worker_success_never_finalizes_atomic_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "success.sqlite3")
+    calls = []
+    flow._finalize_atomic_failure = lambda *args: calls.append(args)
+    snapshot = flow.create_snapshot("BTC")
+    flow.enqueue_matrix(snapshot)
+    flow.start(); flow.join(); flow.stop()
+    assert calls == []
+
+
+def test_retry_attempts_one_and_two_do_not_finalize_before_dead_letter(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "retry.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    flow.enqueue_matrix(snapshot)
+    observed = []
+
+    def finalize(failed_job_id, state):
+        dead = flow._conn().execute(
+            "SELECT attempts FROM analysis_dead_letters WHERE job_id=?",
+            (failed_job_id,),
+        ).fetchone()
+        observed.append((failed_job_id, state, dead[0] if dead else None))
+        return False
+
+    flow._finalize_atomic_failure = finalize
+    flow._stage_claim_extraction = lambda _package: (_ for _ in ()).throw(
+        RuntimeError("transient")
+    )
+    flow.start()
+    deadline = time.time() + 8
+    while time.time() < deadline and not observed:
+        time.sleep(0.05)
+    flow.stop()
+    assert observed
+    assert all(state == "failed" and attempts == 3 for _, state, attempts in observed)
+
+
+def test_final_dead_letter_is_durable_before_failure_finalizer(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "dead.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    flow.enqueue_matrix(snapshot)
+    observed = []
+
+    def finalize(failed_job_id, state):
+        job_state = flow._conn().execute(
+            "SELECT state FROM analysis_jobs WHERE job_id=?", (failed_job_id,)
+        ).fetchone()[0]
+        dead = flow._conn().execute(
+            "SELECT attempts FROM analysis_dead_letters WHERE job_id=?",
+            (failed_job_id,),
+        ).fetchone()
+        observed.append((state, job_state, dead[0]))
+        return False
+
+    flow._finalize_atomic_failure = finalize
+    flow._stage_claim_extraction = lambda _package: (_ for _ in ()).throw(
+        ValueError("permanent")
+    )
+    flow.start(); flow.join(); flow.stop()
+    assert len(observed) == 5
+    assert all(item == ("failed", "failed", 1) for item in observed)
+
+
 def test_prune_keeps_referenced_snapshots(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")

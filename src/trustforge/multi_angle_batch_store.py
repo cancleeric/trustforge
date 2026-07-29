@@ -11,6 +11,7 @@ import json
 import math
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -99,6 +100,16 @@ class AtomicBatchResult:
     snapshot_id: str | None = None
 
 
+@dataclass(frozen=True)
+class BatchSettlementResult:
+    batch_id: str
+    settled: bool
+    replayed: bool
+    actual_cost_usd: Decimal
+    released_usd: Decimal
+    synthesis_claimed: bool
+
+
 class AtomicMultiAngleBatchStore(Protocol):
     def create_batch(self, request: AtomicBatchRequest) -> AtomicBatchResult: ...
 
@@ -112,6 +123,38 @@ class AtomicMultiAngleBatchStore(Protocol):
     def consume_call_slot(
         self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
         config_version: str, expected_amount_usd: Decimal, slot: str,
+    ) -> bool: ...
+
+    def record_call_cost(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        slot: str, accounting_token: str, ledger_receipt: str,
+        actual_cost_usd: Decimal, tokens_in: int, tokens_out: int,
+    ) -> bool: ...
+
+    def record_job_terminal(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        state: str,
+    ) -> bool: ...
+
+    def settle_batch(self, *, batch_id: str) -> BatchSettlementResult: ...
+
+    def reconcile_stale_batches(
+        self, *, stale_before: int, apply: bool = False,
+    ) -> dict[str, Any]: ...
+
+    def claim_synthesis(
+        self, *, batch_id: str, owner_token: str, stale_before: int,
+    ) -> bool: ...
+
+    def complete_synthesis(self, *, batch_id: str, owner_token: str) -> bool: ...
+
+    def call_accounting_state(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+    ) -> dict[str, str]: ...
+
+    def cancel_call_slot(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        slot: str,
     ) -> bool: ...
 
 
@@ -305,6 +348,7 @@ class DynamoDBAtomicMultiAngleBatchStore:
                         "state": self._s("reserved"),
                         "reserved_usd": self._n(request.batch_cost_usd),
                         "config_version": self._s(request.config_version),
+                        "day": self._s(request.day),
                         "created_at": self._n(request.created_at),
                     },
                     "ConditionExpression": "attribute_not_exists(pk)",
@@ -417,7 +461,10 @@ class DynamoDBAtomicMultiAngleBatchStore:
                         "pk": self._s(f"BATCH#{batch_id}"),
                         "sk": self._s(f"ALLOCATION#{mode}"),
                     },
-                    "UpdateExpression": "SET #state=:claimed, owner_token=:owner",
+                    "UpdateExpression": (
+                        "SET #state=:claimed, owner_token=:owner, "
+                        "claimed_at=if_not_exists(claimed_at,:claimed_at)"
+                    ),
                     "ConditionExpression": (
                         "job_id=:job AND amount_usd=:amount AND "
                         "((#state=:reserved AND attribute_not_exists(owner_token)) "
@@ -430,6 +477,7 @@ class DynamoDBAtomicMultiAngleBatchStore:
                         ":claimed": self._s("claimed"),
                         ":owner": self._s(owner_token),
                         ":amount": self._n(expected_amount_usd),
+                        ":claimed_at": self._n(int(datetime.now(UTC).timestamp())),
                     },
                 }
             },
@@ -464,6 +512,379 @@ class DynamoDBAtomicMultiAngleBatchStore:
                 ) from exc
             raise BatchStoreBackendError("allocation authority unavailable") from exc
         return True
+
+    def record_job_terminal(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        state: str,
+    ) -> bool:
+        if state not in {"completed", "failed", "timeout"}:
+            raise ValueError("invalid terminal state")
+        key = {
+            "pk": self._s(f"BATCH#{batch_id}"),
+            "sk": self._s(f"ALLOCATION#{mode}"),
+        }
+        allocation = self._consistent_get(key)
+        if not allocation:
+            raise BatchStoreIntegrityError("terminal allocation is missing")
+        if (
+            allocation.get("job_id", {}).get("S") != job_id
+            or allocation.get("owner_token", {}).get("S") != owner_token
+        ):
+            raise BatchStoreIntegrityError("terminal owner/identity mismatch")
+        costs: list[Decimal] = []
+        tokens_in = 0
+        tokens_out = 0
+        receipts: list[str] = []
+        try:
+            for slot in ("claim_extraction", "evidence_narrative"):
+                if allocation[f"{slot}_slot"]["S"] != "consumed":
+                    raise BatchStoreIntegrityError("terminal call slot was not consumed")
+                costs.append(Decimal(allocation[f"{slot}_actual_cost_usd"]["N"]))
+                tokens_in += int(allocation[f"{slot}_tokens_in"]["N"])
+                tokens_out += int(allocation[f"{slot}_tokens_out"]["N"])
+                receipts.append(allocation[f"{slot}_ledger_receipt"]["S"])
+        except (KeyError, TypeError, ArithmeticError) as exc:
+            raise BatchStoreIntegrityError(
+                "terminal requires both durable call receipts"
+            ) from exc
+        actual = sum(costs, Decimal(0))
+        receipt_set = json.dumps(receipts, separators=(",", ":"))
+        tx = [
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": key,
+                    "UpdateExpression": (
+                        "SET #state=:terminal, actual_cost_usd=:cost, "
+                        "tokens_in=:tin, tokens_out=:tout, ledger_receipts=:receipts"
+                    ),
+                    "ConditionExpression": (
+                        "job_id=:job AND owner_token=:owner AND #state=:claimed"
+                    ),
+                    "ExpressionAttributeNames": {"#state": "state"},
+                    "ExpressionAttributeValues": {
+                        ":terminal": self._s(state), ":claimed": self._s("claimed"),
+                        ":job": self._s(job_id), ":owner": self._s(owner_token),
+                        ":cost": self._n(actual), ":tin": self._n(tokens_in),
+                        ":tout": self._n(tokens_out), ":receipts": self._s(receipt_set),
+                    },
+                }
+            },
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {"pk": self._s(f"JOB#{job_id}"), "sk": self._s("META")},
+                    "UpdateExpression": (
+                        "SET #state=:terminal, actual_cost_usd=:cost, "
+                        "tokens_in=:tin, tokens_out=:tout, ledger_receipts=:receipts"
+                    ),
+                    "ConditionExpression": (
+                        "batch_id=:batch AND #mode=:mode AND owner_token=:owner "
+                        "AND #state=:claimed"
+                    ),
+                    "ExpressionAttributeNames": {"#state": "state", "#mode": "mode"},
+                    "ExpressionAttributeValues": {
+                        ":terminal": self._s(state), ":claimed": self._s("claimed"),
+                        ":batch": self._s(batch_id), ":mode": self._s(mode),
+                        ":owner": self._s(owner_token), ":cost": self._n(actual),
+                        ":tin": self._n(tokens_in), ":tout": self._n(tokens_out),
+                        ":receipts": self._s(receipt_set),
+                    },
+                }
+            },
+        ]
+        try:
+            self._client.transact_write_items(TransactItems=tx)
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code != "TransactionCanceledException":
+                raise BatchStoreBackendError("terminal authority unavailable") from exc
+            replay = self._consistent_get(key)
+            expected = {
+                "state": state, "owner_token": owner_token, "job_id": job_id,
+                "actual_cost_usd": str(actual), "tokens_in": str(tokens_in),
+                "tokens_out": str(tokens_out), "ledger_receipts": receipt_set,
+            }
+            for field, value in expected.items():
+                kind = "N" if field in {"actual_cost_usd", "tokens_in", "tokens_out"} else "S"
+                if replay is None or replay.get(field, {}).get(kind) != value:
+                    raise BatchStoreIntegrityError("terminal replay conflict") from exc
+        return True
+
+    def settle_batch(self, *, batch_id: str) -> BatchSettlementResult:
+        batch_key = {"pk": self._s(f"BATCH#{batch_id}"), "sk": self._s("META")}
+        batch = self._consistent_get(batch_key)
+        if not batch:
+            raise BatchStoreIntegrityError("batch settlement manifest is missing")
+        settlement_key = {
+            "pk": self._s(f"BATCH#{batch_id}"), "sk": self._s("SETTLEMENT")
+        }
+        existing = self._consistent_get(settlement_key)
+        if existing:
+            try:
+                return BatchSettlementResult(
+                    batch_id, True, True,
+                    Decimal(existing["actual_cost_usd"]["N"]),
+                    Decimal(existing["released_usd"]["N"]),
+                    existing["synthesis_claimed"]["BOOL"],
+                )
+            except (KeyError, TypeError, ArithmeticError) as exc:
+                raise BatchStoreIntegrityError("settlement record is malformed") from exc
+        allocations = [
+            self._consistent_get({
+                "pk": self._s(f"BATCH#{batch_id}"),
+                "sk": self._s(f"ALLOCATION#{mode}"),
+            })
+            for mode in ANGLE_MODES
+        ]
+        if any(item is None for item in allocations):
+            raise BatchStoreIntegrityError("settlement allocation manifest is incomplete")
+        try:
+            if any(
+                item["state"]["S"] not in {"completed", "failed", "timeout"}
+                for item in allocations
+            ):
+                return BatchSettlementResult(
+                    batch_id, False, False, Decimal(0), Decimal(0), False
+                )
+            reserved = sum(
+                (Decimal(item["amount_usd"]["N"]) for item in allocations), Decimal(0)
+            )
+            actual = sum(
+                (Decimal(item["actual_cost_usd"]["N"]) for item in allocations), Decimal(0)
+            )
+            day = batch["day"]["S"]
+            config_version = batch["config_version"]["S"]
+            batch_reserved = Decimal(batch["reserved_usd"]["N"])
+        except (KeyError, TypeError, ArithmeticError) as exc:
+            raise BatchStoreIntegrityError("settlement authority data is malformed") from exc
+        if reserved != batch_reserved or actual > reserved:
+            raise BatchStoreIntegrityError("settlement costs exceed reserved authority")
+        released = max(Decimal(0), reserved - actual)
+        synthesize = all(
+            item["state"]["S"] == "completed" for item in allocations
+        )
+        tx = [
+            {"Update": {
+                "TableName": self._table_name,
+                "Key": {"pk": self._s(f"BUDGET#{day}"), "sk": self._s("COUNTER")},
+                "UpdateExpression": (
+                    "SET reserved_total=reserved_total-:reserved, "
+                    "remaining_usd=remaining_usd+:released"
+                ),
+                "ConditionExpression": (
+                    "reserved_total>=:reserved AND config_version=:version"
+                ),
+                "ExpressionAttributeValues": {
+                    ":reserved": self._n(reserved), ":released": self._n(released),
+                    ":version": self._s(config_version),
+                },
+            }},
+            {"Update": {
+                "TableName": self._table_name, "Key": batch_key,
+                "UpdateExpression": "SET #state=:settled",
+                "ConditionExpression": "#state=:reserved",
+                "ExpressionAttributeNames": {"#state": "state"},
+                "ExpressionAttributeValues": {
+                    ":settled": self._s("settled"), ":reserved": self._s("reserved")
+                },
+            }},
+            {"Put": {
+                "TableName": self._table_name,
+                "Item": {
+                    **settlement_key, "actual_cost_usd": self._n(actual),
+                    "released_usd": self._n(released),
+                    "synthesis_claimed": {"BOOL": synthesize},
+                },
+                "ConditionExpression": "attribute_not_exists(pk)",
+            }},
+        ]
+        if synthesize:
+            tx.append({"Put": {
+                "TableName": self._table_name,
+                "Item": {
+                    "pk": self._s(f"BATCH#{batch_id}"), "sk": self._s("SYNTHESIS"),
+                    "state": self._s("available"),
+                },
+                "ConditionExpression": "attribute_not_exists(pk)",
+            }})
+        try:
+            self._client.transact_write_items(TransactItems=tx)
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code != "TransactionCanceledException":
+                raise BatchStoreBackendError("batch settlement unavailable") from exc
+            existing = self._consistent_get(settlement_key)
+            if not existing:
+                raise BatchStoreIntegrityError("batch settlement transaction conflicted") from exc
+            if (
+                existing.get("actual_cost_usd", {}).get("N") != str(actual)
+                or existing.get("released_usd", {}).get("N") != str(released)
+                or existing.get("synthesis_claimed", {}).get("BOOL") is not synthesize
+            ):
+                raise BatchStoreIntegrityError("batch settlement replay conflict") from exc
+            return BatchSettlementResult(
+                batch_id, True, True, actual, released, synthesize
+            )
+        return BatchSettlementResult(
+            batch_id, True, False, actual, released, synthesize
+        )
+
+    def call_accounting_state(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+    ) -> dict[str, str]:
+        item = self._consistent_get({
+            "pk": self._s(f"BATCH#{batch_id}"),
+            "sk": self._s(f"ALLOCATION#{mode}"),
+        })
+        if (
+            not item or item.get("job_id", {}).get("S") != job_id
+            or item.get("owner_token", {}).get("S") != owner_token
+        ):
+            raise BatchStoreIntegrityError("call accounting identity mismatch")
+        result = {}
+        for slot in ("claim_extraction", "evidence_narrative"):
+            state = item.get(f"{slot}_slot", {}).get("S")
+            if state == "available":
+                result[slot] = "available"
+            elif state == "consumed" and f"{slot}_ledger_receipt" in item:
+                result[slot] = "receipted"
+            elif state == "consumed":
+                result[slot] = "uncertain"
+            else:
+                raise BatchStoreIntegrityError("call slot state is malformed")
+        return result
+
+    def claim_synthesis(
+        self, *, batch_id: str, owner_token: str, stale_before: int,
+    ) -> bool:
+        if not _ID_RE.fullmatch(owner_token) or stale_before < 0:
+            raise ValueError("invalid synthesis lease")
+        key = {"pk": self._s(f"BATCH#{batch_id}"), "sk": self._s("SYNTHESIS")}
+        now = int(datetime.now(UTC).timestamp())
+        try:
+            self._client.update_item(
+                TableName=self._table_name, Key=key,
+                UpdateExpression=(
+                    "SET #state=:claimed, owner_token=:owner, claimed_at=:now, "
+                    "lease_epoch=if_not_exists(lease_epoch,:zero)+:one"
+                ),
+                ConditionExpression=(
+                    "#state=:available OR (#state=:claimed AND claimed_at<:stale)"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":available": self._s("available"), ":claimed": self._s("claimed"),
+                    ":owner": self._s(owner_token), ":now": self._n(now),
+                    ":stale": self._n(stale_before), ":zero": self._n(0),
+                    ":one": self._n(1),
+                },
+            )
+            return True
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code == "ConditionalCheckFailedException":
+                return False
+            raise BatchStoreBackendError("synthesis lease unavailable") from exc
+
+    def complete_synthesis(self, *, batch_id: str, owner_token: str) -> bool:
+        try:
+            self._client.update_item(
+                TableName=self._table_name,
+                Key={"pk": self._s(f"BATCH#{batch_id}"), "sk": self._s("SYNTHESIS")},
+                UpdateExpression="SET #state=:completed",
+                ConditionExpression="#state=:claimed AND owner_token=:owner",
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":claimed": self._s("claimed"), ":completed": self._s("completed"),
+                    ":owner": self._s(owner_token),
+                },
+            )
+            return True
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code == "ConditionalCheckFailedException":
+                item = self._consistent_get({
+                    "pk": self._s(f"BATCH#{batch_id}"), "sk": self._s("SYNTHESIS")
+                })
+                if item and item.get("state", {}).get("S") == "completed":
+                    return True
+                raise BatchStoreIntegrityError("synthesis completion conflict") from exc
+            raise BatchStoreBackendError("synthesis completion unavailable") from exc
+
+    def reconcile_stale_batches(
+        self, *, stale_before: int, apply: bool = False,
+    ) -> dict[str, Any]:
+        """Inspect authority state and settle only fully receipted terminal batches.
+
+        A stale claimed allocation with missing receipts is reported as
+        ``uncertain`` and is never stolen, failed, or released automatically.
+        """
+        if stale_before < 0:
+            raise ValueError("stale_before must be non-negative")
+        items: list[dict[str, Any]] = []
+        start_key: dict[str, Any] | None = None
+        try:
+            while True:
+                kwargs: dict[str, Any] = {
+                    "TableName": self._table_name,
+                    "FilterExpression": "#sk=:meta AND #state=:reserved",
+                    "ExpressionAttributeNames": {"#sk": "sk", "#state": "state"},
+                    "ExpressionAttributeValues": {
+                        ":meta": self._s("META"), ":reserved": self._s("reserved")
+                    },
+                    "ConsistentRead": True,
+                }
+                if start_key is not None:
+                    kwargs["ExclusiveStartKey"] = start_key
+                response = self._client.scan(**kwargs)
+                items.extend(response.get("Items", []))
+                start_key = response.get("LastEvaluatedKey")
+                if not start_key:
+                    break
+        except Exception as exc:
+            raise BatchStoreBackendError("cannot scan stale atomic batches") from exc
+        summary: dict[str, Any] = {
+            "dry_run": not apply, "ready": [], "settled": [],
+            "uncertain": [], "pending": [],
+        }
+        for item in items:
+            pk = item.get("pk", {}).get("S", "")
+            created = int(item.get("created_at", {}).get("N", "0"))
+            if not pk.startswith("BATCH#") or created > stale_before:
+                continue
+            batch_id = pk.removeprefix("BATCH#")
+            allocations = [
+                self._consistent_get({
+                    "pk": self._s(pk),
+                    "sk": self._s(f"ALLOCATION#{mode}"),
+                })
+                for mode in ANGLE_MODES
+            ]
+            if any(row is None for row in allocations):
+                summary["uncertain"].append(batch_id)
+                continue
+            terminal = all(
+                row.get("state", {}).get("S") in {"completed", "failed", "timeout"}
+                for row in allocations
+            )
+            missing_receipt = any(
+                row.get(f"{slot}_slot", {}).get("S") == "consumed"
+                and f"{slot}_ledger_receipt" not in row
+                for row in allocations
+                for slot in ("claim_extraction", "evidence_narrative")
+            )
+            if terminal:
+                summary["ready"].append(batch_id)
+                if apply:
+                    result = self.settle_batch(batch_id=batch_id)
+                    if result.settled:
+                        summary["settled"].append(batch_id)
+            elif missing_receipt:
+                summary["uncertain"].append(batch_id)
+            else:
+                summary["pending"].append(batch_id)
+        return summary
 
     def consume_call_slot(
         self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
@@ -534,13 +955,164 @@ class DynamoDBAtomicMultiAngleBatchStore:
             raise BatchStoreBackendError("call slot authority unavailable") from exc
         return True
 
+    def record_call_cost(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        slot: str, accounting_token: str, ledger_receipt: str,
+        actual_cost_usd: Decimal, tokens_in: int, tokens_out: int,
+    ) -> bool:
+        if (
+            slot not in {"claim_extraction", "evidence_narrative"}
+            or mode not in ANGLE_MODES or job_id != _job_id(batch_id, mode)
+            or not _ID_RE.fullmatch(owner_token)
+            or not _HASH_RE.fullmatch(accounting_token) or not ledger_receipt
+            or actual_cost_usd < 0 or tokens_in < 0 or tokens_out < 0
+        ):
+            raise ValueError("invalid call accounting")
+        names = {"#slot": f"{slot}_slot"}
+        values = {
+            ":owner": self._s(owner_token), ":job": self._s(job_id),
+            ":consumed": self._s("consumed"),
+            ":token": self._s(accounting_token), ":receipt": self._s(ledger_receipt),
+            ":cost": self._n(actual_cost_usd),
+            ":tin": self._n(tokens_in), ":tout": self._n(tokens_out),
+        }
+        try:
+            self._client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        "pk": self._s(f"BATCH#{batch_id}"),
+                        "sk": self._s(f"ALLOCATION#{mode}"),
+                    },
+                    "UpdateExpression": (
+                        f"SET {slot}_accounting_token=:token, "
+                        f"{slot}_ledger_receipt=:receipt, "
+                        f"{slot}_actual_cost_usd=:cost, {slot}_tokens_in=:tin, "
+                        f"{slot}_tokens_out=:tout"
+                    ),
+                    "ConditionExpression": (
+                        "#slot=:consumed AND owner_token=:owner AND job_id=:job "
+                        f"AND attribute_not_exists({slot}_accounting_token)"
+                    ),
+                    "ExpressionAttributeNames": names,
+                    "ExpressionAttributeValues": values,
+                }},
+                {"Put": {
+                    "TableName": self._table_name,
+                    "Item": {
+                        "pk": self._s(f"ACCOUNTING#{accounting_token}"),
+                        "sk": self._s("BINDING"), "batch_id": self._s(batch_id),
+                        "mode": self._s(mode), "job_id": self._s(job_id),
+                        "slot": self._s(slot), "owner_token": self._s(owner_token),
+                        "ledger_receipt": self._s(ledger_receipt),
+                        "actual_cost_usd": self._n(actual_cost_usd),
+                        "tokens_in": self._n(tokens_in),
+                        "tokens_out": self._n(tokens_out),
+                    },
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                }},
+            ])
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code != "TransactionCanceledException":
+                raise BatchStoreBackendError(
+                    "call accounting authority write failed"
+                ) from exc
+            binding = self._consistent_get({
+                "pk": self._s(f"ACCOUNTING#{accounting_token}"),
+                "sk": self._s("BINDING"),
+            })
+            allocation = self._consistent_get({
+                "pk": self._s(f"BATCH#{batch_id}"),
+                "sk": self._s(f"ALLOCATION#{mode}"),
+            })
+            expected = {
+                "batch_id": ("S", batch_id), "mode": ("S", mode),
+                "job_id": ("S", job_id), "slot": ("S", slot),
+                "owner_token": ("S", owner_token),
+                "ledger_receipt": ("S", ledger_receipt),
+                "actual_cost_usd": ("N", str(actual_cost_usd)),
+                "tokens_in": ("N", str(tokens_in)),
+                "tokens_out": ("N", str(tokens_out)),
+            }
+            if binding is None or allocation is None or any(
+                binding.get(field, {}).get(kind) != value
+                for field, (kind, value) in expected.items()
+            ) or any((
+                allocation.get(f"{slot}_{field}", {}).get(kind) != value
+                for field, (kind, value) in {
+                    "accounting_token": ("S", accounting_token),
+                    "ledger_receipt": ("S", ledger_receipt),
+                    "actual_cost_usd": ("N", str(actual_cost_usd)),
+                    "tokens_in": ("N", str(tokens_in)),
+                    "tokens_out": ("N", str(tokens_out)),
+                }.items()
+            )):
+                raise BatchStoreIntegrityError(
+                    "call accounting replay conflict"
+                ) from exc
+        return True
+
+    def cancel_call_slot(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        slot: str,
+    ) -> bool:
+        if (
+            slot not in {"claim_extraction", "evidence_narrative"}
+            or mode not in ANGLE_MODES or job_id != _job_id(batch_id, mode)
+            or not _ID_RE.fullmatch(batch_id)
+            or not _ID_RE.fullmatch(owner_token)
+        ):
+            raise ValueError("invalid cancellation slot")
+        token = hashlib.sha256(
+            f"cancelled_before_call:{batch_id}:{mode}:{job_id}:{slot}".encode()
+        ).hexdigest()
+        receipt = f"cancelled-before-call:{token}"
+        names = {"#state": "state", "#slot": f"{slot}_slot"}
+        values = {
+            ":claimed": self._s("claimed"), ":owner": self._s(owner_token),
+            ":job": self._s(job_id), ":available": self._s("available"),
+            ":consumed": self._s("consumed"), ":token": self._s(token),
+            ":receipt": self._s(receipt), ":zero": self._n(0),
+        }
+        try:
+            self._client.update_item(
+                TableName=self._table_name,
+                Key={
+                    "pk": self._s(f"BATCH#{batch_id}"),
+                    "sk": self._s(f"ALLOCATION#{mode}"),
+                },
+                UpdateExpression=(
+                    f"SET #slot=:consumed, {slot}_accounting_token=:token, "
+                    f"{slot}_ledger_receipt=:receipt, {slot}_actual_cost_usd=:zero, "
+                    f"{slot}_tokens_in=:zero, {slot}_tokens_out=:zero"
+                ),
+                ConditionExpression=(
+                    "#state=:claimed AND owner_token=:owner AND job_id=:job AND "
+                    "((#slot=:available AND "
+                    f"attribute_not_exists({slot}_accounting_token)) OR "
+                    f"(#slot=:consumed AND {slot}_accounting_token=:token AND "
+                    f"{slot}_ledger_receipt=:receipt AND "
+                    f"{slot}_actual_cost_usd=:zero AND {slot}_tokens_in=:zero AND "
+                    f"{slot}_tokens_out=:zero))"
+                ),
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+            )
+            return True
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code == "ConditionalCheckFailedException":
+                raise BatchStoreIntegrityError("call cancellation conflict") from exc
+            raise BatchStoreBackendError("call cancellation unavailable") from exc
+
 
 class SQLiteAtomicMultiAngleBatchStore:
     """Local parity adapter with explicit authoritative budget bootstrap."""
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS atomic_budget (
@@ -562,11 +1134,34 @@ class SQLiteAtomicMultiAngleBatchStore:
                   amount_usd TEXT NOT NULL, state TEXT NOT NULL, owner_token TEXT,
                   claim_extraction_slot TEXT NOT NULL DEFAULT 'available',
                   evidence_narrative_slot TEXT NOT NULL DEFAULT 'available',
+                  claimed_at INTEGER,
                   PRIMARY KEY(batch_id,mode)
                 );
                 CREATE TABLE IF NOT EXISTS atomic_jobs (
                   job_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, mode TEXT NOT NULL,
                   state TEXT NOT NULL, owner_token TEXT
+                );
+                CREATE TABLE IF NOT EXISTS atomic_settlements (
+                  batch_id TEXT PRIMARY KEY, actual_cost_usd TEXT NOT NULL,
+                  released_usd TEXT NOT NULL, synthesis_claimed INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS atomic_synthesis_claims (
+                  batch_id TEXT PRIMARY KEY, state TEXT NOT NULL,
+                  owner_token TEXT, claimed_at INTEGER, lease_epoch INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS atomic_call_costs (
+                  job_id TEXT NOT NULL, slot TEXT NOT NULL, batch_id TEXT NOT NULL,
+                  mode TEXT NOT NULL, owner_token TEXT NOT NULL,
+                  accounting_token TEXT NOT NULL UNIQUE,
+                  ledger_receipt TEXT NOT NULL, actual_cost_usd TEXT NOT NULL,
+                  tokens_in INTEGER NOT NULL, tokens_out INTEGER NOT NULL,
+                  PRIMARY KEY(job_id,slot)
+                );
+                CREATE TABLE IF NOT EXISTS atomic_job_outcomes (
+                  job_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, mode TEXT NOT NULL,
+                  state TEXT NOT NULL, actual_cost_usd TEXT NOT NULL,
+                  tokens_in INTEGER NOT NULL, tokens_out INTEGER NOT NULL,
+                  ledger_receipt TEXT NOT NULL
                 );
                 """
             )
@@ -593,6 +1188,24 @@ class SQLiteAtomicMultiAngleBatchStore:
                         f"""ALTER TABLE atomic_allocations ADD COLUMN {slot}
                             TEXT NOT NULL DEFAULT 'available'"""
                     )
+            if "claimed_at" not in allocation_columns:
+                conn.execute(
+                    "ALTER TABLE atomic_allocations ADD COLUMN claimed_at INTEGER"
+                )
+            synthesis_columns = {
+                row[1] for row in conn.execute(
+                    "PRAGMA table_info(atomic_synthesis_claims)"
+                ).fetchall()
+            }
+            for definition in (
+                "owner_token TEXT", "claimed_at INTEGER",
+                "lease_epoch INTEGER NOT NULL DEFAULT 0",
+            ):
+                name = definition.split()[0]
+                if name not in synthesis_columns:
+                    conn.execute(
+                        f"ALTER TABLE atomic_synthesis_claims ADD COLUMN {definition}"
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._db_path, timeout=10, isolation_level=None)
@@ -604,7 +1217,7 @@ class SQLiteAtomicMultiAngleBatchStore:
             raise ValueError("invalid day")
         if remaining_usd < 0 or not _ID_RE.fullmatch(config_version):
             raise ValueError("invalid budget configuration")
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """INSERT INTO atomic_budget VALUES(?,?,?,?)
                    ON CONFLICT(day) DO UPDATE SET remaining_usd=excluded.remaining_usd,
@@ -621,7 +1234,7 @@ class SQLiteAtomicMultiAngleBatchStore:
             raise ValueError("invalid day")
         if remaining_usd < 0 or not _ID_RE.fullmatch(config_version):
             raise ValueError("invalid budget configuration")
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO atomic_budget VALUES(?,?,?,?)",
                 (day, str(remaining_usd), "0", config_version),
@@ -692,6 +1305,71 @@ class SQLiteAtomicMultiAngleBatchStore:
         finally:
             conn.close()
 
+    def cancel_call_slot(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        slot: str,
+    ) -> bool:
+        if (
+            slot not in {"claim_extraction", "evidence_narrative"}
+            or mode not in ANGLE_MODES or job_id != _job_id(batch_id, mode)
+            or not _ID_RE.fullmatch(batch_id)
+            or not _ID_RE.fullmatch(owner_token)
+        ):
+            raise ValueError("invalid cancellation slot")
+        token = hashlib.sha256(
+            f"cancelled_before_call:{batch_id}:{mode}:{job_id}:{slot}".encode()
+        ).hexdigest()
+        receipt = f"cancelled-before-call:{token}"
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"""SELECT job_id,state,owner_token,{slot}_slot
+                    FROM atomic_allocations WHERE batch_id=? AND mode=?""",
+                (batch_id, mode),
+            ).fetchone()
+            if row is None or row[:3] != (job_id, "claimed", owner_token):
+                raise BatchStoreIntegrityError("call cancellation identity mismatch")
+            existing = conn.execute(
+                """SELECT accounting_token,ledger_receipt,actual_cost_usd,
+                          tokens_in,tokens_out FROM atomic_call_costs
+                   WHERE job_id=? AND slot=?""",
+                (job_id, slot),
+            ).fetchone()
+            expected = (token, receipt, "0", 0, 0)
+            if row[3] == "consumed":
+                if existing != expected:
+                    raise BatchStoreIntegrityError("call cancellation conflict")
+                conn.commit()
+                return True
+            if row[3] != "available" or existing is not None:
+                raise BatchStoreIntegrityError("call cancellation conflict")
+            conn.execute(
+                f"""UPDATE atomic_allocations SET {slot}_slot='consumed'
+                    WHERE batch_id=? AND mode=?""",
+                (batch_id, mode),
+            )
+            conn.execute(
+                """INSERT INTO atomic_call_costs(
+                     job_id,slot,batch_id,mode,owner_token,accounting_token,
+                     ledger_receipt,actual_cost_usd,tokens_in,tokens_out
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    job_id, slot, batch_id, mode, owner_token, token, receipt,
+                    "0", 0, 0,
+                ),
+            )
+            conn.commit()
+            return True
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("local call cancellation failed") from exc
+        finally:
+            conn.close()
+
     def create_batch(self, request: AtomicBatchRequest) -> AtomicBatchResult:
         request.validate()
         conn = self._connect()
@@ -753,6 +1431,8 @@ class SQLiteAtomicMultiAngleBatchStore:
                             "snapshot_id": request.snapshot_id,
                             "day": request.day,
                             "config_version": request.config_version,
+                            "batch_cost_usd": str(request.batch_cost_usd),
+                            "created_at": request.created_at,
                         },
                         sort_keys=True,
                     ),
@@ -767,7 +1447,8 @@ class SQLiteAtomicMultiAngleBatchStore:
                     (request.batch_id, mode, job_id, str(per_job), "reserved", None),
                 )
                 conn.execute(
-                    "INSERT INTO atomic_jobs VALUES(?,?,?,?,?)",
+                    """INSERT INTO atomic_jobs
+                       (job_id,batch_id,mode,state,owner_token) VALUES(?,?,?,?,?)""",
                     (job_id, request.batch_id, mode, "pending", None),
                 )
             conn.commit()
@@ -834,9 +1515,10 @@ class SQLiteAtomicMultiAngleBatchStore:
                     "allocation claim identity/state condition failed"
                 )
             conn.execute(
-                """UPDATE atomic_allocations SET state='claimed',owner_token=?
+                """UPDATE atomic_allocations SET state='claimed',owner_token=?,
+                   claimed_at=COALESCE(claimed_at,?)
                    WHERE batch_id=? AND mode=?""",
-                (owner_token, batch_id, mode),
+                (owner_token, int(datetime.now(UTC).timestamp()), batch_id, mode),
             )
             conn.execute(
                 """UPDATE atomic_jobs SET state='claimed',owner_token=?
@@ -896,5 +1578,380 @@ class SQLiteAtomicMultiAngleBatchStore:
         except Exception as exc:
             conn.rollback()
             raise BatchStoreBackendError("local call slot consumption failed") from exc
+        finally:
+            conn.close()
+
+    def record_call_cost(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        slot: str, accounting_token: str, ledger_receipt: str,
+        actual_cost_usd: Decimal, tokens_in: int, tokens_out: int,
+    ) -> bool:
+        if (
+            slot not in {"claim_extraction", "evidence_narrative"}
+            or mode not in ANGLE_MODES or job_id != _job_id(batch_id, mode)
+            or not _ID_RE.fullmatch(owner_token)
+            or actual_cost_usd < 0 or tokens_in < 0 or tokens_out < 0
+            or not _HASH_RE.fullmatch(accounting_token) or not ledger_receipt
+        ):
+            raise ValueError("invalid call accounting")
+        conn = self._connect()
+        payload = (
+            job_id, slot, batch_id, mode, owner_token, accounting_token,
+            ledger_receipt, str(actual_cost_usd), tokens_in, tokens_out,
+        )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            allocation = conn.execute(
+                f"""SELECT job_id,state,owner_token,{slot}_slot
+                    FROM atomic_allocations WHERE batch_id=? AND mode=?""",
+                (batch_id, mode),
+            ).fetchone()
+            if allocation != (job_id, "claimed", owner_token, "consumed"):
+                raise BatchStoreIntegrityError("call accounting authority mismatch")
+            existing = conn.execute(
+                """SELECT job_id,slot,batch_id,mode,owner_token,accounting_token,
+                          ledger_receipt,actual_cost_usd,tokens_in,tokens_out
+                   FROM atomic_call_costs WHERE job_id=? AND slot=?""",
+                (job_id, slot),
+            ).fetchone()
+            if existing is not None:
+                if existing != payload:
+                    raise BatchStoreIntegrityError("call accounting replay conflict")
+                conn.commit()
+                return True
+            token_row = conn.execute(
+                "SELECT job_id,slot FROM atomic_call_costs WHERE accounting_token=?",
+                (accounting_token,),
+            ).fetchone()
+            if token_row is not None:
+                raise BatchStoreIntegrityError("accounting token is already bound")
+            conn.execute(
+                """INSERT INTO atomic_call_costs
+                   (job_id,slot,batch_id,mode,owner_token,accounting_token,
+                    ledger_receipt,actual_cost_usd,tokens_in,tokens_out)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                payload,
+            )
+            conn.commit()
+            return True
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("local call accounting failed") from exc
+        finally:
+            conn.close()
+
+    def record_job_terminal(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        state: str,
+    ) -> bool:
+        if state not in {"completed", "failed", "timeout"}:
+            raise ValueError("invalid terminal outcome")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            call_rows = conn.execute(
+                """SELECT slot,actual_cost_usd,tokens_in,tokens_out,ledger_receipt
+                   FROM atomic_call_costs WHERE job_id=? ORDER BY slot""",
+                (job_id,),
+            ).fetchall()
+            if [row[0] for row in call_rows] != [
+                "claim_extraction", "evidence_narrative"
+            ]:
+                raise BatchStoreIntegrityError(
+                    "terminal requires both durable call receipts"
+                )
+            actual_cost_usd = sum(
+                (Decimal(row[1]) for row in call_rows), Decimal(0)
+            )
+            tokens_in = sum(row[2] for row in call_rows)
+            tokens_out = sum(row[3] for row in call_rows)
+            ledger_receipt = json.dumps(
+                [row[4] for row in call_rows], separators=(",", ":")
+            )
+            outcome = conn.execute(
+                """SELECT batch_id,mode,state,actual_cost_usd,tokens_in,tokens_out,
+                          ledger_receipt FROM atomic_job_outcomes WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+            expected_outcome = (
+                batch_id, mode, state, str(actual_cost_usd),
+                tokens_in, tokens_out, ledger_receipt,
+            )
+            if outcome is not None:
+                if outcome != expected_outcome:
+                    raise BatchStoreIntegrityError("terminal replay conflict")
+                conn.commit()
+                return True
+            for table, where, args in (
+                ("atomic_jobs", "job_id=?", (job_id,)),
+                ("atomic_allocations", "batch_id=? AND mode=?", (batch_id, mode)),
+            ):
+                row = conn.execute(
+                    f"SELECT state,owner_token FROM {table} WHERE {where}",
+                    args,
+                ).fetchone()
+                if row is None or row[1] != owner_token:
+                    raise BatchStoreIntegrityError("terminal owner mismatch")
+                if row[0] != "claimed":
+                    raise BatchStoreIntegrityError("job is not claimed")
+                conn.execute(f"UPDATE {table} SET state=? WHERE {where}", (state, *args))
+            conn.execute(
+                """INSERT INTO atomic_job_outcomes VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    job_id, batch_id, mode, state, str(actual_cost_usd),
+                    tokens_in, tokens_out, ledger_receipt,
+                ),
+            )
+            conn.commit()
+            return True
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("terminal authority write failed") from exc
+        finally:
+            conn.close()
+
+    def settle_batch(self, *, batch_id: str) -> BatchSettlementResult:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = conn.execute(
+                "SELECT actual_cost_usd,released_usd,synthesis_claimed FROM atomic_settlements WHERE batch_id=?",
+                (batch_id,),
+            ).fetchone()
+            if replay:
+                conn.commit()
+                return BatchSettlementResult(
+                    batch_id, True, True, Decimal(replay[0]), Decimal(replay[1]), bool(replay[2])
+                )
+            rows = conn.execute(
+                """SELECT actual_cost_usd,state FROM atomic_job_outcomes
+                   WHERE batch_id=?""",
+                (batch_id,),
+            ).fetchall()
+            if len(rows) != len(ANGLE_MODES):
+                conn.rollback()
+                return BatchSettlementResult(batch_id, False, False, Decimal(0), Decimal(0), False)
+            actual = sum((Decimal(row[0] or "0") for row in rows), Decimal(0))
+            synthesize = all(row[1] == "completed" for row in rows)
+            batch = conn.execute(
+                "SELECT payload_json FROM atomic_batches WHERE batch_id=?", (batch_id,)
+            ).fetchone()
+            payload = json.loads(batch[0])
+            budget = conn.execute(
+                "SELECT remaining_usd,reserved_total FROM atomic_budget WHERE day=?",
+                (payload["day"],),
+            ).fetchone()
+            reserved = sum(
+                (Decimal(row[0]) for row in conn.execute(
+                    "SELECT amount_usd FROM atomic_allocations WHERE batch_id=?", (batch_id,)
+                )), Decimal(0)
+            )
+            if reserved != Decimal(payload["batch_cost_usd"]) or actual > reserved:
+                raise BatchStoreIntegrityError(
+                    "settlement costs exceed reserved authority"
+                )
+            released = max(Decimal(0), reserved - actual)
+            if budget is None or Decimal(budget[1]) < reserved:
+                raise BatchStoreIntegrityError("budget reserved_total underflow")
+            remaining = Decimal(budget[0]) + released
+            reserved_total = Decimal(budget[1]) - reserved
+            conn.execute(
+                """UPDATE atomic_budget SET reserved_total=?,remaining_usd=?
+                   WHERE day=?""",
+                (str(reserved_total), str(remaining), payload["day"]),
+            )
+            conn.execute(
+                "INSERT INTO atomic_settlements VALUES(?,?,?,?)",
+                (batch_id, str(actual), str(released), int(synthesize)),
+            )
+            if synthesize:
+                conn.execute(
+                    """INSERT INTO atomic_synthesis_claims
+                       (batch_id,state,owner_token,claimed_at,lease_epoch)
+                       VALUES(?,?,?,?,?)""",
+                    (batch_id, "available", None, None, 0),
+                )
+            conn.commit()
+            return BatchSettlementResult(
+                batch_id, True, False, actual, released, synthesize
+            )
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("batch settlement failed") from exc
+        finally:
+            conn.close()
+
+    def call_accounting_state(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+    ) -> dict[str, str]:
+        conn = self._connect()
+        try:
+            allocation = conn.execute(
+                """SELECT job_id,owner_token,claim_extraction_slot,
+                          evidence_narrative_slot FROM atomic_allocations
+                   WHERE batch_id=? AND mode=?""",
+                (batch_id, mode),
+            ).fetchone()
+            if (
+                allocation is None or allocation[0] != job_id
+                or allocation[1] != owner_token
+            ):
+                raise BatchStoreIntegrityError("call accounting identity mismatch")
+            receipts = {
+                row[0] for row in conn.execute(
+                    "SELECT slot FROM atomic_call_costs WHERE job_id=?", (job_id,)
+                ).fetchall()
+            }
+            result = {}
+            for slot, state in zip(
+                ("claim_extraction", "evidence_narrative"),
+                allocation[2:], strict=True,
+            ):
+                result[slot] = (
+                    "available" if state == "available"
+                    else "receipted" if slot in receipts
+                    else "uncertain"
+                )
+            return result
+        finally:
+            conn.close()
+
+    def claim_synthesis(
+        self, *, batch_id: str, owner_token: str, stale_before: int,
+    ) -> bool:
+        if not _ID_RE.fullmatch(owner_token) or stale_before < 0:
+            raise ValueError("invalid synthesis lease")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT state,claimed_at FROM atomic_synthesis_claims
+                   WHERE batch_id=?""",
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                raise BatchStoreIntegrityError("synthesis authority is missing")
+            if row[0] == "completed":
+                conn.commit()
+                return False
+            if row[0] == "claimed" and (
+                row[1] is None or int(row[1]) >= stale_before
+            ):
+                conn.commit()
+                return False
+            now = int(datetime.now(UTC).timestamp())
+            conn.execute(
+                """UPDATE atomic_synthesis_claims
+                   SET state='claimed',owner_token=?,claimed_at=?,
+                       lease_epoch=lease_epoch+1 WHERE batch_id=?""",
+                (owner_token, now, batch_id),
+            )
+            conn.commit()
+            return True
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("local synthesis lease failed") from exc
+        finally:
+            conn.close()
+
+    def complete_synthesis(self, *, batch_id: str, owner_token: str) -> bool:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT state,owner_token FROM atomic_synthesis_claims
+                   WHERE batch_id=?""",
+                (batch_id,),
+            ).fetchone()
+            if row and row[0] == "completed":
+                conn.commit()
+                return True
+            if row != ("claimed", owner_token):
+                raise BatchStoreIntegrityError("synthesis completion conflict")
+            conn.execute(
+                """UPDATE atomic_synthesis_claims SET state='completed'
+                   WHERE batch_id=?""",
+                (batch_id,),
+            )
+            conn.commit()
+            return True
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("local synthesis completion failed") from exc
+        finally:
+            conn.close()
+
+    def reconcile_stale_batches(
+        self, *, stale_before: int, apply: bool = False,
+    ) -> dict[str, Any]:
+        if stale_before < 0:
+            raise ValueError("stale_before must be non-negative")
+        summary: dict[str, Any] = {
+            "dry_run": not apply, "ready": [], "settled": [],
+            "uncertain": [], "pending": [],
+        }
+        conn = self._connect()
+        try:
+            batches = conn.execute(
+                """SELECT b.batch_id,b.payload_json
+                   FROM atomic_batches b
+                   LEFT JOIN atomic_settlements s USING(batch_id)
+                   WHERE s.batch_id IS NULL ORDER BY b.batch_id"""
+            ).fetchall()
+            for batch_id, payload_json in batches:
+                try:
+                    created_at = int(json.loads(payload_json)["created_at"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise BatchStoreIntegrityError(
+                        "stale batch timestamp is malformed"
+                    ) from exc
+                if created_at > stale_before:
+                    continue
+                rows = conn.execute(
+                    """SELECT state,claim_extraction_slot,evidence_narrative_slot
+                       FROM atomic_allocations WHERE batch_id=?""",
+                    (batch_id,),
+                ).fetchall()
+                if len(rows) != len(ANGLE_MODES):
+                    summary["uncertain"].append(batch_id)
+                    continue
+                if all(
+                    row[0] in {"completed", "failed", "timeout"} for row in rows
+                ):
+                    summary["ready"].append(batch_id)
+                    if apply:
+                        result = self.settle_batch(batch_id=batch_id)
+                        if result.settled:
+                            summary["settled"].append(batch_id)
+                    continue
+                consumed = sum(
+                    state == "consumed" for row in rows for state in row[1:]
+                )
+                receipts = conn.execute(
+                    "SELECT count(*) FROM atomic_call_costs WHERE batch_id=?",
+                    (batch_id,),
+                ).fetchone()[0]
+                target = "uncertain" if receipts < consumed else "pending"
+                summary[target].append(batch_id)
+            return summary
+        except (BatchStoreIntegrityError, ValueError):
+            raise
+        except Exception as exc:
+            raise BatchStoreBackendError("local stale batch scan failed") from exc
         finally:
             conn.close()

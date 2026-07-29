@@ -87,9 +87,11 @@ def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, P
         / f"libpython{sys.version_info.major}.{sys.version_info.minor}.dylib"
     )
     if runtime_library.is_file():
+        runtime_library_copy = tmp_path / runtime_library.name
+        shutil.copyfile(runtime_library, runtime_library_copy)
         files[
             Path(".venv/lib") / runtime_library.name
-        ] = (runtime_library, "0444")
+        ] = (runtime_library_copy, "0444")
     directories = sorted(
         {
             parent

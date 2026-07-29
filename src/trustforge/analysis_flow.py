@@ -222,7 +222,11 @@ def _db_path(path: str | Path | None = None) -> Path:
 
 
 @contextmanager
-def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
+def _bedrock_live_attempt(
+    log: ExecutionLog, *, batch_allocation: bool = False,
+    on_accounted: Callable[[dict[str, Any]], None] | None = None,
+    force_offline: bool = False,
+):
     """Yield 是否本次真的允許呼叫 Bedrock（fail-closed；任何判定例外一律離線）。
 
     複用既有閘邏輯，不另造繞過 `budget_guard`／每日 cap 的新路徑（`STAGES`
@@ -255,6 +259,12 @@ def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
       巢狀 `finally` 保證即使記帳邏輯本身出非預期例外，release 仍必定
       執行，不讓預留卡死漏放。
     """
+    on_accounted = on_accounted or getattr(
+        log, "_atomic_accounting_callback", None
+    )
+    force_offline = force_offline or bool(
+        getattr(log, "_force_atomic_offline", False)
+    )
     reservation: float | None = None
     live = False
     try:
@@ -269,6 +279,8 @@ def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
             elif not budget_guard.daily_cap_exceeded():
                 reservation = budget_guard.try_reserve_request_budget()
                 live = reservation is not None
+        if force_offline:
+            live = False
     except Exception:
         logging.getLogger(__name__).warning(
             "analysis_flow: bedrock live 閘判定失敗，fail-closed 強制本次離線",
@@ -277,8 +289,13 @@ def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
         live, reservation = False, None
 
     start_idx = len(log.events)
+    accounting_error: Exception | None = None
+    body_error: BaseException | None = None
     try:
         yield live
+    except BaseException as exc:
+        body_error = exc
+        raise
     finally:
         try:
             # `total_cost_usd` 故意算在 `append_run` 的 try 之外/更前
@@ -296,16 +313,37 @@ def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
                 if event.get("tool") == "llm.cost"
             ]
             total_cost_usd = round(sum(float(c["cost_usd"] or 0.0) for c in new_calls), 6)
-            if total_cost_usd > 0:
+            # Atomic calls need a durable receipt even for an authoritative
+            # offline cancellation. A live attempt with no usage is uncertain
+            # (the provider may have accepted a timed-out request), so it is
+            # deliberately not receipted and cannot be settled automatically.
+            should_persist = total_cost_usd > 0 or (
+                batch_allocation and not live
+            )
+            if batch_allocation and live and not new_calls:
+                log.record(
+                    "atomic.accounting_uncertain",
+                    params={"outcome": "failed", "reason": "live_usage_missing"},
+                    summary="Live Bedrock attempt has no verifiable usage receipt",
+                )
+                if body_error is None:
+                    accounting_error = MultiAngleAuthorityError(
+                        "live Bedrock usage is uncertain; reconciliation required"
+                    )
+            if should_persist:
+                ledger_record = {
+                    "ts": iso_utc(time.time()),
+                    "question_type": "analysis_flow",
+                    "coin": None,
+                    "offline": not live,
+                    "calls": new_calls,
+                    "total_cost_usd": total_cost_usd,
+                    "accounting_outcome": (
+                        "charged" if total_cost_usd > 0 else "cancelled_offline"
+                    ),
+                }
                 try:
-                    persisted = append_run({
-                        "ts": iso_utc(time.time()),
-                        "question_type": "analysis_flow",
-                        "coin": None,
-                        "offline": not live,
-                        "calls": new_calls,
-                        "total_cost_usd": total_cost_usd,
-                    })
+                    persisted = append_run(ledger_record)
                 except Exception:
                     persisted = False
                     logging.getLogger(__name__).warning(
@@ -314,7 +352,28 @@ def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
                     )
                 if not persisted:
                     budget_guard.record_unledgered_spend(total_cost_usd)
+                    if on_accounted is not None and body_error is None:
+                        accounting_error = MultiAngleAuthorityError(
+                            "atomic accounting has no durable ledger receipt"
+                        )
+                elif on_accounted is not None:
+                    on_accounted({
+                        "ledger_receipt": ledger_record["run_id"],
+                        "accounting_token": hashlib.sha256(
+                            json.dumps(
+                                ledger_record, sort_keys=True, separators=(",", ":")
+                            ).encode()
+                        ).hexdigest(),
+                        "actual_cost_usd": Decimal(str(total_cost_usd)),
+                        "tokens_in": sum(int(c["tokens_in"]) for c in new_calls),
+                        "tokens_out": sum(int(c["tokens_out"]) for c in new_calls),
+                        "outcome": ledger_record["accounting_outcome"],
+                    })
         except Exception:
+            if on_accounted is not None and body_error is None:
+                accounting_error = MultiAngleAuthorityError(
+                    "atomic Bedrock accounting could not be persisted"
+                )
             logging.getLogger(__name__).warning(
                 "analysis_flow: bedrock 花費記帳失敗（cap 帳本可能少計這筆）", exc_info=True,
             )
@@ -331,6 +390,8 @@ def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
                     logging.getLogger(__name__).warning(
                         "analysis_flow: release_request_budget 失敗", exc_info=True,
                     )
+        if accounting_error is not None and body_error is None:
+            raise accounting_error
 
 
 # Issue #570: three-track learning emission hooks. These wrappers live at
@@ -455,6 +516,15 @@ class AnalysisFlow:
           snapshot_json TEXT NOT NULL,
           locale TEXT NOT NULL, state TEXT NOT NULL,
           result_json TEXT, updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS analysis_atomic_owners (
+          job_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, mode TEXT NOT NULL,
+          owner_token TEXT NOT NULL, claimed_at REAL NOT NULL,
+          UNIQUE(batch_id,mode)
+        );
+        CREATE TABLE IF NOT EXISTS analysis_atomic_terminal_failures (
+          job_id TEXT PRIMARY KEY, terminal_state TEXT NOT NULL,
+          finalized_at REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_analysis_results_lookup
           ON analysis_results(coin, mode, question, published_at DESC);
@@ -1706,6 +1776,7 @@ class AnalysisFlow:
         """
         repaired = {"workers": 0, "jobs": 0}
         repaired["atomic_projections"] = self._recover_atomic_projections()
+        repaired["atomic_terminals"] = self._recover_atomic_terminals()
         for stage in STAGES:
             prefix = f"hermes-{stage}-"
             live = [thread for thread in self._threads if thread.name.startswith(prefix) and thread.is_alive()]
@@ -1741,6 +1812,125 @@ class AnalysisFlow:
             logging.warning("Hermes runtime reconciled: %s", repaired)
         repaired["syntheses"] = self._recover_multi_angle_syntheses()
         return repaired
+
+    def _recover_atomic_terminals(self) -> int:
+        """Replay only locally durable completed results into batch authority."""
+        rows = self._conn().execute(
+            """SELECT o.job_id,o.batch_id,o.mode,o.owner_token,
+                      j.snapshot_id,j.coin
+               FROM analysis_atomic_owners o
+               JOIN analysis_jobs j USING(job_id)
+               JOIN analysis_results r USING(job_id)
+               WHERE j.state='completed'"""
+        ).fetchall()
+        recovered = 0
+        authority = self._atomic_store()
+        for row in rows:
+            try:
+                authority.record_job_terminal(
+                    batch_id=row["batch_id"], mode=row["mode"],
+                    job_id=row["job_id"], owner_token=row["owner_token"],
+                    state="completed",
+                )
+                settlement = authority.settle_batch(batch_id=row["batch_id"])
+                if not settlement.settled:
+                    continue
+                synthesis_owner = f"synthesis-{uuid.uuid4().hex[:24]}"
+                synthesis_completed = False
+                if authority.claim_synthesis(
+                    batch_id=row["batch_id"], owner_token=synthesis_owner,
+                    stale_before=int(
+                        time.time() - STALE_RUNNING_JOB_THRESHOLD_SECONDS
+                    ),
+                ):
+                    self._maybe_trigger_synthesis(row["snapshot_id"], row["coin"])
+                    synthesis_completed = authority.complete_synthesis(
+                        batch_id=row["batch_id"], owner_token=synthesis_owner
+                    )
+                if synthesis_completed:
+                    self._conn().execute(
+                        "DELETE FROM analysis_atomic_owners WHERE batch_id=?",
+                        (row["batch_id"],),
+                    )
+                recovered += 1
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "atomic_terminal_recovery_failed batch_id=%s job_id=%s",
+                    row["batch_id"], row["job_id"], exc_info=True,
+                )
+        failures = self._conn().execute(
+            """SELECT d.job_id,d.error FROM analysis_dead_letters d
+               JOIN analysis_jobs j USING(job_id)
+               JOIN analysis_atomic_owners o USING(job_id)
+               LEFT JOIN analysis_atomic_terminal_failures f USING(job_id)
+               WHERE j.state='failed' AND f.job_id IS NULL"""
+        ).fetchall()
+        for failure in failures:
+            terminal = (
+                "timeout" if "stale running job reaped" in failure["error"]
+                else "failed"
+            )
+            try:
+                if self._finalize_atomic_failure(failure["job_id"], terminal):
+                    recovered += 1
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "atomic_failure_recovery_failed job_id=%s",
+                    failure["job_id"], exc_info=True,
+                )
+        terminal_batches = self._conn().execute(
+            """SELECT DISTINCT o.batch_id
+               FROM analysis_atomic_terminal_failures f
+               JOIN analysis_atomic_owners o USING(job_id)"""
+        ).fetchall()
+        for terminal_batch in terminal_batches:
+            try:
+                authority.settle_batch(batch_id=terminal_batch["batch_id"])
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "atomic_failure_settlement_recovery_failed batch_id=%s",
+                    terminal_batch["batch_id"], exc_info=True,
+                )
+        return recovered
+
+    def _finalize_atomic_failure(self, job_id: str, state: str) -> bool:
+        """Finalize only a durable dead-letter with provable call accounting."""
+        if state not in {"failed", "timeout"}:
+            raise ValueError("invalid atomic failure state")
+        row = self._conn().execute(
+            """SELECT o.batch_id,o.mode,o.owner_token,j.atomic_batch_id
+               FROM analysis_atomic_owners o JOIN analysis_jobs j USING(job_id)
+               JOIN analysis_dead_letters d USING(job_id)
+               WHERE o.job_id=? AND j.state='failed'""",
+            (job_id,),
+        ).fetchone()
+        if row is None or row["batch_id"] != row["atomic_batch_id"]:
+            return False
+        authority = self._atomic_store()
+        statuses = authority.call_accounting_state(
+            batch_id=row["batch_id"], mode=row["mode"], job_id=job_id,
+            owner_token=row["owner_token"],
+        )
+        if "uncertain" in statuses.values():
+            return False
+        for slot, status in statuses.items():
+            if status != "available":
+                continue
+            authority.cancel_call_slot(
+                batch_id=row["batch_id"], mode=row["mode"], job_id=job_id,
+                owner_token=row["owner_token"], slot=slot,
+            )
+        authority.record_job_terminal(
+            batch_id=row["batch_id"], mode=row["mode"], job_id=job_id,
+            owner_token=row["owner_token"], state=state,
+        )
+        self._conn().execute(
+            """INSERT OR REPLACE INTO analysis_atomic_terminal_failures
+               VALUES(?,?,?)""",
+            (job_id, state, time.time()),
+        )
+        authority.settle_batch(batch_id=row["batch_id"])
+        return True
 
     def _recover_atomic_projections(self) -> int:
         """Recover admitted authority manifests without a client retry.
@@ -1921,6 +2111,13 @@ class AnalysisFlow:
                 )
                 self._checkpoint(job_id, stage, "failed", error=error, retry=retry)
                 self._adopted.discard(job_id)
+                try:
+                    self._finalize_atomic_failure(job_id, "timeout")
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "atomic timeout finalization deferred job_id=%s",
+                        job_id, exc_info=True,
+                    )
             reaped += 1
         if reaped:
             logging.warning("Hermes reaped %d stale running job(s) after %.0fs idle", reaped, threshold)
@@ -2046,6 +2243,14 @@ class AnalysisFlow:
                          retry, str(exc)[:1000], time.time()),
                     )
                     self._adopted.discard(job_id)
+                    try:
+                        terminal = "timeout" if isinstance(exc, TimeoutError) else "failed"
+                        self._finalize_atomic_failure(job_id, terminal)
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "atomic failure finalization deferred job_id=%s",
+                            job_id, exc_info=True,
+                        )
                     # Issue #570: three-track learning FAILURE hook.
                     # Structurally Fail-soft — runs strictly after the
                     # dead-letter row has landed; the helper never raises
@@ -2123,6 +2328,19 @@ class AnalysisFlow:
                     config_version=config_version,
                     expected_amount_usd=expected_batch_cost / len(MODES),
                 )
+                self._conn().execute(
+                    """INSERT INTO analysis_atomic_owners
+                       (job_id,batch_id,mode,owner_token,claimed_at)
+                       VALUES(?,?,?,?,?)
+                       ON CONFLICT(job_id) DO UPDATE SET
+                         batch_id=excluded.batch_id,mode=excluded.mode,
+                         owner_token=excluded.owner_token
+                       WHERE analysis_atomic_owners.owner_token=excluded.owner_token""",
+                    (
+                        job["job_id"], batch_id, job["atomic_mode"],
+                        owner_token, time.time(),
+                    ),
+                )
                 self._atomic_store().consume_call_slot(
                     batch_id=batch_id,
                     mode=job["atomic_mode"],
@@ -2137,8 +2355,24 @@ class AnalysisFlow:
                     "atomic worker allocation/call slot cannot be consumed"
                 ) from exc
         package["batch_allocation"] = batch_allocation
+        def record_claim_cost(receipt: dict[str, Any]) -> None:
+            if not batch_allocation:
+                return
+            self._atomic_store().record_call_cost(
+                batch_id=batch_id, mode=job["atomic_mode"], job_id=job["job_id"],
+                owner_token=package["allocation_owner_token"],
+                slot="claim_extraction", **{
+                    key: receipt[key] for key in (
+                        "accounting_token", "ledger_receipt", "actual_cost_usd",
+                        "tokens_in", "tokens_out",
+                    )
+                },
+            )
+
+        if batch_allocation:
+            log._atomic_accounting_callback = record_claim_cost
         with _bedrock_live_attempt(
-            log, batch_allocation=batch_allocation
+            log, batch_allocation=batch_allocation,
         ) as live:
             client = BedrockClient(offline=not live)
             package["client"] = client
@@ -2219,7 +2453,43 @@ class AnalysisFlow:
                 locale=package.get("locale", DEFAULT_NARRATIVE_LOCALE),
             )
 
-        if client.offline:
+        batch_allocation = bool(package.get("batch_allocation"))
+        if batch_allocation:
+            config_version = os.getenv(
+                "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
+            ).strip() or "local-v1"
+            expected_batch_cost = (
+                Decimal(str(budget_guard.multi_angle_angle_max_cost_usd()))
+                * len(MODES)
+            ).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
+            try:
+                self._atomic_store().consume_call_slot(
+                    batch_id=job["atomic_batch_id"], mode=job["atomic_mode"],
+                    job_id=job["job_id"],
+                    owner_token=package["allocation_owner_token"],
+                    config_version=config_version,
+                    expected_amount_usd=expected_batch_cost / len(MODES),
+                    slot="evidence_narrative",
+                )
+            except Exception as exc:
+                raise MultiAngleAuthorityError(
+                    "atomic narrative call slot cannot be consumed"
+                ) from exc
+
+        def record_narrative_cost(receipt: dict[str, Any]) -> None:
+            self._atomic_store().record_call_cost(
+                batch_id=job["atomic_batch_id"], mode=job["atomic_mode"],
+                job_id=job["job_id"],
+                owner_token=package["allocation_owner_token"],
+                slot="evidence_narrative", **{
+                    key: receipt[key] for key in (
+                        "accounting_token", "ledger_receipt", "actual_cost_usd",
+                        "tokens_in", "tokens_out",
+                    )
+                },
+            )
+
+        if client.offline and not batch_allocation:
             # Step1 已判離線（未 live 資格 / 預留失敗）：Step3 narrative 不會
             # 憑空變成 live，維持離線、不需要再走一次閘。
             package["report"], package["evidence"] = _build_report()
@@ -2228,32 +2498,11 @@ class AnalysisFlow:
             # 是兩次獨立真呼叫，中間隔著佇列等待——重新走一次獨立的 live 閘 +
             # 預留，反映呼叫當下最新的 cap 狀態，不沿用 Step1 當時已過期的判定
             # （避免這段等待期間才發生的「已達每日上限」被繞過）。
-            if package.get("batch_allocation"):
-                job = package["job"]
-                config_version = os.getenv(
-                    "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
-                ).strip() or "local-v1"
-                expected_batch_cost = (
-                    Decimal(str(budget_guard.multi_angle_angle_max_cost_usd()))
-                    * len(MODES)
-                ).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
-                try:
-                    self._atomic_store().consume_call_slot(
-                        batch_id=job["atomic_batch_id"],
-                        mode=job["atomic_mode"],
-                        job_id=job["job_id"],
-                        owner_token=package["allocation_owner_token"],
-                        config_version=config_version,
-                        expected_amount_usd=expected_batch_cost / len(MODES),
-                        slot="evidence_narrative",
-                    )
-                except Exception as exc:
-                    raise MultiAngleAuthorityError(
-                        "atomic narrative call slot cannot be consumed"
-                    ) from exc
+            if batch_allocation:
+                log._atomic_accounting_callback = record_narrative_cost
+                log._force_atomic_offline = client.offline
             with _bedrock_live_attempt(
-                log,
-                batch_allocation=bool(package.get("batch_allocation")),
+                log, batch_allocation=batch_allocation,
             ) as live:
                 client.offline = not live
                 package["report"], package["evidence"] = _build_report()
@@ -2309,14 +2558,54 @@ class AnalysisFlow:
             self._conn().execute("COMMIT")
         except Exception:
             self._conn().execute("ROLLBACK"); raise
-        # #809: Multi-angle synthesis 觸發（fail-soft，不影響 report_delivery）
-        try:
-            self._maybe_trigger_synthesis(job["snapshot_id"], job["coin"])
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "multi-angle synthesis trigger failed (fail-soft) for snapshot=%s coin=%s",
-                job["snapshot_id"], job["coin"], exc_info=True,
-            )
+        if job["atomic_batch_id"]:
+            try:
+                authority = self._atomic_store()
+                authority.record_job_terminal(
+                    batch_id=job["atomic_batch_id"], mode=job["atomic_mode"],
+                    job_id=job["job_id"],
+                    owner_token=package["allocation_owner_token"],
+                    state="completed",
+                )
+                settlement = authority.settle_batch(
+                    batch_id=job["atomic_batch_id"]
+                )
+                if settlement.settled and settlement.synthesis_claimed:
+                    synthesis_owner = f"synthesis-{uuid.uuid4().hex[:24]}"
+                    synthesis_completed = False
+                    if authority.claim_synthesis(
+                        batch_id=job["atomic_batch_id"],
+                        owner_token=synthesis_owner,
+                        stale_before=int(
+                            time.time() - STALE_RUNNING_JOB_THRESHOLD_SECONDS
+                        ),
+                    ):
+                        self._maybe_trigger_synthesis(
+                            job["snapshot_id"], job["coin"]
+                        )
+                        synthesis_completed = authority.complete_synthesis(
+                            batch_id=job["atomic_batch_id"],
+                            owner_token=synthesis_owner,
+                        )
+                    if synthesis_completed:
+                        self._conn().execute(
+                            "DELETE FROM analysis_atomic_owners WHERE batch_id=?",
+                            (job["atomic_batch_id"],),
+                        )
+            except Exception as exc:
+                raise MultiAngleAuthorityError(
+                    "atomic terminal/settlement authority failed"
+                ) from exc
+        else:
+            # Legacy batches retain their local claim until atomic migration.
+            try:
+                self._maybe_trigger_synthesis(job["snapshot_id"], job["coin"])
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "multi-angle synthesis trigger failed (fail-soft) "
+                    "for snapshot=%s coin=%s",
+                    job["snapshot_id"], job["coin"], exc_info=True,
+                )
         return package
 
     def status(self) -> dict[str, Any]:
@@ -2441,6 +2730,13 @@ class AnalysisFlow:
     def requeue_dead_letter(self, job_id: str) -> bool:
         row = self._conn().execute("SELECT 1 FROM analysis_dead_letters WHERE job_id=?", (job_id,)).fetchone()
         if row is None: return False
+        atomic_terminal = self._conn().execute(
+            """SELECT 1 FROM analysis_atomic_terminal_failures
+               WHERE job_id=?""",
+            (job_id,),
+        ).fetchone()
+        if atomic_terminal is not None:
+            return False
         self._conn().execute("BEGIN IMMEDIATE")
         try:
             self._conn().execute("DELETE FROM analysis_dead_letters WHERE job_id=?", (job_id,))
