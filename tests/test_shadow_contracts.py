@@ -340,3 +340,92 @@ def test_aggregate_and_decision_reject_illegal_construction():
             action=ShadowDecisionAction.ELIGIBLE_FOR_OPERATOR_REVIEW,
             aggregate=aggregate,
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #871: intrinsic_shadow observational context field on ShadowObservation.
+# ---------------------------------------------------------------------------
+
+
+def _observation_with_intrinsic(intrinsic_shadow):
+    identity = _identity()
+    canonical_input = ShadowInput(
+        request_id="request-intrinsic",
+        coin="BTC",
+        question_type="analysis",
+        pit_epoch=1_800_000_000.0,
+        query="outlook",
+    )
+    return ShadowObservation(
+        release_identity=identity,
+        canonical_input=canonical_input,
+        input_digest=input_digest(to_dict(canonical_input)),
+        observed_at="2026-07-28T00:00:00Z",
+        status="success",
+        parity_passed=True,
+        confidence_delta=0.01,
+        trust_delta=0.01,
+        supporting_jaccard=0.9,
+        elapsed_ms=100,
+        provider_calls=0,
+        cost_usd=0,
+        claim_ids=("claim-1",),
+        intrinsic_shadow=intrinsic_shadow,
+    )
+
+
+def test_intrinsic_shadow_defaults_to_none_and_round_trips():
+    observation = _observation_with_intrinsic(None)
+    payload = to_dict(observation)
+    assert payload["intrinsic_shadow"] is None
+    assert canonical_json(payload)
+    assert observation.intrinsic_shadow is None
+
+
+def test_intrinsic_shadow_accepts_bounded_mapping_payload():
+    payload_dict = {
+        "schema_version": "1.0.0",
+        "asset_id": "asset:btc",
+        "total_delta": 0.0,
+        "gate": {"passed": False, "known_count": 0, "source_family_count": 0},
+        "dimensions": [],
+    }
+    observation = _observation_with_intrinsic(payload_dict)
+    assert observation.intrinsic_shadow == payload_dict
+    assert to_dict(observation)["intrinsic_shadow"] == payload_dict
+
+
+@pytest.mark.parametrize("hostile", [["not", "a", "dict"], "string", 42, [1, 2, 3]])
+def test_intrinsic_shadow_rejects_non_mapping(hostile):
+    with pytest.raises(ShadowContractError):
+        _observation_with_intrinsic(hostile)
+
+
+def test_intrinsic_shadow_changes_observation_digest():
+    base = _observation_with_intrinsic(None)
+    enriched = _observation_with_intrinsic({"total_delta": 0.0})
+    assert observation_digest(to_dict(base)) != observation_digest(to_dict(enriched))
+
+
+def test_intrinsic_shadow_cannot_carry_nonfinite_values():
+    with pytest.raises(ShadowContractError):
+        _observation_with_intrinsic({"total_delta": float("inf")})
+
+
+def test_intrinsic_shadow_does_not_affect_parity_or_decision_evaluation():
+    without = _observations()
+    identity = _identity()
+    with_intrinsic = []
+    for observation in without:
+        with_intrinsic.append(
+            replace(
+                observation,
+                intrinsic_shadow={"asset_id": "asset:btc", "total_delta": 0.08},
+            )
+        )
+    policy = load_policy()
+    now = "2026-07-28T00:30:00Z"
+    plain = evaluate_shadow(without, policy, now=now)
+    enriched = evaluate_shadow(with_intrinsic, policy, now=now)
+    assert plain.action == enriched.action
+    assert plain.aggregate == enriched.aggregate

@@ -6,10 +6,12 @@ the trust scorer, calibration, decision state, ranking, or market judgment.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from datetime import datetime, timedelta
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from trustforge.asset_intrinsic import (
     INTRINSIC_DIMENSION_NAMES,
@@ -20,6 +22,8 @@ from trustforge.asset_intrinsic import (
 )
 
 ASSESSMENT_SCHEMA_VERSION = "1.0.0"
+INTRINSIC_SHADOW_OBSERVATION_VERSION = "1.0.0"
+_FACTS_DOMAIN = b"trustforge.intrinsic.facts.v1\x00"
 DIMENSION_WEIGHT = 0.032
 TOTAL_DELTA_CAP = 0.08
 REQUIRED_KNOWN_DIMENSIONS = 3
@@ -266,4 +270,130 @@ def _public_provenance(dimension: IntrinsicDimension) -> dict:
         "source_coordinates": provenance.source_coordinates,
         "as_of": dimension.as_of.isoformat().replace("+00:00", "Z"),
         "fetched_at": dimension.fetched_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Issue #871: provenance sanitization + shadow observation context.
+#
+# These helpers turn one pure ``assess_intrinsic_shadow`` result into the
+# observational ``intrinsic_shadow`` payload attached to a ShadowObservation.
+# Nothing here imports or mutates trust/scoring, calibration, decision state,
+# direction, or market judgment.  Sensitive URL query strings and credentials
+# are excluded (AC4); nonfinite/malformed inputs fail closed (AC3).
+# ---------------------------------------------------------------------------
+
+
+def _sanitized_url(url: str) -> str:
+    """Return scheme://host/path with query, fragment, and userinfo stripped.
+
+    Sensitive query strings (tokens, credentials) and fragments never survive
+    into a shadow event.  Unparseable or scheme-less values collapse to an
+    empty string so the caller can drop them entirely (fail closed).
+    """
+    if not isinstance(url, str) or not url:
+        return ""
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname
+    if not scheme or not hostname:
+        return ""
+    netloc = hostname.rstrip(".").lower()
+    try:
+        rebuilt = urlunsplit((scheme, netloc, parsed.path, "", ""))
+    except ValueError:
+        return ""
+    return rebuilt
+
+
+def _sanitized_query(query: str) -> str:
+    """Return a domain-tagged SHA-256 digest of a query string.
+
+    The plaintext query is never carried into provenance; only its stable
+    identifier is retained so observations remain idempotent and comparable.
+    """
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
+    return "sha256:" + hashlib.sha256(
+        b"trustforge.intrinsic.query.v1\x00" + query.encode("utf-8")
+    ).hexdigest()
+
+
+def _finite_trust(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def build_intrinsic_shadow_observation(
+    view: AssetIntrinsicView,
+    *,
+    baseline_trust: float,
+    candidate_trust: float,
+    query: str,
+) -> dict:
+    """Build a sanitized, deterministic intrinsic shadow observation payload.
+
+    Captures baseline/candidate trust, the trust delta, the intrinsic total
+    delta, a facts hash, the as-of schema, the coverage gate (with known and
+    source-family counts), and sanitized per-dimension provenance.  Malformed
+    or nonfinite inputs raise ``ValueError`` (fail closed); the shadow runtime
+    degrades such failures to ``intrinsic_shadow=None`` so the official report
+    is never affected (AC2, AC3).
+    """
+    baseline = _finite_trust(baseline_trust, "baseline_trust")
+    candidate = _finite_trust(candidate_trust, "candidate_trust")
+    assessment = assess_intrinsic_shadow(view)
+
+    sanitized_dimensions: list[dict] = []
+    facts_material: list[dict] = []
+    for dimension in assessment["dimensions"]:
+        dimension_copy = dict(dimension)
+        provenance = dimension_copy.get("provenance")
+        sanitized_provenance: dict | None
+        if isinstance(provenance, dict):
+            sanitized_provenance = dict(provenance)
+            raw_urls = sanitized_provenance.get("source_urls")
+            if isinstance(raw_urls, list):
+                sanitized_provenance["source_urls"] = [
+                    cleaned
+                    for cleaned in (_sanitized_url(str(url)) for url in raw_urls)
+                    if cleaned
+                ]
+            dimension_copy["provenance"] = sanitized_provenance
+        else:
+            sanitized_provenance = None
+        sanitized_dimensions.append(dimension_copy)
+        facts_material.append(
+            {
+                "name": dimension_copy.get("name"),
+                "status": dimension_copy.get("status"),
+                "raw": dimension_copy.get("raw"),
+                "content_hash": (sanitized_provenance or {}).get("content_hash"),
+            }
+        )
+
+    facts_hash = "sha256:" + hashlib.sha256(
+        _FACTS_DOMAIN + json.dumps(facts_material, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    return {
+        "schema_version": INTRINSIC_SHADOW_OBSERVATION_VERSION,
+        "assessment_schema_version": assessment["schema_version"],
+        "mode": "shadow",
+        "affects_official_score": False,
+        "asset_id": assessment["asset_id"],
+        "as_of": assessment["as_of"],
+        "baseline_trust": round(baseline, 8),
+        "candidate_trust": round(candidate, 8),
+        "trust_delta": round(candidate - baseline, 8),
+        "total_delta": assessment["total_delta"],
+        "total_delta_cap": assessment["total_delta_cap"],
+        "facts_hash": facts_hash,
+        "query_hash": _sanitized_query(query),
+        "gate": assessment["gate"],
+        "dimensions": sanitized_dimensions,
     }
