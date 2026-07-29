@@ -210,3 +210,46 @@ def test_all_schema_paths_accept_real_umbrella_receipt(
     assert conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0] > 0
+
+
+@pytest.mark.parametrize(
+    ("repository_class", "connects_schema"),
+    [
+        (memory_os.MemoryRepository, False),
+        (skill_registry.SkillRegistryRepository, False),
+        (tool_registry.ToolRegistryRepository, False),
+        (context_builder.ContextBuilder, True),
+    ],
+)
+def test_fresh_repository_connect_accepts_real_umbrella_receipt(
+    repository_class: object,
+    connects_schema: bool,
+    tmp_path: Path,
+) -> None:
+    """Fresh repository files use the same real umbrella authorization."""
+    receipt = tmp_path / (
+        f"eric-auth-{datetime.now(timezone.utc).strftime('%Y%m%d')}-"
+        "trustforge-agos-schema-closeout.token"
+    )
+    receipt.touch()
+    db_path = tmp_path / f"{repository_class.__name__}.db"  # type: ignore[attr-defined]
+
+    with (
+        patch("trustforge.agos_db_auth._token_path", return_value=receipt),
+        patch(
+            "trustforge.agos_db_auth.verify_db_authorization",
+            wraps=verify_db_authorization,
+        ) as authorize,
+    ):
+        repository = repository_class(db_path=db_path)  # type: ignore[operator]
+        if connects_schema:
+            repository._connect()
+        else:
+            repository.ensure_schema()
+        repository.close()
+
+    assert db_path.is_file()
+    assert authorize.call_count >= 1
+    assert {
+        call.args for call in authorize.call_args_list
+    } == {(AGOS_SCHEMA_AUTH_PURPOSE,)}

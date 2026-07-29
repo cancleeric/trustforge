@@ -255,8 +255,11 @@ class MemoryRepository:
         if self._conn is None:
             # Auth gate: if DB file does NOT exist, this is a creation → require auth
             if not self._db_path.exists():
-                from .agos_db_auth import verify_db_authorization
-                verify_db_authorization("memory_os")
+                from .agos_db_auth import (
+                    AGOS_SCHEMA_AUTH_PURPOSE,
+                    verify_db_authorization,
+                )
+                verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(self._db_path))
             self._conn.execute("PRAGMA journal_mode=WAL")
