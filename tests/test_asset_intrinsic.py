@@ -39,10 +39,10 @@ def raw_records() -> list[dict]:
     return value
 
 
-def test_fixture_has_btc_and_bnb_without_symbol_field_or_unsupported_claims() -> None:
+def test_fixture_has_btc_and_bnb_and_eth_without_symbol_field_or_unsupported_claims() -> None:
     records = load_asset_intrinsic_records(FIXTURE)
 
-    assert {record.profile.asset_id for record in records} == {"asset:btc", "asset:bnb"}
+    assert {record.profile.asset_id for record in records} == {"asset:btc", "asset:bnb", "asset:eth"}
     serialized = FIXTURE.read_text(encoding="utf-8").lower()
     assert "wall street" not in serialized
     assert "lost coin" not in serialized
@@ -194,6 +194,7 @@ def test_pit_view_omits_stale_conflicted_expired_and_future_dimensions() -> None
     dimensions[0]["status"] = "stale"
     dimensions[0]["value"] = None
     dimensions[1]["status"] = "conflicted"
+    dimensions[1]["value"] = None
     dimensions[2]["valid_until"] = "2026-07-28T00:00:00Z"
     dimensions[3]["as_of"] = "2026-08-02T00:00:00Z"
     dimensions[3]["fetched_at"] = "2026-08-02T00:00:00Z"
@@ -305,16 +306,45 @@ def test_known_btc_evidence_is_exact_pinned_upstream_bytes() -> None:
     btc = next(record for record in records if record.profile.asset_id == "asset:btc")
     known = [dimension for dimension in btc.profile.dimensions if dimension.status.value == "known"]
 
-    assert len(known) == 2
+    assert len(known) == 4
     for dimension in known:
         provenance = dimension.provenance
         assert provenance.evidence_kind == "upstream_excerpt"
         assert "d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in provenance.source_revision
-        assert all("d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in url for url in provenance.source_urls)
         assert "lines " in provenance.source_coordinates
-    issuance = Path(__file__).parents[1] / known[0].provenance.evidence_path
+    # Issuance and supply are pinned single-revision excerpts of Bitcoin Core.
+    pinned = [
+        dimension
+        for dimension in known
+        if dimension.name
+        in (IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, IntrinsicDimensionName.SUPPLY_VERIFIABILITY)
+    ]
+    assert len(pinned) == 2
+    for dimension in pinned:
+        assert all(
+            "d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in url
+            for url in dimension.provenance.source_urls
+        )
+    issuance = Path(__file__).parents[1] / pinned[0].provenance.evidence_path
     assert issuance.read_text(encoding="utf-8").startswith("CAmount GetBlockSubsidy(")
     assert "observation:" not in issuance.read_text(encoding="utf-8")
+    # Control and governance span at least two independent source hosts so that
+    # documentation statements are never the sole entity-control proof.
+    multi_host = [
+        dimension
+        for dimension in known
+        if dimension.name
+        in (IntrinsicDimensionName.CONTROL_DISPERSION, IntrinsicDimensionName.GOVERNANCE_CAPTURE_RESISTANCE)
+    ]
+    assert len(multi_host) == 2
+    for dimension in multi_host:
+        families = {
+            url.split("://", 1)[1].split("/", 1)[0]
+            for url in dimension.provenance.source_urls
+        }
+        assert len(families) >= 2
+        evidence_path = Path(__file__).parents[1] / dimension.provenance.evidence_path
+        assert "observation:" not in evidence_path.read_text(encoding="utf-8")
 
 
 def test_loader_rejects_oversized_records_before_json_decode(tmp_path: Path) -> None:
@@ -491,3 +521,125 @@ def test_load_rejects_non_array_or_non_object(tmp_path: Path) -> None:
     scalar_file.write_text("[1]", encoding="utf-8")
     with pytest.raises(ValueError, match="must be an object"):
         load_asset_intrinsic_records(scalar_file)
+
+
+# ---- PEP & Builder tests (issue #873) ----
+
+PEP_ETH_DIR = Path(__file__).parents[1] / "data" / "asset_intrinsic_evidence" / "pep" / "asset:eth"
+BUILDER_SCRIPT = Path(__file__).parents[1] / "scripts" / "build_issuance_supply_records.py"
+
+
+def test_pep_manifest_schema_is_versioned_and_reject_unknown_protocol_family(tmp_path: Path) -> None:
+    bad_manifest = {
+        "manifest_version": "1.0.0",
+        "asset_id": "asset:test",
+        "protocol_family": "unknown_protocol_xyz",
+        "source_revision": "test:v1",
+        "source_urls": ["https://example.com/source"],
+        "source_coordinates": "test coords",
+        "evidence_files": {"test.txt": "a" * 64},
+        "methodology": "test",
+        "coverage": "test",
+        "valid_from": "2026-07-29T00:00:00Z",
+        "valid_until": None,
+        "dimensions": {},
+    }
+    pep_dir = tmp_path / "asset:test"
+    pep_dir.mkdir()
+    manifest_path = pep_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(bad_manifest), encoding="utf-8")
+    (pep_dir / "evidence").mkdir()
+    (pep_dir / "evidence" / "test.txt").write_text("test", encoding="utf-8")
+
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+    result = subprocess.run(
+        [sys.executable, str(BUILDER_SCRIPT), str(pep_dir)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "unknown protocol_family" in result.stderr
+
+
+def test_builder_rejects_tampered_evidence_and_wrong_hash(tmp_path: Path) -> None:
+    manifest = json.loads((PEP_ETH_DIR / "manifest.json").read_text())
+    pep_dir = tmp_path / "asset:eth"
+    pep_dir.mkdir()
+    (pep_dir / "evidence").mkdir()
+    (pep_dir / "evidence" / "eth-issuance-pos.txt").write_text("tampered content")
+    manifest["evidence_files"]["eth-issuance-pos.txt"] = "a" * 64
+    (pep_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+    result = subprocess.run(
+        [sys.executable, str(BUILDER_SCRIPT), str(pep_dir)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "fingerprint mismatch" in result.stderr
+
+
+def test_builder_emits_exact_record_keys_and_sorted_json() -> None:
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+    result = subprocess.run(
+        [sys.executable, str(BUILDER_SCRIPT), str(PEP_ETH_DIR)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    profile = json.loads(result.stdout)
+    # Top-level keys must be sorted
+    assert list(profile.keys()) == ["asset_id", "dimensions", "schema_version"]
+    # Each dimension must have exact expected keys in sorted order
+    expected_dim_keys = [
+        "as_of", "fetched_at", "name", "provenance",
+        "status", "valid_from", "valid_until", "value",
+    ]
+    for dim in profile["dimensions"]:
+        assert list(dim.keys()) == expected_dim_keys
+    # schema_version is fixed
+    assert profile["schema_version"] == "1.0.0"
+
+
+def test_second_protocol_fixture_is_offline_and_hash_verified() -> None:
+    records = load_asset_intrinsic_records(FIXTURE)
+    eth = next(record for record in records if record.profile.asset_id == "asset:eth")
+    known = [dimension for dimension in eth.profile.dimensions if dimension.status.value == "known"]
+
+    assert len(known) == 2
+    for dimension in known:
+        provenance = dimension.provenance
+        assert provenance.evidence_kind == "upstream_excerpt"
+        assert "ethereum" in provenance.source_revision.lower()
+        assert all("https://" in url for url in provenance.source_urls)
+        # Verify evidence file hash matches
+        evidence_path = Path(__file__).parents[1] / provenance.evidence_path
+        assert evidence_path.is_file()
+        import hashlib
+        actual_hash = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        assert actual_hash == provenance.content_hash
+
+
+def test_second_protocol_is_different_family_from_btc() -> None:
+    records = load_asset_intrinsic_records(FIXTURE)
+    btc = next(record for record in records if record.profile.asset_id == "asset:btc")
+    eth = next(record for record in records if record.profile.asset_id == "asset:eth")
+
+    # BTC evidence is from bitcoin/bitcoin (pow source code)
+    # ETH evidence is from ethereum/consensus-specs (pos consensus spec)
+    btc_source = btc.profile.dimensions[0].provenance.source_revision
+    eth_source = eth.profile.dimensions[0].provenance.source_revision
+
+    assert "bitcoin" in btc_source.lower() or "btc" in btc_source.lower()
+    assert "ethereum" in eth_source.lower() or "eth" in eth_source.lower()
+    assert btc_source != eth_source

@@ -448,4 +448,16 @@ describe('N80 窄螢幕頂欄不得把語言切換鈕擠出視窗', () => {
   it('膠囊收字之後名字改掛 aria-label，不能只剩兩個數字', () => {
     expect(bar).toContain("aria-label={t('telemetry')}")
   })
+
+  it('N82：FPS/畫質 HUD 必須藏在 ?fps=1 後面，不常駐在使用者畫面上', () => {
+    const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
+
+    // 它是 position:fixed / z-index 9999 的左下角浮層，常駐時會壓在能量列的
+    // 站點編號上（430x932 實測「60 FPS」壓「01」12x12px），而且「60 FPS · HIGH」
+    // 是給我們自己看的效能數字，不是使用者要的資訊。
+    expect(dashboard).toContain("searchParams.get('fps') === '1' && <FpsMeter")
+    // 不能改用 qaMode 當開關：探針帶著 ?qa=1 進來，那等於完全沒關。
+    expect(dashboard).not.toMatch(/qaMode\s*&&\s*<FpsMeter/)
+  })
+
 })

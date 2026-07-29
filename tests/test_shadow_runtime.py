@@ -681,3 +681,130 @@ def test_candidate_success_cannot_change_active_report_or_evidence(monkeypatch, 
     assert [asdict(item) for item in shadow_evidence] == [
         asdict(item) for item in baseline_evidence
     ]
+
+
+# ---------------------------------------------------------------------------
+# Issue #871: intrinsic_shadow capture in the observation worker.
+# ---------------------------------------------------------------------------
+
+
+def _known_intrinsic_view(coin, pit_epoch):
+    """Module-resolvable view with a sensitive query string to prove sanitization."""
+    from trustforge.asset_intrinsic import (
+        AssetIntrinsicView,
+        IntrinsicDimension,
+        IntrinsicDimensionName,
+        IntrinsicFactStatus,
+        IntrinsicProvenance,
+    )
+
+    as_of = datetime.fromtimestamp(pit_epoch, tz=timezone.utc)
+    provenance = IntrinsicProvenance(
+        source_urls=("https://a.example/source?token=secret", "https://b.example/x#frag"),
+        methodology="test methodology",
+        content_hash="a" * 64,
+        coverage="test coverage",
+        evidence_path="data/asset_intrinsic_evidence/btc-issuance-v30.txt",
+        source_revision="test-revision",
+        evidence_kind="upstream_excerpt",
+        source_coordinates="test coordinates",
+    )
+    dimensions = tuple(
+        IntrinsicDimension(
+            name=name,
+            status=IntrinsicFactStatus.KNOWN,
+            value=1.0,
+            as_of=as_of,
+            valid_from=as_of,
+            valid_until=None,
+            fetched_at=as_of,
+            provenance=provenance,
+        )
+        for name in (
+            IntrinsicDimensionName.ISSUANCE_PREDICTABILITY,
+            IntrinsicDimensionName.CONTROL_DISPERSION,
+            IntrinsicDimensionName.SUPPLY_VERIFIABILITY,
+        )
+    )
+    return AssetIntrinsicView(asset_id="asset:btc", as_of=as_of, dimensions=dimensions)
+
+
+def _broken_intrinsic_view(coin, pit_epoch):
+    raise ValueError("malformed intrinsic input")
+
+
+def _latest_observation_payload(path):
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT payload FROM observations ORDER BY recorded_at DESC, event_id DESC LIMIT 1"
+        ).fetchone()
+        return json.loads(bytes(row[0]))
+    finally:
+        connection.close()
+
+
+def test_intrinsic_shadow_flag_off_leaves_observation_without_intrinsic(
+    monkeypatch, tmp_path,
+):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
+    monkeypatch.delenv("TRUSTFORGE_SHADOW_INTRINSIC_ENABLED", raising=False)
+
+    result = _observe(
+        request_id="hermes-intrinsic-off", intrinsic_view_fn=_known_intrinsic_view,
+    )
+    assert result.status == "success"
+    payload = _latest_observation_payload(path)
+    assert payload["intrinsic_shadow"] is None
+
+
+def test_intrinsic_shadow_flag_on_records_sanitized_context(
+    monkeypatch, tmp_path,
+):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
+    monkeypatch.setenv("TRUSTFORGE_SHADOW_INTRINSIC_ENABLED", "1")
+
+    result = _observe(
+        request_id="hermes-intrinsic-on", intrinsic_view_fn=_known_intrinsic_view,
+    )
+    assert result.status == "success"
+    payload = _latest_observation_payload(path)
+    intrinsic = payload["intrinsic_shadow"]
+    assert isinstance(intrinsic, dict)
+    assert intrinsic["affects_official_score"] is False
+    assert intrinsic["asset_id"] == "asset:btc"
+    assert intrinsic["facts_hash"].startswith("sha256:")
+    assert intrinsic["query_hash"].startswith("sha256:")
+    serialized = json.dumps(intrinsic)
+    assert "token=secret" not in serialized
+    assert "#frag" not in serialized
+    assert "BTC" not in serialized.split('"query_hash"')[0]
+    for dimension_payload in intrinsic["dimensions"]:
+        provenance = dimension_payload.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        for url in provenance.get("source_urls", []):
+            assert "?" not in url and "#" not in url
+    # AC2: official fields are unchanged by intrinsic context presence.
+    assert payload["confidence_delta"] == result.parity.delta_confidence
+    assert payload["trust_delta"] == result.parity.delta_trust
+
+
+def test_intrinsic_shadow_failure_degrades_to_none_and_keeps_observation(
+    monkeypatch, tmp_path,
+):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
+    monkeypatch.setenv("TRUSTFORGE_SHADOW_INTRINSIC_ENABLED", "1")
+
+    result = _observe(
+        request_id="hermes-intrinsic-broken", intrinsic_view_fn=_broken_intrinsic_view,
+    )
+    assert result.status == "success"
+    payload = _latest_observation_payload(path)
+    assert payload["intrinsic_shadow"] is None

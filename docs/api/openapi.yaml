@@ -163,6 +163,54 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/shadow/dashboard:
+    get:
+      tags: [shadow]
+      operationId: getShadowDashboard
+      summary: Shadow 觀測聚合儀表板（唯讀，不改動 official report）
+      description: |
+        Issue #871：覆蓋率／missing／stale／conflict／delta 分佈，全部由
+        append-only SQLite ledger 讀出。Shadow 觀測永不改變 official
+        confidence、calibrated confidence、decision state、direction 或
+        market judgment。Flag OFF 或證據庫未設定時 fail-closed 回
+        `enabled=false` 空報告（AC6：不寫入、無行為差異）。
+      responses:
+        "200":
+          description: 唯讀聚合報告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  report_version: trustforge.shadow-dashboard/v1
+                  read_only: true
+                  enabled: false
+                  reason: identity_policy_or_attestation_invalid
+                  coverage:
+                    observation_count: 0
+                    coin_count: 0
+                    question_type_count: 0
+                  missing:
+                    observations_without_intrinsic_shadow: 0
+                    fraction: 0.0
+                  stale:
+                    approaching_expiry: 0
+                  conflict:
+                    parity_failed: 0
+                    intrinsic_gate_failed: 0
+                    fraction: 0.0
+                  deltas:
+                    trust_delta:
+                      count: 0
+                      min: null
+                      p50: null
+                      p95: null
+                      max: null
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/agentcore/status:
     get:
       tags: [observability]

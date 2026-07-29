@@ -293,6 +293,44 @@ def test_api_health_matches_documented_shape():
     )
 
 
+def test_api_shadow_dashboard_matches_documented_shape(monkeypatch):
+    # Issue #871: read-only, fail-closed when no shadow ledger is configured.
+    monkeypatch.delenv("TRUSTFORGE_SHADOW_DB_PATH", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_SHADOW_DEDICATED_RUNTIME", raising=False)
+    code, body = web._handle_api_shadow_dashboard()
+    assert code == 200
+    envelope = json.loads(body)
+    assert envelope["ok"] is True
+    data = envelope["data"]
+    _assert_shape(
+        data,
+        {
+            "report_version": str,
+            "read_only": bool,
+            "enabled": bool,
+            "coverage": dict,
+            "missing": dict,
+            "stale": dict,
+            "conflict": dict,
+            "deltas": dict,
+        },
+        context="/api/shadow/dashboard",
+    )
+    assert data["read_only"] is True
+    assert data["enabled"] is False
+    assert data["deltas"]["trust_delta"]["count"] == 0
+
+
+def test_do_get_dashboard_shadow_page_returns_200_html(monkeypatch):
+    monkeypatch.delenv("TRUSTFORGE_SHADOW_DB_PATH", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_SHADOW_DEDICATED_RUNTIME", raising=False)
+    code, body, headers = _do_get("/dashboard-shadow")
+    assert code == 200
+    assert headers["Content-Type"] == "text/html; charset=utf-8"
+    assert "Shadow 觀測儀表板" in body
+    assert "AC6" in body or "Flag OFF" in body
+
+
 def test_api_status_matches_documented_shape(json_cache_backend):
     code, body = web._handle_api_status(client_ip="10.9.9.2")
     assert code == 200

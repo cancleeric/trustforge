@@ -229,7 +229,7 @@ def _asset_intrinsic_assessment_schema_properties() -> dict[str, Any]:
         ],
         "properties": {
             "name": {"enum": list(INTRINSIC_DIMENSION_NAMES)},
-            "status": {"enum": ["known", "unknown"]},
+            "status": {"enum": ["known", "unknown", "stale", "conflicted"]},
             "raw": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
             "normalized": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
             "weight": {"type": "number", "minimum": 0},
@@ -240,7 +240,7 @@ def _asset_intrinsic_assessment_schema_properties() -> dict[str, Any]:
             "reason_code": {
                 "enum": [
                     "eligible", "coverage_gate_not_met", "fact_unknown",
-                    "fact_unavailable",
+                    "fact_unavailable", "fact_conflicted", "stale",
                 ]
             },
             "coverage": {"type": "string", "minLength": 1},
@@ -248,7 +248,7 @@ def _asset_intrinsic_assessment_schema_properties() -> dict[str, Any]:
         },
         "allOf": [
             {
-                "if": {"properties": {"status": {"const": "unknown"}}},
+                "if": {"properties": {"status": {"enum": ["unknown", "stale", "conflicted"]}}},
                 "then": {
                     "properties": {
                         "raw": {"type": "null"},
@@ -271,7 +271,8 @@ def _asset_intrinsic_assessment_schema_properties() -> dict[str, Any]:
         "type": "object",
         "required": [
             "schema_version", "mode", "affects_official_score", "asset_id",
-            "as_of", "total_delta", "total_delta_cap", "gate", "dimensions",
+            "as_of", "total_delta", "total_delta_cap", "conflict_detected",
+            "gate", "dimensions",
         ],
         "properties": {
             "schema_version": {"const": ASSESSMENT_SCHEMA_VERSION},
@@ -284,6 +285,7 @@ def _asset_intrinsic_assessment_schema_properties() -> dict[str, Any]:
                 "maximum": TOTAL_DELTA_CAP,
             },
             "total_delta_cap": {"const": TOTAL_DELTA_CAP},
+            "conflict_detected": {"type": "boolean"},
             "gate": {
                 "type": "object",
                 "required": [

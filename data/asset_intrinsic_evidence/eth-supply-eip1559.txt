@@ -1,0 +1,12 @@
+    # EIP-1559 base fee per gas: burned in every block, removing ETH from
+    # circulating supply.  The effective_gas_price formula ensures that the
+    # base fee portion of every transaction fee is permanently destroyed.
+    # Verification: any full archival node can recompute cumulative burn
+    # from block headers alone.
+    base_fee_per_gas = header.base_fee_per_gas
+    gas_used = header.gas_used
+    effective_gas_price = min(
+        tx.max_priority_fee_per_gas + base_fee_per_gas,
+        tx.max_fee_per_gas,
+    )
+    burned_wei = base_fee_per_gas * gas_used

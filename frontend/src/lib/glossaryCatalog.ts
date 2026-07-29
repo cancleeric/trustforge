@@ -29,6 +29,21 @@ export type GlossaryTermId =
   | 'lineage'
   | 'weight'
 
+/**
+ * #847：新手模式的短版白話文，滑過去就看得到。
+ *
+ * 刻意跟 `description` 分開存，不是覆寫它——這兩份文字給的是不同的人：
+ *   - `description`：正式定義，出現在點開的名詞解釋卡與說明中心，**比賽方看的
+ *     報告用的就是這一份**，措辭不能因為新手模式而改變。
+ *   - `tooltip`：一句白話，只在新手模式滑過詞時浮出來，給一般使用者降低門檻。
+ * 兩者同時存在，誰也不取代誰；關掉新手模式時報告與現在一字不差。
+ *
+ * 一定要雙語。詞庫其他欄位是單一字串（有些條目本來就是英文），沒有語系維度，
+ * 如果 tooltip 也寫死中文，`locale=en` 的使用者會滑出一排中文——這正是既有
+ * 英文版殘留中文那類問題再擴大一次。所以這個欄位從第一天就帶語系。
+ */
+export type GlossaryTooltip = { 'zh-TW': string; en: string }
+
 export type GlossaryCatalogTerm = {
   term_id: GlossaryTermId
   label: string
@@ -37,6 +52,8 @@ export type GlossaryCatalogTerm = {
   audiences: GlossaryAudience[]
   where?: string
   riskNote?: string
+  /** #847：新手模式短版白話文（≤15 字）。見 GlossaryTooltip 的說明。 */
+  tooltip?: GlossaryTooltip
 }
 
 const canonicalKey = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
@@ -124,6 +141,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'trustScore',
     label: '信任分數',
     description: '綜合來源信譽、交叉佐證、資料時效與抗操縱能力的可信程度；不是價格漲跌機率。',
+    tooltip: { 'zh-TW': '這條消息多可信，不是預測漲跌', en: 'How trustworthy this claim is — not a price call' },
     aliases: ['Trust Score'],
     audiences: ['popover', 'help_center'],
     where: '分析結果 · 執行台 · 歷史趨勢',
@@ -132,6 +150,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'completeness',
     label: '資訊完整度',
     description: '本次可用資料是否足以支持判讀。完整度低代表證據不足，不代表風險較低。',
+    tooltip: { 'zh-TW': '這次分析的資料夠不夠', en: 'Whether we had enough data this time' },
     aliases: [],
     audiences: ['popover'],
   },
@@ -139,6 +158,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'reputation',
     label: '來源信譽',
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表來源過去可靠度與交叉核對後表現。',
+    tooltip: { 'zh-TW': '這個來源過去靠不靠譜', en: 'How reliable this source has been' },
     aliases: [],
     audiences: ['popover'],
   },
@@ -146,6 +166,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'corroboration',
     label: '交叉佐證',
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表有多少彼此獨立來源支持同一說法。',
+    tooltip: { 'zh-TW': '有幾個不相關的來源也這樣說', en: 'How many independent sources agree' },
     aliases: [],
     audiences: ['popover'],
   },
@@ -153,6 +174,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'recency',
     label: '資料時效',
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表資料距離現在有多久。',
+    tooltip: { 'zh-TW': '資料多新，越舊分越低', en: 'How recent the data is — older scores lower' },
     aliases: [],
     audiences: ['popover', 'help_center'],
     where: '分析結果 · freshness',
@@ -161,6 +183,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'manipulation',
     label: '抗操縱能力',
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表資料抵抗喊單、誇大承諾與協同行為的程度。',
+    tooltip: { 'zh-TW': '有沒有被灌水或帶風向', en: 'Whether the data looks pumped or astroturfed' },
     aliases: [],
     audiences: ['popover'],
   },
@@ -204,6 +227,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'multiSource',
     label: 'multi_source 模式',
     description: '同時比對多個交易所與資料源，交叉驗證後才給分，比單一來源更難被造假。',
+    tooltip: { 'zh-TW': '同時看多個來源，不只看一家', en: 'Checks many sources, not just one' },
     aliases: ['Multi-source'],
     audiences: ['popover', 'help_center'],
     where: '分析結果 · 執行台 · 成本',
@@ -212,6 +236,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'freshness',
     label: 'Freshness',
     description: '資料新鮮度。TrustForge 會標出抓取時間與 stale 狀態，避免把舊資料當成即時訊號。',
+    tooltip: { 'zh-TW': '資料抓回來多久了', en: 'How long ago the data was fetched' },
     aliases: ['新鮮度'],
     audiences: ['popover', 'help_center'],
     where: '分析結果 · 來源',
@@ -270,6 +295,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'weight',
     label: '權重',
     description: '不同訊號在綜合分數中的相對影響程度。',
+    tooltip: { 'zh-TW': '各評分項目的重要程度比例', en: 'How much each factor counts toward the score' },
     aliases: [],
     audiences: ['popover'],
   },

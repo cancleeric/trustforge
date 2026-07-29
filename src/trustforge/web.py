@@ -1951,6 +1951,137 @@ def _render_costs_page() -> str:
 """
 
 
+def _shadow_dashboard_value(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return html.escape(str(value))
+
+
+def _shadow_dashboard_dist_row(label: str, dist: dict) -> str:
+    e = html.escape
+    return (
+        f"<tr><td>{e(label)}</td><td>{dist.get('count', 0)}</td>"
+        f"<td>{_shadow_dashboard_value(dist.get('min'))}</td>"
+        f"<td>{_shadow_dashboard_value(dist.get('p50'))}</td>"
+        f"<td>{_shadow_dashboard_value(dist.get('p95'))}</td>"
+        f"<td>{_shadow_dashboard_value(dist.get('max'))}</td></tr>"
+    )
+
+
+def _render_shadow_dashboard_page() -> str:
+    """`/dashboard-shadow`（issue #871）：唯讀 shadow 觀測聚合儀表板。
+
+    純 SSR 渲染 `build_shadow_dashboard_report()` 結果——覆蓋率／missing／
+    stale／conflict／delta 分佈。不寫入、不影響 official report；flag OFF
+    或 store 未設定時顯示 fail-closed 空狀態。
+    """
+    from .agent.shadow_dashboard import build_shadow_dashboard_report
+
+    e = html.escape
+    report = build_shadow_dashboard_report()
+    coverage = report.get("coverage", {})
+    missing = report.get("missing", {})
+    stale = report.get("stale", {})
+    conflict = report.get("conflict", {})
+    deltas = report.get("deltas", {})
+    flags = report.get("runtime_flags", {})
+
+    if not report.get("enabled"):
+        return f"""
+<div class="tf-section" style="border-color:#8957e5;background:rgba(137,87,229,.08)">
+  <h2 style="margin:0 0 .3rem">Shadow 觀測儀表板</h2>
+  <p style="color:var(--tf-muted)">shadow 觀測目前未啟用或證據庫不可用
+  （{_shadow_dashboard_value(report.get('reason'))}）。</p>
+  <p style="color:var(--tf-muted);font-size:.85rem">
+    runtime={_shadow_dashboard_value(flags.get('runtime_enabled'))} ·
+    observe={_shadow_dashboard_value(flags.get('observe_enabled'))} ·
+    intrinsic={_shadow_dashboard_value(flags.get('intrinsic_enabled'))}
+  </p>
+  <p style="color:var(--tf-muted);font-size:.85rem">
+    Flag OFF 時不寫入、不改變任何 official 行為（AC6）。
+  </p>
+</div>
+"""
+
+    cells = coverage.get("scenario_cells", {}) or {}
+    cell_rows = "".join(
+        f"<tr><td>{e(str(k))}</td><td>{int(v)}</td></tr>"
+        for k, v in sorted(cells.items())
+    ) or '<tr><td colspan="2">&#8212;</td></tr>'
+
+    dist_rows = "".join(
+        _shadow_dashboard_dist_row(label, deltas.get(key, {}))
+        for label, key in (
+            ("trust_delta", "trust_delta"),
+            ("confidence_delta", "confidence_delta"),
+            ("intrinsic_total_delta", "intrinsic_total_delta"),
+            ("intrinsic_trust_delta", "intrinsic_trust_delta"),
+        )
+    )
+
+    return f"""
+<div class="tf-section" style="border-color:#8957e5;background:rgba(137,87,229,.08)">
+  <h2 style="margin:0 0 .3rem">Shadow 觀測儀表板</h2>
+  <p style="color:var(--tf-muted);font-size:.85rem">
+    唯讀聚合（append-only ledger）· evaluated_at {e(str(report.get('evaluated_at')))} ·
+    runtime={_shadow_dashboard_value(flags.get('runtime_enabled'))} ·
+    observe={_shadow_dashboard_value(flags.get('observe_enabled'))} ·
+    intrinsic={_shadow_dashboard_value(flags.get('intrinsic_enabled'))}
+  </p>
+</div>
+
+<div class="tf-section">
+  <h3>覆蓋率（coverage）</h3>
+  <table>
+    <tr><th>觀測數</th><th>幣種數</th><th>題型數</th><th>每格最小觀測</th></tr>
+    <tr>
+      <td>{int(coverage.get('observation_count', 0))}</td>
+      <td>{int(coverage.get('coin_count', 0))}</td>
+      <td>{int(coverage.get('question_type_count', 0))}</td>
+      <td>{int(coverage.get('minimum_per_cell', 0))}</td>
+    </tr>
+  </table>
+  <table style="margin-top:.6rem">
+    <tr><th>情境格（coin／題型）</th><th>觀測數</th></tr>
+    {cell_rows}
+  </table>
+</div>
+
+<div class="tf-section">
+  <h3>missing · stale · conflict</h3>
+  <table>
+    <tr><th>指標</th><th>數值</th></tr>
+    <tr><td>缺 intrinsic_shadow 的觀測</td>
+        <td>{int(missing.get('observations_without_intrinsic_shadow', 0))}
+        （{_shadow_dashboard_value(missing.get('fraction'))}）</td></tr>
+    <tr><td>逼近 window 過期的觀測</td>
+        <td>{int(stale.get('approaching_expiry', 0))}
+        （window {e(str(stale.get('window_hours')))}h，
+        max age {_shadow_dashboard_value(stale.get('max_age_hours'))}h）</td></tr>
+    <tr><td>parity 失敗</td><td>{int(conflict.get('parity_failed', 0))}</td></tr>
+    <tr><td>intrinsic gate 未過</td><td>{int(conflict.get('intrinsic_gate_failed', 0))}</td></tr>
+    <tr><td>conflict 合計（fraction）</td>
+        <td>{int(conflict.get('total', 0))}
+        （{_shadow_dashboard_value(conflict.get('fraction'))}）</td></tr>
+  </table>
+</div>
+
+<div class="tf-section">
+  <h3>Delta 分佈</h3>
+  <p style="color:var(--tf-muted);font-size:.85rem">
+    min／p50／p95／max（count 為納入觀測數）。</p>
+  <table>
+    <tr><th>指標</th><th>count</th><th>min</th><th>p50</th><th>p95</th><th>max</th></tr>
+    {dist_rows or '<tr><td colspan="6">&#8212;</td></tr>'}
+  </table>
+</div>
+"""
+
+
 def _hero_analyze_href() -> str:
     """首頁 hero「立即開始分析」CTA 連結：真的觸發一次 `/analyze` 真資料
     分析（`_is_real_request()` 預設檔位——未帶 `sample`/`live` 即走真連接器
@@ -7327,6 +7458,24 @@ def _handle_api_health() -> tuple[int, str]:
         return 502, _json_envelope_err("upstream_error", "健康檢查暫時無法讀取，請稍後再試")
 
 
+def _handle_api_shadow_dashboard() -> tuple[int, str]:
+    """`GET /api/shadow/dashboard`（issue #871）：唯讀 shadow 觀測聚合指標。
+
+    覆蓋率／missing／stale／conflict／delta 分佈，全部由 append-only SQLite
+    ledger 讀出，不寫入、不改動 official report。Flag OFF 或 store 未設定時
+    fail-closed 回空報告（`enabled=false`），不影響任何 pipeline 行為。
+    """
+    try:
+        from .agent.shadow_dashboard import build_shadow_dashboard_report
+
+        return 200, _json_envelope_ok(build_shadow_dashboard_report())
+    except Exception:
+        logging.exception("TrustForge /api/shadow/dashboard error")
+        return 502, _json_envelope_err(
+            "upstream_error", "shadow dashboard 暫時無法讀取，請稍後再試"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Module Runtime Telemetry API（issue #382）
 # ---------------------------------------------------------------------------
@@ -8265,6 +8414,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/health":
             code, body = _handle_api_health()
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/shadow/dashboard":
+            code, body = _handle_api_shadow_dashboard()
+            return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/agentcore/status":
             code, body = _handle_api_agentcore_status()
             return self._send(code, body, "application/json; charset=utf-8")
@@ -8397,6 +8549,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         if u.path == "/costs":
             return self._send(200, page(_render_costs_page()))
+        if u.path == "/dashboard-shadow":
+            return self._send(200, page(_render_shadow_dashboard_page()))
         if u.path == "/status":
             code, body = _handle_status(client_ip)
             return self._send(code, body)

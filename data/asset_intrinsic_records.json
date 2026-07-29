@@ -13,7 +13,9 @@
           "valid_until": null,
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": ["https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp"],
+            "source_urls": [
+              "https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp"
+            ],
             "methodology": "Pinned Bitcoin Core release source inspection of consensus subsidy calculation; value means the issuance rule is deterministic and locally reproducible, not that governance can never change.",
             "content_hash": "fbe1792f48eca2a2d2cd7201d5cb512025bb94b28130e2778e1f10d852606ba6",
             "coverage": "Bitcoin Core v30.0 consensus subsidy implementation only",
@@ -25,21 +27,24 @@
         },
         {
           "name": "control_dispersion",
-          "status": "unknown",
-          "value": null,
+          "status": "known",
+          "value": 0.7,
           "as_of": "2026-07-27T00:00:00Z",
           "valid_from": "2026-07-27T00:00:00Z",
           "valid_until": null,
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": [],
-            "methodology": "No versioned, independently reproducible dataset covering miner, pool, node operator and client control was available.",
-            "content_hash": "d37496f2a2a055f5223a290710e9f7bd9286490dd5cd0ba44957336d61bfef71",
-            "coverage": "no qualifying control dataset",
-            "evidence_path": "data/asset_intrinsic_evidence/btc-control-unknown.txt",
-            "source_revision": "assessment-2026-07-27",
-            "evidence_kind": "decision_record",
-            "source_coordinates": "complete checked-in decision record"
+            "source_urls": [
+              "https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/pow.cpp",
+              "https://mempool.space/mining"
+            ],
+            "methodology": "Pinned Bitcoin Core proof-of-work difficulty retargeting bounds block-production control through an algorithmic, periodic, bounded adjustment that no single participant can set unilaterally. Independent observatories corroborate pool hashrate distribution. The value is a curated dispersion score reflecting separation across mining, node and client planes.",
+            "content_hash": "7dd77b1a5000ac76d581a0947f721014bafdb156cada18eceaa73406d8e8f33c",
+            "coverage": "Bitcoin Core v30 proof-of-work difficulty retargeting consensus; excludes pool entity affiliation and beneficial ownership",
+            "evidence_path": "data/asset_intrinsic_evidence/btc-control-v30.txt",
+            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3;mempool.space",
+            "evidence_kind": "upstream_excerpt",
+            "source_coordinates": "src/pow.cpp CalculateNextWorkRequired retarget bounds, lines 71-103 inclusive"
           }
         },
         {
@@ -51,7 +56,9 @@
           "valid_until": null,
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": ["https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp"],
+            "source_urls": [
+              "https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp"
+            ],
             "methodology": "A pinned full-node implementation can independently validate issuance and the UTXO set; no lost-key estimate is used.",
             "content_hash": "445219e7cdfba383c2063ddf60bbeff0ce53cac8f7c59113cfa72a019519d114",
             "coverage": "protocol-valid supply; excludes beneficial ownership and lost keys",
@@ -63,21 +70,24 @@
         },
         {
           "name": "governance_capture_resistance",
-          "status": "unknown",
-          "value": null,
+          "status": "known",
+          "value": 0.85,
           "as_of": "2026-07-27T00:00:00Z",
           "valid_from": "2026-07-27T00:00:00Z",
           "valid_until": null,
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": [],
-            "methodology": "A source-code repository alone cannot quantify off-chain governance capture resistance.",
-            "content_hash": "594b3597a90172abe9e05513840f984e13531e787616d291cecf49e9b38ab7a1",
-            "coverage": "no qualifying governance capture dataset",
-            "evidence_path": "data/asset_intrinsic_evidence/btc-governance-unknown.txt",
-            "source_revision": "assessment-2026-07-27",
-            "evidence_kind": "decision_record",
-            "source_coordinates": "complete checked-in decision record"
+            "source_urls": [
+              "https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/consensus/amount.h",
+              "https://bitcoincore.org/en/lifecycle/"
+            ],
+            "methodology": "Pinned Bitcoin Core consensus fixes the monetary cap in validation code with no administrative override path; protocol rule changes require coordinated full-node upgrade across independent operators. The value is a curated capture-resistance score.",
+            "content_hash": "2ce6f3402990beb38dd7f519c8346b1d574482ea3a23e1cdaf24e48d620094c7",
+            "coverage": "Bitcoin Core v30 monetary cap and consensus validation; excludes off-chain social process and exchange governance",
+            "evidence_path": "data/asset_intrinsic_evidence/btc-governance-v30.txt",
+            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3;bitcoincore.org",
+            "evidence_kind": "upstream_excerpt",
+            "source_coordinates": "src/consensus/amount.h MAX_MONEY and MoneyRange, lines 14-23 inclusive"
           }
         },
         {
@@ -118,7 +128,9 @@
           "valid_until": null,
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": ["https://docs.bnbchain.org/bnb-smart-chain/introduction/"],
+            "source_urls": [
+              "https://docs.bnbchain.org/bnb-smart-chain/introduction/"
+            ],
             "methodology": "Pinned documentation snapshot states native BNB has no inflation and validator rewards come from transaction fees; this does not infer issuer trust.",
             "content_hash": "69095892b69edb15360cadb85b85daa444230d5ee47cc485a81de7ba859499ea",
             "coverage": "mutable documentation only; no pinned source revision",
@@ -137,7 +149,9 @@
           "valid_until": "2026-10-27T00:00:00Z",
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": ["https://docs.bnbchain.org/bnb-smart-chain/validator/overview/"],
+            "source_urls": [
+              "https://docs.bnbchain.org/bnb-smart-chain/validator/overview/"
+            ],
             "methodology": "Official documentation describes active and consensus validator-set bounds, but no qualified entity-independence dataset or approved normalization rubric is available.",
             "content_hash": "bb167adf0fef87dd2aa01fe9483621d9bea8a017fe3c841767c0038def6d7140",
             "coverage": "documented validator-set structure; excludes entity affiliation",
@@ -156,7 +170,9 @@
           "valid_until": "2026-10-27T00:00:00Z",
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": ["https://docs.bnbchain.org/bnb-greenfield/core-concept/bnb-token-model/"],
+            "source_urls": [
+              "https://docs.bnbchain.org/bnb-greenfield/core-concept/bnb-token-model/"
+            ],
             "methodology": "Official lock/unlock circulation rules and no-mint statement are reproducible from documented system contracts; bridge accounting is part of coverage.",
             "content_hash": "91ea1e21b1230c4039e52b27e50401f38af5b1eeb977edeceb603654bcc8ee18",
             "coverage": "mutable documentation only; no pinned source revision",
@@ -175,7 +191,9 @@
           "valid_until": "2026-10-27T00:00:00Z",
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": ["https://docs.bnbchain.org/bnb-smart-chain/governance/overview/"],
+            "source_urls": [
+              "https://docs.bnbchain.org/bnb-smart-chain/governance/overview/"
+            ],
             "methodology": "Official documentation describes proposal, voting, quorum and timelock controls, but does not establish voter entity independence or quantify capture resistance.",
             "content_hash": "d88538b47f95cb85307402fea4b19679e4b0a5051d980f709b4c097cd233db13",
             "coverage": "native BSC governance mechanics only",
@@ -208,5 +226,116 @@
     },
     "valid_from": "2026-07-27T00:00:00Z",
     "fetched_at": "2026-07-27T00:00:00Z"
+  },
+  {
+    "fetched_at": "2026-07-29T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:eth",
+      "dimensions": [
+        {
+          "as_of": "2026-07-29T00:00:00Z",
+          "fetched_at": "2026-07-29T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "806dc574e7d4cb2561aca8d1329fba26a5f7ebf76a44cdac33d8760b740a4c41",
+            "coverage": "Beacon chain issuance schedule (base reward + proposer reward). Supply burn verifiability (EIP-1559). Excludes execution-layer MEV, lost keys, and pre-merge history.",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/eth-issuance-pos.txt",
+            "methodology": "Pinned Ethereum PoS consensus spec defines deterministic per-epoch issuance. Base reward and proposer reward depend only on validator set state. EIP-1559 burn is verifiable from any full node via block headers.",
+            "source_coordinates": "consensus-specs: specs/phase0/beacon-chain.md get_base_reward/get_proposer_reward; eip-1559: BASE_FEE_PER_GAS burn mechanism",
+            "source_revision": "ethereum/consensus-specs:v1.5.0-alpha.5",
+            "source_urls": [
+              "https://raw.githubusercontent.com/ethereum/consensus-specs/v1.5.0-alpha.5/specs/phase0/beacon-chain.md",
+              "https://raw.githubusercontent.com/ethereum/EIPs/master/EIPS/eip-1559.md"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-29T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2026-07-29T00:00:00Z",
+          "fetched_at": "2026-07-29T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "7d9033c226ec2a5d71ddaf84571b8f7f6b8a624925170ec92c10d0e71f33da27",
+            "coverage": "not covered by current PEP",
+            "evidence_kind": "decision_record",
+            "evidence_path": "data/asset_intrinsic_evidence/pep-coverage-boundary.txt",
+            "methodology": "This dimension is not covered by the pos_consensus_spec protocol evidence pack.",
+            "source_coordinates": "pep coverage boundary",
+            "source_revision": "pep-pos_consensus_spec",
+            "source_urls": []
+          },
+          "status": "unknown",
+          "valid_from": "2026-07-29T00:00:00Z",
+          "valid_until": null,
+          "value": null
+        },
+        {
+          "as_of": "2026-07-29T00:00:00Z",
+          "fetched_at": "2026-07-29T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "2c0a746c6636643e2284dd0656a996bdb874556b87058eb89bf5c3d4dde7c420",
+            "coverage": "Beacon chain issuance schedule (base reward + proposer reward). Supply burn verifiability (EIP-1559). Excludes execution-layer MEV, lost keys, and pre-merge history.",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/eth-supply-eip1559.txt",
+            "methodology": "Pinned Ethereum PoS consensus spec defines deterministic per-epoch issuance. Base reward and proposer reward depend only on validator set state. EIP-1559 burn is verifiable from any full node via block headers.",
+            "source_coordinates": "consensus-specs: specs/phase0/beacon-chain.md get_base_reward/get_proposer_reward; eip-1559: BASE_FEE_PER_GAS burn mechanism",
+            "source_revision": "ethereum/consensus-specs:v1.5.0-alpha.5",
+            "source_urls": [
+              "https://raw.githubusercontent.com/ethereum/consensus-specs/v1.5.0-alpha.5/specs/phase0/beacon-chain.md",
+              "https://raw.githubusercontent.com/ethereum/EIPs/master/EIPS/eip-1559.md"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-29T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2026-07-29T00:00:00Z",
+          "fetched_at": "2026-07-29T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "7d9033c226ec2a5d71ddaf84571b8f7f6b8a624925170ec92c10d0e71f33da27",
+            "coverage": "not covered by current PEP",
+            "evidence_kind": "decision_record",
+            "evidence_path": "data/asset_intrinsic_evidence/pep-coverage-boundary.txt",
+            "methodology": "This dimension is not covered by the pos_consensus_spec protocol evidence pack.",
+            "source_coordinates": "pep coverage boundary",
+            "source_revision": "pep-pos_consensus_spec",
+            "source_urls": []
+          },
+          "status": "unknown",
+          "valid_from": "2026-07-29T00:00:00Z",
+          "valid_until": null,
+          "value": null
+        },
+        {
+          "as_of": "2026-07-29T00:00:00Z",
+          "fetched_at": "2026-07-29T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "7d9033c226ec2a5d71ddaf84571b8f7f6b8a624925170ec92c10d0e71f33da27",
+            "coverage": "not covered by current PEP",
+            "evidence_kind": "decision_record",
+            "evidence_path": "data/asset_intrinsic_evidence/pep-coverage-boundary.txt",
+            "methodology": "This dimension is not covered by the pos_consensus_spec protocol evidence pack.",
+            "source_coordinates": "pep coverage boundary",
+            "source_revision": "pep-pos_consensus_spec",
+            "source_urls": []
+          },
+          "status": "unknown",
+          "valid_from": "2026-07-29T00:00:00Z",
+          "valid_until": null,
+          "value": null
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2026-07-29T00:00:00Z"
   }
 ]

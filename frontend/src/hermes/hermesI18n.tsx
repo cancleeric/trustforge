@@ -900,3 +900,17 @@ export function useHermesI18n(): I18nValue {
   if (!value) throw new Error('useHermesI18n must be used within HermesI18nProvider')
   return value
 }
+
+/**
+ * #847：只要語系、而且不能在沒有 Provider 時炸掉的場合用這支。
+ *
+ * `GlossaryTerm` 被埋在很深的地方（報告、右軌、各分頁），而 GlossaryTerm /
+ * AnnotatedText / TrustBreakdown / CrossSourceSignalPanel / ComparePage 的既有
+ * 測試都是**不包 Provider** 直接 render 的。名詞解釋為了雙語 tooltip 去接
+ * `useHermesI18n` 會讓那些測試全部開始 throw——那是把別人的測試弄壞，不是修功能。
+ * 有 Provider 時完全跟著 Provider（語系切換會重繪）；沒有時退回 cookie，
+ * 與 Provider 自己的 `initialLocale()` 同一套判定。
+ */
+export function useHermesLocaleOptional(): HermesLocale {
+  return useContext(HermesI18nContext)?.locale ?? initialLocale()
+}
