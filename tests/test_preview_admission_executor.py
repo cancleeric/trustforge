@@ -22,6 +22,7 @@ from trustforge.preview_admission_compiler import (
 from trustforge.preview_admission_executor import (
     AdmissionOutcome,
     PreviewAdmissionExecutor,
+    _CONFIRMED_WRITE_REJECTION_CODES,
 )
 from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
 
@@ -105,13 +106,31 @@ class FakeClient:
         return self.write
 
 
-def _client_error(code: str, status: int = 400) -> ClientError:
-    return ClientError(
-        {
-            "Error": {"Code": code, "Message": "secret backend detail"},
-            "ResponseMetadata": {"HTTPStatusCode": status, "RequestId": "secret"},
+def _client_error(
+    code: str,
+    status: object = 400,
+    *,
+    request_id: object = "request-id",
+    message: object = "secret backend detail",
+    operation_name: str = "TransactWriteItems",
+    error_extra: dict[str, object] | None = None,
+    include_metadata: bool = True,
+) -> ClientError:
+    response: dict[str, object] = {
+        "Error": {
+            "Code": code,
+            "Message": message,
+            **(error_extra or {}),
         },
-        "TransactWriteItems",
+    }
+    if include_metadata:
+        response["ResponseMetadata"] = {
+            "HTTPStatusCode": status,
+            "RequestId": request_id,
+        }
+    return ClientError(
+        response,
+        operation_name,
     )
 
 
@@ -189,23 +208,53 @@ def test_open_circuit_pre_read_denial_returns_safe_reason():
     assert client.write_calls == []
 
 
-def test_confirmed_write_failures_are_unavailable_without_latching():
-    for code in (
-        "TransactionCanceledException",
-        "TransactionConflictException",
-        "ProvisionedThroughputExceededException",
-        "ValidationException",
-    ):
-        request = _request()
-        client = FakeClient(request, _client_error(code))
-        executor = PreviewAdmissionExecutor(client, "preview-store")
+@pytest.mark.parametrize("code", sorted(_CONFIRMED_WRITE_REJECTION_CODES))
+def test_each_strict_confirmed_4xx_rejection_is_unavailable_without_latching(
+    code,
+):
+    request = _request()
+    client = FakeClient(request, _client_error(code))
+    executor = PreviewAdmissionExecutor(client, "preview-store")
 
-        first = executor.execute(request)
-        second = executor.execute(request)
+    first = executor.execute(request)
+    second = executor.execute(request)
 
-        assert first.outcome is second.outcome is AdmissionOutcome.UNAVAILABLE
-        assert len(client.read_calls) == len(client.write_calls) == 2
-        assert "secret" not in repr(first)
+    assert first.outcome is second.outcome is AdmissionOutcome.UNAVAILABLE
+    assert len(client.read_calls) == len(client.write_calls) == 2
+    assert "secret" not in repr(first)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _client_error("TransactionCanceledException", 500),
+        _client_error(
+            "TransactionCanceledException", include_metadata=False
+        ),
+        _client_error("TransactionCanceledException", request_id=""),
+        _client_error("TransactionCanceledException", request_id=None),
+        _client_error("TransactionCanceledException", status=True),
+        _client_error("TransactionCanceledException", status="400"),
+        _client_error("TransactionCanceledException", status=None),
+        _client_error("TransactionCanceledException", message=""),
+        _client_error("TransactionCanceledException", message=None),
+        _client_error(
+            "TransactionCanceledException",
+            error_extra={"Type": "Sender"},
+        ),
+        _client_error(
+            "TransactionCanceledException", operation_name="PutItem"
+        ),
+    ],
+)
+def test_allowlisted_code_with_contradictory_shape_latches(error):
+    request = _request()
+    client = FakeClient(request, error)
+    executor = PreviewAdmissionExecutor(client, "preview-store")
+
+    assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
+    assert executor.execute(request).outcome is AdmissionOutcome.UNAVAILABLE
+    assert len(client.read_calls) == len(client.write_calls) == 1
 
 
 def test_malformed_cancellation_reasons_never_becomes_denied():

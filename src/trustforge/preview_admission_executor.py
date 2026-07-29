@@ -160,13 +160,34 @@ class PreviewAdmissionExecutor:
 def _confirmed_write_rejection(exc: Exception) -> bool:
     from botocore.exceptions import ClientError
 
-    if not isinstance(exc, ClientError):
+    if (
+        not isinstance(exc, ClientError)
+        or exc.operation_name != "TransactWriteItems"
+    ):
         return False
     response = exc.response
-    if type(response) is not dict or type(response.get("Error")) is not dict:
+    if type(response) is not dict:
         return False
-    code = response["Error"].get("Code")
-    return type(code) is str and code in _CONFIRMED_WRITE_REJECTION_CODES
+    error = response.get("Error")
+    metadata = response.get("ResponseMetadata")
+    if (
+        type(error) is not dict
+        or set(error) != {"Code", "Message"}
+        or type(error.get("Code")) is not str
+        or error["Code"] not in _CONFIRMED_WRITE_REJECTION_CODES
+        or type(error.get("Message")) is not str
+        or not error["Message"]
+        or type(metadata) is not dict
+    ):
+        return False
+    status = metadata.get("HTTPStatusCode")
+    request_id = metadata.get("RequestId")
+    return (
+        type(status) is int
+        and 400 <= status <= 499
+        and type(request_id) is str
+        and bool(request_id)
+    )
 
 
 def _confirmed_success(response: object) -> bool:
