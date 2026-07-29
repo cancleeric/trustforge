@@ -237,6 +237,35 @@ class TestExclusion:
         assert len(manifest.excluded_refs) == 1
         assert manifest.excluded_refs[0].reason == EXCLUSION_STALE
 
+    @pytest.mark.parametrize(
+        "expires_at",
+        ["not-a-timestamp", "2026-07-01T00:00:00"],
+    )
+    def test_malformed_or_naive_expiry_fails_closed(
+        self,
+        builder: ContextBuilder,
+        memory_repo: MemoryRepository,
+        expires_at: str,
+    ):
+        entry = MemoryEntry(
+            memory_id=f"invalid-expiry-{expires_at}",
+            kind="episodic",
+            provider="test",
+            content_hash="d" * 64,
+            content_ref="data",
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z",
+            expires_at=expires_at,
+            evidence_eligible=True,
+        )
+        memory_repo.save(entry)
+        manifest = builder.build(
+            run_id=f"run-{entry.memory_id}",
+            memory_refs=[_make_memory_ref(entry.memory_id)],
+        )
+        assert manifest.included_refs.memory_refs == []
+        assert manifest.excluded_refs[0].reason == EXCLUSION_STALE
+
     def test_unknown_tool_excluded(
         self, builder: ContextBuilder, tool_registry: ToolRegistryRepository
     ):

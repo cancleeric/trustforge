@@ -314,7 +314,10 @@ class ContextBuilder:
                             excluded.append(ExcludedRef(mref.memory_id, "memory", EXCLUSION_STALE))
                             continue
                     except (ValueError, TypeError):
-                        pass
+                        excluded.append(
+                            ExcludedRef(mref.memory_id, "memory", EXCLUSION_STALE)
+                        )
+                        continue
                 frozen_content_hash = entry.content_hash
             else:
                 # No repo available — cannot verify, default to non-evidentiary
