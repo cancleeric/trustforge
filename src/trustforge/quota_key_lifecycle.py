@@ -38,6 +38,10 @@ class LifecycleClient(Protocol):
 
     def put_item(self, **kwargs: object) -> object: ...
 
+    def transact_get_items(self, **kwargs: object) -> object: ...
+
+    def transact_write_items(self, **kwargs: object) -> object: ...
+
 
 @dataclass(frozen=True, slots=True, init=False)
 class RetirementCapability:
@@ -131,7 +135,10 @@ class QuotaKeyLifecycle:
             or type(self.current) is not QuotaKey
             or self.purpose != "pap1_quota"
             or self.schema_version != 1
-            or self.issued.latest > self.current.activated
+            or (
+                (self.generation == 1 or self.previous is not None)
+                and self.issued.latest > self.current.activated
+            )
             or (
                 mode is LifecycleMode.OVERLAP
                 and (
@@ -439,6 +446,7 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
         self._client = dynamodb_client
         self._table = table_name
         self._durable_fingerprint: str | None = None
+        self._retired_capabilities: set[RetirementCapability] = set()
 
     def install(
         self,
@@ -549,6 +557,155 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
                 },
             }
         }
+
+    def retire_previous(self, capability: RetirementCapability) -> bool:
+        """Atomically retire the previous key with every durable safety proof."""
+
+        from trustforge.quota_key_retirement import (
+            _control_condition,
+            _decode_item,
+            _decode_lifecycle,
+            _decode_recovery,
+            _decode_waterline,
+            _recovery_condition,
+            _require_open,
+            _strong_read,
+        )
+
+        with self._lock:
+            lifecycle = self._lifecycle
+            if (
+                type(capability) is not RetirementCapability
+                or capability._authority is not self._nonce
+                or capability in self._retired_capabilities
+                or lifecycle is None
+                or lifecycle.mode is not LifecycleMode.OVERLAP
+                or lifecycle.generation != capability.lifecycle_generation
+                or lifecycle.previous is None
+                or lifecycle.previous.version
+                != capability.previous_quota_key_version
+            ):
+                return False
+            # Consume before dispatch so concurrent callers and ambiguous failures
+            # can never replay the authority.
+            self._retired_capabilities.add(capability)
+            try:
+                now = self._trusted_now()
+                responses = _strong_read(self._client, self._table)
+                waterline = _decode_waterline(_decode_item(responses[0]))
+                recovery = _decode_recovery(_decode_item(responses[1]))
+                control = _require_open(_decode_item(responses[2]))
+                durable = _decode_lifecycle(_decode_item(responses[3]))
+                if (
+                    now.earliest <= waterline.retire_not_before
+                    or now.earliest > waterline.retention_until
+                    or recovery.version < waterline.required_recovery_version
+                    or recovery.shard <= waterline.last_old_expiry_shard
+                    or durable.generation != lifecycle.generation
+                    or durable.current_version != lifecycle.current.version
+                    or durable.previous_version != lifecycle.previous.version
+                    or durable.config_fingerprint != self._durable_fingerprint
+                ):
+                    return False
+                following = QuotaKeyLifecycle(
+                    lifecycle.generation + 1,
+                    now,
+                    lifecycle.current,
+                )
+                desired = _lifecycle_metadata(following)
+                proof = type("_Proof", (), {
+                    "recovery": recovery,
+                    "control": control,
+                })()
+                request = {
+                    "TransactItems": [
+                        {
+                            "Put": {
+                                "TableName": self._table,
+                                "Item": _encode_metadata(desired),
+                                "ConditionExpression": (
+                                    "#generation=:generation "
+                                    "AND #fingerprint=:fingerprint"
+                                ),
+                                "ExpressionAttributeNames": {
+                                    "#generation": "generation",
+                                    "#fingerprint": "config_fingerprint",
+                                },
+                                "ExpressionAttributeValues": {
+                                    ":generation": {
+                                        "N": str(lifecycle.generation)
+                                    },
+                                    ":fingerprint": {
+                                        "S": self._durable_fingerprint
+                                    },
+                                },
+                            }
+                        },
+                        {
+                            "ConditionCheck": _waterline_condition(
+                                self._table, waterline
+                            )
+                        },
+                        {
+                            "ConditionCheck": _recovery_condition(
+                                self._table, proof
+                            )
+                        },
+                        {
+                            "ConditionCheck": _control_condition(
+                                self._table, proof
+                            )
+                        },
+                    ]
+                }
+                try:
+                    response = self._client.transact_write_items(**request)
+                except Exception:
+                    if not self._prove_retired(
+                        desired, waterline, recovery, control
+                    ):
+                        return False
+                else:
+                    if (
+                        not _confirmed_ddb_success(response)
+                        and not self._prove_retired(
+                            desired, waterline, recovery, control
+                        )
+                    ):
+                        return False
+                self._lifecycle = following
+                self._observed = now
+                self._durable_fingerprint = desired["config_fingerprint"]
+                return True
+            except Exception:
+                return False
+
+    def _prove_retired(
+        self,
+        desired: dict[str, object],
+        waterline: object,
+        recovery: object,
+        control: object,
+    ) -> bool:
+        try:
+            from trustforge.quota_key_retirement import (
+                _decode_item,
+                _decode_recovery,
+                _decode_waterline,
+                _require_open,
+                _strong_read,
+            )
+
+            responses = _strong_read(self._client, self._table)
+            return (
+                _decode_waterline(_decode_item(responses[0])) == waterline
+                and _decode_recovery(_decode_item(responses[1])) == recovery
+                and _require_open(_decode_item(responses[2])) == control
+                and _decode_lifecycle_any(_decode_item(responses[3]))
+                == desired
+            )
+        except Exception:
+            return False
 
     def _read_metadata(self) -> dict[str, object] | None:
         response = self._client.get_item(
@@ -692,6 +849,49 @@ def _confirmed_ddb_success(response: object) -> bool:
         and type(metadata.get("RequestId")) is str
         and bool(metadata["RequestId"])
     )
+
+
+def _decode_lifecycle_any(item: dict[str, object]) -> dict[str, object]:
+    return _decode_metadata(item)
+
+
+def _waterline_condition(table: str, waterline: object) -> dict[str, object]:
+    names = {
+        "#version": "waterline_version",
+        "#generation": "lifecycle_generation",
+        "#previous": "previous_quota_key_version",
+        "#current": "current_quota_key_version",
+        "#upper": "last_old_admission_upper",
+        "#shard": "last_old_expiry_shard",
+        "#recovery": "required_recovery_version",
+        "#retire": "retire_not_before",
+        "#retention": "retention_until",
+    }
+    attributes = {
+        ":version": waterline.waterline_version,
+        ":generation": waterline.lifecycle_generation,
+        ":previous": waterline.previous_quota_key_version,
+        ":current": waterline.current_quota_key_version,
+        ":upper": waterline.last_old_admission_upper,
+        ":shard": waterline.last_old_expiry_shard,
+        ":recovery": waterline.required_recovery_version,
+        ":retire": waterline.retire_not_before,
+        ":retention": waterline.retention_until,
+    }
+    return {
+        "TableName": table,
+        "Key": {
+            "pk": {"S": "PAP#1#QUOTA-KEY"},
+            "sk": {"S": "RETIREMENT#WATERLINE"},
+        },
+        "ConditionExpression": " AND ".join(
+            f"#{name[1:]}={name}" for name in attributes
+        ),
+        "ExpressionAttributeNames": names,
+        "ExpressionAttributeValues": {
+            name: {"N": str(value)} for name, value in attributes.items()
+        },
+    }
 
 
 def _quota_hmac(key: QuotaKey, material: bytes) -> str:

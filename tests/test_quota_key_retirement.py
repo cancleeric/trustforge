@@ -4,7 +4,7 @@ from email.utils import formatdate
 
 import pytest
 
-from trustforge.preview_trusted_clock import PreviewTrustedClock
+from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
 from trustforge.quota_key_retirement import (
     QuotaKeyRetirementAuthority,
     QuotaKeyRetirementWaterline,
@@ -12,7 +12,12 @@ from trustforge.quota_key_retirement import (
     RetirementDisposition,
     WaterlineWriteDisposition,
 )
-from trustforge.quota_key_lifecycle import DurableQuotaKeyLifecycleAuthority
+from trustforge.quota_key_lifecycle import (
+    DurableQuotaKeyLifecycleAuthority,
+    MIN_OVERLAP_SECONDS,
+    QuotaKey,
+    QuotaKeyLifecycle,
+)
 
 
 def _ddb(item: dict[str, object]) -> dict[str, object]:
@@ -119,7 +124,12 @@ class Client:
 
     def transact_write_items(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
-        return {}
+        return {
+            "ResponseMetadata": {
+                "HTTPStatusCode": 200,
+                "RequestId": "retired",
+            }
+        }
 
 
 def _authority(
@@ -320,6 +330,50 @@ def test_proposal_and_retirable_result_are_nominal_and_consumed_once() -> None:
         authority.consume(decision)
     with pytest.raises(ValueError):
         authority.consume(type(decision)())
+
+
+def test_capability_retires_overlap_in_one_transaction_and_cannot_replay() -> None:
+    client = Client()
+    clock = PreviewTrustedClock(
+        dynamodb_client=client,
+        table_name="table",
+        monotonic_clock=lambda: 1.0,
+        wall_clock=lambda: 200.0,
+    )
+    lifecycle_authority = DurableQuotaKeyLifecycleAuthority(
+        clock, dynamodb_client=client, table_name="table"
+    )
+    current = QuotaKey(
+        2, "quota-2", bytes(range(1, 33)), 100, "ssm-v2"
+    )
+    previous = QuotaKey(
+        1,
+        "quota-1",
+        bytes(range(32)),
+        0,
+        "ssm-v1",
+        100,
+        100 + MIN_OVERLAP_SECONDS,
+    )
+    lifecycle_authority._lifecycle = QuotaKeyLifecycle(
+        2, TrustedUtcInterval(99, 100), current, previous
+    )
+    lifecycle_authority._durable_fingerprint = "exact-transition"
+    retirement = _authority(client, lifecycle_authority)
+    capability = retirement.consume(retirement.evaluate())
+
+    assert lifecycle_authority.retire_previous(capability) is True
+    assert lifecycle_authority.retire_previous(capability) is False
+    write = next(
+        call
+        for call in client.calls
+        if "TransactItems" in call and "Put" in call["TransactItems"][0]
+    )
+    assert len(write["TransactItems"]) == 4
+    assert write["TransactItems"][0]["Put"]["Item"]["mode"] == {"S": "single"}
+    assert all(
+        "ConditionCheck" in action for action in write["TransactItems"][1:]
+    )
 
 
 def test_writer_accepts_no_caller_controlled_boundaries() -> None:
