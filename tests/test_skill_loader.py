@@ -8,6 +8,15 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _authorize_schema_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        lambda purpose: None,
+    )
+    monkeypatch.setattr("trustforge.agos_db_auth._is_pytest", lambda: True)
+
 from trustforge.skill_loader import (
     ActivationProposal,
     FrozenSkillManifest,

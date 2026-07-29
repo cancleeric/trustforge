@@ -16,6 +16,14 @@ from unittest.mock import patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _authorize_schema_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        lambda purpose: None,
+    )
+
 from trustforge.agos_admin_api import dispatch_admin_agos
 from trustforge.agos_runtime import AgosRuntime
 from trustforge.context_builder import compute_manifest_hash

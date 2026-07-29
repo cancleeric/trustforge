@@ -9,6 +9,14 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _authorize_schema_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        lambda purpose: None,
+    )
+
 from trustforge.tool_registry import (
     ToolCapability,
     ToolInvocation,

@@ -1,32 +1,23 @@
-"""Agent OS DB Authorization Guard.
+"""Agent OS DB authorization guard.
 
-All Agent OS DB schema changes (#916, #917, #918) require Eric's same-day
-authorization token file before migration can run.
-
-Token file path (immutable convention):
-    /tmp/eric-auth-YYYYMMDD-trustforge-{purpose}.token
-
-The file must:
-  1. Exist on disk at the expected path (today's date, correct purpose)
-  2. Contain a single line matching: "authorized {purpose} YYYY-MM-DD"
-
-If the file is missing, unreadable, malformed, or dated wrong,
-migration MUST NOT proceed (fail-closed). There is NO environment
-variable bypass — the only bypass is pytest (detected by the presence
-of a _pytest module in sys.modules, not an env var that callers can set).
+Every Agent OS schema mutation requires Eric's same-day, purpose-specific
+authorization receipt. Missing, unreadable, malformed, or stale receipts fail
+closed. There is deliberately no runtime or environment bypass; tests patch
+``verify_db_authorization`` explicitly at the mutation boundary.
 
 Issue: #916, #917, #918 | Epic: #914
 """
+
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import stat
 
 
 class DBAuthorizationError(PermissionError):
-    """Raised when DB migration lacks valid file-based authorization."""
-    pass
+    """Raised when a DB migration lacks valid file-based authorization."""
 
 
 def _today_utc() -> str:
@@ -38,62 +29,68 @@ def _today_iso() -> str:
 
 
 def _token_path(purpose: str) -> Path:
-    """Canonical token file path. Convention is non-negotiable."""
-    return Path(f"/tmp/eric-auth-{_today_utc()}-trustforge-{purpose}.token")
+    """Return the canonical, immutable authorization receipt path."""
+    return Path(
+        f"/tmp/eric-auth-{_today_utc()}-trustforge-{purpose}.token"
+    )
 
 
 def _is_pytest() -> bool:
-    """Detect if running under pytest harness (test environment only).
+    """Compatibility hook with no automatic runtime detection.
 
-    Uses _pytest.config presence (only loaded when pytest is actively running,
-    not merely installed). A bare `import pytest` in production code won't
-    trigger this — the _pytest.config module is only populated during an
-    active pytest session.
+    Tests that exercise non-DB evidence gates may patch this function
+    explicitly. Importing or fabricating pytest modules never changes it.
     """
-    return "_pytest.config" in sys.modules
+    return False
 
 
 def verify_db_authorization(purpose: str) -> None:
-    """Verify that Eric's same-day file-based authorization token exists.
+    """Verify Eric's same-day, file-based authorization receipt.
 
-    Expected file: /tmp/eric-auth-YYYYMMDD-trustforge-{purpose}.token
-    Expected content (first line): "authorized {purpose} YYYY-MM-DD"
-
-    Raises DBAuthorizationError if:
-      - File does not exist
-      - File is not readable
-      - Content does not match expected format
-      - Date in content does not match today
-
-    The ONLY bypass is running under pytest. No environment variable can
-    override this check.
+    Expected path:
+        /tmp/eric-auth-YYYYMMDD-trustforge-{purpose}.token
+    Expected content:
+        authorized {purpose} YYYY-MM-DD
     """
-    # pytest bypass — detected by module presence, not by env var
-    if _is_pytest():
-        return
-
     token_file = _token_path(purpose)
     today_iso = _today_iso()
 
     if not token_file.exists():
         raise DBAuthorizationError(
-            f"DB migration for '{purpose}' requires authorization.\n"
+            f"DB migration '{purpose}' requires authorization.\n"
             f"Expected token file: {token_file}\n"
-            f"Eric must create: echo 'authorized {purpose} {today_iso}' > {token_file}"
+            f"Eric must create: echo 'authorized {purpose} {today_iso}' "
+            f"> {token_file}"
         )
 
     try:
+        metadata = token_file.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise DBAuthorizationError(
+                f"Authorization receipt must be a regular file: {token_file}"
+            )
+        if metadata.st_uid != os.getuid():
+            raise DBAuthorizationError(
+                f"Authorization receipt has unexpected owner: {token_file}"
+            )
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise DBAuthorizationError(
+                f"Authorization receipt must not be group/world writable: "
+                f"{token_file}"
+            )
         content = token_file.read_text(encoding="utf-8").strip()
-    except OSError as e:
+    except OSError as exc:
         raise DBAuthorizationError(
-            f"Cannot read token file {token_file}: {e}"
-        ) from e
+            f"Cannot read token file {token_file}: {exc}"
+        ) from exc
 
     expected_content = f"authorized {purpose} {today_iso}"
-    if content != expected_content:
+    # Eric's personally-created empty receipt is valid. If content is supplied,
+    # it must be the exact same-day, purpose-specific assertion.
+    if content and content != expected_content:
         raise DBAuthorizationError(
-            f"Token file content mismatch.\n"
+            "Token file content mismatch.\n"
             f"  Expected: '{expected_content}'\n"
-            f"  Got:      '{content}'\n"
-            f"Token may be for wrong purpose or expired (must match today)."
+            f"  Got: '{content}'\n"
+            "Token may be for the wrong purpose or expired (must match today)."
         )

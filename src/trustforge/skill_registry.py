@@ -125,9 +125,11 @@ def revision_hash_for(content: dict[str, Any]) -> str:
 def _upgrade(conn: sqlite3.Connection) -> None:
     """Create Skill Registry tables (idempotent).
 
-    NOTE: Authorization is checked by ensure_schema() BEFORE this function
-    is called. Do not call upgrade() directly — use ensure_schema().
+    Authorization is checked here so direct callers cannot bypass the guard.
     """
+    from .agos_db_auth import verify_db_authorization
+
+    verify_db_authorization("skill_registry")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -179,6 +181,9 @@ def _upgrade(conn: sqlite3.Connection) -> None:
 
 def rollback(conn: sqlite3.Connection) -> None:
     """Drop Skill Registry tables."""
+    from .agos_db_auth import verify_db_authorization
+
+    verify_db_authorization("skill_registry")
     conn.executescript("""
         DROP TABLE IF EXISTS skill_dependencies;
         DROP TABLE IF EXISTS skill_revisions;

@@ -149,9 +149,11 @@ def validate_evidence_eligible(entry: MemoryEntry) -> None:
 def _upgrade(conn: sqlite3.Connection) -> None:
     """Create Memory OS tables (idempotent).
 
-    NOTE: Authorization is checked by ensure_schema() BEFORE this function
-    is called. Do not call upgrade() directly — use ensure_schema().
+    Authorization is checked here so direct callers cannot bypass the guard.
     """
+    from .agos_db_auth import verify_db_authorization
+
+    verify_db_authorization("memory_os")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -210,6 +212,9 @@ def _upgrade(conn: sqlite3.Connection) -> None:
 
 def rollback(conn: sqlite3.Connection) -> None:
     """Drop Memory OS tables."""
+    from .agos_db_auth import verify_db_authorization
+
+    verify_db_authorization("memory_os")
     conn.executescript("""
         DROP TABLE IF EXISTS memory_evidence_usage;
         DROP TABLE IF EXISTS memory_links;

@@ -11,6 +11,14 @@ from unittest.mock import patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _authorize_schema_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        lambda purpose: None,
+    )
+
 from trustforge.agos_runtime import AgosRuntime, agos_enabled
 from trustforge.analysis_flow import AnalysisFlow
 from trustforge.memory_retrieval import MemoryRef

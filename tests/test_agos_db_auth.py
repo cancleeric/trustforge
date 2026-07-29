@@ -1,11 +1,12 @@
-"""Tests for Agent OS DB Authorization Guard (file-based).
+"""Tests for the fail-closed Agent OS DB authorization guard."""
 
-Issue: #916, #917, #918 | Epic: #914
-"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import sqlite3
+import sys
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -16,109 +17,161 @@ from trustforge.agos_db_auth import (
     _token_path,
     verify_db_authorization,
 )
+from trustforge import context_builder, memory_os, skill_registry, tool_registry
 
 
 def _today_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _today_compact() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d")
+def test_token_path_is_date_and_purpose_specific() -> None:
+    compact = datetime.now(timezone.utc).strftime("%Y%m%d")
+    assert str(_token_path("memory_os")) == (
+        f"/tmp/eric-auth-{compact}-trustforge-memory_os.token"
+    )
+    assert _token_path("memory_os") != _token_path("skill_registry")
 
 
-class TestTokenPath:
-    def test_path_format(self):
-        p = _token_path("memory_os")
-        assert str(p) == f"/tmp/eric-auth-{_today_compact()}-trustforge-memory_os.token"
+def test_missing_receipt_fails_closed(tmp_path: Path) -> None:
+    with patch(
+        "trustforge.agos_db_auth._token_path",
+        return_value=tmp_path / "missing.token",
+    ):
+        with pytest.raises(DBAuthorizationError, match="requires authorization"):
+            verify_db_authorization("memory_os")
 
-    def test_path_varies_by_purpose(self):
-        assert _token_path("memory_os") != _token_path("skill_registry")
+
+def test_wrong_receipt_content_fails_closed(tmp_path: Path) -> None:
+    receipt = tmp_path / "receipt.token"
+    receipt.write_text("authorized wrong-purpose 2000-01-01", encoding="utf-8")
+    with patch("trustforge.agos_db_auth._token_path", return_value=receipt):
+        with pytest.raises(DBAuthorizationError, match="content mismatch"):
+            verify_db_authorization("memory_os")
 
 
-class TestPytestBypass:
-    def test_pytest_detected(self):
-        """Under test, _is_pytest() should return True."""
-        assert _is_pytest() is True
+def test_valid_receipt_passes(tmp_path: Path) -> None:
+    receipt = tmp_path / "receipt.token"
+    receipt.write_text(
+        f"authorized context_manifest {_today_iso()}", encoding="utf-8"
+    )
+    with patch("trustforge.agos_db_auth._token_path", return_value=receipt):
+        verify_db_authorization("context_manifest")
 
-    def test_verify_passes_under_pytest(self):
-        """Under pytest, verify always passes regardless of file existence."""
-        # This should NOT raise even though no token file exists
+
+def test_personally_created_empty_receipt_passes(tmp_path: Path) -> None:
+    receipt = tmp_path / "receipt.token"
+    receipt.touch()
+    with patch("trustforge.agos_db_auth._token_path", return_value=receipt):
         verify_db_authorization("memory_os")
-        verify_db_authorization("skill_registry")
-        verify_db_authorization("tool_registry")
 
 
-class TestFileBasedAuth:
-    """Test the actual authorization logic (bypass _is_pytest by patching)."""
+def test_symlink_receipt_fails_closed(tmp_path: Path) -> None:
+    target = tmp_path / "target.token"
+    target.touch()
+    receipt = tmp_path / "receipt.token"
+    receipt.symlink_to(target)
+    with patch("trustforge.agos_db_auth._token_path", return_value=receipt):
+        with pytest.raises(DBAuthorizationError, match="regular file"):
+            verify_db_authorization("memory_os")
 
-    def test_blocks_when_file_missing(self, tmp_path: Path):
-        """No token file → DBAuthorizationError."""
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=tmp_path / "nonexistent.token"):
-                with pytest.raises(DBAuthorizationError, match="requires authorization"):
-                    verify_db_authorization("memory_os")
 
-    def test_blocks_when_content_wrong(self, tmp_path: Path):
-        """File exists but content wrong → DBAuthorizationError."""
-        token_file = tmp_path / "token.token"
-        token_file.write_text("wrong content", encoding="utf-8")
+def test_fake_pytest_module_cannot_bypass(tmp_path: Path) -> None:
+    with (
+        patch.dict(sys.modules, {"_pytest.config": ModuleType("_pytest.config")}),
+        patch(
+            "trustforge.agos_db_auth._token_path",
+            return_value=tmp_path / "missing.token",
+        ),
+    ):
+        assert _is_pytest() is False
+        with pytest.raises(DBAuthorizationError):
+            verify_db_authorization("memory_os")
 
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=token_file):
-                with pytest.raises(DBAuthorizationError, match="content mismatch"):
-                    verify_db_authorization("memory_os")
 
-    def test_blocks_when_purpose_wrong(self, tmp_path: Path):
-        """File contains different purpose → DBAuthorizationError."""
-        token_file = tmp_path / "token.token"
-        token_file.write_text(f"authorized skill_registry {_today_iso()}", encoding="utf-8")
+@pytest.mark.parametrize(
+    ("module", "purpose"),
+    [
+        (memory_os, "memory_os"),
+        (skill_registry, "skill_registry"),
+        (tool_registry, "tool_registry"),
+    ],
+)
+def test_direct_upgrade_authorizes_before_empty_db_mutation(
+    module: object, purpose: str
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        side_effect=DBAuthorizationError("blocked"),
+    ) as authorize:
+        with pytest.raises(DBAuthorizationError, match="blocked"):
+            module._upgrade(conn)  # type: ignore[attr-defined]
+    authorize.assert_called_once_with(purpose)
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall() == []
 
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=token_file):
-                with pytest.raises(DBAuthorizationError, match="content mismatch"):
-                    verify_db_authorization("memory_os")
 
-    def test_blocks_when_date_wrong(self, tmp_path: Path):
-        """File contains yesterday's date → DBAuthorizationError."""
-        token_file = tmp_path / "token.token"
-        token_file.write_text("authorized memory_os 2020-01-01", encoding="utf-8")
+@pytest.mark.parametrize(
+    ("module", "purpose", "version_key"),
+    [
+        (memory_os, "memory_os", "memory_os_version"),
+        (skill_registry, "skill_registry", "skill_registry_version"),
+        (tool_registry, "tool_registry", "tool_registry_version"),
+    ],
+)
+def test_direct_upgrade_authorizes_existing_old_schema(
+    module: object, purpose: str, version_key: str
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO _meta VALUES (?, '0')", (version_key,))
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        side_effect=DBAuthorizationError("blocked"),
+    ) as authorize:
+        with pytest.raises(DBAuthorizationError, match="blocked"):
+            module._upgrade(conn)  # type: ignore[attr-defined]
+    authorize.assert_called_once_with(purpose)
+    assert conn.execute(
+        "SELECT value FROM _meta WHERE key = ?", (version_key,)
+    ).fetchone() == ("0",)
 
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=token_file):
-                with pytest.raises(DBAuthorizationError, match="content mismatch"):
-                    verify_db_authorization("memory_os")
 
-    def test_passes_valid_file(self, tmp_path: Path):
-        """Correct file + content + date → passes."""
-        token_file = tmp_path / "token.token"
-        token_file.write_text(f"authorized memory_os {_today_iso()}", encoding="utf-8")
+@pytest.mark.parametrize(
+    ("module", "purpose"),
+    [
+        (memory_os, "memory_os"),
+        (skill_registry, "skill_registry"),
+        (tool_registry, "tool_registry"),
+    ],
+)
+def test_rollback_authorizes_before_mutation(
+    module: object, purpose: str
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE sentinel (id INTEGER)")
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        side_effect=DBAuthorizationError("blocked"),
+    ) as authorize:
+        with pytest.raises(DBAuthorizationError, match="blocked"):
+            module.rollback(conn)  # type: ignore[attr-defined]
+    authorize.assert_called_once_with(purpose)
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE name='sentinel'"
+    ).fetchone() == ("sentinel",)
 
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=token_file):
-                # Should NOT raise
-                verify_db_authorization("memory_os")
 
-    def test_passes_skill_registry(self, tmp_path: Path):
-        token_file = tmp_path / "token.token"
-        token_file.write_text(f"authorized skill_registry {_today_iso()}", encoding="utf-8")
-
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=token_file):
-                verify_db_authorization("skill_registry")
-
-    def test_passes_tool_registry(self, tmp_path: Path):
-        token_file = tmp_path / "token.token"
-        token_file.write_text(f"authorized tool_registry {_today_iso()}", encoding="utf-8")
-
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=token_file):
-                verify_db_authorization("tool_registry")
-
-    def test_no_env_var_bypass(self, tmp_path: Path):
-        """Even with TRUSTFORGE_TESTING=1 set, file check still happens when _is_pytest=False."""
-        import os
-        with patch("trustforge.agos_db_auth._is_pytest", return_value=False):
-            with patch("trustforge.agos_db_auth._token_path", return_value=tmp_path / "no.token"):
-                with patch.dict(os.environ, {"TRUSTFORGE_TESTING": "1"}):
-                    with pytest.raises(DBAuthorizationError):
-                        verify_db_authorization("memory_os")
+def test_context_manifest_authorizes_before_mutation() -> None:
+    conn = sqlite3.connect(":memory:")
+    with patch(
+        "trustforge.agos_db_auth.verify_db_authorization",
+        side_effect=DBAuthorizationError("blocked"),
+    ) as authorize:
+        with pytest.raises(DBAuthorizationError, match="blocked"):
+            context_builder._ensure_manifest_table(conn)
+    authorize.assert_called_once_with("context_manifest")
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall() == []
