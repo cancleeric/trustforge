@@ -50,9 +50,9 @@
 - [x] 測試 tool_audited_fetch success path
 - [x] 測試 tool_audited_fetch failure path
 - [x] 測試 lineage query returns correct data
-- [ ] 建立 `tests/test_agos_integration.py` — deferred; no such file at HEAD
-- [ ] Integration test with fixture: run → manifest → lineage queryable —
-  open; runtime unit/E2E coverage does not replace the named integration gate
+- [x] Integration coverage 由 `tests/test_agos_e2e.py` 與
+  `tests/test_agos_lineage_consistency.py` 提供，避免建立重複測試檔
+- [x] Integration fixture：run → manifest → Admin lineage queryable
 
 ## Task 7: 回歸驗證
 

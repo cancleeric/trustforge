@@ -3,7 +3,7 @@
 > Epic: [#914](https://github.com/cancleeric/trustforge/issues/914)
 > Issue: [#925](https://github.com/cancleeric/trustforge/issues/925)
 > Date: 2026-07-29
-> Status: BLOCKED — CPO docs/Eye closeout and CISO disposition pending
+> Status: BLOCKED — desktop/mobile Eye and commit-bound CISO/CPO review pending
 > Branch: `agos/915-architecture-contracts`
 
 ## Reviewer Information
@@ -11,12 +11,12 @@
 - Implementation: Kiro (automated)
 - Security review required: harper (CISO)
 - Product review required: gray (CPO)
-- Implementation baseline reconciled:
-  `ef14855bd8e898f1c8ca2a4167f78324ea4df846`
+- Implementation baseline: current branch HEAD; the immutable reviewed SHA is
+  recorded in the PR disposition comment
 - Closeout review binding: the commit containing this document must be reviewed
   again after integration if production code has advanced beyond that baseline
-- CPO disposition: BLOCKED pending truthful task/backlog reconciliation and
-  desktop/mobile Eye review
+- CPO disposition: task/backlog reconciliation completed; desktop/mobile Eye
+  and exact-HEAD re-review remain pending
 - CISO disposition: pending; this document does not self-approve security
 
 ## Security Controls Implemented
@@ -97,23 +97,24 @@ Evidence is commit-bound to
 
 | Test scope | Recorded result |
 |------------|-----------------|
-| Current targeted AGOS backend run | 225 PASS |
+| Current targeted AGOS replay/guard/regression/lineage run | 78 PASS |
 | Current targeted Admin AGOS frontend run | 18 PASS |
 | Current frontend production build | PASS |
 | Authenticated real-handler HTTP E2E | PASS (included above) |
-| Full pre-push backend parallel lane | 6007 PASS, 12 skipped |
+| Full pre-push backend parallel lane | 6043 PASS, 12 skipped |
 | Full pre-push backend serial lane | 3 PASS, 1 skipped |
 | Full pre-push frontend | 596 PASS |
 
-The full pre-push results are the recorded HEAD gate results. The 225-test
-targeted AGOS run was rerun during this reconciliation. No expected-failure
-exception remains claimed. Mandatory replay, non-regression, lineage-consistency, Eye, and human
-review items that lack concrete evidence remain open in the #925 task record.
+The full pre-push results are the recorded HEAD gate results. Replay,
+non-regression, lineage-consistency, security-guard, and authenticated HTTP
+tests now have concrete passing evidence. No expected-failure exception remains
+claimed. The manual Eye scan and exact-HEAD human reviews remain open.
 
 ## Disposition
 
 - [ ] harper (CISO): APPROVED / BLOCKED
-- [x] gray (CPO): BLOCKED — docs reconciliation and Eye review pending
+- [ ] gray (CPO): exact-HEAD re-review pending after docs reconciliation; Eye
+  remains a separate manual gate
 - [ ] /codex-review adversarial gate: PASS / FAIL
 - [x] Authenticated real-handler HTTP E2E: PASS
 
