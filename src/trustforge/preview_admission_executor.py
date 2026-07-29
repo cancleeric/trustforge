@@ -200,7 +200,29 @@ class PreviewAdmissionExecutor:
             if (
                 type(resolution) is not AdmissionAmbiguityResolution
                 or not resolution._proves(ambiguity)
+                or not self._durable_gate.ready
             ):
+                return False
+            self._ambiguity = None
+            self._latched_closed = False
+            return True
+
+    def recover_pending(self, resolver: AdmissionAmbiguityResolver) -> bool:
+        """Recover a restart-visible durable quarantine under the write lock."""
+
+        with self._write_gate:
+            from trustforge.preview_lease_recovery import PreviewAmbiguityRecovery
+
+            if (
+                type(resolver) is not PreviewAmbiguityRecovery
+                or self._durable_gate.ready
+            ):
+                return False
+            try:
+                recovered = resolver.resolve_pending()
+            except Exception:  # noqa: BLE001 - recovery is fail closed
+                return False
+            if not recovered or not self._durable_gate.ready:
                 return False
             self._ambiguity = None
             self._latched_closed = False

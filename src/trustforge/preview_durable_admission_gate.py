@@ -16,6 +16,7 @@ from typing import Protocol
 
 from trustforge.preview_admission_compiler import (
     RETENTION_SECONDS,
+    RESERVATION_LEASE_SECONDS,
     AdmissionHandle,
     CompiledAdmissionPlan,
 )
@@ -378,6 +379,74 @@ class DurableAdmissionGate:
             binding,
         )
 
+    def prove_pending_present(self) -> QuarantineProof:
+        """Restart-safe exact proof of the pending reservation and fence."""
+
+        unresolved = QuarantineProof._create(
+            _PROOF_FACTORY, ProofDisposition.UNRESOLVED, self._proof_nonce
+        )
+        binding = self.pending_binding
+        if binding is None:
+            return unresolved
+        lease_until = binding.dispatch_upper + RESERVATION_LEASE_SECONDS
+        key = reservation_key(1, lease_until // 60, binding.reservation_id)
+        try:
+            response = self._client.transact_get_items(
+                TransactItems=[
+                    {"Get": {"TableName": self._table, "Key": CONTROL_KEY}},
+                    {
+                        "Get": {
+                            "TableName": self._table,
+                            "Key": _ddb_map(key),
+                        }
+                    },
+                ]
+            )
+            responses = response["Responses"]
+            if type(responses) is not list or len(responses) != 2:
+                return unresolved
+            control_response, reservation_response = responses
+            if (
+                type(control_response) is not dict
+                or set(control_response) != {"Item"}
+                or type(reservation_response) is not dict
+                or set(reservation_response) != {"Item"}
+            ):
+                return unresolved
+            control = _decode_control(control_response["Item"])
+            from trustforge.preview_lease_recovery import (
+                _decode_map,
+                _decode_reservation,
+            )
+
+            reservation = _decode_reservation(
+                _decode_map(reservation_response["Item"])
+            )
+            handle = reservation.handle
+        except Exception:
+            return unresolved
+        if (
+            control is None
+            or control.state is not GateState.QUARANTINED
+            or control.binding != binding
+            or reservation.disposition is not None
+            or handle.reservation_id != binding.reservation_id
+            or handle.created_lower != binding.dispatch_lower
+            or handle.created_upper != binding.dispatch_upper
+            or handle.lease_until != lease_until
+        ):
+            return unresolved
+        with self._lock:
+            self._control = control
+            self._closed = True
+        return QuarantineProof._create(
+            _PROOF_FACTORY,
+            ProofDisposition.PRESENT,
+            self._proof_nonce,
+            handle,
+            binding,
+        )
+
     def pre_provider_abort_authority(
         self, proof: QuarantineProof
     ) -> RecoveryAuthority:
@@ -482,6 +551,73 @@ class DurableAdmissionGate:
                 },
             ],
         }
+
+    def execute_recovery(
+        self, authority: RecoveryAuthority, terminal_plan: object
+    ) -> bool:
+        """Execute D1 and OPEN once; ambiguity succeeds only by exact proof."""
+
+        try:
+            request = self.append_recovery_open_action(authority, terminal_plan)
+            response = self._client.transact_write_items(**request)
+        except Exception:
+            return self._prove_recovery_commit(authority)
+        if not _confirmed_2xx(response):
+            return self._prove_recovery_commit(authority)
+        current = self._control
+        if current is None or current.state is not GateState.QUARANTINED:
+            return False
+        self._control = _Control(
+            GateState.OPEN, current.generation, current.version + 1, None
+        )
+        self._closed = False
+        return True
+
+    def _prove_recovery_commit(self, authority: RecoveryAuthority) -> bool:
+        from trustforge.preview_terminal_reconcile import (
+            build_terminal_read_request,
+            decode_terminal_responses,
+        )
+
+        if (
+            type(authority) is not RecoveryAuthority
+            or authority._gate_nonce is not self._proof_nonce
+        ):
+            return False
+        current = self._control
+        if current is None or current.state is not GateState.QUARANTINED:
+            return False
+        expected = _Control(
+            GateState.OPEN, current.generation, current.version + 1, None
+        )
+        try:
+            request = build_terminal_read_request(
+                authority.intent, self._table
+            )
+            request["TransactItems"].append(
+                {"Get": {"TableName": self._table, "Key": CONTROL_KEY}}
+            )
+            response = self._client.transact_get_items(**request)
+            responses = response["Responses"]
+            if type(responses) is not list or len(responses) < 3:
+                return False
+            terminal = decode_terminal_responses(
+                authority.intent, responses[:-1]
+            )
+            control_response = responses[-1]
+            if (
+                type(control_response) is not dict
+                or set(control_response) != {"Item"}
+            ):
+                return False
+            control = _decode_control(control_response["Item"])
+        except Exception:
+            return False
+        if not terminal.terminal_replay or control != expected:
+            return False
+        self._control = control
+        self._closed = False
+        return True
 
     def _owns_present(self, proof: QuarantineProof) -> bool:
         return (

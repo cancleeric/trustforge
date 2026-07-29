@@ -20,11 +20,21 @@ from trustforge.preview_admission_executor import (
     _confirmed_ambiguity_resolution,
 )
 from trustforge.preview_admission_store import MAX_EPOCH_MINUTE, SCHEMA_VERSION
+from trustforge.preview_durable_admission_gate import (
+    CONTROL_KEY as ADMISSION_CONTROL_KEY,
+    DurableAdmissionGate,
+    GateState,
+    ProofDisposition,
+    _decode_control,
+)
 from trustforge.preview_terminal_reconcile import (
     PreviewTerminalReconciler,
     TerminalDisposition,
     TerminalIntent,
     TerminalOutcome,
+    build_terminal_read_request,
+    compile_terminal,
+    decode_terminal_responses,
 )
 from trustforge.preview_trusted_clock import TrustedUtcInterval
 
@@ -178,6 +188,10 @@ class PreviewLeaseRecovery:
                             RecoveryOutcome.UNAVAILABLE, pages, candidates
                         )
                     if reservation.disposition is None:
+                        if not self._fence_allows_uncertain():
+                            return RecoveryResult(
+                                RecoveryOutcome.UNAVAILABLE, pages, candidates
+                            )
                         result = self._terminal.reconcile(
                             TerminalIntent(
                                 handle, interval, TerminalDisposition.UNCERTAIN
@@ -209,6 +223,17 @@ class PreviewLeaseRecovery:
             )
         except Exception:  # noqa: BLE001 - every malformed/backend path stays closed
             return RecoveryResult(RecoveryOutcome.UNAVAILABLE, 0, 0)
+
+    def _fence_allows_uncertain(self) -> bool:
+        response = self._client.get_item(
+            TableName=self._table,
+            Key=ADMISSION_CONTROL_KEY,
+            ConsistentRead=True,
+        )
+        if type(response) is not dict or set(response) < {"Item"}:
+            return False
+        control = _decode_control(response["Item"])
+        return control is not None and control.state is GateState.OPEN
 
     def _read_watermark(self) -> _Watermark:
         response = self._client.get_item(
@@ -303,7 +328,7 @@ class PreviewAmbiguityRecovery:
         client: RecoveryClient,
         table_name: str,
         terminal: PreviewTerminalReconciler,
-        interval: TrustedUtcInterval,
+        durable_gate: DurableAdmissionGate,
     ) -> None:
         if not _TABLE_RE.fullmatch(table_name):
             raise ValueError("invalid table")
@@ -315,53 +340,52 @@ class PreviewAmbiguityRecovery:
             or type(terminal) is not PreviewTerminalReconciler
             or terminal._client is not client
             or terminal._table_name != table_name
-            or type(interval) is not TrustedUtcInterval
-            or not math.isfinite(interval.earliest)
-            or not math.isfinite(interval.latest)
-            or interval.earliest > interval.latest
+            or type(durable_gate) is not DurableAdmissionGate
+            or durable_gate._client is not client
+            or durable_gate._table != table_name
         ):
             raise ValueError("invalid ambiguity recovery configuration")
         self._client = client
         self._table = table_name
         self._terminal = terminal
-        self._interval = interval
+        self._gate = durable_gate
 
     def resolve(
         self, ambiguity: AdmissionAmbiguity
     ) -> AdmissionAmbiguityResolution | None:
+        return (
+            _confirmed_ambiguity_resolution(ambiguity)
+            if self._recover(ambiguity.handle)
+            else None
+        )
+
+    def resolve_pending(self) -> bool:
+        """Recover a restart-discovered durable quarantine."""
+
+        return self._recover(None)
+
+    def _recover(self, expected: AdmissionHandle | None) -> bool:
         try:
-            handle = ambiguity.handle
-            key = {
-                "pk": f"PAP#1#RESERVATION#{handle.expiry_shard:010d}",
-                "sk": f"ID#{handle.reservation_id}",
-            }
-            response = self._client.get_item(
-                TableName=self._table,
-                Key=_ddb_map(key),
-                ConsistentRead=True,
-            )
-            if type(response) is not dict or "Item" not in response:
-                return None  # ABSENT is permanently UNRESOLVED without authority.
-            present = _decode_reservation(_decode_map(response["Item"]))
+            proof = self._gate.prove_pending_present()
             if (
-                present.handle != handle
-                or self._interval.earliest <= handle.lease_until
+                proof.disposition is not ProofDisposition.PRESENT
+                or (expected is not None and proof.handle != expected)
             ):
-                return None
-            if present.disposition is not None:
-                return _confirmed_ambiguity_resolution(ambiguity)
-            result = self._terminal.reconcile(
-                TerminalIntent(
-                    handle, self._interval, TerminalDisposition.UNCERTAIN
-                )
+                return False
+            authority = self._gate.pre_provider_abort_authority(proof)
+            request = build_terminal_read_request(
+                authority.intent, self._table
             )
-            return (
-                _confirmed_ambiguity_resolution(ambiguity)
-                if result.outcome is TerminalOutcome.RECONCILED
-                else None
+            response = self._client.transact_get_items(**request)
+            snapshot = decode_terminal_responses(
+                authority.intent, response["Responses"]
             )
+            plan = compile_terminal(
+                authority.intent, self._table, snapshot
+            )
+            return self._gate.execute_recovery(authority, plan)
         except Exception:  # noqa: BLE001 - malformed/backend/ambiguity remains closed
-            return None
+            return False
 
 
 def _decode_reservation(item: dict[str, object]) -> _Reservation:

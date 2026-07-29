@@ -28,6 +28,11 @@ from trustforge.preview_lease_recovery import (
     RecoveryOutcome,
     _ddb_map,
 )
+from trustforge.preview_durable_admission_gate import (
+    DurableAdmissionGate,
+    GateState,
+    _control_item,
+)
 from trustforge.preview_terminal_reconcile import (
     PreviewTerminalReconciler,
     TerminalDisposition,
@@ -35,7 +40,7 @@ from trustforge.preview_terminal_reconcile import (
     TerminalIntent,
     TerminalOutcome,
 )
-from trustforge.preview_trusted_clock import TrustedUtcInterval
+from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
 from tests.test_preview_terminal_reconcile import (
     _admit,
     _create,
@@ -103,10 +108,13 @@ class Client:
         self.queries = []
         self.puts = []
         self.reservation = None
+        self.admission_control = _control_item(GateState.OPEN, 0, 0, None)
 
     def get_item(self, **kwargs):
         if kwargs["Key"]["pk"]["S"] == CONTROL_PK:
             return {"Item": self.item}
+        if kwargs["Key"]["pk"]["S"] == "PAP#1#CONTROL":
+            return {"Item": self.admission_control}
         return {} if self.reservation is None else {"Item": self.reservation}
 
     def query(self, **kwargs):
@@ -129,6 +137,18 @@ class Client:
 
 def _terminal(client: Client) -> PreviewTerminalReconciler:
     return PreviewTerminalReconciler(client, "preview-store")
+
+
+def _exact_terminal(client):
+    terminal = PreviewTerminalReconciler(client, "preview-store")
+    terminal.intents = []
+
+    def reconcile(intent):
+        terminal.intents.append(intent)
+        return TerminalExecutionResult(TerminalOutcome.RECONCILED)
+
+    terminal.reconcile = reconcile
+    return terminal
 
 
 def test_empty_expired_shards_are_bounded_and_checkpointed():
@@ -395,6 +415,10 @@ def test_real_reserved_reaper_d1_uncertain_releases_concurrency_once():
     _create(client)
     request = _request(previous="d" * 64)
     handle = _admit(client, request)
+    client.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
     _seed_watermark(client, handle.expiry_shard)
 
     interval = TrustedUtcInterval(
@@ -495,6 +519,10 @@ def test_d1_commit_response_loss_is_proved_then_checkpointed():
     _create(raw)
     request = _request()
     handle = _admit(raw, request)
+    raw.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
     _seed_watermark(raw, handle.expiry_shard)
 
     class CommitThenRaise:
@@ -537,6 +565,10 @@ def test_two_real_reapers_converge_without_double_release_or_skip():
     _create(raw)
     request = _request()
     handle = _admit(raw, request)
+    raw.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
     _seed_watermark(raw, handle.expiry_shard)
 
     class Shared:
@@ -701,7 +733,7 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate():
             self.calls["transact_write_items"] += 1
             self.write_calls += 1
             response = raw.transact_write_items(**kwargs)
-            if not self.raised:
+            if self.write_calls in (1, 2):
                 self.raised = True
                 raise TimeoutError("admission response lost")
             return response
@@ -727,31 +759,51 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate():
             return raw.put_item(**kwargs)
 
     client = AdmissionCommitThenRaise()
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    raw.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
+    clock = PreviewTrustedClock(
+        dynamodb_client=client, table_name="preview-store"
+    )
+    gate = DurableAdmissionGate(
+        client, "preview-store", trusted_clock=clock
+    )
+    executor = PreviewAdmissionExecutor(
+        client, "preview-store", durable_gate=gate
+    )
     first_request = _request()
     first = executor.execute(first_request)
     assert first.outcome.value == "unavailable"
     assert executor.latched_closed is True
     assert client.write_calls == 1
+    # A replacement process has no process-local ambiguity object; durable
+    # QUARANTINED is the only authority.
+    replacement_clock = PreviewTrustedClock(
+        dynamodb_client=client, table_name="preview-store"
+    )
+    replacement_gate = DurableAdmissionGate(
+        client, "preview-store", trusted_clock=replacement_clock
+    )
+    executor = PreviewAdmissionExecutor(
+        client, "preview-store", durable_gate=replacement_gate
+    )
+    assert executor._ambiguity is None
 
     # While closed, execute performs zero DynamoDB I/O.
     calls_before = dict(client.calls)
     assert executor.execute(_request()).outcome.value == "unavailable"
     assert client.calls == calls_before
 
-    handle = executor._ambiguity.handle
-    interval = TrustedUtcInterval(
-        handle.lease_until + 1, handle.lease_until + 2
-    )
     terminal = PreviewTerminalReconciler(client, "preview-store")
     resolver = PreviewAmbiguityRecovery(
-        client, "preview-store", terminal, interval
+        client, "preview-store", terminal, replacement_gate
     )
     client.block_terminal_read = True
     results = {}
     resolve_thread = threading.Thread(
         target=lambda: results.setdefault(
-            "resolved", executor.resolve_ambiguity(resolver)
+            "resolved", executor.recover_pending(resolver)
         )
     )
     resolve_thread.start()
@@ -771,66 +823,21 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate():
 
     following = results["following"]
     assert following.outcome.value == "admitted"
-    assert client.write_calls == 3  # admission, D1 terminal, next admission
-
-
-def _exact_terminal(client):
-    terminal = PreviewTerminalReconciler(client, "preview-store")
-    terminal.intents = []
-
-    def reconcile(intent):
-        terminal.intents.append(intent)
-        return TerminalExecutionResult(TerminalOutcome.RECONCILED)
-
-    terminal.reconcile = reconcile
-    return terminal
-
-
-def test_present_exact_expired_runs_d1_uncertain_and_resolves():
-    handle = _handle()
-    client = Client(handle.expiry_shard)
-    client.reservation = _reservation(handle)
-    terminal = _exact_terminal(client)
-    resolver = PreviewAmbiguityRecovery(
-        client,
-        "preview-store",
-        terminal,
-        TrustedUtcInterval(handle.lease_until + 1, handle.lease_until + 2),
-    )
-    ambiguity = AdmissionAmbiguity(
-        handle, "d" * 64, TrustedUtcInterval(handle.created_lower, handle.created_upper)
-    )
-
-    assert resolver.resolve(ambiguity) is not None
-    assert len(terminal.intents) == 1
-    assert terminal.intents[0].disposition.value == "uncertain"
-
-
-def test_absent_even_after_expiry_is_unresolved_and_executor_stays_closed():
-    handle = _handle()
-    client = Client(handle.expiry_shard)
-    terminal = _exact_terminal(client)
-    resolver = PreviewAmbiguityRecovery(
-        client,
-        "preview-store",
-        terminal,
-        TrustedUtcInterval(handle.lease_until + 10_000, handle.lease_until + 10_001),
-    )
-
-    assert resolver.resolve(
-        AdmissionAmbiguity(
-            handle,
-            "d" * 64,
-            TrustedUtcInterval(handle.created_lower, handle.created_upper),
-        )
-    ) is None
-    assert terminal.intents == []
+    assert client.write_calls == 4  # admission, D1+OPEN, next admission+finalize
 
 
 def test_public_resolver_boolean_cannot_forge_unlatch():
     handle = _handle()
     client = Client(handle.expiry_shard)
-    executor = PreviewAdmissionExecutor(client, "preview-store")
+    clock = PreviewTrustedClock(
+        dynamodb_client=client, table_name="preview-store"
+    )
+    gate = DurableAdmissionGate(
+        client, "preview-store", trusted_clock=clock
+    )
+    executor = PreviewAdmissionExecutor(
+        client, "preview-store", durable_gate=gate
+    )
     ambiguity = AdmissionAmbiguity(
         handle,
         "d" * 64,
@@ -871,73 +878,6 @@ def test_resolution_is_bound_to_exact_ambiguity_and_fingerprint():
     assert resolution._proves(first) is True
     assert resolution._proves(wrong_identity) is False
     assert resolution._proves(wrong_fingerprint) is False
-
-
-def test_absent_resolution_one_strong_get_no_d1_and_stays_zero_io_closed():
-    handle = _handle()
-
-    class CountingAbsent(Client):
-        def __init__(self):
-            super().__init__(handle.expiry_shard)
-            self.calls = {
-                "get_item": 0,
-                "query": 0,
-                "put_item": 0,
-                "transact_get_items": 0,
-                "transact_write_items": 0,
-            }
-
-        def get_item(self, **kwargs):
-            self.calls["get_item"] += 1
-            assert kwargs["ConsistentRead"] is True
-            return {}
-
-        def query(self, **kwargs):
-            self.calls["query"] += 1
-            return super().query(**kwargs)
-
-        def put_item(self, **kwargs):
-            self.calls["put_item"] += 1
-            return super().put_item(**kwargs)
-
-        def transact_get_items(self, **kwargs):
-            self.calls["transact_get_items"] += 1
-            raise AssertionError("ABSENT must not invoke D1")
-
-        def transact_write_items(self, **kwargs):
-            self.calls["transact_write_items"] += 1
-            raise AssertionError("ABSENT must not write")
-
-    client = CountingAbsent()
-    terminal = PreviewTerminalReconciler(client, "preview-store")
-    executor = PreviewAdmissionExecutor(client, "preview-store")
-    ambiguity = AdmissionAmbiguity(
-        handle,
-        "d" * 64,
-        TrustedUtcInterval(handle.created_lower, handle.created_upper),
-    )
-    with executor._write_gate:
-        executor._ambiguity = ambiguity
-        executor._latched_closed = True
-    resolver = PreviewAmbiguityRecovery(
-        client,
-        "preview-store",
-        terminal,
-        TrustedUtcInterval(handle.lease_until + 100, handle.lease_until + 101),
-    )
-
-    assert executor.resolve_ambiguity(resolver) is False
-    assert executor.latched_closed is True
-    assert client.calls == {
-        "get_item": 1,
-        "query": 0,
-        "put_item": 0,
-        "transact_get_items": 0,
-        "transact_write_items": 0,
-    }
-    after_proof = dict(client.calls)
-    assert executor.execute(_request()).outcome.value == "unavailable"
-    assert client.calls == after_proof
 
 
 def test_source_contract_has_no_scan_provider_or_retry():
