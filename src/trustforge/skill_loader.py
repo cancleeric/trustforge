@@ -106,32 +106,20 @@ class SkillLoader:
         self._ensure_loader_tables()
 
     def _ensure_loader_tables(self) -> None:
-        """Create loader-specific tables (frozen manifests, proposals)."""
+        """Fail closed unless the authorized registry migration has run."""
         conn = self._registry._connect()
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS frozen_skill_manifests (
-                run_id TEXT NOT NULL,
-                skill_id TEXT NOT NULL,
-                revision_hash TEXT NOT NULL,
-                reason TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (run_id, skill_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS activation_proposals (
-                proposal_id TEXT PRIMARY KEY,
-                skill_id TEXT NOT NULL,
-                revision_hash TEXT NOT NULL,
-                reason TEXT NOT NULL DEFAULT '',
-                proposed_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending','approved','rejected')),
-                sandbox_passed INTEGER NOT NULL DEFAULT 0,
-                decided_by TEXT,
-                decided_at TEXT
-            );
-        """)
-        conn.commit()
+        rows = conn.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type = 'table'
+                 AND name IN ('frozen_skill_manifests', 'activation_proposals')"""
+        ).fetchall()
+        present = {row[0] for row in rows}
+        required = {"frozen_skill_manifests", "activation_proposals"}
+        if present != required:
+            raise RuntimeError(
+                "SkillLoader schema unavailable; run authorized "
+                "SkillRegistryRepository.ensure_schema() first"
+            )
 
     # ─── Discovery ───────────────────────────────────────────────────────
 

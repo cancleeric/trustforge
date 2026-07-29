@@ -5,6 +5,7 @@ Issue: #920 | Epic: #914
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -46,6 +47,20 @@ def registry(db_path: Path) -> SkillRegistryRepository:
 @pytest.fixture
 def loader(registry: SkillRegistryRepository) -> SkillLoader:
     return SkillLoader(registry)
+
+
+def test_loader_does_not_create_missing_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "unmigrated.db"
+    sqlite3.connect(db_path).close()
+    registry = SkillRegistryRepository(db_path=db_path)
+
+    with pytest.raises(RuntimeError, match="authorized"):
+        SkillLoader(registry)
+
+    tables = registry._connect().execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
+    assert tables == []
 
 
 def _create_active_skill(

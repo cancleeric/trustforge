@@ -38,7 +38,7 @@ VALID_RELATIONS = frozenset({"requires", "optional", "conflicts"})
 
 HIGH_RISK_CLASSES = frozenset({"external_write", "deploy_or_release"})
 
-_MIGRATION_VERSION = 1
+_MIGRATION_VERSION = 2
 
 _MAX_CYCLE_DEPTH = 10
 
@@ -173,6 +173,28 @@ def _upgrade(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (from_skill_id, to_skill_id, relation),
             CHECK (from_skill_id != to_skill_id)
         );
+
+        CREATE TABLE IF NOT EXISTS frozen_skill_manifests (
+            run_id TEXT NOT NULL,
+            skill_id TEXT NOT NULL,
+            revision_hash TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, skill_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS activation_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL,
+            revision_hash TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            proposed_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','approved','rejected')),
+            sandbox_passed INTEGER NOT NULL DEFAULT 0,
+            decided_by TEXT,
+            decided_at TEXT
+        );
     """)
 
     _set_version(conn, _MIGRATION_VERSION)
@@ -185,6 +207,8 @@ def rollback(conn: sqlite3.Connection) -> None:
 
     verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
     conn.executescript("""
+        DROP TABLE IF EXISTS activation_proposals;
+        DROP TABLE IF EXISTS frozen_skill_manifests;
         DROP TABLE IF EXISTS skill_dependencies;
         DROP TABLE IF EXISTS skill_revisions;
         DROP TABLE IF EXISTS skills;
