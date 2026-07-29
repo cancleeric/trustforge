@@ -229,7 +229,12 @@ class AssetIntrinsicRecord:
 
 @dataclass(frozen=True)
 class AssetIntrinsicView:
-    """PIT-safe view. Stale, conflicted and future facts are omitted."""
+    """PIT-safe view. Stale and future facts are omitted.
+
+    Known, unknown and conflicted dimensions may appear; conflicted dimensions
+    are surfaced so the shadow layer can report exact zero contribution with a
+    ``conflicted`` status rather than silently collapsing to unknown.
+    """
 
     asset_id: str
     as_of: datetime
@@ -238,10 +243,15 @@ class AssetIntrinsicView:
     def __post_init__(self) -> None:
         _ensure_aware(self.as_of, "view.as_of")
         if any(
-            dimension.status not in {IntrinsicFactStatus.KNOWN, IntrinsicFactStatus.UNKNOWN}
+            dimension.status
+            not in {
+                IntrinsicFactStatus.KNOWN,
+                IntrinsicFactStatus.UNKNOWN,
+                IntrinsicFactStatus.CONFLICTED,
+            }
             for dimension in self.dimensions
         ):
-            raise ValueError("PIT view may contain only known or unknown dimensions")
+            raise ValueError("PIT view may contain only known, unknown or conflicted dimensions")
 
     @property
     def eligible_dimensions(self) -> tuple[IntrinsicDimension, ...]:

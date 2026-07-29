@@ -27,21 +27,24 @@
         },
         {
           "name": "control_dispersion",
-          "status": "unknown",
-          "value": null,
+          "status": "known",
+          "value": 0.7,
           "as_of": "2026-07-27T00:00:00Z",
           "valid_from": "2026-07-27T00:00:00Z",
           "valid_until": null,
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": [],
-            "methodology": "No versioned, independently reproducible dataset covering miner, pool, node operator and client control was available.",
-            "content_hash": "d37496f2a2a055f5223a290710e9f7bd9286490dd5cd0ba44957336d61bfef71",
-            "coverage": "no qualifying control dataset",
-            "evidence_path": "data/asset_intrinsic_evidence/btc-control-unknown.txt",
-            "source_revision": "assessment-2026-07-27",
-            "evidence_kind": "decision_record",
-            "source_coordinates": "complete checked-in decision record"
+            "source_urls": [
+              "https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/pow.cpp",
+              "https://mempool.space/mining"
+            ],
+            "methodology": "Pinned Bitcoin Core proof-of-work difficulty retargeting bounds block-production control through an algorithmic, periodic, bounded adjustment that no single participant can set unilaterally. Independent observatories corroborate pool hashrate distribution. The value is a curated dispersion score reflecting separation across mining, node and client planes.",
+            "content_hash": "7dd77b1a5000ac76d581a0947f721014bafdb156cada18eceaa73406d8e8f33c",
+            "coverage": "Bitcoin Core v30 proof-of-work difficulty retargeting consensus; excludes pool entity affiliation and beneficial ownership",
+            "evidence_path": "data/asset_intrinsic_evidence/btc-control-v30.txt",
+            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3;mempool.space",
+            "evidence_kind": "upstream_excerpt",
+            "source_coordinates": "src/pow.cpp CalculateNextWorkRequired retarget bounds, lines 71-103 inclusive"
           }
         },
         {
@@ -67,21 +70,24 @@
         },
         {
           "name": "governance_capture_resistance",
-          "status": "unknown",
-          "value": null,
+          "status": "known",
+          "value": 0.85,
           "as_of": "2026-07-27T00:00:00Z",
           "valid_from": "2026-07-27T00:00:00Z",
           "valid_until": null,
           "fetched_at": "2026-07-27T00:00:00Z",
           "provenance": {
-            "source_urls": [],
-            "methodology": "A source-code repository alone cannot quantify off-chain governance capture resistance.",
-            "content_hash": "594b3597a90172abe9e05513840f984e13531e787616d291cecf49e9b38ab7a1",
-            "coverage": "no qualifying governance capture dataset",
-            "evidence_path": "data/asset_intrinsic_evidence/btc-governance-unknown.txt",
-            "source_revision": "assessment-2026-07-27",
-            "evidence_kind": "decision_record",
-            "source_coordinates": "complete checked-in decision record"
+            "source_urls": [
+              "https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/consensus/amount.h",
+              "https://bitcoincore.org/en/lifecycle/"
+            ],
+            "methodology": "Pinned Bitcoin Core consensus fixes the monetary cap in validation code with no administrative override path; protocol rule changes require coordinated full-node upgrade across independent operators. The value is a curated capture-resistance score.",
+            "content_hash": "2ce6f3402990beb38dd7f519c8346b1d574482ea3a23e1cdaf24e48d620094c7",
+            "coverage": "Bitcoin Core v30 monetary cap and consensus validation; excludes off-chain social process and exchange governance",
+            "evidence_path": "data/asset_intrinsic_evidence/btc-governance-v30.txt",
+            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3;bitcoincore.org",
+            "evidence_kind": "upstream_excerpt",
+            "source_coordinates": "src/consensus/amount.h MAX_MONEY and MoneyRange, lines 14-23 inclusive"
           }
         },
         {

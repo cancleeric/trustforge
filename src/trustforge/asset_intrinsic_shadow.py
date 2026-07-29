@@ -163,6 +163,10 @@ def assess_intrinsic_shadow(view: AssetIntrinsicView) -> dict:
     total_delta = max(-TOTAL_DELTA_CAP, min(TOTAL_DELTA_CAP, total_delta))
     if not math.isfinite(total_delta):
         raise ValueError("shadow total must be finite")
+    conflict_detected = any(
+        dimension.status is IntrinsicFactStatus.CONFLICTED
+        for dimension in view.dimensions
+    )
     return {
         "schema_version": ASSESSMENT_SCHEMA_VERSION,
         "mode": "shadow",
@@ -171,6 +175,7 @@ def assess_intrinsic_shadow(view: AssetIntrinsicView) -> dict:
         "as_of": view.as_of.isoformat().replace("+00:00", "Z"),
         "total_delta": total_delta,
         "total_delta_cap": TOTAL_DELTA_CAP,
+        "conflict_detected": conflict_detected,
         "gate": {
             "passed": gate_passed,
             "known_count": len(eligible),
@@ -186,6 +191,14 @@ def assess_intrinsic_shadow(view: AssetIntrinsicView) -> dict:
 def _dimension_output(
     dimension: IntrinsicDimension, assessment_as_of: datetime, gate_passed: bool
 ) -> dict:
+    if dimension.status is IntrinsicFactStatus.CONFLICTED:
+        return _unknown_dimension(
+            dimension.name.value,
+            "fact_conflicted",
+            status="conflicted",
+            coverage=dimension.provenance.coverage,
+            provenance=_public_provenance(dimension),
+        )
     if dimension.status is not IntrinsicFactStatus.KNOWN or not dimension.eligible_at(
         assessment_as_of
     ):
@@ -225,12 +238,13 @@ def _unknown_dimension(
     name: str,
     reason_code: str,
     *,
+    status: str = "unknown",
     coverage: str = "no PIT-visible verified fact",
     provenance: dict | None = None,
 ) -> dict:
     return {
         "name": name,
-        "status": "unknown",
+        "status": status,
         "raw": None,
         "normalized": None,
         "weight": DIMENSION_WEIGHT,

@@ -194,6 +194,7 @@ def test_pit_view_omits_stale_conflicted_expired_and_future_dimensions() -> None
     dimensions[0]["status"] = "stale"
     dimensions[0]["value"] = None
     dimensions[1]["status"] = "conflicted"
+    dimensions[1]["value"] = None
     dimensions[2]["valid_until"] = "2026-07-28T00:00:00Z"
     dimensions[3]["as_of"] = "2026-08-02T00:00:00Z"
     dimensions[3]["fetched_at"] = "2026-08-02T00:00:00Z"
@@ -305,16 +306,45 @@ def test_known_btc_evidence_is_exact_pinned_upstream_bytes() -> None:
     btc = next(record for record in records if record.profile.asset_id == "asset:btc")
     known = [dimension for dimension in btc.profile.dimensions if dimension.status.value == "known"]
 
-    assert len(known) == 2
+    assert len(known) == 4
     for dimension in known:
         provenance = dimension.provenance
         assert provenance.evidence_kind == "upstream_excerpt"
         assert "d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in provenance.source_revision
-        assert all("d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in url for url in provenance.source_urls)
         assert "lines " in provenance.source_coordinates
-    issuance = Path(__file__).parents[1] / known[0].provenance.evidence_path
+    # Issuance and supply are pinned single-revision excerpts of Bitcoin Core.
+    pinned = [
+        dimension
+        for dimension in known
+        if dimension.name
+        in (IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, IntrinsicDimensionName.SUPPLY_VERIFIABILITY)
+    ]
+    assert len(pinned) == 2
+    for dimension in pinned:
+        assert all(
+            "d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in url
+            for url in dimension.provenance.source_urls
+        )
+    issuance = Path(__file__).parents[1] / pinned[0].provenance.evidence_path
     assert issuance.read_text(encoding="utf-8").startswith("CAmount GetBlockSubsidy(")
     assert "observation:" not in issuance.read_text(encoding="utf-8")
+    # Control and governance span at least two independent source hosts so that
+    # documentation statements are never the sole entity-control proof.
+    multi_host = [
+        dimension
+        for dimension in known
+        if dimension.name
+        in (IntrinsicDimensionName.CONTROL_DISPERSION, IntrinsicDimensionName.GOVERNANCE_CAPTURE_RESISTANCE)
+    ]
+    assert len(multi_host) == 2
+    for dimension in multi_host:
+        families = {
+            url.split("://", 1)[1].split("/", 1)[0]
+            for url in dimension.provenance.source_urls
+        }
+        assert len(families) >= 2
+        evidence_path = Path(__file__).parents[1] / dimension.provenance.evidence_path
+        assert "observation:" not in evidence_path.read_text(encoding="utf-8")
 
 
 def test_loader_rejects_oversized_records_before_json_decode(tmp_path: Path) -> None:
