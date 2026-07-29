@@ -13,6 +13,7 @@ import hashlib
 import json
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -26,6 +27,7 @@ from trustforge.analysis_flow import (
     _bedrock_live_attempt,
 )
 from trustforge.execlog import ExecutionLog
+from trustforge.admin_config import AdminConfig
 
 
 @pytest.fixture
@@ -223,7 +225,7 @@ def test_multi_angle_worker_never_bypasses_per_call_budget_guard(monkeypatch):
     )
     monkeypatch.setattr(
         "trustforge.analysis_flow.budget_guard.try_reserve_request_budget",
-        lambda: calls.append(True) or None,
+        lambda **_kwargs: calls.append(True) or None,
     )
 
     with _bedrock_live_attempt(ExecutionLog(run_id="ma-worker-guard")) as live:
@@ -457,3 +459,149 @@ class TestMultiAngleStatus:
 
         result_b = flow.multi_angle_status("XRP", "snap-xrp-b")
         assert result_b["consensus"] == "偏多"
+
+
+def _insert_complete_angle_inputs(flow, snapshot_id="snap-narration", coin="BTC"):
+    for mode in MODES:
+        payload = json.dumps({
+            "report": {
+                "direction": "偏多",
+                "calibrated_confidence": 0.65,
+                "decision_state": "normal",
+                "question_type": "multi_source",
+                "market_judgment": f"{coin} {mode}",
+                "key_basis": [],
+            },
+            "evidence": [{"source": f"source-{mode}", "trust": 0.8}],
+            "snapshot_id": snapshot_id,
+        })
+        flow._conn().execute(
+            "INSERT INTO analysis_results VALUES(?,?,?,?,?,?,?,?)",
+            (
+                f"result-{snapshot_id}-{mode}",
+                f"job-{snapshot_id}-{mode}",
+                snapshot_id,
+                coin,
+                mode,
+                "q",
+                payload,
+                time.time(),
+            ),
+        )
+
+
+def test_default_on_runtime_calls_llm_exactly_once_and_persists_narration(
+    flow, monkeypatch
+):
+    calls = []
+
+    @contextmanager
+    def live_gate(_log):
+        yield True
+
+    class Result:
+        text = "五方向一致偏多，證據來源彼此獨立。"
+        model_id = None
+
+    class Client:
+        def __init__(self, *, offline):
+            assert offline is False
+            self.offline = offline
+
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            return Result()
+
+    monkeypatch.delenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", raising=False)
+    monkeypatch.setattr(
+        "trustforge.admin_config.get_config_cached",
+        lambda: AdminConfig(multi_angle_narration_enabled=None),
+    )
+    monkeypatch.setattr("trustforge.analysis_flow._bedrock_live_attempt", live_gate)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", Client)
+    _insert_complete_angle_inputs(flow)
+
+    assert flow._complete_claimed_synthesis("snap-narration", "BTC") is True
+    result = flow.multi_angle_status("BTC", "snap-narration")
+
+    assert len(calls) == 1
+    assert result["narration"] == Result.text
+    assert result["synthesis_summary"]
+
+
+@pytest.mark.parametrize(
+    ("case", "resolver_result"),
+    [
+        ("admin_off", (False, "config")),
+        ("config_read_error", (False, "config_read_error")),
+    ],
+)
+def test_runtime_disabled_resolver_never_constructs_client(
+    flow, monkeypatch, case, resolver_result
+):
+    constructed = []
+    monkeypatch.setattr(
+        "trustforge.admin_config.multi_angle_narration_enabled_resolved",
+        lambda: resolver_result,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.BedrockClient",
+        lambda **kwargs: constructed.append(kwargs),
+    )
+    snapshot_id = f"snap-{case}"
+    _insert_complete_angle_inputs(flow, snapshot_id)
+
+    assert flow._complete_claimed_synthesis(snapshot_id, "BTC") is True
+    result = flow.multi_angle_status("BTC", snapshot_id)
+
+    assert constructed == []
+    assert "narration" not in result
+    assert result["synthesis_summary"]
+
+
+def test_runtime_env_zero_never_constructs_client(flow, monkeypatch):
+    constructed = []
+    monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "0")
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.BedrockClient",
+        lambda **kwargs: constructed.append(kwargs),
+    )
+    _insert_complete_angle_inputs(flow, "snap-env-zero")
+
+    assert flow._complete_claimed_synthesis("snap-env-zero", "BTC") is True
+    result = flow.multi_angle_status("BTC", "snap-env-zero")
+
+    assert constructed == []
+    assert "narration" not in result
+
+
+def test_llm_error_falls_back_without_changing_structural_fields(flow, monkeypatch):
+    @contextmanager
+    def live_gate(_log):
+        yield True
+
+    class BrokenClient:
+        def __init__(self, *, offline):
+            assert offline is False
+            self.offline = offline
+
+        def complete(self, **_kwargs):
+            raise RuntimeError("provider failure")
+
+    monkeypatch.setattr(
+        "trustforge.admin_config.multi_angle_narration_enabled_resolved",
+        lambda: (True, "default"),
+    )
+    monkeypatch.setattr("trustforge.analysis_flow._bedrock_live_attempt", live_gate)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", BrokenClient)
+    _insert_complete_angle_inputs(flow, "snap-llm-error")
+
+    assert flow._complete_claimed_synthesis("snap-llm-error", "BTC") is True
+    result = flow.multi_angle_status("BTC", "snap-llm-error")
+
+    assert "narration" not in result
+    assert result["coin"] == "BTC"
+    assert result["consensus"] == "偏多"
+    assert result["angles"]
+    assert result["synthesis_summary"]
+    assert "agreement_matrix" in result

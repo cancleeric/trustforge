@@ -314,6 +314,328 @@ def test_batch_allocation_skips_legacy_reserve_release_but_ledgers(
     assert ledger[0]["total_cost_usd"] == 0.01
 
 
+def _allow_legacy_live_attempt(monkeypatch, reservation=0.25):
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: True)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.narrative_model_priced",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.daily_cap_exceeded",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.try_reserve_request_budget",
+        lambda **_kwargs: reservation,
+    )
+
+
+def test_live_timeout_without_usage_charges_reservation_before_release(
+    monkeypatch,
+):
+    order = []
+    _allow_legacy_live_attempt(monkeypatch, reservation=0.25)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda amount: order.append(("unledgered", amount)),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        lambda amount, **_kwargs: order.append(("release", amount)),
+    )
+    log = ExecutionLog(run_id="narration-timeout")
+
+    with pytest.raises(TimeoutError):
+        with _bedrock_live_attempt(log) as live:
+            assert live is True
+            raise TimeoutError("provider accepted request but response timed out")
+
+    assert order == [("unledgered", 0.25), ("release", 0.25)]
+    assert any(
+        event["tool"] == "llm.accounting_uncertain" for event in log.events
+    )
+
+
+def test_live_timeout_retains_reservation_when_unledgered_fallback_fails(
+    monkeypatch,
+):
+    released = []
+    _allow_legacy_live_attempt(monkeypatch, reservation=0.25)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda _amount: (_ for _ in ()).throw(RuntimeError("counter unavailable")),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+
+    with pytest.raises(TimeoutError):
+        with _bedrock_live_attempt(ExecutionLog(run_id="timeout-no-fallback")) as live:
+            assert live is True
+            raise TimeoutError("provider timeout")
+
+    assert released == []
+
+
+def test_shared_unknown_usage_retains_authority_across_instance_and_restart(
+    monkeypatch,
+):
+    state = {"reserved": 0.0, "release_calls": 0}
+
+    class SharedAuthority:
+        def __init__(self, durable_state):
+            self.state = durable_state
+
+        def reserve(self, **_kwargs):
+            if self.state["reserved"] + 0.25 > 0.25:
+                return None
+            self.state["reserved"] += 0.25
+            return 0.25
+
+        def release(self, amount, **_kwargs):
+            self.state["release_calls"] += 1
+            self.state["reserved"] -= amount
+
+    instance_a = SharedAuthority(state)
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: True)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.narrative_model_priced",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.daily_cap_exceeded",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.budget_reservation_backend",
+        lambda: "dynamodb",
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.try_reserve_request_budget",
+        instance_a.reserve,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        instance_a.release,
+    )
+    # This succeeds only process-locally and therefore is not a durable shared
+    # receipt authorizing release of the authority reservation.
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda _amount: None,
+    )
+
+    with pytest.raises(TimeoutError):
+        with _bedrock_live_attempt(ExecutionLog(run_id="shared-timeout")) as live:
+            assert live is True
+            raise TimeoutError("provider timeout")
+
+    assert state == {"reserved": 0.25, "release_calls": 0}
+    assert SharedAuthority(state).reserve() is None  # instance B
+    assert SharedAuthority(state).reserve() is None  # restarted instance
+
+
+def test_live_usage_ledger_failure_charges_actual_before_release(monkeypatch):
+    order = []
+    _allow_legacy_live_attempt(monkeypatch, reservation=0.25)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.append_run",
+        lambda _record: (_ for _ in ()).throw(RuntimeError("ledger down")),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda amount: order.append(("unledgered", amount)),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        lambda amount, **_kwargs: order.append(("release", amount)),
+    )
+    log = ExecutionLog(run_id="narration-ledger-failure")
+
+    with _bedrock_live_attempt(log) as live:
+        assert live is True
+        log.record(
+            "llm.cost",
+            params={
+                "model": "test-model",
+                "tokens_in": 10,
+                "tokens_out": 5,
+                "cost_usd": 0.04,
+            },
+            summary="usage",
+        )
+
+    assert order == [("unledgered", 0.04), ("release", 0.25)]
+
+
+def test_shared_usage_ledger_failure_retains_reservation_despite_local_fallback(
+    monkeypatch,
+):
+    released = []
+    _allow_legacy_live_attempt(monkeypatch, reservation=0.25)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.budget_reservation_backend",
+        lambda: "dynamodb",
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.append_run",
+        lambda _record: False,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda _amount: None,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+    log = ExecutionLog(run_id="shared-ledger-failure")
+
+    with pytest.raises(MultiAngleAuthorityError, match="retained"):
+        with _bedrock_live_attempt(log) as live:
+            assert live is True
+            log.record(
+                "llm.cost",
+                params={
+                    "model": "test-model",
+                    "tokens_in": 10,
+                    "tokens_out": 5,
+                    "cost_usd": 0.04,
+                },
+                summary="usage",
+            )
+
+    assert released == []
+
+
+def test_live_usage_retains_reservation_when_ledger_and_fallback_both_fail(
+    monkeypatch,
+):
+    released = []
+    _allow_legacy_live_attempt(monkeypatch, reservation=0.25)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.append_run",
+        lambda _record: (_ for _ in ()).throw(RuntimeError("ledger down")),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda _amount: (_ for _ in ()).throw(RuntimeError("counter down")),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+    log = ExecutionLog(run_id="usage-no-accounting")
+
+    with pytest.raises(MultiAngleAuthorityError, match="reservation retained"):
+        with _bedrock_live_attempt(log) as live:
+            assert live is True
+            log.record(
+                "llm.cost",
+                params={
+                    "model": "test-model",
+                    "tokens_in": 10,
+                    "tokens_out": 5,
+                    "cost_usd": 0.04,
+                },
+                summary="usage",
+            )
+
+    assert released == []
+
+
+def test_live_success_with_usage_ledgers_actual_without_worst_case(monkeypatch):
+    order = []
+    ledger = []
+    _allow_legacy_live_attempt(monkeypatch, reservation=0.25)
+
+    def append(record):
+        ledger.append(record)
+        order.append(("ledger", record["total_cost_usd"]))
+        return True
+
+    monkeypatch.setattr("trustforge.analysis_flow.append_run", append)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda amount: order.append(("unledgered", amount)),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        lambda amount, **_kwargs: order.append(("release", amount)),
+    )
+    log = ExecutionLog(run_id="narration-success")
+
+    with _bedrock_live_attempt(log) as live:
+        assert live is True
+        log.record(
+            "llm.cost",
+            params={
+                "model": "test-model",
+                "tokens_in": 10,
+                "tokens_out": 5,
+                "cost_usd": 0.04,
+            },
+            summary="usage",
+        )
+
+    assert order == [("ledger", 0.04), ("release", 0.25)]
+    assert ledger[0]["total_cost_usd"] == 0.04
+
+
+def test_narration_attempt_binds_reserve_and_release_to_captured_provenance(
+    monkeypatch,
+):
+    backend_reads = []
+    reserve_backends = []
+    release_backends = []
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: True)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.narrative_model_priced",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.daily_cap_exceeded",
+        lambda: False,
+    )
+
+    def resolve_backend():
+        backend_reads.append(True)
+        return "local" if len(backend_reads) == 1 else "dynamodb"
+
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.budget_reservation_backend",
+        resolve_backend,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.try_reserve_request_budget",
+        lambda **kwargs: reserve_backends.append(kwargs["backend"]) or 0.25,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.release_request_budget",
+        lambda _amount, **kwargs: release_backends.append(kwargs["backend"]),
+    )
+    monkeypatch.setattr("trustforge.analysis_flow.append_run", lambda _record: True)
+    log = ExecutionLog(run_id="bound-provenance")
+
+    with _bedrock_live_attempt(log) as live:
+        assert live is True
+        log.record(
+            "llm.cost",
+            params={
+                "model": "test-model",
+                "tokens_in": 1,
+                "tokens_out": 1,
+                "cost_usd": 0.01,
+            },
+            summary="usage",
+        )
+
+    assert len(backend_reads) == 1
+    assert reserve_backends == ["local"]
+    assert release_backends == ["local"]
+
+
 def test_exclusive_mode_disables_every_legacy_admission(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE", "1")
     from trustforge import budget_guard

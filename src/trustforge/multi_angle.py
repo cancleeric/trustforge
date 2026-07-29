@@ -559,13 +559,16 @@ def narrate_synthesis(
     """用 Bedrock 把 MultiAngleReport 改寫成人類可讀摘要（#811）。
 
     硬約束：LLM 不可自行發明交叉訊號。
-    失敗降級：回傳 report.synthesis_summary（確定性模板文字）。
+    空輸出降級：回傳 report.synthesis_summary。Provider 例外向外傳給
+    accounting context 記保守成本，再由 synthesis caller 做結構化降級。
     離線 / client.offline → 直接回傳 synthesis_summary。
 
-    由環境變數 TRUSTFORGE_MULTI_ANGLE_NARRATION=1 控制是否啟用。
+    由共享的 Admin/env/default resolver 控制是否啟用；預設開啟，env 可
+    fail-closed 緊急阻斷。
     """
-    import os
-    if os.environ.get("TRUSTFORGE_MULTI_ANGLE_NARRATION") != "1":
+    from .admin_config import multi_angle_narration_enabled_resolved
+    enabled, _ = multi_angle_narration_enabled_resolved()
+    if not enabled:
         return report.synthesis_summary
 
     # 離線直接降級
@@ -592,25 +595,26 @@ def narrate_synthesis(
         limits=limits_text,
     )
 
-    try:
-        result = client.complete(system=_NARRATION_SYSTEM, prompt=prompt)
-        if log is not None and getattr(result, "model_id", None):
-            from .ledger import estimate_cost
-            log.record_llm_cost(
+    # Provider exceptions must escape into `_bedrock_live_attempt`: a timeout can
+    # mean the provider accepted work even though no usage response arrived.
+    # The accounting context records the conservative reservation before release;
+    # `_complete_claimed_synthesis` owns the structural-summary fallback.
+    result = client.complete(system=_NARRATION_SYSTEM, prompt=prompt)
+    if log is not None and getattr(result, "model_id", None):
+        from .ledger import estimate_cost
+        log.record_llm_cost(
+            result.model_id,
+            result.input_tokens,
+            result.output_tokens,
+            estimate_cost(
                 result.model_id,
                 result.input_tokens,
                 result.output_tokens,
-                estimate_cost(
-                    result.model_id,
-                    result.input_tokens,
-                    result.output_tokens,
-                ),
-            )
-        narration = result.text.strip() if hasattr(result, "text") else str(result).strip()
-        if narration and len(narration) > 10:
-            return narration
-    except Exception:
-        pass
+            ),
+        )
+    narration = result.text.strip() if hasattr(result, "text") else str(result).strip()
+    if narration and len(narration) > 10:
+        return narration
 
     # 降級
     return report.synthesis_summary

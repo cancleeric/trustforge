@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from trustforge import budget_counter
+from trustforge import budget_counter, budget_guard
 from trustforge.budget_counter import BudgetBackendError, DynamoDBBudgetCounter
 from trustforge.budget_guard import (
     _reset_reservation_for_tests,
@@ -316,9 +316,9 @@ def test_budget_guard_ddb_multi_instance_no_overspend(monkeypatch, _budget_ddb_e
     assert reserved_items[0]["reserved_total"] == pytest.approx(1.0)
 
 
-def test_budget_guard_ddb_backend_error_falls_back_to_local(monkeypatch, _budget_ddb_env):
-    """後端不可用（BudgetBackendError）時，fallback 回 process-local 預留，
-    不讓預留整個 fail-open。"""
+def test_budget_guard_ddb_backend_error_fails_closed_without_local_reserve(
+    monkeypatch, _budget_ddb_env
+):
     broken = DynamoDBBudgetCounter()
     broken._table = _AlwaysThrottledTable()
 
@@ -328,11 +328,8 @@ def test_budget_guard_ddb_backend_error_falls_back_to_local(monkeypatch, _budget
     monkeypatch.setattr(budget_counter, "_default_counter", _fake_default_counter)
 
     cost = try_reserve_request_budget()
-    # fallback 到 process-local：cap=1.0, cost=0.1 → 第一筆成功
-    assert cost is not None
-    assert cost == pytest.approx(0.1)
-    # 釋放不會炸
-    release_request_budget(cost)
+    assert cost is None
+    assert budget_guard._RESERVATION._reserved == 0
 
 
 def test_budget_guard_ddb_release_frees_shared_counter(monkeypatch, _budget_ddb_env):
@@ -350,3 +347,47 @@ def test_budget_guard_ddb_release_frees_shared_counter(monkeypatch, _budget_ddb_
     assert c.current_reserved() == pytest.approx(0.1)
     release_request_budget(cost)
     assert c.current_reserved() == pytest.approx(0.0)
+
+
+def test_explicit_ddb_provenance_survives_env_switch_to_local(
+    monkeypatch, _budget_ddb_env
+):
+    released = []
+
+    class Counter:
+        def try_reserve(self, **_kwargs):
+            return True
+
+        def release(self, amount):
+            released.append(amount)
+
+    monkeypatch.setattr(budget_counter, "_default_counter", lambda: Counter())
+    cost = try_reserve_request_budget(backend="dynamodb")
+    assert cost is not None
+
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "local")
+    release_request_budget(cost, backend="dynamodb")
+
+    assert released == [cost]
+
+
+def test_explicit_local_provenance_survives_env_switch_to_ddb(
+    monkeypatch, _budget_ddb_env
+):
+    ddb_release = []
+
+    class Counter:
+        def release(self, amount):
+            ddb_release.append(amount)
+
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "local")
+    _reset_reservation_for_tests()
+    cost = try_reserve_request_budget(backend="local")
+    assert cost is not None
+
+    monkeypatch.setattr(budget_counter, "_default_counter", lambda: Counter())
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
+    release_request_budget(cost, backend="local")
+
+    assert budget_guard._RESERVATION._reserved == 0
+    assert ddb_release == []

@@ -274,6 +274,10 @@ def _bedrock_live_attempt(
         getattr(log, "_force_atomic_offline", False)
     )
     reservation: float | None = None
+    # Capture authority provenance before reserve.  Both reserve and release
+    # are explicitly bound to this value; a runtime env transition cannot make
+    # us decrement a different backend.
+    reservation_backend = budget_guard.budget_reservation_backend()
     live = False
     try:
         from .web import _bedrock_allowed  # noqa: PLC0415 — 避免頂層循環匯入
@@ -285,7 +289,9 @@ def _bedrock_live_attempt(
                 # reserve/release path would double charge capacity.
                 live = budget_guard.daily_cap_usd() > 0
             elif not budget_guard.daily_cap_exceeded():
-                reservation = budget_guard.try_reserve_request_budget()
+                reservation = budget_guard.try_reserve_request_budget(
+                    backend=reservation_backend
+                )
                 live = reservation is not None
         if force_offline:
             live = False
@@ -299,6 +305,15 @@ def _bedrock_live_attempt(
     start_idx = len(log.events)
     accounting_error: Exception | None = None
     body_error: BaseException | None = None
+    shared_reservation = (
+        reservation is not None
+        and reservation_backend == "dynamodb"
+    )
+    # A live legacy reservation may only be released after actual usage has a
+    # durable ledger receipt or a conservative/actual unledgered fallback was
+    # recorded successfully.  Until then the held reservation itself is the
+    # fail-closed admission barrier.
+    reservation_release_safe = reservation is None or not live
     try:
         yield live
     except BaseException as exc:
@@ -321,6 +336,31 @@ def _bedrock_live_attempt(
                 if event.get("tool") == "llm.cost"
             ]
             total_cost_usd = round(sum(float(c["cost_usd"] or 0.0) for c in new_calls), 6)
+            # A live legacy call with no usage receipt is financially uncertain:
+            # provider timeout/exception can happen after it accepted the work.
+            # Charge the conservative reservation into the fail-closed in-process
+            # counter *before* releasing that reservation, closing the zero-cost
+            # window for the next concurrent caller.  Successful calls with
+            # verifiable usage stay on the actual-cost ledger path below and are
+            # never double charged at the worst-case amount.
+            if live and reservation is not None and not new_calls:
+                budget_guard.record_unledgered_spend(reservation)
+                # Process-local unledgered state cannot authorize release of a
+                # cross-instance DynamoDB reservation.  Keep shared capacity
+                # held for durable reconciliation/manual disposition.
+                if not shared_reservation:
+                    reservation_release_safe = True
+                log.record(
+                    "llm.accounting_uncertain",
+                    params={
+                        "reason": "live_usage_missing",
+                        "conservative_cost_usd": reservation,
+                    },
+                    summary=(
+                        "Live Bedrock attempt has no usage receipt; "
+                        "charged conservative reservation"
+                    ),
+                )
             # Atomic calls need a durable receipt even for an authoritative
             # offline cancellation. A live attempt with no usage is uncertain
             # (the provider may have accepted a timed-out request), so it is
@@ -360,27 +400,48 @@ def _bedrock_live_attempt(
                     )
                 if not persisted:
                     budget_guard.record_unledgered_spend(total_cost_usd)
+                    if reservation is not None and not shared_reservation:
+                        reservation_release_safe = True
                     if on_accounted is not None and body_error is None:
                         accounting_error = MultiAngleAuthorityError(
                             "atomic accounting has no durable ledger receipt"
                         )
-                elif on_accounted is not None:
-                    on_accounted({
-                        "ledger_receipt": ledger_record["run_id"],
-                        "accounting_token": hashlib.sha256(
-                            json.dumps(
-                                ledger_record, sort_keys=True, separators=(",", ":")
-                            ).encode()
-                        ).hexdigest(),
-                        "actual_cost_usd": Decimal(str(total_cost_usd)),
-                        "tokens_in": sum(int(c["tokens_in"]) for c in new_calls),
-                        "tokens_out": sum(int(c["tokens_out"]) for c in new_calls),
-                        "outcome": ledger_record["accounting_outcome"],
-                    })
+                else:
+                    if reservation is not None:
+                        reservation_release_safe = True
+                    if on_accounted is not None:
+                        on_accounted({
+                            "ledger_receipt": ledger_record["run_id"],
+                            "accounting_token": hashlib.sha256(
+                                json.dumps(
+                                    ledger_record, sort_keys=True, separators=(",", ":")
+                                ).encode()
+                            ).hexdigest(),
+                            "actual_cost_usd": Decimal(str(total_cost_usd)),
+                            "tokens_in": sum(int(c["tokens_in"]) for c in new_calls),
+                            "tokens_out": sum(int(c["tokens_out"]) for c in new_calls),
+                            "outcome": ledger_record["accounting_outcome"],
+                        })
+            if (
+                shared_reservation
+                and not reservation_release_safe
+                and body_error is None
+            ):
+                accounting_error = MultiAngleAuthorityError(
+                    "shared Bedrock reservation retained for reconciliation"
+                )
         except Exception:
             if on_accounted is not None and body_error is None:
                 accounting_error = MultiAngleAuthorityError(
                     "atomic Bedrock accounting could not be persisted"
+                )
+            elif (
+                reservation is not None
+                and not reservation_release_safe
+                and body_error is None
+            ):
+                accounting_error = MultiAngleAuthorityError(
+                    "Bedrock accounting failed; reservation retained fail-closed"
                 )
             logging.getLogger(__name__).warning(
                 "analysis_flow: bedrock 花費記帳失敗（cap 帳本可能少計這筆）", exc_info=True,
@@ -391,13 +452,23 @@ def _bedrock_live_attempt(
             # 一定執行（不因記帳例外漏放預留），但文字順序＋巢狀結構確保
             # release 永遠在記帳嘗試「之後」才生效，關掉並發 job 讀到偏低
             # `daily_cost_usd()`、誤判有額度繞過 cap 的 TOCTOU 空窗。
-            if reservation is not None:
+            if reservation is not None and reservation_release_safe:
                 try:
-                    budget_guard.release_request_budget(reservation)
+                    budget_guard.release_request_budget(
+                        reservation, backend=reservation_backend
+                    )
                 except Exception:
                     logging.getLogger(__name__).warning(
                         "analysis_flow: release_request_budget 失敗", exc_info=True,
                     )
+            elif reservation is not None:
+                logging.getLogger(__name__).critical(
+                    "analysis_flow: accounting 無可靠 receipt/fallback；"
+                    "保留 reservation=%s backend=%s fail-closed，"
+                    "等待 reconcile/manual，禁止重開 admission",
+                    reservation,
+                    "dynamodb" if shared_reservation else "local",
+                )
         if accounting_error is not None and body_error is None:
             raise accounting_error
 
@@ -1573,8 +1644,11 @@ class AnalysisFlow:
             raise RuntimeError("multi-angle inputs disappeared after synthesis claim")
         report = synthesize_angles(angles, coin, snapshot_id)
         narration = report.synthesis_summary
-        # Flag 關閉時完全不進 live gate、不預留成本、不建立 client。
-        if os.environ.get("TRUSTFORGE_MULTI_ANGLE_NARRATION") == "1":
+        # Feature switch 關閉時完全不進 live gate、不預留成本、不建立 client。
+        # Resolver 預設開啟，且 env 是 Admin 無法覆蓋的 emergency kill switch。
+        from .admin_config import multi_angle_narration_enabled_resolved
+        narration_enabled, _ = multi_angle_narration_enabled_resolved()
+        if narration_enabled:
             try:
                 from .multi_angle import narrate_synthesis
                 narration_log = ExecutionLog(run_id=f"ma-{snapshot_id}")

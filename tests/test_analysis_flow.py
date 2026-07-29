@@ -788,9 +788,9 @@ def test_bedrock_live_attempt_records_ledger_before_releasing_reservation(tmp_pa
         order.append("append_run")
         return result
 
-    def _tracking_release(amount):
+    def _tracking_release(amount, **kwargs):
         order.append("release")
-        return real_release(amount)
+        return real_release(amount, **kwargs)
 
     monkeypatch.setattr("trustforge.analysis_flow.append_run", _slow_append_run)
     monkeypatch.setattr("trustforge.analysis_flow.budget_guard.release_request_budget", _tracking_release)
@@ -818,9 +818,9 @@ def test_bedrock_live_attempt_releases_reservation_even_when_ledger_accounting_r
     released = {}
     real_release = budget_guard.release_request_budget
 
-    def _tracking_release(amount):
+    def _tracking_release(amount, **kwargs):
         released["amount"] = amount
-        return real_release(amount)
+        return real_release(amount, **kwargs)
 
     monkeypatch.setattr("trustforge.analysis_flow.append_run", _boom)
     monkeypatch.setattr("trustforge.analysis_flow.budget_guard.release_request_budget", _tracking_release)
