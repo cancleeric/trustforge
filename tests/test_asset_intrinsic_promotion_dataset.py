@@ -285,6 +285,10 @@ def test_completion_not_durable_at_cutoff_is_not_pit_visible():
         "dimension_reason",
         "dimension_order",
         "provenance_hash",
+        "provenance_time_malformed",
+        "provenance_as_of_future",
+        "provenance_fetched_future",
+        "provenance_time_order",
         "assessment_schema",
         "gate_count",
         "gate_pass",
@@ -319,6 +323,23 @@ def test_intrinsic_reconstruction_inconsistency_fails_closed(tmp_path, case):
     elif case == "provenance_hash":
         intrinsic["dimensions"][0]["provenance"]["content_hash"] = "not-a-digest"
         intrinsic["facts_hash"] = intrinsic_facts_hash(intrinsic["dimensions"])
+    elif case == "provenance_time_malformed":
+        intrinsic["dimensions"][0]["provenance"]["as_of"] = "not-a-time"
+    elif case == "provenance_as_of_future":
+        intrinsic["dimensions"][0]["provenance"]["as_of"] = (
+            base + timedelta(minutes=1)
+        ).isoformat()
+        intrinsic["dimensions"][0]["provenance"]["fetched_at"] = (
+            base + timedelta(minutes=1)
+        ).isoformat()
+    elif case == "provenance_fetched_future":
+        intrinsic["dimensions"][0]["provenance"]["fetched_at"] = (
+            base + timedelta(minutes=1)
+        ).isoformat()
+    elif case == "provenance_time_order":
+        intrinsic["dimensions"][0]["provenance"]["fetched_at"] = (
+            base - timedelta(minutes=3)
+        ).isoformat()
     elif case == "assessment_schema":
         intrinsic["assessment_schema_version"] = "9.9.9"
     elif case == "gate_count":

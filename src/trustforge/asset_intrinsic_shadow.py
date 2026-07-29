@@ -343,6 +343,18 @@ def _finite_trust(value: float, name: str) -> float:
     return result
 
 
+def _aware_timestamp(value: object, name: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed
+
+
 def intrinsic_facts_hash(dimensions: list[dict]) -> str:
     """Return the producer-canonical digest for sanitized dimension facts."""
     facts_material = []
@@ -405,6 +417,7 @@ def validate_intrinsic_shadow_observation(payload: dict) -> dict:
     ):
         raise ValueError("intrinsic shadow observation contract is malformed")
 
+    observation_as_of = _aware_timestamp(payload["as_of"], "intrinsic as_of")
     baseline = _finite_trust(payload["baseline_trust"], "baseline_trust")
     candidate = _finite_trust(payload["candidate_trust"], "candidate_trust")
     trust_delta = _finite_trust(payload["trust_delta"], "trust_delta")
@@ -507,6 +520,18 @@ def validate_intrinsic_shadow_observation(payload: dict) -> dict:
                 or not provenance["fetched_at"]
             ):
                 raise ValueError("intrinsic dimension provenance is malformed")
+            provenance_as_of = _aware_timestamp(
+                provenance["as_of"], "intrinsic provenance as_of"
+            )
+            provenance_fetched_at = _aware_timestamp(
+                provenance["fetched_at"], "intrinsic provenance fetched_at"
+            )
+            if not (
+                provenance_as_of <= provenance_fetched_at <= observation_as_of
+            ):
+                raise ValueError(
+                    "intrinsic provenance timestamps violate PIT ordering"
+                )
         if status == "known":
             raw, normalized = dimension["raw"], dimension["normalized"]
             if (
