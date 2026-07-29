@@ -13,8 +13,13 @@ import threading
 from typing import Protocol
 
 from trustforge.preview_trusted_clock import PreviewTrustedClock
+from trustforge.preview_admission_compiler import (
+    RESERVATION_LEASE_SECONDS,
+    RETENTION_SECONDS,
+)
 from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
+    MIN_OVERLAP_SECONDS,
     RetirementCapability,
     _RETIREMENT_TOKEN,
 )
@@ -141,33 +146,35 @@ class QuotaKeyRetirementWaterlineWriter:
         dynamodb_client: RetirementClient,
         table_name: str,
         trusted_clock: PreviewTrustedClock,
+        lifecycle_authority: DurableQuotaKeyLifecycleAuthority,
     ) -> None:
         _require_bound_storage(dynamodb_client, table_name, trusted_clock)
+        _require_lifecycle_storage(
+            lifecycle_authority, dynamodb_client, table_name
+        )
         self._client = dynamodb_client
         self._table = table_name
         self._clock = trusted_clock
+        self._lifecycle_authority = lifecycle_authority
         self._nonce = object()
 
-    def propose(
-        self,
-        *,
-        last_old_admission_upper: int,
-        last_old_expiry_shard: int,
-        retire_not_before: float,
-        retention_until: float,
-    ) -> QuotaKeyRetirementWaterline:
-        """Bind caller facts to one exact durable lifecycle/D2/OPEN snapshot."""
+    def propose(self) -> QuotaKeyRetirementWaterline:
+        """Derive every boundary from one exact durable transition snapshot."""
 
         responses = _strong_read(self._client, self._table)
         proof = _decode_write_proof(responses)
+        transition_upper = int(proof.lifecycle.issued_latest)
+        last_expiry = (
+            transition_upper + RESERVATION_LEASE_SECONDS
+        ) // 60
         return QuotaKeyRetirementWaterline._mint(
             _PROPOSAL_TOKEN,
             self._nonce,
             proof,
-            last_old_admission_upper=last_old_admission_upper,
-            last_old_expiry_shard=last_old_expiry_shard,
-            retire_not_before=retire_not_before,
-            retention_until=retention_until,
+            last_old_admission_upper=transition_upper,
+            last_old_expiry_shard=last_expiry,
+            retire_not_before=transition_upper + MIN_OVERLAP_SECONDS,
+            retention_until=transition_upper + RETENTION_SECONDS,
         )
 
     def write(
@@ -220,7 +227,7 @@ class QuotaKeyRetirementWaterlineWriter:
                     }
                 )
             try:
-                self._client.transact_write_items(
+                response = self._client.transact_write_items(
                     TransactItems=[
                         {"Put": put},
                         {"ConditionCheck": _recovery_condition(self._table, proof)},
@@ -228,13 +235,18 @@ class QuotaKeyRetirementWaterlineWriter:
                         {"ConditionCheck": _lifecycle_condition(self._table, proof)},
                     ]
                 )
-                return WaterlineWriteDisposition.COMMITTED
             except Exception:
                 return (
                     WaterlineWriteDisposition.COMMITTED
                     if self._prove_exact(desired, proof)
                     else WaterlineWriteDisposition.UNRESOLVED
                 )
+            return (
+                WaterlineWriteDisposition.COMMITTED
+                if _confirmed_ddb_success(response)
+                or self._prove_exact(desired, proof)
+                else WaterlineWriteDisposition.UNRESOLVED
+            )
         except Exception:
             return WaterlineWriteDisposition.REJECTED
 
@@ -256,9 +268,12 @@ class QuotaKeyRetirementAuthority:
         dynamodb_client: RetirementClient,
         table_name: str,
         trusted_clock: PreviewTrustedClock,
-        lifecycle_authority: DurableQuotaKeyLifecycleAuthority | None = None,
+        lifecycle_authority: DurableQuotaKeyLifecycleAuthority,
     ) -> None:
         _require_bound_storage(dynamodb_client, table_name, trusted_clock)
+        _require_lifecycle_storage(
+            lifecycle_authority, dynamodb_client, table_name
+        )
         self._client = dynamodb_client
         self._table = table_name
         self._clock = trusted_clock
@@ -327,7 +342,6 @@ class QuotaKeyRetirementAuthority:
                 or getattr(decision, "_authority", None) is not self._nonce
                 or getattr(decision, "_serial", None) is None
                 or getattr(decision, "_serial", None) in self._consumed
-                or self._lifecycle_authority is None
             ):
                 raise ValueError("invalid retirement decision")
             self._consumed.add(decision._serial)
@@ -382,6 +396,7 @@ class _Lifecycle:
     current_version: int
     previous_version: int
     config_fingerprint: str
+    issued_latest: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +569,31 @@ def _require_bound_storage(
         raise ValueError("retirement authority must share trusted storage")
 
 
+def _require_lifecycle_storage(
+    authority: DurableQuotaKeyLifecycleAuthority,
+    client: RetirementClient,
+    table: str,
+) -> None:
+    if (
+        type(authority) is not DurableQuotaKeyLifecycleAuthority
+        or authority._client is not client
+        or authority._table != table
+    ):
+        raise ValueError("retirement lifecycle storage mismatch")
+
+
+def _confirmed_ddb_success(response: object) -> bool:
+    if type(response) is not dict:
+        return False
+    metadata = response.get("ResponseMetadata")
+    return (
+        type(metadata) is dict
+        and metadata.get("HTTPStatusCode") == 200
+        and type(metadata.get("RequestId")) is str
+        and bool(metadata["RequestId"])
+    )
+
+
 def _decode_recovery(item: dict[str, object]) -> _Recovery:
     if (
         set(item) not in (
@@ -604,6 +644,7 @@ def _decode_lifecycle(item: dict[str, object]) -> _Lifecycle:
         or item["current_version"] != item["previous_version"] + 1
         or type(item.get("config_fingerprint")) is not str
         or not item["config_fingerprint"]
+        or type(item.get("issued_latest")) not in (int, float)
     ):
         raise ValueError
     return _Lifecycle(
@@ -611,6 +652,7 @@ def _decode_lifecycle(item: dict[str, object]) -> _Lifecycle:
         item["current_version"],
         item["previous_version"],
         item["config_fingerprint"],
+        item["issued_latest"],
     )
 
 

@@ -12,6 +12,7 @@ from trustforge.quota_key_retirement import (
     RetirementDisposition,
     WaterlineWriteDisposition,
 )
+from trustforge.quota_key_lifecycle import DurableQuotaKeyLifecycleAuthority
 
 
 def _ddb(item: dict[str, object]) -> dict[str, object]:
@@ -26,6 +27,14 @@ class Client:
         self.now = now
         self.mutate = mutate
         self.calls: list[object] = []
+
+    def get_item(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        return {}
+
+    def put_item(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        return {}
 
     def describe_table(self, **kwargs: object) -> dict[str, object]:
         return {
@@ -78,6 +87,7 @@ class Client:
             "current_version": 2,
             "previous_version": 1,
             "config_fingerprint": "exact-transition",
+            "issued_latest": 100,
         }
         if self.mutate == "equal_time":
             waterline["retire_not_before"] = 200
@@ -121,11 +131,18 @@ def _authority(
         monotonic_clock=lambda: 1.0,
         wall_clock=lambda: float(client.now),
     )
+    lifecycle = (
+        lifecycle_authority
+        if lifecycle_authority is not None
+        else DurableQuotaKeyLifecycleAuthority(
+            clock, dynamodb_client=client, table_name="table"
+        )
+    )
     return QuotaKeyRetirementAuthority(
         dynamodb_client=client,
         table_name="table",
         trusted_clock=clock,
-        lifecycle_authority=lifecycle_authority,
+        lifecycle_authority=lifecycle,
     )
 
 
@@ -170,11 +187,15 @@ def test_clock_and_authority_must_share_exact_storage() -> None:
         monotonic_clock=lambda: 1.0,
         wall_clock=lambda: 200.0,
     )
+    lifecycle = DurableQuotaKeyLifecycleAuthority(
+        clock, dynamodb_client=first, table_name="table"
+    )
     try:
         QuotaKeyRetirementAuthority(
             dynamodb_client=second,
             table_name="table",
             trusted_clock=clock,
+            lifecycle_authority=lifecycle,
         )
     except ValueError:
         pass
@@ -185,14 +206,9 @@ def test_clock_and_authority_must_share_exact_storage() -> None:
 def _proposal(
     writer: QuotaKeyRetirementWaterlineWriter, **changes: object
 ) -> QuotaKeyRetirementWaterline:
-    values = {
-        "last_old_admission_upper": 120,
-        "last_old_expiry_shard": 150,
-        "retire_not_before": 290,
-        "retention_until": 400,
-    }
-    values.update(changes)
-    return writer.propose(**values)
+    if changes:
+        return writer.propose(**changes)  # type: ignore[call-arg]
+    return writer.propose()
 
 
 class StatefulClient(Client):
@@ -216,6 +232,9 @@ class StatefulClient(Client):
         lifecycle["previous_version"] = {
             "N": str(self.lifecycle_generation - 1)
         }
+        lifecycle["issued_latest"] = {
+            "N": str(100 + (self.lifecycle_generation - 2) * 60)
+        }
         return response
 
     def transact_write_items(self, **kwargs: object) -> dict[str, object]:
@@ -236,10 +255,14 @@ def _writer(client: StatefulClient) -> QuotaKeyRetirementWaterlineWriter:
         monotonic_clock=lambda: 1.0,
         wall_clock=lambda: 200.0,
     )
+    lifecycle = DurableQuotaKeyLifecycleAuthority(
+        clock, dynamodb_client=client, table_name="table"
+    )
     return QuotaKeyRetirementWaterlineWriter(
         dynamodb_client=client,
         table_name="table",
         trusted_clock=clock,
+        lifecycle_authority=lifecycle,
     )
 
 
@@ -289,11 +312,7 @@ def test_proposal_and_retirable_result_are_nominal_and_consumed_once() -> None:
     forged = QuotaKeyRetirementWaterline()
     assert first.write(forged) is WaterlineWriteDisposition.REJECTED
 
-    class Lifecycle:
-        _nonce = object()
-
-    lifecycle = Lifecycle()
-    authority = _authority(Client(), lifecycle)
+    authority = _authority(Client())
     decision = authority.evaluate()
     capability = authority.consume(decision)
     assert capability.lifecycle_generation == 2
@@ -303,15 +322,10 @@ def test_proposal_and_retirable_result_are_nominal_and_consumed_once() -> None:
         authority.consume(type(decision)())
 
 
-def test_writer_rejects_trusted_time_equality_and_straddle_without_write() -> None:
-    for boundary in (200, 200.5, 201):
-        client = StatefulClient()
-        writer = _writer(client)
-        assert (
-            writer.write(_proposal(writer, retire_not_before=boundary))
-            is WaterlineWriteDisposition.REJECTED
-        )
-        assert client.put_count == 0
+def test_writer_accepts_no_caller_controlled_boundaries() -> None:
+    writer = _writer(StatefulClient())
+    with pytest.raises(TypeError):
+        writer.propose(retire_not_before=200)  # type: ignore[call-arg]
 
 
 def _stored_waterline(*, recovery_version: int = 4) -> dict[str, object]:
@@ -325,11 +339,11 @@ def _stored_waterline(*, recovery_version: int = 4) -> dict[str, object]:
             "lifecycle_generation": 2,
             "previous_quota_key_version": 1,
             "current_quota_key_version": 2,
-            "last_old_admission_upper": 120,
-            "last_old_expiry_shard": 150,
+            "last_old_admission_upper": 100,
+            "last_old_expiry_shard": 1,
             "required_recovery_version": recovery_version,
-            "retire_not_before": 190,
-            "retention_until": 300,
+            "retire_not_before": 86_590,
+            "retention_until": 604_900,
         }
     )
 
@@ -337,14 +351,9 @@ def _stored_waterline(*, recovery_version: int = 4) -> dict[str, object]:
 def _advance(
     writer: QuotaKeyRetirementWaterlineWriter, **changes: object
 ) -> QuotaKeyRetirementWaterline:
-    values = {
-        "last_old_admission_upper": 121,
-        "last_old_expiry_shard": 151,
-        "retire_not_before": 291,
-        "retention_until": 401,
-    }
-    values.update(changes)
-    return _proposal(writer, **values)
+    if changes:
+        raise ValueError("caller boundaries forbidden")
+    return _proposal(writer)
 
 
 def test_advance_uses_exact_version_cas_and_rejects_equality() -> None:
@@ -354,22 +363,20 @@ def test_advance_uses_exact_version_cas_and_rejects_equality() -> None:
     writer = _writer(client)
     assert writer.write(_advance(writer)) is WaterlineWriteDisposition.COMMITTED
     assert client.put_count == 1
-    put = client.calls[-1]["TransactItems"][0]["Put"]
+    write = next(
+        call
+        for call in client.calls
+        if "TransactItems" in call and "Put" in call["TransactItems"][0]
+    )
+    put = write["TransactItems"][0]["Put"]
     assert put["ExpressionAttributeValues"][":expected"] == {"N": "7"}
 
-    equality_values = {
-        "last_old_admission_upper": 120,
-        "last_old_expiry_shard": 150,
-        "retire_not_before": 290,
-        "retention_until": 400,
-    }
-    for field, equality in equality_values.items():
-        hostile = StatefulClient()
-        hostile.stored = _stored_waterline()
-        hostile.lifecycle_generation = 3
-        writer = _writer(hostile)
-        assert (
-            writer.write(_advance(writer, **{field: equality}))
-            is WaterlineWriteDisposition.REJECTED
-        )
-        assert hostile.put_count == 0
+    hostile = StatefulClient()
+    hostile.stored = _stored_waterline()
+    hostile.lifecycle_generation = 3
+    hostile_writer = _writer(hostile)
+    assert (
+        hostile_writer.write(_advance(hostile_writer))
+        is WaterlineWriteDisposition.REJECTED
+    )
+    assert hostile.put_count == 0
