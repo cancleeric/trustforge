@@ -103,8 +103,9 @@ function conflictedDim(name: string) {
 }
 
 function officialAssessment() {
+  const payload = passedAssessment()
   return {
-    ...assessment(),
+    ...payload,
     mode: 'official',
     affects_official_score: true,
     release_capability: { capability: 'asset_intrinsic', promoted_at: '2026-07-28T00:00:00Z' },
@@ -309,13 +310,15 @@ describe('AssetIntrinsicShadowPanel', () => {
 
   // -- #878 official parsing skeleton ---------------------------------------
 
-  it('official skeleton: parses a fully-receipted official payload but does not render it', () => {
+  it('renders official only from a fully-receipted, release-capable and eligible payload', () => {
     const parsed = parseIntrinsicAssessment(officialAssessment())
     expect(parsed).not.toBeNull()
     expect(parsed?.mode).toBe('official')
-    // official actual rendering is disabled: the shadow panel renders nothing.
     const { container } = renderPanel(officialAssessment())
-    expect(container).toBeEmptyDOMElement()
+    expect(container.querySelector('[data-intrinsic-mode="official"]')).not.toBeNull()
+    expect(screen.getByText('OFFICIAL／已納入正式信任分')).toBeInTheDocument()
+    expect(screen.getByText(/只調整信任分，不直接改變市場方向/)).toBeInTheDocument()
+    expect(screen.getByText(/Promotion receipt: rc-001/)).toBeInTheDocument()
   })
 
   it('official skeleton fail-closed: missing release_capability or receipt -> downgrade', () => {
@@ -341,6 +344,17 @@ describe('AssetIntrinsicShadowPanel', () => {
     const fakeOfficial = assessment()
     fakeOfficial.mode = 'official'
     expect(parseIntrinsicAssessment(fakeOfficial)).toBeNull()
+    const emptyCapability = officialAssessment()
+    emptyCapability.release_capability = {} as typeof emptyCapability.release_capability
+    expect(parseIntrinsicAssessment(emptyCapability)).toBeNull()
+    const wrongCapability = officialAssessment()
+    wrongCapability.release_capability.capability = 'other' as 'asset_intrinsic'
+    expect(parseIntrinsicAssessment(wrongCapability)).toBeNull()
+    const unpromoted = officialAssessment()
+    unpromoted.gate = assessment().gate
+    unpromoted.total_delta = 0
+    unpromoted.dimensions = assessment().dimensions
+    expect(parseIntrinsicAssessment(unpromoted)).toBeNull()
     // all invalid official payloads downgrade to the unavailable notice
     renderPanel(blocked)
     expect(screen.getByText(/Shadow 資料格式不相容/)).toBeInTheDocument()
