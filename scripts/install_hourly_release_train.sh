@@ -8,6 +8,11 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 ENABLE=1
 EXECUTE=0
 
+if [[ -n "${BEDROCK_MODEL_ID-}" && ! "${BEDROCK_MODEL_ID}" =~ '^[A-Za-z0-9._:-]+$' ]]; then
+  echo "BEDROCK_MODEL_ID contains invalid characters" >&2
+  exit 2
+fi
+
 for arg in "$@"; do
   case "$arg" in
     --no-enable) ENABLE=0 ;;
@@ -38,7 +43,7 @@ payload = {
     "ProgramArguments": arguments,
     "EnvironmentVariables": {
         key: os.environ[key]
-        for key in ("PATH", "NVM_DIR")
+        for key in ("PATH", "NVM_DIR", "BEDROCK_MODEL_ID")
         if key in os.environ
     },
     "StartInterval": 3600,
