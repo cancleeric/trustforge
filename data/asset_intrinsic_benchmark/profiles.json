@@ -1,0 +1,802 @@
+[
+  {
+    "fetched_at": "2026-07-01T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:bench-anon-5known-high",
+      "dimensions": [
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "c0b34661abda569b3c6cd5c768d71a0ade3f1223514549c3d3bbf0f779a485f5",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-1p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-1p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "70d67564e2e2917b16a29943809b86fc22bf2166c87b9977da82abb97448d799",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p90.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p90",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.9
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "c0b34661abda569b3c6cd5c768d71a0ade3f1223514549c3d3bbf0f779a485f5",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-1p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-1p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "ee3c93c7787a0ab68aee83abd2a5380270931d0491d84ce81b2a3f3bac766083",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p85.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p85",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.85
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "89699cadcf081e33256fc9f22307e3277d52c4319cb90ce7e14ebf8402c153af",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p95.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p95",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.95
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2026-07-01T00:00:00Z"
+  },
+  {
+    "fetched_at": "2026-07-01T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:bench-anon-5known-low",
+      "dimensions": [
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "609682e079ac235502229fed9590bdd1fa90ba58fe61760476672fc4deba5f90",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.0
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "b1e388a186e8e7213035c4fd5e7982d24aeb6dd5b15d46abbfceaa7edca95047",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p10.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p10",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.1
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "609682e079ac235502229fed9590bdd1fa90ba58fe61760476672fc4deba5f90",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.0
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "d9ed113b1d61149d17759e7c49de72d55b04e9813ed58fae529dcf0e5281bab0",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p15.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p15",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.15
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "8cadbc272121c253b47d5825cfa07b334f2f3b462f83e96f2cd7517d76cdfa0d",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p05.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p05",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.05
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2026-07-01T00:00:00Z"
+  },
+  {
+    "fetched_at": "2026-07-01T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:bench-anon-3known-boundary",
+      "dimensions": [
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "95d5c8accb3b4c8b0467d2daba2fe35b5261bb2e144091c90358cdf3234cc7dd",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p70.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p70",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.7
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "d7f0e09ffb7faa095f20ddf535dab6dd8675d362ec6f405f7c493430636ec5d7",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p60.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p60",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.6
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "eba661ec0d3fd6dc23c99cba4b321601d01708af0764734d4f0804e3caf2b837",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p80.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p80",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.8
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "97bf80f836e5e62b45707c6db69cd9f94925dfee8ae754dece7f914ed0376811",
+            "coverage": "benchmark corpus; no verified fact",
+            "evidence_kind": "decision_record",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-unknown.txt",
+            "methodology": "Benchmark corpus decision record; no verified upstream fact available for this dimension.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-unknown",
+            "source_urls": []
+          },
+          "status": "unknown",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": null
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "97bf80f836e5e62b45707c6db69cd9f94925dfee8ae754dece7f914ed0376811",
+            "coverage": "benchmark corpus; no verified fact",
+            "evidence_kind": "decision_record",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-unknown.txt",
+            "methodology": "Benchmark corpus decision record; no verified upstream fact available for this dimension.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-unknown",
+            "source_urls": []
+          },
+          "status": "unknown",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": null
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2026-07-01T00:00:00Z"
+  },
+  {
+    "fetched_at": "2026-07-01T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:bench-anon-conflicted",
+      "dimensions": [
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "eba661ec0d3fd6dc23c99cba4b321601d01708af0764734d4f0804e3caf2b837",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p80.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p80",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.8
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "95d5c8accb3b4c8b0467d2daba2fe35b5261bb2e144091c90358cdf3234cc7dd",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p70.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p70",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.7
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "1b6d2ac80c62fc924cad2b1678f2cfbccfca966325017bad04d564d6573352d9",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p75.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p75",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.75
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "3b62c2cdfd55fc970eee49b4717641da593fb991ae920604831010fe7f3fc646",
+            "coverage": "benchmark corpus; divergent observations",
+            "evidence_kind": "decision_record",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-conflicted.txt",
+            "methodology": "Benchmark corpus decision record; independent upstream observations diverge for this dimension.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-conflicted",
+            "source_urls": [
+              "https://bench-alpha.example/observation",
+              "https://bench-beta.example/observation"
+            ]
+          },
+          "status": "conflicted",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": null
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "97bf80f836e5e62b45707c6db69cd9f94925dfee8ae754dece7f914ed0376811",
+            "coverage": "benchmark corpus; no verified fact",
+            "evidence_kind": "decision_record",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-unknown.txt",
+            "methodology": "Benchmark corpus decision record; no verified upstream fact available for this dimension.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-unknown",
+            "source_urls": []
+          },
+          "status": "unknown",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": null
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2026-07-01T00:00:00Z"
+  },
+  {
+    "fetched_at": "2025-06-01T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:bench-anon-stale",
+      "dimensions": [
+        {
+          "as_of": "2025-06-01T00:00:00Z",
+          "fetched_at": "2025-06-01T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "c0b34661abda569b3c6cd5c768d71a0ade3f1223514549c3d3bbf0f779a485f5",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-1p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-1p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2025-06-01T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2025-06-01T00:00:00Z",
+          "fetched_at": "2025-06-01T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "70d67564e2e2917b16a29943809b86fc22bf2166c87b9977da82abb97448d799",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p90.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p90",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2025-06-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.9
+        },
+        {
+          "as_of": "2025-06-01T00:00:00Z",
+          "fetched_at": "2025-06-01T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "c0b34661abda569b3c6cd5c768d71a0ade3f1223514549c3d3bbf0f779a485f5",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-1p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-1p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2025-06-01T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2025-06-01T00:00:00Z",
+          "fetched_at": "2025-06-01T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "ee3c93c7787a0ab68aee83abd2a5380270931d0491d84ce81b2a3f3bac766083",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p85.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p85",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2025-06-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.85
+        },
+        {
+          "as_of": "2025-06-01T00:00:00Z",
+          "fetched_at": "2025-06-01T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "89699cadcf081e33256fc9f22307e3277d52c4319cb90ce7e14ebf8402c153af",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p95.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p95",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2025-06-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.95
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2025-06-01T00:00:00Z"
+  },
+  {
+    "fetched_at": "2026-07-01T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:bench-anon-single-family",
+      "dimensions": [
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "c0b34661abda569b3c6cd5c768d71a0ade3f1223514549c3d3bbf0f779a485f5",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-1p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-1p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "70d67564e2e2917b16a29943809b86fc22bf2166c87b9977da82abb97448d799",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p90.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p90",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.9
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "c0b34661abda569b3c6cd5c768d71a0ade3f1223514549c3d3bbf0f779a485f5",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-1p00.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-1p00",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 1.0
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "ee3c93c7787a0ab68aee83abd2a5380270931d0491d84ce81b2a3f3bac766083",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p85.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p85",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.85
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "89699cadcf081e33256fc9f22307e3277d52c4319cb90ce7e14ebf8402c153af",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p95.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p95",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.95
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2026-07-01T00:00:00Z"
+  },
+  {
+    "fetched_at": "2026-07-01T00:00:00Z",
+    "profile": {
+      "asset_id": "asset:bench-anon-future-gap",
+      "dimensions": [
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "issuance_predictability",
+          "provenance": {
+            "content_hash": "eba661ec0d3fd6dc23c99cba4b321601d01708af0764734d4f0804e3caf2b837",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p80.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p80",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.8
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "control_dispersion",
+          "provenance": {
+            "content_hash": "95d5c8accb3b4c8b0467d2daba2fe35b5261bb2e144091c90358cdf3234cc7dd",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p70.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p70",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.7
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "supply_verifiability",
+          "provenance": {
+            "content_hash": "1b6d2ac80c62fc924cad2b1678f2cfbccfca966325017bad04d564d6573352d9",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p75.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p75",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.75
+        },
+        {
+          "as_of": "2026-07-01T00:00:00Z",
+          "fetched_at": "2026-07-01T00:00:00Z",
+          "name": "governance_capture_resistance",
+          "provenance": {
+            "content_hash": "95d5c8accb3b4c8b0467d2daba2fe35b5261bb2e144091c90358cdf3234cc7dd",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p70.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p70",
+            "source_urls": [
+              "https://bench-beta.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-07-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.7
+        },
+        {
+          "as_of": "2026-09-01T00:00:00Z",
+          "fetched_at": "2026-09-01T00:00:00Z",
+          "name": "holder_concentration",
+          "provenance": {
+            "content_hash": "70d67564e2e2917b16a29943809b86fc22bf2166c87b9977da82abb97448d799",
+            "coverage": "benchmark corpus; single dimension parameter excerpt",
+            "evidence_kind": "upstream_excerpt",
+            "evidence_path": "data/asset_intrinsic_evidence/bench-value-0p90.txt",
+            "methodology": "Benchmark corpus reproducible upstream parameter excerpt; a single protocol-derived parameter only.",
+            "source_coordinates": "benchmark excerpt coordinates",
+            "source_revision": "bench-value-0p90",
+            "source_urls": [
+              "https://bench-alpha.example/excerpt"
+            ]
+          },
+          "status": "known",
+          "valid_from": "2026-09-01T00:00:00Z",
+          "valid_until": null,
+          "value": 0.9
+        }
+      ],
+      "schema_version": "1.0.0"
+    },
+    "valid_from": "2026-07-01T00:00:00Z"
+  }
+]

@@ -16,10 +16,16 @@ receipt。
 ./scripts/install_hourly_release_train.sh
 ```
 
-啟用 production 使用 repo 內固定的
-`deploy/backup_production_release.sh` 與 `deploy/deploy_ec2.sh`，不接受 plist
-傳入任意命令，避免憑證或命令字串落碟。備份 receipt 會綁定 run ID、schema、
-archive SHA-256 與回復驗證結果：
+啟用 production 使用 repo 內固定的 `deploy/backup_production_release.sh`、
+`deploy/deploy_ec2.sh` 與 `deploy/deploy_frontend_nginx.sh`，不接受 plist 傳入任意
+命令，避免憑證或命令字串落碟。backend activation 通過後必須完成 frontend 的
+versioned release／atomic symlink 切換，並從公開站抓取實際 JS bundle，核對 release
+SHA 與競賽選題功能標記。frontend 部署或公開驗證失敗時，整輪 receipt 必須為 failed，
+不可宣稱 production completed，並以發布前 active artifact 重新執行受控 activation，
+確認 backend 回復到原 SHA／digest。frontend 回復同時涵蓋 `frontend/current`、nginx
+live conf 與 `trustforge.service` 快照，通過 `nginx -t`、reload、service restart 與
+health 後才算完成；補償回復失敗必須升級為 rollback-failed。備份 receipt 會綁定
+run ID、schema、archive SHA-256 與回復驗證結果：
 
 ```bash
 ./scripts/install_hourly_release_train.sh --execute
