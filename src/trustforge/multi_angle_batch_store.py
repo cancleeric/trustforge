@@ -96,10 +96,23 @@ class AtomicBatchResult:
     replayed: bool
     batch_id: str
     job_ids: tuple[str, ...]
+    snapshot_id: str | None = None
 
 
 class AtomicMultiAngleBatchStore(Protocol):
     def create_batch(self, request: AtomicBatchRequest) -> AtomicBatchResult: ...
+
+    def claim_allocation(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        config_version: str, expected_amount_usd: Decimal,
+    ) -> bool: ...
+
+    def find_replay(self, request: AtomicBatchRequest) -> AtomicBatchResult | None: ...
+
+    def consume_call_slot(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        config_version: str, expected_amount_usd: Decimal, slot: str,
+    ) -> bool: ...
 
 
 def _job_id(batch_id: str, mode: str) -> str:
@@ -226,7 +239,16 @@ class DynamoDBAtomicMultiAngleBatchStore:
                 or job.get("mode", {}).get("S") != mode
             ):
                 raise BatchStoreIntegrityError("job manifest identity is inconsistent")
-        return AtomicBatchResult(True, True, batch_id, _job_ids(batch_id))
+        snapshot_id = batch.get("snapshot_id", {}).get("S")
+        if not snapshot_id or not _ID_RE.fullmatch(snapshot_id):
+            raise BatchStoreIntegrityError("batch snapshot identity is invalid")
+        return AtomicBatchResult(
+            True, True, batch_id, _job_ids(batch_id), snapshot_id
+        )
+
+    def find_replay(self, request: AtomicBatchRequest) -> AtomicBatchResult | None:
+        request.validate()
+        return self._read_replay(request)
 
     def create_batch(self, request: AtomicBatchRequest) -> AtomicBatchResult:
         request.validate()
@@ -302,6 +324,8 @@ class DynamoDBAtomicMultiAngleBatchStore:
                                 "job_id": self._s(job_id),
                                 "amount_usd": self._n(per_job),
                                 "state": self._s("reserved"),
+                                "claim_extraction_slot": self._s("available"),
+                                "evidence_narrative_slot": self._s("available"),
                             },
                             "ConditionExpression": "attribute_not_exists(pk)",
                         }
@@ -350,7 +374,165 @@ class DynamoDBAtomicMultiAngleBatchStore:
             if failed == [0] and reasons[0].get("Code") == "ConditionalCheckFailed":
                 return self._budget_denied_after_consistent_read(request)
             raise BatchStoreBackendError("atomic transaction integrity failure") from exc
-        return AtomicBatchResult(True, False, request.batch_id, _job_ids(request.batch_id))
+        return AtomicBatchResult(
+            True, False, request.batch_id, _job_ids(request.batch_id), request.snapshot_id
+        )
+
+    def claim_allocation(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        config_version: str, expected_amount_usd: Decimal,
+    ) -> bool:
+        """Atomically bind one reserved allocation to its authority job.
+
+        Re-entry after a daemon restart is idempotent only when both records
+        already carry the expected claimed state and immutable identity.
+        """
+        if (
+            not _ID_RE.fullmatch(batch_id)
+            or mode not in ANGLE_MODES
+            or job_id != _job_id(batch_id, mode)
+            or not _ID_RE.fullmatch(owner_token)
+            or not _ID_RE.fullmatch(config_version)
+            or expected_amount_usd <= 0
+        ):
+            raise ValueError("invalid allocation identity")
+        tx = [
+            {
+                "ConditionCheck": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        "pk": self._s(f"BATCH#{batch_id}"),
+                        "sk": self._s("META"),
+                    },
+                    "ConditionExpression": "config_version=:version",
+                    "ExpressionAttributeValues": {
+                        ":version": self._s(config_version),
+                    },
+                }
+            },
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        "pk": self._s(f"BATCH#{batch_id}"),
+                        "sk": self._s(f"ALLOCATION#{mode}"),
+                    },
+                    "UpdateExpression": "SET #state=:claimed, owner_token=:owner",
+                    "ConditionExpression": (
+                        "job_id=:job AND amount_usd=:amount AND "
+                        "((#state=:reserved AND attribute_not_exists(owner_token)) "
+                        "OR (#state=:claimed AND owner_token=:owner))"
+                    ),
+                    "ExpressionAttributeNames": {"#state": "state"},
+                    "ExpressionAttributeValues": {
+                        ":job": self._s(job_id),
+                        ":reserved": self._s("reserved"),
+                        ":claimed": self._s("claimed"),
+                        ":owner": self._s(owner_token),
+                        ":amount": self._n(expected_amount_usd),
+                    },
+                }
+            },
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {"pk": self._s(f"JOB#{job_id}"), "sk": self._s("META")},
+                    "UpdateExpression": "SET #state=:claimed, owner_token=:owner",
+                    "ConditionExpression": (
+                        "batch_id=:batch AND #mode=:mode "
+                        "AND ((#state=:pending AND attribute_not_exists(owner_token)) "
+                        "OR (#state=:claimed AND owner_token=:owner))"
+                    ),
+                    "ExpressionAttributeNames": {"#state": "state", "#mode": "mode"},
+                    "ExpressionAttributeValues": {
+                        ":batch": self._s(batch_id),
+                        ":mode": self._s(mode),
+                        ":pending": self._s("pending"),
+                        ":claimed": self._s("claimed"),
+                        ":owner": self._s(owner_token),
+                    },
+                }
+            },
+        ]
+        try:
+            self._client.transact_write_items(TransactItems=tx)
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code == "TransactionCanceledException":
+                raise BatchStoreIntegrityError(
+                    "allocation claim identity/state condition failed"
+                ) from exc
+            raise BatchStoreBackendError("allocation authority unavailable") from exc
+        return True
+
+    def consume_call_slot(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        config_version: str, expected_amount_usd: Decimal, slot: str,
+    ) -> bool:
+        if slot not in {"claim_extraction", "evidence_narrative"}:
+            raise ValueError("invalid call slot")
+        if (
+            not _ID_RE.fullmatch(batch_id)
+            or mode not in ANGLE_MODES
+            or job_id != _job_id(batch_id, mode)
+            or not _ID_RE.fullmatch(owner_token)
+            or not _ID_RE.fullmatch(config_version)
+            or expected_amount_usd <= 0
+        ):
+            raise ValueError("invalid call slot identity")
+        slot_name = f"{slot}_slot"
+        tx = [
+            {
+                "ConditionCheck": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        "pk": self._s(f"BATCH#{batch_id}"),
+                        "sk": self._s("META"),
+                    },
+                    "ConditionExpression": "config_version=:version",
+                    "ExpressionAttributeValues": {
+                        ":version": self._s(config_version),
+                    },
+                }
+            },
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        "pk": self._s(f"BATCH#{batch_id}"),
+                        "sk": self._s(f"ALLOCATION#{mode}"),
+                    },
+                    "UpdateExpression": "SET #slot=:consumed",
+                    "ConditionExpression": (
+                        "job_id=:job AND amount_usd=:amount "
+                        "AND owner_token=:owner AND #state=:claimed "
+                        "AND #slot=:available"
+                    ),
+                    "ExpressionAttributeNames": {
+                        "#slot": slot_name,
+                        "#state": "state",
+                    },
+                    "ExpressionAttributeValues": {
+                        ":job": self._s(job_id),
+                        ":amount": self._n(expected_amount_usd),
+                        ":owner": self._s(owner_token),
+                        ":claimed": self._s("claimed"),
+                        ":available": self._s("available"),
+                        ":consumed": self._s("consumed"),
+                    },
+                }
+            },
+        ]
+        try:
+            self._client.transact_write_items(TransactItems=tx)
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code == "TransactionCanceledException":
+                raise BatchStoreIntegrityError(
+                    "call slot is consumed or identity/config does not match"
+                ) from exc
+            raise BatchStoreBackendError("call slot authority unavailable") from exc
+        return True
 
 
 class SQLiteAtomicMultiAngleBatchStore:
@@ -377,15 +559,40 @@ class SQLiteAtomicMultiAngleBatchStore:
                 );
                 CREATE TABLE IF NOT EXISTS atomic_allocations (
                   batch_id TEXT NOT NULL, mode TEXT NOT NULL, job_id TEXT NOT NULL,
-                  amount_usd TEXT NOT NULL, state TEXT NOT NULL,
+                  amount_usd TEXT NOT NULL, state TEXT NOT NULL, owner_token TEXT,
+                  claim_extraction_slot TEXT NOT NULL DEFAULT 'available',
+                  evidence_narrative_slot TEXT NOT NULL DEFAULT 'available',
                   PRIMARY KEY(batch_id,mode)
                 );
                 CREATE TABLE IF NOT EXISTS atomic_jobs (
                   job_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, mode TEXT NOT NULL,
-                  state TEXT NOT NULL
+                  state TEXT NOT NULL, owner_token TEXT
                 );
                 """
             )
+            for table_name in ("atomic_allocations", "atomic_jobs"):
+                columns = {
+                    row[1]
+                    for row in conn.execute(
+                        f"PRAGMA table_info({table_name})"
+                    ).fetchall()
+                }
+                if "owner_token" not in columns:
+                    conn.execute(
+                        f"ALTER TABLE {table_name} ADD COLUMN owner_token TEXT"
+                    )
+            allocation_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(atomic_allocations)"
+                ).fetchall()
+            }
+            for slot in ("claim_extraction_slot", "evidence_narrative_slot"):
+                if slot not in allocation_columns:
+                    conn.execute(
+                        f"""ALTER TABLE atomic_allocations ADD COLUMN {slot}
+                            TEXT NOT NULL DEFAULT 'available'"""
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._db_path, timeout=10, isolation_level=None)
@@ -403,6 +610,20 @@ class SQLiteAtomicMultiAngleBatchStore:
                    ON CONFLICT(day) DO UPDATE SET remaining_usd=excluded.remaining_usd,
                      reserved_total=excluded.reserved_total,
                      config_version=excluded.config_version""",
+                (day, str(remaining_usd), "0", config_version),
+            )
+
+    def ensure_budget(
+        self, *, day: str, remaining_usd: Decimal, config_version: str
+    ) -> None:
+        """Local/test bootstrap that never resets an existing day's balance."""
+        if date.fromisoformat(day).isoformat() != day:
+            raise ValueError("invalid day")
+        if remaining_usd < 0 or not _ID_RE.fullmatch(config_version):
+            raise ValueError("invalid budget configuration")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO atomic_budget VALUES(?,?,?,?)",
                 (day, str(remaining_usd), "0", config_version),
             )
 
@@ -447,7 +668,29 @@ class SQLiteAtomicMultiAngleBatchStore:
             != {(_job_id(batch_id, mode), mode) for mode in ANGLE_MODES}
         ):
             raise BatchStoreIntegrityError("replay manifest identity is inconsistent")
-        return AtomicBatchResult(True, True, batch_id, _job_ids(batch_id))
+        try:
+            payload = json.loads(batch[1])
+            snapshot_id = payload["snapshot_id"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise BatchStoreIntegrityError("batch snapshot identity is invalid") from exc
+        if not isinstance(snapshot_id, str) or not _ID_RE.fullmatch(snapshot_id):
+            raise BatchStoreIntegrityError("batch snapshot identity is invalid")
+        return AtomicBatchResult(
+            True, True, batch_id, _job_ids(batch_id), snapshot_id
+        )
+
+    def find_replay(self, request: AtomicBatchRequest) -> AtomicBatchResult | None:
+        request.validate()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """SELECT fingerprint,batch_id FROM atomic_requests
+                   WHERE caller_hash=? AND idempotency_key_hash=?""",
+                (request.caller_hash, request.idempotency_key_hash),
+            ).fetchone()
+            return self._verify_replay(conn, request, row) if row else None
+        finally:
+            conn.close()
 
     def create_batch(self, request: AtomicBatchRequest) -> AtomicBatchResult:
         request.validate()
@@ -505,7 +748,12 @@ class SQLiteAtomicMultiAngleBatchStore:
                     request.batch_id,
                     request.request_fingerprint,
                     json.dumps(
-                        {"coin": request.coin, "snapshot_id": request.snapshot_id},
+                        {
+                            "coin": request.coin,
+                            "snapshot_id": request.snapshot_id,
+                            "day": request.day,
+                            "config_version": request.config_version,
+                        },
                         sort_keys=True,
                     ),
                 ),
@@ -513,20 +761,140 @@ class SQLiteAtomicMultiAngleBatchStore:
             per_job = request.batch_cost_usd / Decimal(len(ANGLE_MODES))
             for mode, job_id in zip(ANGLE_MODES, _job_ids(request.batch_id), strict=True):
                 conn.execute(
-                    "INSERT INTO atomic_allocations VALUES(?,?,?,?,?)",
-                    (request.batch_id, mode, job_id, str(per_job), "reserved"),
+                    """INSERT INTO atomic_allocations
+                       (batch_id,mode,job_id,amount_usd,state,owner_token)
+                       VALUES(?,?,?,?,?,?)""",
+                    (request.batch_id, mode, job_id, str(per_job), "reserved", None),
                 )
                 conn.execute(
-                    "INSERT INTO atomic_jobs VALUES(?,?,?,?)",
-                    (job_id, request.batch_id, mode, "pending"),
+                    "INSERT INTO atomic_jobs VALUES(?,?,?,?,?)",
+                    (job_id, request.batch_id, mode, "pending", None),
                 )
             conn.commit()
-            return AtomicBatchResult(True, False, request.batch_id, _job_ids(request.batch_id))
+            return AtomicBatchResult(
+                True, False, request.batch_id, _job_ids(request.batch_id),
+                request.snapshot_id,
+            )
         except (BatchConflictError, BatchStoreIntegrityError, BatchStoreBackendError):
             conn.rollback()
             raise
         except Exception as exc:
             conn.rollback()
             raise BatchStoreBackendError("local atomic batch transaction failed") from exc
+        finally:
+            conn.close()
+
+    def claim_allocation(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        config_version: str, expected_amount_usd: Decimal,
+    ) -> bool:
+        if (
+            not _ID_RE.fullmatch(batch_id)
+            or mode not in ANGLE_MODES
+            or job_id != _job_id(batch_id, mode)
+            or not _ID_RE.fullmatch(owner_token)
+            or not _ID_RE.fullmatch(config_version)
+            or expected_amount_usd <= 0
+        ):
+            raise ValueError("invalid allocation identity")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            allocation = conn.execute(
+                """SELECT job_id,amount_usd,state,owner_token FROM atomic_allocations
+                   WHERE batch_id=? AND mode=?""",
+                (batch_id, mode),
+            ).fetchone()
+            job = conn.execute(
+                "SELECT batch_id,mode,state,owner_token FROM atomic_jobs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            batch = conn.execute(
+                "SELECT payload_json FROM atomic_batches WHERE batch_id=?", (batch_id,)
+            ).fetchone()
+            if (
+                allocation is None
+                or job is None
+                or batch is None
+                or allocation[0] != job_id
+                or Decimal(allocation[1]) != expected_amount_usd
+                or allocation[2] not in {"reserved", "claimed"}
+                or tuple(job[:2]) != (batch_id, mode)
+                or job[2] not in {"pending", "claimed"}
+                or (
+                    allocation[2] == "claimed"
+                    and allocation[3] != owner_token
+                )
+                or (allocation[2] == "reserved" and allocation[3] is not None)
+                or (job[2] == "claimed" and job[3] != owner_token)
+                or (job[2] == "pending" and job[3] is not None)
+                or json.loads(batch[0]).get("config_version") != config_version
+            ):
+                raise BatchStoreIntegrityError(
+                    "allocation claim identity/state condition failed"
+                )
+            conn.execute(
+                """UPDATE atomic_allocations SET state='claimed',owner_token=?
+                   WHERE batch_id=? AND mode=?""",
+                (owner_token, batch_id, mode),
+            )
+            conn.execute(
+                """UPDATE atomic_jobs SET state='claimed',owner_token=?
+                   WHERE job_id=?""",
+                (owner_token, job_id),
+            )
+            conn.commit()
+            return True
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("local allocation claim failed") from exc
+        finally:
+            conn.close()
+
+    def consume_call_slot(
+        self, *, batch_id: str, mode: str, job_id: str, owner_token: str,
+        config_version: str, expected_amount_usd: Decimal, slot: str,
+    ) -> bool:
+        if slot not in {"claim_extraction", "evidence_narrative"}:
+            raise ValueError("invalid call slot")
+        slot_name = f"{slot}_slot"
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            allocation = conn.execute(
+                f"""SELECT job_id,amount_usd,state,owner_token,{slot_name}
+                    FROM atomic_allocations WHERE batch_id=? AND mode=?""",
+                (batch_id, mode),
+            ).fetchone()
+            batch = conn.execute(
+                "SELECT payload_json FROM atomic_batches WHERE batch_id=?", (batch_id,)
+            ).fetchone()
+            if (
+                allocation is None
+                or batch is None
+                or allocation[0] != job_id
+                or Decimal(allocation[1]) != expected_amount_usd
+                or allocation[2:] != ("claimed", owner_token, "available")
+                or json.loads(batch[0]).get("config_version") != config_version
+            ):
+                raise BatchStoreIntegrityError(
+                    "call slot is consumed or identity/config does not match"
+                )
+            conn.execute(
+                f"""UPDATE atomic_allocations SET {slot_name}='consumed'
+                    WHERE batch_id=? AND mode=?""",
+                (batch_id, mode),
+            )
+            conn.commit()
+            return True
+        except (BatchStoreIntegrityError, ValueError):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise BatchStoreBackendError("local call slot consumption failed") from exc
         finally:
             conn.close()

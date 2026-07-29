@@ -33,6 +33,21 @@ Deploy the adapter dark, then dual-observe without dual-writing cost state.
 Enable atomic admission for an internal canary, verify exactly one batch and
 five jobs per admitted request, then expand traffic. SQLite remains local-only.
 
+Production activation additionally requires:
+
+- `TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=1`; this disables every legacy live budget
+  admission path so atomic and legacy counters cannot spend from split truth.
+- `TRUSTFORGE_SHARED_ANALYSIS_DB_PATH` set to the exact durable shared
+  projection database path used by every web/daemon instance.
+
+The release gate must additionally verify on every instance that this path is
+the same shared mount/device (not a repository checkout, `/tmp`, container
+ephemeral layer, or instance-local disk), is writable by the runtime role, and
+survives an instance replacement/restart. A matching pathname alone is not
+durability proof; retain mount/device and restart evidence with the release.
+
+Without either setting, public atomic submission fails closed with HTTP 503.
+
 ## Rollback
 
 Disable new multi-angle submissions first. Allow already claimed jobs to finish
@@ -40,6 +55,11 @@ under #885 reconciliation; do not delete reservations or jobs manually. Roll
 application traffic back to the prior release. The prior public submission path
 must remain disabled until a transaction authority is available—backend
 unavailability fails closed.
+
+Before re-enabling the legacy release, unset
+`TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE` only after all atomic submissions are
+disabled and #885 has reconciled outstanding reservations. Never run legacy and
+atomic live admission concurrently.
 
 This spike does not mutate the existing cost ledger and supplies no cleanup
 command. Any data migration or reservation release requires a separate reviewed

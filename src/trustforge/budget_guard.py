@@ -341,6 +341,47 @@ def request_max_cost_usd() -> float:
     return max(estimate_request_max_cost_usd(), DEFAULT_REQUEST_MAX_USD)
 
 
+def multi_angle_angle_max_cost_usd() -> float:
+    """Complete one-angle upper bound: claim extraction + narrative.
+
+    Claim extraction is capped by ``MULTI_ANGLE_MAX_CLAIM_DOCS`` in
+    ``analysis_flow``; 32k input tokens conservatively covers 50 bounded
+    snippets plus identifiers/metadata. Narrative uses the existing configured
+    worst-case input bound. Both calls use the configured Bedrock model and
+    configured maximum output tokens. An explicit operator request-max override
+    remains a floor; the specialised estimate must never reserve less than it.
+    """
+    from .ledger import estimate_cost
+
+    model = _narrative_worst_case_model_id()
+    try:
+        output = int(os.getenv("BEDROCK_MAX_TOKENS", "1024"))
+    except ValueError as exc:
+        raise ValueError("BEDROCK_MAX_TOKENS must be an integer") from exc
+    if not 1 <= output <= 8192:
+        raise ValueError("BEDROCK_MAX_TOKENS must be within 1..8192")
+    raw_narrative_tokens = os.getenv(
+        "TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS", "8000"
+    )
+    try:
+        narrative_input_tokens = int(raw_narrative_tokens)
+    except ValueError as exc:
+        raise ValueError(
+            "TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS must be an integer"
+        ) from exc
+    if not 8_000 <= narrative_input_tokens <= 1_000_000:
+        raise ValueError(
+            "TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS must be within 8000..1000000"
+        )
+    claim = estimate_cost(model, 32_000, output)
+    narrative = estimate_cost(model, narrative_input_tokens, output)
+    return max(claim + narrative, request_max_cost_usd(), DEFAULT_REQUEST_MAX_USD)
+
+
+def atomic_batch_exclusive_enabled() -> bool:
+    return os.getenv("TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE", "").strip() == "1"
+
+
 # ---------------------------------------------------------------------------
 # D2.5 / #76（真實 worst-case accounting 取代固定 $0.05）：單次 /api/analyze
 # 請求「最壞情況」可能觸發的 Bedrock 花費保守上界，改以「實際會用到的模型
@@ -565,6 +606,8 @@ def try_reserve_request_budget(
     擋），不讓預留整個 fail-open。預設（未設 env）行為與修 #75 前逐字相同
     （純 process-local）。
     """
+    if atomic_batch_exclusive_enabled():
+        return None
     backend = _budget_counter_backend()
     if backend is None:
         return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
@@ -614,6 +657,8 @@ def request_budget_available(
     """
     if count <= 0:
         raise ValueError("count must be positive")
+    if atomic_batch_exclusive_enabled():
+        return False
     backend = _budget_counter_backend()
     cap = daily_cap_usd()
     cost = round(request_max_cost_usd() * count, 6)

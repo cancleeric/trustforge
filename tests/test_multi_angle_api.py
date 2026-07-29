@@ -90,6 +90,25 @@ def test_multi_angle_post_capacity_error_is_retryable(monkeypatch):
     assert payload["error"]["code"] == "multi_angle_queue_unavailable"
 
 
+def test_multi_angle_post_authority_failure_is_503(monkeypatch):
+    from trustforge.analysis_flow import MultiAngleAuthorityError
+
+    class FakeFlow:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def submit_multi_angle(self, *_args, **_kwargs):
+            raise MultiAngleAuthorityError("ddb unavailable")
+
+    monkeypatch.setattr("trustforge.analysis_flow.AnalysisFlow", FakeFlow)
+    code, payload = _post({"coin": "BTC", "question": "test"})
+    assert code == 503
+    assert payload["error"]["code"] == "multi_angle_authority_unavailable"
+
+
 def test_multi_angle_post_rejects_invalid_json():
     code, payload = web._handle_api_multi_angle_post(
         {"Content-Length": "1", "Idempotency-Key": "test-key"},

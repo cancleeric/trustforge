@@ -18,13 +18,17 @@ import math
 import os
 import queue
 import re
+import secrets
 import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import UTC, datetime
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import budget_guard
 from .agent.narrative_locale import DEFAULT_LOCALE as DEFAULT_NARRATIVE_LOCALE
@@ -32,12 +36,12 @@ from .agent.narrative_locale import normalize_locale
 from .agent.orchestrator import build_report
 from .bedrock import BedrockClient
 from .execlog import ExecutionLog
+from .feature_store import TrustFeatureStore
 from .ingestion.base import collect
 from .ingestion.cache import doc_from_dict, doc_to_dict
 from .ledger import append_run
 from .schema import COIN_POOL, QuestionType, iso_utc
 from .trust.scoring import build_stance_fn
-from .feature_store import TrustFeatureStore
 
 STAGES = ("source_ingestion", "claim_extraction", "trust_reasoning", "evidence_assembly", "report_delivery")
 
@@ -61,6 +65,73 @@ MODES: dict[str, tuple[QuestionType, str]] = {
 }
 QUESTION_TYPES = {**{mode: item[0] for mode, item in MODES.items()}, "comparison": QuestionType.COMPARISON}
 QUEUE_CAPACITY = 500
+MULTI_ANGLE_MAX_CLAIM_DOCS = 50
+MULTI_ANGLE_DOC_ID_MAX_CHARS = 128
+MULTI_ANGLE_DOC_SOURCE_MAX_CHARS = 128
+MULTI_ANGLE_DOC_KIND_MAX_CHARS = 32
+MULTI_ANGLE_DOC_TEXT_MAX_CHARS = 300
+MULTI_ANGLE_DOC_FIELD_MAX_BYTES = 1200
+MULTI_ANGLE_DOC_BLOCK_MAX_BYTES = 28_000
+
+
+def _bounded_text(value: str, *, chars: int, byte_cap: int) -> str:
+    text = str(value)[:chars]
+    encoded = text.encode("utf-8")[:byte_cap]
+    return encoded.decode("utf-8", errors="ignore")
+
+
+def _multi_angle_doc_line(doc) -> str:
+    # Must stay byte-for-byte aligned with BedrockClient.extract_claims_with_llm.
+    return f"[{doc.id}] kind={doc.kind} source={doc.source}: {doc.text[:300]}"
+
+
+def _bounded_multi_angle_documents(docs: list) -> list:
+    """Copy authority documents into the exact bounded claim-prompt contract."""
+    bounded = []
+    used = 0
+    for doc in docs[:MULTI_ANGLE_MAX_CLAIM_DOCS]:
+        candidate = dataclasses.replace(
+            doc,
+            id=_bounded_text(
+                doc.id, chars=MULTI_ANGLE_DOC_ID_MAX_CHARS,
+                byte_cap=MULTI_ANGLE_DOC_FIELD_MAX_BYTES,
+            ),
+            source=_bounded_text(
+                doc.source, chars=MULTI_ANGLE_DOC_SOURCE_MAX_CHARS,
+                byte_cap=MULTI_ANGLE_DOC_FIELD_MAX_BYTES,
+            ),
+            kind=_bounded_text(
+                doc.kind, chars=MULTI_ANGLE_DOC_KIND_MAX_CHARS,
+                byte_cap=MULTI_ANGLE_DOC_FIELD_MAX_BYTES,
+            ),
+            text=_bounded_text(
+                doc.text, chars=MULTI_ANGLE_DOC_TEXT_MAX_CHARS,
+                byte_cap=MULTI_ANGLE_DOC_FIELD_MAX_BYTES,
+            ),
+        )
+        separator_bytes = 1 if bounded else 0
+        line = _multi_angle_doc_line(candidate)
+        line_bytes = len(line.encode("utf-8"))
+        remaining = MULTI_ANGLE_DOC_BLOCK_MAX_BYTES - used - separator_bytes
+        if line_bytes > remaining:
+            fixed = dataclasses.replace(candidate, text="")
+            fixed_bytes = len(_multi_angle_doc_line(fixed).encode("utf-8"))
+            if fixed_bytes > remaining:
+                break
+            text_budget = remaining - fixed_bytes
+            candidate = dataclasses.replace(
+                candidate,
+                text=candidate.text.encode("utf-8")[:text_budget].decode(
+                    "utf-8", errors="ignore"
+                ),
+            )
+            line_bytes = len(_multi_angle_doc_line(candidate).encode("utf-8"))
+        bounded.append(candidate)
+        used += separator_bytes + line_bytes
+    block = "\n".join(_multi_angle_doc_line(doc) for doc in bounded)
+    if len(block.encode("utf-8")) > MULTI_ANGLE_DOC_BLOCK_MAX_BYTES:
+        raise MultiAngleAuthorityError("bounded claim document block exceeds byte cap")
+    return bounded
 
 
 class MultiAngleCapacityError(RuntimeError):
@@ -69,6 +140,10 @@ class MultiAngleCapacityError(RuntimeError):
 
 class MultiAngleBudgetError(RuntimeError):
     """五角度執行的保守成本預檢未通過。"""
+
+
+class MultiAngleAuthorityError(RuntimeError):
+    """Production atomic batch authority unavailable or inconsistent."""
 
 
 class MultiAngleIdempotencyConflictError(RuntimeError):
@@ -147,7 +222,7 @@ def _db_path(path: str | Path | None = None) -> Path:
 
 
 @contextmanager
-def _bedrock_live_attempt(log: ExecutionLog):
+def _bedrock_live_attempt(log: ExecutionLog, *, batch_allocation: bool = False):
     """Yield 是否本次真的允許呼叫 Bedrock（fail-closed；任何判定例外一律離線）。
 
     複用既有閘邏輯，不另造繞過 `budget_guard`／每日 cap 的新路徑（`STAGES`
@@ -185,13 +260,15 @@ def _bedrock_live_attempt(log: ExecutionLog):
     try:
         from .web import _bedrock_allowed  # noqa: PLC0415 — 避免頂層循環匯入
 
-        if (
-            _bedrock_allowed()
-            and not budget_guard.daily_cap_exceeded()
-            and budget_guard.narrative_model_priced()
-        ):
-            reservation = budget_guard.try_reserve_request_budget()
-            live = reservation is not None
+        if _bedrock_allowed() and budget_guard.narrative_model_priced():
+            if batch_allocation:
+                # #884: the authority transaction already reserved this job's
+                # conservative allocation. Re-entering the legacy per-call
+                # reserve/release path would double charge capacity.
+                live = budget_guard.daily_cap_usd() > 0
+            elif not budget_guard.daily_cap_exceeded():
+                reservation = budget_guard.try_reserve_request_budget()
+                live = reservation is not None
     except Exception:
         logging.getLogger(__name__).warning(
             "analysis_flow: bedrock live 閘判定失敗，fail-closed 強制本次離線",
@@ -287,7 +364,7 @@ def _emit_three_track_learning_on_failure(
 
 class AnalysisFlow:
     def __init__(self, path: str | Path | None = None, *, workers_per_stage: int = 1,
-                 readonly: bool = False):
+                 readonly: bool = False, atomic_batch_store=None):
         self.path = _db_path(path)
         self.readonly = readonly
         if not readonly:
@@ -305,6 +382,7 @@ class AnalysisFlow:
         self._threads: list[threading.Thread] = []
         self._timers: list[threading.Timer] = []
         self._adopted: set[str] = set()
+        self._atomic_batch_store = atomic_batch_store
         if not readonly:
             self._init_schema()
 
@@ -372,6 +450,12 @@ class AnalysisFlow:
           created_at REAL NOT NULL, updated_at REAL NOT NULL, expires_at REAL NOT NULL,
           PRIMARY KEY(caller_hash, idempotency_key_hash)
         );
+        CREATE TABLE IF NOT EXISTS analysis_atomic_projection_queue (
+          batch_id TEXT PRIMARY KEY, request_json TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          locale TEXT NOT NULL, state TEXT NOT NULL,
+          result_json TEXT, updated_at REAL NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_analysis_results_lookup
           ON analysis_results(coin, mode, question, published_at DESC);
         CREATE TABLE IF NOT EXISTS analysis_questions (
@@ -431,6 +515,10 @@ class AnalysisFlow:
             conn.execute("ALTER TABLE analysis_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'scheduled'")
         if "priority" not in columns:
             conn.execute(f"ALTER TABLE analysis_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT {SCHEDULED_PRIORITY}")
+        if "atomic_batch_id" not in columns:
+            conn.execute("ALTER TABLE analysis_jobs ADD COLUMN atomic_batch_id TEXT")
+        if "atomic_mode" not in columns:
+            conn.execute("ALTER TABLE analysis_jobs ADD COLUMN atomic_mode TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_priority ON analysis_jobs(state,priority,created_at)")
         request_columns = {
             row[1]
@@ -464,6 +552,17 @@ class AnalysisFlow:
             """CREATE INDEX IF NOT EXISTS idx_analysis_multi_angle_request_id
                ON analysis_multi_angle_requests(request_id)"""
         )
+        projection_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(analysis_atomic_projection_queue)"
+            ).fetchall()
+        }
+        if "snapshot_json" not in projection_columns:
+            conn.execute(
+                """ALTER TABLE analysis_atomic_projection_queue
+                   ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'"""
+            )
         TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
         # memory existed. Deterministic IDs make this migration restart-safe.
@@ -621,6 +720,384 @@ class AnalysisFlow:
                 job_id = existing["job_id"] if existing else None
             return question_id, job_id
 
+    def _atomic_store(self):
+        if self._atomic_batch_store is not None:
+            return self._atomic_batch_store
+        from .multi_angle_batch_store import (
+            DynamoDBAtomicMultiAngleBatchStore,
+            SQLiteAtomicMultiAngleBatchStore,
+        )
+        from .runtime_control import is_production_environment
+
+        config_version = os.getenv(
+            "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
+        ).strip()
+        if is_production_environment():
+            table = os.getenv("TRUSTFORGE_ATOMIC_BATCH_TABLE", "").strip()
+            region = os.getenv("AWS_REGION", "").strip()
+            shared_db = os.getenv(
+                "TRUSTFORGE_SHARED_ANALYSIS_DB_PATH", ""
+            ).strip()
+            if (
+                not table
+                or not region
+                or not config_version
+                or not budget_guard.atomic_batch_exclusive_enabled()
+                or not shared_db
+                or Path(shared_db).resolve() != self.path.resolve()
+            ):
+                raise MultiAngleAuthorityError(
+                    "production atomic batch authority/exclusive shared projection "
+                    "storage is not configured"
+                )
+            try:
+                import boto3
+
+                store = DynamoDBAtomicMultiAngleBatchStore(
+                    client=boto3.client("dynamodb", region_name=region),
+                    table_name=table,
+                )
+            except Exception as exc:
+                raise MultiAngleAuthorityError(
+                    "production atomic batch authority is unavailable"
+                ) from exc
+        else:
+            config_version = config_version or "local-v1"
+            store = SQLiteAtomicMultiAngleBatchStore(str(self.path))
+            day = datetime.now(UTC).date().isoformat()
+            raw_remaining = os.getenv(
+                "TRUSTFORGE_ATOMIC_BATCH_LOCAL_REMAINING_USD", "1000"
+            )
+            try:
+                remaining = Decimal(raw_remaining)
+                store.ensure_budget(
+                    day=day,
+                    remaining_usd=remaining,
+                    config_version=config_version,
+                )
+            except Exception as exc:
+                raise MultiAngleAuthorityError(
+                    "local atomic batch authority bootstrap failed"
+                ) from exc
+        self._atomic_batch_store = store
+        return store
+
+    def _materialize_atomic_batch(
+        self,
+        *,
+        coin: str,
+        locale: str,
+        snapshot_id: str,
+        batch_id: str,
+        authority_job_ids: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Project one authority manifest into SQLite, all five or zero."""
+        if len(authority_job_ids) != len(MODES):
+            raise MultiAngleAuthorityError("authority manifest does not contain five jobs")
+        planned = [
+            (mode, MODES[mode][1].format(coin=coin), job_id)
+            for mode, job_id in zip(MODES, authority_job_ids, strict=True)
+        ]
+        conn = self._conn()
+        now = time.time()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            snapshot = conn.execute(
+                "SELECT coin FROM analysis_snapshots WHERE snapshot_id=?", (snapshot_id,)
+            ).fetchone()
+            if snapshot is None or snapshot["coin"] != coin:
+                raise MultiAngleAuthorityError(
+                    "authority snapshot is unavailable for worker projection"
+                )
+            existing = conn.execute(
+                """SELECT job_id,mode,atomic_batch_id FROM analysis_jobs
+                   WHERE atomic_batch_id=?""",
+                (batch_id,),
+            ).fetchall()
+            if existing:
+                observed = {
+                    (row["mode"], row["job_id"], row["atomic_batch_id"]) for row in existing
+                }
+                expected = {
+                    (mode, job_id, batch_id) for mode, _question, job_id in planned
+                }
+                if observed != expected:
+                    raise MultiAngleAuthorityError(
+                        "atomic worker projection is incomplete or inconsistent"
+                    )
+            else:
+                pending = conn.execute(
+                    "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')"
+                ).fetchone()[0]
+                if pending + len(planned) > QUEUE_CAPACITY:
+                    raise MultiAngleCapacityError(
+                        f"佇列剩餘容量不足，五角度需同時保留 {len(planned)} 個位置"
+                    )
+                conn.execute(
+                    """INSERT OR IGNORE INTO analysis_multi_angle_runs
+                       (snapshot_id,coin,submitted_at) VALUES(?,?,?)""",
+                    (snapshot_id, coin, now),
+                )
+                for mode, mode_question, job_id in planned:
+                    qtype = QUESTION_TYPES[mode]
+                    conn.execute(
+                        """INSERT INTO analysis_jobs(
+                             job_id,snapshot_id,coin,mode,question,question_type,
+                             state,current_stage,retry_count,error,created_at,updated_at,
+                             origin,priority,atomic_batch_id,atomic_mode
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            job_id, snapshot_id, coin, mode, mode_question, qtype.value,
+                            "queued", STAGES[0], 0, None, now, now, "manual",
+                            MANUAL_PRIORITY, batch_id, mode,
+                        ),
+                    )
+                    self._checkpoint(job_id, STAGES[0], "queued")
+                    self._append_lineage(
+                        "job_enqueued", entity_type="analysis_job", entity_id=job_id,
+                        snapshot_id=snapshot_id, job_id=job_id,
+                        parent_type="atomic_batch", parent_id=batch_id,
+                        metadata={
+                            "coin": coin, "mode": mode, "question_type": qtype.value,
+                            "origin": "manual", "priority": MANUAL_PRIORITY,
+                            "locale": locale, "atomic_budget": True,
+                        },
+                    )
+                self._append_lineage(
+                    "multi_angle_submitted", entity_type="multi_angle_run",
+                    entity_id=f"ma-{snapshot_id}", snapshot_id=snapshot_id,
+                    parent_type="atomic_batch", parent_id=batch_id,
+                    metadata={"coin": coin, "locale": locale, "batch_id": batch_id},
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        job_ids = {
+            mode: job_id
+            for mode, _question, job_id in planned
+        }
+        for mode, mode_question, job_id in planned:
+            try:
+                self.register_question(coin, mode, mode_question, enqueue=False)
+                self._put_package(
+                    STAGES[0],
+                    {"job_id": job_id, "priority": MANUAL_PRIORITY, "locale": locale},
+                )
+                self._adopted.add(job_id)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "atomic multi-angle dispatch will be recovered for %s",
+                    job_id,
+                    exc_info=True,
+                )
+        return {
+            "snapshot_id": snapshot_id,
+            "job_ids": job_ids,
+            "coin": coin,
+            "batch_id": batch_id,
+        }
+
+    def _submit_multi_angle_atomic(
+        self,
+        coin: str,
+        question: str,
+        *,
+        locale: str,
+        caller_id: str,
+        idempotency_key: str,
+        admission_check: Callable[[], None] | None,
+    ) -> dict[str, Any]:
+        from .multi_angle_batch_store import (
+            AtomicBatchRequest,
+            BatchConflictError,
+            BatchStoreBackendError,
+            BatchStoreIntegrityError,
+        )
+
+        if admission_check is not None:
+            admission_check()
+        caller_hash = hashlib.sha256(caller_id.encode()).hexdigest()
+        key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {"coin": coin, "question": question, "locale": locale},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        batch_id = "ma-" + hashlib.sha256(
+            f"{caller_hash}:{key_hash}".encode()
+        ).hexdigest()[:24]
+        now = int(time.time())
+        day = datetime.fromtimestamp(now, UTC).date().isoformat()
+        config_version = os.getenv(
+            "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
+        ).strip() or "local-v1"
+        try:
+            batch_cost = (
+                Decimal(str(budget_guard.multi_angle_angle_max_cost_usd()))
+                * len(MODES)
+            ).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
+        except (ValueError, ArithmeticError) as exc:
+            raise MultiAngleAuthorityError(
+                "multi-angle cost authority configuration is invalid"
+            ) from exc
+        store = self._atomic_store()
+        probe = AtomicBatchRequest(
+            batch_id=batch_id, caller_hash=caller_hash,
+            idempotency_key_hash=key_hash, request_fingerprint=fingerprint,
+            coin=coin, snapshot_id=f"snap-pending-{batch_id}",
+            day=day, batch_cost_usd=batch_cost,
+            config_version=config_version, created_at=now,
+        )
+        try:
+            replay = store.find_replay(probe)
+        except BatchConflictError as exc:
+            raise MultiAngleIdempotencyConflictError(str(exc)) from exc
+        except (BatchStoreBackendError, BatchStoreIntegrityError) as exc:
+            logging.getLogger(__name__).error(
+                "multi_angle_authority_unavailable phase=find_replay error_type=%s",
+                type(exc).__name__,
+            )
+            raise MultiAngleAuthorityError(str(exc)) from exc
+        if replay is not None:
+            return self._materialize_atomic_batch(
+                coin=coin, locale=locale, snapshot_id=str(replay.snapshot_id),
+                batch_id=replay.batch_id, authority_job_ids=replay.job_ids,
+            )
+
+        pending = self._conn().execute(
+            "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')"
+        ).fetchone()[0]
+        if pending + len(MODES) > QUEUE_CAPACITY:
+            raise MultiAngleCapacityError(
+                f"佇列剩餘容量不足，五角度需同時保留 {len(MODES)} 個位置"
+            )
+        before = {
+            row[0] for row in self._conn().execute(
+                "SELECT snapshot_id FROM analysis_snapshots"
+            ).fetchall()
+        }
+        content_snapshot_id = self.create_snapshot(coin, query=question)
+        created_snapshots = (
+            {content_snapshot_id} if content_snapshot_id not in before else set()
+        )
+        # Each admitted authority batch owns an immutable projection snapshot.
+        # Copying the content-addressed snapshot avoids the legacy
+        # UNIQUE(snapshot,coin,mode,question) key collapsing distinct paid
+        # batches while retaining the exact source revision/docs.
+        snapshot_id = (
+            f"snap-{coin.lower()}-"
+            f"{hashlib.sha256(batch_id.encode()).hexdigest()[:16]}"
+        )
+        if snapshot_id != content_snapshot_id:
+            source = self._conn().execute(
+                """SELECT source_revision,docs_json,document_count
+                   FROM analysis_snapshots WHERE snapshot_id=?""",
+                (content_snapshot_id,),
+            ).fetchone()
+            cursor = self._conn().execute(
+                "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
+                (
+                    snapshot_id, coin, time.time(), source["source_revision"],
+                    source["docs_json"], source["document_count"],
+                ),
+            )
+            if cursor.rowcount:
+                created_snapshots.add(snapshot_id)
+        request = dataclasses.replace(probe, snapshot_id=snapshot_id)
+        request_json = json.dumps(
+            {
+                **dataclasses.asdict(request),
+                "batch_cost_usd": str(request.batch_cost_usd),
+            },
+            sort_keys=True,
+        )
+        snapshot_row = self._conn().execute(
+            "SELECT * FROM analysis_snapshots WHERE snapshot_id=?", (snapshot_id,)
+        ).fetchone()
+        snapshot_json = json.dumps(dict(snapshot_row), sort_keys=True)
+        self._conn().execute(
+            """INSERT OR REPLACE INTO analysis_atomic_projection_queue
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                batch_id, request_json, snapshot_json, locale,
+                "pending_authority", None, time.time(),
+            ),
+        )
+        authority_succeeded = False
+        try:
+            result = store.create_batch(request)
+            if not result.admitted:
+                self._conn().execute(
+                    "DELETE FROM analysis_atomic_projection_queue WHERE batch_id=?",
+                    (batch_id,),
+                )
+                raise MultiAngleBudgetError(
+                    "authoritative budget cannot admit five-angle batch"
+                )
+            authority_succeeded = True
+            resolved_snapshot = str(result.snapshot_id)
+            result_json = json.dumps(
+                {
+                    "batch_id": result.batch_id,
+                    "snapshot_id": resolved_snapshot,
+                    "job_ids": list(result.job_ids),
+                },
+                sort_keys=True,
+            )
+            self._conn().execute(
+                """UPDATE analysis_atomic_projection_queue
+                   SET state='admitted',result_json=?,updated_at=?
+                   WHERE batch_id=?""",
+                (result_json, time.time(), batch_id),
+            )
+            if resolved_snapshot != snapshot_id:
+                for created_snapshot in created_snapshots:
+                    self._conn().execute(
+                        """DELETE FROM analysis_snapshots WHERE snapshot_id=?
+                           AND NOT EXISTS(
+                             SELECT 1 FROM analysis_jobs WHERE snapshot_id=?
+                           )""",
+                        (created_snapshot, created_snapshot),
+                    )
+            materialized = self._materialize_atomic_batch(
+                coin=coin, locale=locale, snapshot_id=resolved_snapshot,
+                batch_id=result.batch_id, authority_job_ids=result.job_ids,
+            )
+            for created_snapshot in created_snapshots - {resolved_snapshot}:
+                self._conn().execute(
+                    """DELETE FROM analysis_snapshots WHERE snapshot_id=?
+                       AND NOT EXISTS(
+                         SELECT 1 FROM analysis_jobs WHERE snapshot_id=?
+                       )""",
+                    (created_snapshot, created_snapshot),
+                )
+            self._conn().execute(
+                "DELETE FROM analysis_atomic_projection_queue WHERE batch_id=?",
+                (batch_id,),
+            )
+            return materialized
+        except BatchConflictError as exc:
+            raise MultiAngleIdempotencyConflictError(str(exc)) from exc
+        except (BatchStoreBackendError, BatchStoreIntegrityError) as exc:
+            logging.getLogger(__name__).error(
+                "multi_angle_authority_unavailable phase=create_batch error_type=%s",
+                type(exc).__name__,
+            )
+            raise MultiAngleAuthorityError(str(exc)) from exc
+        finally:
+            if not authority_succeeded:
+                for created_snapshot in created_snapshots:
+                    self._conn().execute(
+                        """DELETE FROM analysis_snapshots WHERE snapshot_id=?
+                           AND NOT EXISTS(
+                             SELECT 1 FROM analysis_jobs WHERE snapshot_id=?
+                           )""",
+                        (created_snapshot, created_snapshot),
+                    )
+
     def submit_multi_angle(
         self,
         coin: str,
@@ -641,6 +1118,13 @@ class AnalysisFlow:
             raise ValueError(f"unsupported coin: {coin}")
         question = question.strip()
         locale = normalize_locale(locale)
+        if caller_id is not None or idempotency_key is not None:
+            if not caller_id or not idempotency_key:
+                raise ValueError("caller_id and idempotency_key must be provided together")
+            return self._submit_multi_angle_atomic(
+                coin, question, locale=locale, caller_id=caller_id,
+                idempotency_key=idempotency_key, admission_check=admission_check,
+            )
         conn = self._conn()
         request_claim: tuple[str, str] | None = None
         if caller_id is not None or idempotency_key is not None:
@@ -1221,6 +1705,7 @@ class AnalysisFlow:
         pretending the recorded stage can resume with missing state.
         """
         repaired = {"workers": 0, "jobs": 0}
+        repaired["atomic_projections"] = self._recover_atomic_projections()
         for stage in STAGES:
             prefix = f"hermes-{stage}-"
             live = [thread for thread in self._threads if thread.name.startswith(prefix) and thread.is_alive()]
@@ -1256,6 +1741,92 @@ class AnalysisFlow:
             logging.warning("Hermes runtime reconciled: %s", repaired)
         repaired["syntheses"] = self._recover_multi_angle_syntheses()
         return repaired
+
+    def _recover_atomic_projections(self) -> int:
+        """Recover admitted authority manifests without a client retry.
+
+        This repairs only the local worker projection. Reservation settlement
+        remains exclusively #885.
+        """
+        from .multi_angle_batch_store import AtomicBatchRequest
+
+        rows = self._conn().execute(
+            """SELECT batch_id,request_json,snapshot_json,locale,state,result_json
+               FROM analysis_atomic_projection_queue ORDER BY updated_at"""
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            try:
+                raw_request = json.loads(row["request_json"])
+                raw_request["batch_cost_usd"] = Decimal(
+                    raw_request["batch_cost_usd"]
+                )
+                request = AtomicBatchRequest(**raw_request)
+                if row["state"] == "pending_authority":
+                    result = self._atomic_store().find_replay(request)
+                    if result is None:
+                        continue
+                    result_payload = {
+                        "batch_id": result.batch_id,
+                        "snapshot_id": result.snapshot_id,
+                        "job_ids": list(result.job_ids),
+                    }
+                    self._conn().execute(
+                        """UPDATE analysis_atomic_projection_queue
+                           SET state='admitted',result_json=?,updated_at=?
+                           WHERE batch_id=?""",
+                        (
+                            json.dumps(result_payload, sort_keys=True),
+                            time.time(),
+                            row["batch_id"],
+                        ),
+                    )
+                else:
+                    result_payload = json.loads(row["result_json"])
+                snapshot = json.loads(row["snapshot_json"])
+                existing_snapshot = self._conn().execute(
+                    """SELECT coin,source_revision,docs_json,document_count
+                       FROM analysis_snapshots WHERE snapshot_id=?""",
+                    (snapshot["snapshot_id"],),
+                ).fetchone()
+                expected_snapshot = (
+                    snapshot["coin"], snapshot["source_revision"],
+                    snapshot["docs_json"], snapshot["document_count"],
+                )
+                if (
+                    existing_snapshot is not None
+                    and tuple(existing_snapshot) != expected_snapshot
+                ):
+                    raise MultiAngleAuthorityError(
+                        "immutable recovery snapshot conflicts with local storage"
+                    )
+                self._conn().execute(
+                    """INSERT OR IGNORE INTO analysis_snapshots
+                       VALUES(?,?,?,?,?,?)""",
+                    (
+                        snapshot["snapshot_id"], snapshot["coin"],
+                        snapshot["created_at"], snapshot["source_revision"],
+                        snapshot["docs_json"], snapshot["document_count"],
+                    ),
+                )
+                self._materialize_atomic_batch(
+                    coin=request.coin,
+                    locale=row["locale"],
+                    snapshot_id=result_payload["snapshot_id"],
+                    batch_id=result_payload["batch_id"],
+                    authority_job_ids=tuple(result_payload["job_ids"]),
+                )
+                self._conn().execute(
+                    "DELETE FROM analysis_atomic_projection_queue WHERE batch_id=?",
+                    (row["batch_id"],),
+                )
+                recovered += 1
+            except Exception as exc:
+                logging.getLogger(__name__).error(
+                    "multi_angle_projection_recovery_failed error_type=%s",
+                    type(exc).__name__,
+                )
+        return recovered
 
     def _recover_multi_angle_syntheses(self) -> int:
         """重啟/巡檢時補做五角度已完成但 crash 遺失的 synthesis。"""
@@ -1529,10 +2100,67 @@ class AnalysisFlow:
 
     def _stage_claim_extraction(self, package: dict) -> dict:
         log = package["log"]
-        with _bedrock_live_attempt(log) as live:
+        job = package["job"]
+        batch_id = job.get("atomic_batch_id") if isinstance(job, dict) else job["atomic_batch_id"]
+        batch_allocation = bool(batch_id)
+        if batch_allocation:
+            owner_token = package.setdefault(
+                "allocation_owner_token", f"attempt-{secrets.token_hex(24)}"
+            )
+            config_version = os.getenv(
+                "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
+            ).strip() or "local-v1"
+            expected_batch_cost = (
+                Decimal(str(budget_guard.multi_angle_angle_max_cost_usd()))
+                * len(MODES)
+            ).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
+            try:
+                self._atomic_store().claim_allocation(
+                    batch_id=batch_id,
+                    mode=job["atomic_mode"],
+                    job_id=job["job_id"],
+                    owner_token=owner_token,
+                    config_version=config_version,
+                    expected_amount_usd=expected_batch_cost / len(MODES),
+                )
+                self._atomic_store().consume_call_slot(
+                    batch_id=batch_id,
+                    mode=job["atomic_mode"],
+                    job_id=job["job_id"],
+                    owner_token=owner_token,
+                    config_version=config_version,
+                    expected_amount_usd=expected_batch_cost / len(MODES),
+                    slot="claim_extraction",
+                )
+            except Exception as exc:
+                raise MultiAngleAuthorityError(
+                    "atomic worker allocation/call slot cannot be consumed"
+                ) from exc
+        package["batch_allocation"] = batch_allocation
+        with _bedrock_live_attempt(
+            log, batch_allocation=batch_allocation
+        ) as live:
             client = BedrockClient(offline=not live)
             package["client"] = client
-            package["claims"] = client.extract_claims_with_llm(package["docs"], log=log)
+            prompt_docs = (
+                _bounded_multi_angle_documents(package["docs"])
+                if batch_allocation else package["docs"]
+            )
+            if batch_allocation:
+                doc_block = "\n".join(
+                    _multi_angle_doc_line(doc) for doc in prompt_docs
+                )
+                if (
+                    len(doc_block.encode("utf-8"))
+                    > MULTI_ANGLE_DOC_BLOCK_MAX_BYTES
+                ):
+                    raise MultiAngleAuthorityError(
+                        "claim document block exceeds authority byte cap"
+                    )
+            package["claims"] = client.extract_claims_with_llm(
+                prompt_docs,
+                log=log,
+            )
             llm_active = not client.offline and bool(client.config.model_id)
         log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
         return package
@@ -1600,7 +2228,33 @@ class AnalysisFlow:
             # 是兩次獨立真呼叫，中間隔著佇列等待——重新走一次獨立的 live 閘 +
             # 預留，反映呼叫當下最新的 cap 狀態，不沿用 Step1 當時已過期的判定
             # （避免這段等待期間才發生的「已達每日上限」被繞過）。
-            with _bedrock_live_attempt(log) as live:
+            if package.get("batch_allocation"):
+                job = package["job"]
+                config_version = os.getenv(
+                    "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
+                ).strip() or "local-v1"
+                expected_batch_cost = (
+                    Decimal(str(budget_guard.multi_angle_angle_max_cost_usd()))
+                    * len(MODES)
+                ).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
+                try:
+                    self._atomic_store().consume_call_slot(
+                        batch_id=job["atomic_batch_id"],
+                        mode=job["atomic_mode"],
+                        job_id=job["job_id"],
+                        owner_token=package["allocation_owner_token"],
+                        config_version=config_version,
+                        expected_amount_usd=expected_batch_cost / len(MODES),
+                        slot="evidence_narrative",
+                    )
+                except Exception as exc:
+                    raise MultiAngleAuthorityError(
+                        "atomic narrative call slot cannot be consumed"
+                    ) from exc
+            with _bedrock_live_attempt(
+                log,
+                batch_allocation=bool(package.get("batch_allocation")),
+            ) as live:
                 client.offline = not live
                 package["report"], package["evidence"] = _build_report()
         return package

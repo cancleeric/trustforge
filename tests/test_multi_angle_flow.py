@@ -19,10 +19,10 @@ import pytest
 from trustforge.analysis_flow import (
     AnalysisFlow,
     MODES,
+    MultiAngleAuthorityError,
     MultiAngleBudgetError,
     MultiAngleCapacityError,
     MultiAngleIdempotencyConflictError,
-    MultiAngleRequestInProgressError,
     _bedrock_live_attempt,
 )
 from trustforge.execlog import ExecutionLog
@@ -69,13 +69,13 @@ class TestSubmitMultiAngle:
         assert second == first
         assert flow._conn().execute("SELECT count(*) FROM analysis_jobs").fetchone()[0] == before
         request = flow._conn().execute(
-            """SELECT caller_hash,idempotency_key_hash,state,result_json
-               FROM analysis_multi_angle_requests"""
+            """SELECT caller_hash,idempotency_key_hash,state,batch_id
+               FROM atomic_requests"""
         ).fetchone()
         assert request["caller_hash"] != "203.0.113.8"
         assert request["idempotency_key_hash"] != "retry-1"
-        assert request["state"] == "completed"
-        assert json.loads(request["result_json"]) == first
+        assert request["state"] == "active"
+        assert request["batch_id"] == first["batch_id"]
 
     def test_completed_replay_does_not_repeat_admission(self, flow):
         calls: list[str] = []
@@ -87,7 +87,9 @@ class TestSubmitMultiAngle:
         first = flow.submit_multi_angle("BTC", "same request", **kwargs)
         second = flow.submit_multi_angle("BTC", "same request", **kwargs)
         assert second == first
-        assert calls == ["admitted"]
+        # Public rate admission is checked on every HTTP attempt, including a
+        # durable replay; only budget/job creation is replayed.
+        assert calls == ["admitted", "admitted"]
 
     def test_same_caller_key_different_payload_conflicts(self, flow):
         flow.submit_multi_angle(
@@ -100,107 +102,42 @@ class TestSubmitMultiAngle:
             )
         assert flow._conn().execute("SELECT count(*) FROM analysis_jobs").fetchone()[0] == 5
 
-    def test_processing_replay_returns_same_request_id(self, flow):
+    def test_incomplete_authority_replay_fails_closed(self, flow):
         caller_hash = hashlib.sha256(b"203.0.113.10").hexdigest()
-        now = time.time()
+        flow._atomic_store()
         flow._conn().execute(
-            """INSERT INTO analysis_multi_angle_requests VALUES(
-                 ?,?,?,?,?,?,?,?,?,?
-               )""",
+            """INSERT INTO atomic_requests VALUES(?,?,?,?,?)""",
             (
                 caller_hash, hashlib.sha256(b"pending-1").hexdigest(),
                 hashlib.sha256(
                     b'{"coin":"BTC","locale":"zh-Hant","question":"pending"}'
                 ).hexdigest(),
-                "ma-request-fixed", "processing", None, None, now, now, now + 60,
+                "ma-request-fixed", "active",
             ),
         )
-        with pytest.raises(MultiAngleRequestInProgressError) as caught:
+        with pytest.raises(MultiAngleAuthorityError):
             flow.submit_multi_angle(
                 "BTC", "pending", caller_id="203.0.113.10",
                 idempotency_key="pending-1",
             )
-        assert caught.value.request_id == "ma-request-fixed"
 
-    def test_concurrent_different_keys_same_payload_have_one_batch(
-        self, tmp_path
-    ):
-        db_path = tmp_path / "multi-angle-idempotency-race.sqlite3"
-        leader = AnalysisFlow(db_path)
-        follower = AnalysisFlow(db_path)
-        claim_created = threading.Event()
-        release_leader = threading.Event()
-        leader_result: dict = {}
-        follower_request_ids: list[str] = []
-
-        def hold_after_claim():
-            claim_created.set()
-            assert release_leader.wait(timeout=5)
-
-        def submit_leader():
-            leader_result.update(
-                leader.submit_multi_angle(
-                    "BTC",
-                    "concurrent",
-                    caller_id="203.0.113.12",
-                    idempotency_key="same-key",
-                    admission_check=hold_after_claim,
-                )
-            )
-
-        thread = threading.Thread(target=submit_leader)
-        thread.start()
-        assert claim_created.wait(timeout=5)
-        try:
-            with pytest.raises(MultiAngleRequestInProgressError) as caught:
-                follower.submit_multi_angle(
-                    "BTC",
-                    "concurrent",
-                    caller_id="203.0.113.12",
-                    idempotency_key="other-tab-key",
-                )
-            follower_request_ids.append(caught.value.request_id)
-        finally:
-            release_leader.set()
-            thread.join(timeout=5)
-            leader.close()
-            follower.close()
-
-        assert not thread.is_alive()
-        assert leader_result["snapshot_id"]
-        with AnalysisFlow(db_path) as verified:
-            assert verified._conn().execute(
-                "SELECT count(*) FROM analysis_multi_angle_requests"
-            ).fetchone()[0] == 2
-            assert verified._conn().execute(
-                "SELECT count(*) FROM analysis_multi_angle_runs"
-            ).fetchone()[0] == 1
-            assert verified._conn().execute(
-                "SELECT count(*) FROM analysis_jobs"
-            ).fetchone()[0] == 5
-            requests = verified._conn().execute(
-                "SELECT request_id,state,result_json FROM analysis_multi_angle_requests"
-            ).fetchall()
-            assert len({request["request_id"] for request in requests}) == 1
-            assert follower_request_ids == [requests[0]["request_id"]]
-            assert {request["state"] for request in requests} == {"completed"}
-            assert all(
-                json.loads(request["result_json"]) == leader_result
-                for request in requests
-            )
-            assert verified.submit_multi_angle(
-                "BTC",
-                "concurrent",
-                caller_id="203.0.113.12",
-                idempotency_key="other-tab-key",
-            ) == leader_result
-            with pytest.raises(MultiAngleIdempotencyConflictError):
-                verified.submit_multi_angle(
-                    "BTC",
-                    "different payload",
-                    caller_id="203.0.113.12",
-                    idempotency_key="other-tab-key",
-                )
+    def test_different_keys_are_distinct_paid_batches(self, flow):
+        first = flow.submit_multi_angle(
+            "BTC", "concurrent", caller_id="203.0.113.12",
+            idempotency_key="same-key",
+        )
+        second = flow.submit_multi_angle(
+            "BTC", "concurrent", caller_id="203.0.113.12",
+            idempotency_key="other-tab-key",
+        )
+        assert first["batch_id"] != second["batch_id"]
+        assert first["snapshot_id"] != second["snapshot_id"]
+        assert flow._conn().execute(
+            "SELECT count(*) FROM atomic_requests"
+        ).fetchone()[0] == 2
+        assert flow._conn().execute(
+            "SELECT count(*) FROM analysis_jobs"
+        ).fetchone()[0] == 10
 
     def test_failed_admission_can_retry_same_key(self, flow):
         def denied():
