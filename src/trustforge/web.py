@@ -8500,7 +8500,11 @@ class Handler(BaseHTTPRequestHandler):
                         self.server._agos_runtime = _agos_rt
                     headers_dict = {k: v for k, v in getattr(self, "headers", {}).items()}
                     code, body = dispatch_admin_agos(u.path, u.query or "", headers_dict, _agos_rt)
-                    return self._send(code, json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+                    return self._send(
+                        code,
+                        json.dumps(body, ensure_ascii=False),
+                        "application/json; charset=utf-8",
+                    )
                 # 已認證但打到不存在的 admin 子路徑 → JSON 404
                 return self._send(
                     404,

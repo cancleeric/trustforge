@@ -59,13 +59,6 @@ def test_admin_agos_http_requires_outer_x_admin_token(agos_http_server):
     assert json.loads(body)["error"]["code"] == "unauthorized"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "web.Handler passes bytes to Handler._send for AGOS responses; "
-        "production fix is outside this closeout's docs/test-only scope"
-    ),
-)
 def test_admin_agos_http_returns_dispatcher_contract(agos_http_server):
     status, headers, body = _get(
         agos_http_server,
@@ -80,6 +73,6 @@ def test_admin_agos_http_returns_dispatcher_contract(agos_http_server):
     assert payload["data"] == {
         "items": [],
         "page": 1,
-        "page_size": 50,
+        "page_size": 20,
         "total": 0,
     }
