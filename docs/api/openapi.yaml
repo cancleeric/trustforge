@@ -676,43 +676,6 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
-  /api/module-telemetry:
-    get:
-      tags: [observability]
-      operationId: getModuleTelemetry
-      summary: 模組 runtime 遙測狀態
-      description: |
-        唯讀。未帶 `module_id` 時回傳所有模組遙測紀錄與總數；
-        帶 `module_id` 時回傳單一模組紀錄，找不到則回 404。
-      parameters:
-        - in: query
-          name: module_id
-          required: false
-          schema:
-            type: string
-          description: 可選的模組識別碼。
-      responses:
-        "200":
-          description: 模組遙測狀態
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        additionalProperties: true
-        "404":
-          description: 指定模組不存在
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-
   /api/asset-context:
     get:
       tags: [analysis]
@@ -907,105 +870,6 @@ paths:
                                   type: string
         "400":
           description: 缺少必要參數 asset
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-
-  /api/multi-angle:
-    get:
-      tags: [analysis]
-      operationId: getMultiAngle
-      summary: 五角度綜合分析結果
-      description: |
-        唯讀。回傳指定幣種的最新五角度綜合分析結果（MultiAngleReport）。
-        可選 `snapshot_id` 參數指定特定快照。查無結果時回 200 + null。
-      parameters:
-        - in: query
-          name: coin
-          required: true
-          schema:
-            type: string
-          description: 幣種代碼，例如 `BTC`。
-        - in: query
-          name: snapshot_id
-          required: false
-          schema:
-            type: string
-          description: 指定快照 ID（選填，不指定則取最新）。
-      responses:
-        "200":
-          description: 五角度綜合分析結果
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        properties:
-                          multi_angle:
-                            type: object
-                            nullable: true
-                            description: MultiAngleReport 或 null（查無結果）
-        "400":
-          description: 參數錯誤
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-    post:
-      tags: [analysis]
-      operationId: postMultiAngle
-      summary: 觸發五角度綜合分析
-      description: |
-        建立同一份 immutable snapshot，同時為五個分析角度各排入一個 job。
-        五 job 全部完成後自動觸發 synthesis。
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [coin]
-              properties:
-                coin:
-                  type: string
-                  description: 幣種代碼
-                question:
-                  type: string
-                  description: 分析問題（選填，有預設模板）
-                locale:
-                  type: string
-                  description: 敘事語系（選填，預設 zh-Hant）
-      responses:
-        "200":
-          description: 五角度分析已排入佇列
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        required: [snapshot_id, job_ids, coin]
-                        properties:
-                          snapshot_id:
-                            type: string
-                          job_ids:
-                            type: object
-                          coin:
-                            type: string
-        "400":
-          description: 參數錯誤
           content:
             application/json:
               schema:
@@ -1324,6 +1188,9 @@ paths:
       tags: [analysis]
       operationId: getMultiAngleAnalysis
       summary: 讀取同一 snapshot 的五角度綜合報告
+      description: |
+        唯讀。回傳指定幣種最新或指定 snapshot 的 MultiAngleReport；
+        尚未完成或查無結果時仍回 200，`data.multi_angle` 為 null。
       parameters:
         - in: query
           name: coin
@@ -1338,7 +1205,18 @@ paths:
           description: 綜合報告；尚未完成時 data.multi_angle 為 null
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/OkEnvelope"}
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [multi_angle]
+                        properties:
+                          multi_angle:
+                            type: [object, "null"]
+                            description: 完成的 MultiAngleReport，或尚未完成時為 null。
         "400": {$ref: "#/components/responses/BadRequest"}
         "502": {$ref: "#/components/responses/UpstreamError"}
     post:
@@ -1361,7 +1239,27 @@ paths:
           description: 五個工作已完整入列，回傳 snapshot_id 與逐角度 job_ids
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/OkEnvelope"}
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [snapshot_id, job_ids, coin]
+                        properties:
+                          snapshot_id: {type: string}
+                          job_ids:
+                            type: object
+                            required: [risk, sentiment, fundamentals, news, catalyst]
+                            additionalProperties: false
+                            properties:
+                              risk: {type: string}
+                              sentiment: {type: string}
+                              fundamentals: {type: string}
+                              news: {type: string}
+                              catalyst: {type: string}
+                          coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
         "400": {$ref: "#/components/responses/BadRequest"}
         "409":
           description: 唯讀預檢顯示目前可觀測額度不足以啟動五個工作（未預扣款）

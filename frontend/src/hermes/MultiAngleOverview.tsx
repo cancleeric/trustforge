@@ -5,7 +5,7 @@
  * Mobile: card layout (via CSS grid)
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useHermesI18n } from './hermesI18n'
+import { jobStateLabel, useHermesI18n } from './hermesI18n'
 import type { MessageKey } from './hermesI18n'
 import ConflictBadge from './ConflictBadge'
 import type { AngleResult, MultiAngleReport } from '../lib/multiAngleEndpoints'
@@ -71,6 +71,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     coin: string
   } | null>(null)
   const generation = useRef(0)
+  const submitLock = useRef(false)
   const timers = useRef(new Set<number>())
   const controller = useRef(new AbortController())
 
@@ -88,6 +89,13 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     controller.current = new AbortController()
     const activeController = controller.current
     const activeTimers = timers.current
+    submitLock.current = false
+    setReport(null)
+    setLoading(false)
+    setSubmitting(false)
+    setError(null)
+    setJobStates({})
+    setSubmittedResult(null)
     setExpanded(null)
     return () => {
       generation.current += 1
@@ -98,29 +106,35 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
   }, [coin, snapshotId])
 
   const load = useCallback(async () => {
+    const requestGeneration = generation.current
     setLoading(true)
     setError(null)
     try {
       const result = await fetchMultiAngleReport(coin, snapshotId, controller.current.signal)
+      if (requestGeneration !== generation.current) return
       setReport(result.multi_angle)
     } catch (reason) {
+      if (requestGeneration !== generation.current) return
       setError(reason instanceof Error ? reason.message : t('maErrorLoad'))
     } finally {
-      setLoading(false)
+      if (requestGeneration === generation.current) setLoading(false)
     }
   }, [coin, snapshotId, t])
 
   useEffect(() => { load() }, [load])
 
   const handleSubmit = useCallback(async () => {
+    if (submitLock.current) return
+    submitLock.current = true
+    const requestGeneration = generation.current
     setSubmitting(true)
     setError(null)
     setJobStates({})
     setSubmittedResult(null)
     try {
       const result = await submitMultiAngle(coin, undefined, locale, controller.current.signal)
+      if (requestGeneration !== generation.current) return
       setSubmittedResult(result)
-      const requestGeneration = generation.current
       const deadline = Date.now() + 10 * 60 * 1000
       let transientFailures = 0
       const poll = async () => {
@@ -128,6 +142,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
         const states = await Promise.all(
           Object.values(result.job_ids).map((jobId) => getAnalysisJob(jobId, controller.current.signal)),
         )
+        if (requestGeneration !== generation.current) return
         const nextStates: Record<string, { state: string; error?: string }> = {}
         const entries = Object.entries(result.job_ids)
         states.forEach((state, idx) => {
@@ -148,10 +163,12 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
         }
         if (states.every((state) => state.ok && state.data.state === 'completed')) {
           const data = await fetchMultiAngleReport(coin, result.snapshot_id, controller.current.signal)
+          if (requestGeneration !== generation.current) return
           if (data.multi_angle) {
             setReport(data.multi_angle)
             setSubmitting(false)
             setSubmittedResult(null)
+            submitLock.current = false
             return
           }
         }
@@ -161,15 +178,19 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
         schedule(() => { void poll().catch(handlePollError) }, 1500)
       }
       const handlePollError = (reason: unknown) => {
+        if (requestGeneration !== generation.current) return
         setError(reason instanceof Error ? reason.message : t('maErrorStatusRead'))
         setSubmitting(false)
         setSubmittedResult(null)
+        submitLock.current = false
       }
       schedule(() => { void poll().catch(handlePollError) }, 1000)
     } catch (reason) {
+      if (requestGeneration !== generation.current) return
       setError(reason instanceof Error ? reason.message : t('maErrorSubmit'))
       setSubmitting(false)
       setSubmittedResult(null)
+      submitLock.current = false
     }
   }, [coin, locale, schedule, t])
 
@@ -194,43 +215,50 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     return <div className="animate-pulse text-center py-8 text-gray-400">{t('maTitle')}...</div>
   }
 
+  const submitControls = (
+    <div className={report ? 'mt-4 border-t border-gray-700 pt-4' : ''}>
+      <button
+        onClick={handleSubmit}
+        disabled={submitting}
+        className="px-4 py-2 rounded-lg font-medium transition-colors"
+        style={{ backgroundColor: submitting ? '#374151' : '#7c3aed', color: '#fff' }}
+        aria-label={t('maSubmit')}
+      >
+        {submitting ? t('maSubmitting') : `⚡ ${t('maSubmit')}`}
+      </button>
+      <p className="text-xs text-gray-500 mt-2">{t('maCostWarning')}</p>
+      {submitting && submittedResult && (
+        <div className="mt-4 space-y-2" role="status" aria-live="polite">
+          <p className="text-sm text-gray-400">
+            {t('maProgressTemplate', {
+              n: String(Object.values(jobStates).filter((s) => s.state === 'completed').length),
+              total: String(Object.keys(submittedResult.job_ids).length),
+            })}
+          </p>
+          {Object.entries(submittedResult.job_ids).map(([angle]) => {
+            const state = jobStates[angle]?.state ?? 'queued'
+            const color = state === 'completed' ? '#22c55e' : state === 'failed' ? '#ef4444' : '#eab308'
+            return (
+              <div key={angle} className="flex items-center gap-2 text-sm">
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+                <span>{modeLabels[angle] ?? angle}</span>
+                <span className="text-gray-400">
+                  {state === 'error' ? t('maErrorStatusRead') : jobStateLabel(state, t)}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {error && <p className="text-red-400 mt-2 text-sm">{error}</p>}
+    </div>
+  )
+
   if (!report) {
     return (
       <div className="text-center py-8">
         <p className="text-gray-400 mb-4">{t('maNoResult')}</p>
-        <button
-          onClick={handleSubmit}
-          disabled={submitting}
-          className="px-4 py-2 rounded-lg font-medium transition-colors"
-          style={{ backgroundColor: submitting ? '#374151' : '#7c3aed', color: '#fff' }}
-          aria-label={t('maSubmit')}
-        >
-          {submitting ? t('maSubmitting') : `⚡ ${t('maSubmit')}`}
-        </button>
-        <p className="text-xs text-gray-500 mt-2">{t('maCostWarning')}</p>
-        {submitting && Object.keys(jobStates).length > 0 && (
-          <div className="mt-4 space-y-2" role="status" aria-live="polite">
-            <p className="text-sm text-gray-400">
-              {submittedResult
-                ? t('maProgressTemplate', {
-                    n: String(Object.values(jobStates).filter((s) => s.state === 'completed').length),
-                    total: String(Object.keys(submittedResult.job_ids).length),
-                  })
-                : ''}
-            </p>
-            {Object.entries(jobStates).map(([angle, s]) => {
-              const color = s.state === 'completed' ? '#22c55e' : s.state === 'failed' ? '#ef4444' : '#eab308'
-              return (
-                <div key={angle} className="flex items-center gap-2 text-sm">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
-                  <span>{modeLabels[angle] ?? angle}</span>
-                  <span className="text-gray-400">{s.state}</span>
-                </div>
-              )
-            })}
-          </div>
-        )}
-        {error && <p className="text-red-400 mt-2 text-sm">{error}</p>}
+        {submitControls}
       </div>
     )
   }
@@ -360,6 +388,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
           <AnalysisReportView data={expanded.data} />
         </div>
       )}
+      {submitControls}
     </section>
   )
 }
