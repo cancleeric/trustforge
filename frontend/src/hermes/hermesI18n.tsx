@@ -424,6 +424,22 @@ const messages = {
     helpFooterLink: '? 說明',
     helpFooterPost: ' 隨時回到這裡。',
     helpFooterCta: '開始一次分析 →',
+    // #878：資產內在 shadow panel——三層 framing、每維「這在量什麼」、
+    // 四態說明。純觀察語氣,禁預測/方向/處方用詞（AC5）。
+    intrinsicEyebrow: '資產結構 · ASSET STRUCTURE',
+    intrinsicIntro: '這一層只看資產本身的結構事實（發行、控制權、供給、治理、持幣分布），與「證據信任（資訊完整度）」和「市場方向結論」是三個獨立的層次——結構觀察不會改動另外兩層的結果。',
+    intrinsicWhatLabel: '這在量什麼',
+    intrinsicStateLabel: '狀態說明',
+    intrinsicDimIssuanceWhat: '這個資產的發行規則與節奏是否可被外界事先看清楚——總量上限、解鎖時程與增發機制是否公開且固定。',
+    intrinsicDimControlWhat: '能夠變更這個資產協議的權限，是集中在少數幾個位址，還是分散在許多參與者之間。',
+    intrinsicDimSupplyWhat: '這個資產的流通數量能否在鏈上被獨立清點與核對，而不只能仰賴發行方的單方聲明。',
+    intrinsicDimGovernanceWhat: '這個資產的治理如何分配表決與提案權，以及變更協議需要經過哪些關卡。',
+    intrinsicDimHolderWhat: '這個資產的持有量在各大位址之間如何分布——集中在少數位址，或分散在許多位址。',
+    intrinsicStateKnown: '找到可追溯到公開來源、且在截止時點仍有效的可核對事實。',
+    intrinsicStateUnknown: '目前沒有找到可核對的公開事實。這代表資訊不足，不代表資產本身的狀況。',
+    intrinsicStateStale: '曾有可核對的事實，但已超過新鮮度窗口，不再反映截止時點的狀態。',
+    intrinsicStateConflicted: '多個來源對同一項事實給出互相矛盾的說法，目前無法判斷何者成立。',
+    intrinsicConflictNote: '這份觀察記錄到至少一個維度的來源衝突；衝突維度的調整已維持 0，不影響正式信任分。',
   },
   en: {
     analyze: 'ANALYZE', compare: 'COMPARE', history: 'HISTORY', sources: 'SOURCES', costs: 'COSTS', galaxy: 'GALAXY',
@@ -828,6 +844,23 @@ const messages = {
     helpFooterLink: '? Help',
     helpFooterPost: ' link in the top-right of any page brings you back here.',
     helpFooterCta: 'Start an analysis →',
+    // #878: asset-intrinsic shadow panel — three-layer framing, per-dimension
+    // "what this measures", and four-state explanations. Observational only;
+    // no predictive, directional, or prescriptive wording (AC5).
+    intrinsicEyebrow: 'ASSET STRUCTURE',
+    intrinsicIntro: "This layer looks only at the asset's own structural facts (issuance, control, supply, governance, holder distribution). It is separate from the 'evidence trust (information completeness)' and 'market direction conclusion' layers — structural observations do not change the other two.",
+    intrinsicWhatLabel: 'What this measures',
+    intrinsicStateLabel: 'Status meaning',
+    intrinsicDimIssuanceWhat: "Whether the asset's issuance rules and pace are observable in advance — whether the supply cap, unlock schedule, and minting mechanism are public and fixed.",
+    intrinsicDimControlWhat: 'Whether the permission to change this asset’s protocol is concentrated in a few addresses or spread across many participants.',
+    intrinsicDimSupplyWhat: "Whether the asset's circulating supply can be independently counted and reconciled on-chain, rather than relying solely on the issuer's statement.",
+    intrinsicDimGovernanceWhat: 'How this asset’s governance distributes voting and proposal rights, and what checkpoints a protocol change must pass.',
+    intrinsicDimHolderWhat: "How this asset's holdings are distributed across addresses — concentrated in a few addresses or spread across many.",
+    intrinsicStateKnown: 'A checkable fact traceable to a public source and still valid at the point-in-time cutoff was found.',
+    intrinsicStateUnknown: 'No checkable public fact was found. This means information is insufficient — it does not describe the asset itself.',
+    intrinsicStateStale: 'A checkable fact existed but has passed the freshness window; it no longer reflects the state at the cutoff.',
+    intrinsicStateConflicted: 'Multiple sources give contradictory accounts of the same fact; none can currently be confirmed.',
+    intrinsicConflictNote: 'This observation recorded conflicting sources on at least one dimension; the conflicted dimension contributes zero and the official trust score is unaffected.',
   },
 } as const
 
