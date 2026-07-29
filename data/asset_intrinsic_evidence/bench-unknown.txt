@@ -1,0 +1,3 @@
+benchmark corpus decision record
+status: no verified upstream fact available for this dimension
+scope: benchmark measurement only

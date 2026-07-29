@@ -1,0 +1,3 @@
+benchmark corpus decision record
+status: upstream observations diverge across independent sources
+scope: benchmark measurement only

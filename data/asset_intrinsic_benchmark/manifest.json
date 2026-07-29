@@ -1,0 +1,548 @@
+{
+  "assessment_schema_version": "1.0.0",
+  "asset_intrinsic_schema_version": "1.0.0",
+  "benchmark_version": "1.0.0",
+  "coverage_probe": {
+    "conflict_detected": true,
+    "dimensions": [
+      {
+        "name": "issuance_predictability",
+        "reason_code": "eligible",
+        "status": "known"
+      },
+      {
+        "name": "control_dispersion",
+        "reason_code": "eligible",
+        "status": "known"
+      },
+      {
+        "name": "supply_verifiability",
+        "reason_code": "fact_conflicted",
+        "status": "conflicted"
+      },
+      {
+        "name": "governance_capture_resistance",
+        "reason_code": "eligible",
+        "status": "known"
+      },
+      {
+        "name": "holder_concentration",
+        "reason_code": "eligible",
+        "status": "known"
+      }
+    ],
+    "label": "anon-conflicted-direct-view",
+    "note": "pit_view does not surface conflicted facts at this schema version; this probe covers the fact_conflicted branch for coverage completeness",
+    "path": "direct AssetIntrinsicView (not pit_view)"
+  },
+  "data_version": "sha256:cc76da3722102228eaee84dba87a76778808ab8987ecb21eed028180d1460986",
+  "disposition": "remain-shadow",
+  "evidence_version": {
+    "bench-conflicted.txt": "3b62c2cdfd55fc970eee49b4717641da593fb991ae920604831010fe7f3fc646",
+    "bench-unknown.txt": "97bf80f836e5e62b45707c6db69cd9f94925dfee8ae754dece7f914ed0376811",
+    "bench-value-0p00.txt": "609682e079ac235502229fed9590bdd1fa90ba58fe61760476672fc4deba5f90",
+    "bench-value-0p05.txt": "8cadbc272121c253b47d5825cfa07b334f2f3b462f83e96f2cd7517d76cdfa0d",
+    "bench-value-0p10.txt": "b1e388a186e8e7213035c4fd5e7982d24aeb6dd5b15d46abbfceaa7edca95047",
+    "bench-value-0p15.txt": "d9ed113b1d61149d17759e7c49de72d55b04e9813ed58fae529dcf0e5281bab0",
+    "bench-value-0p60.txt": "d7f0e09ffb7faa095f20ddf535dab6dd8675d362ec6f405f7c493430636ec5d7",
+    "bench-value-0p70.txt": "95d5c8accb3b4c8b0467d2daba2fe35b5261bb2e144091c90358cdf3234cc7dd",
+    "bench-value-0p75.txt": "1b6d2ac80c62fc924cad2b1678f2cfbccfca966325017bad04d564d6573352d9",
+    "bench-value-0p80.txt": "eba661ec0d3fd6dc23c99cba4b321601d01708af0764734d4f0804e3caf2b837",
+    "bench-value-0p85.txt": "ee3c93c7787a0ab68aee83abd2a5380270931d0491d84ce81b2a3f3bac766083",
+    "bench-value-0p90.txt": "70d67564e2e2917b16a29943809b86fc22bf2166c87b9977da82abb97448d799",
+    "bench-value-0p95.txt": "89699cadcf081e33256fc9f22307e3277d52c4319cb90ce7e14ebf8402c153af",
+    "bench-value-1p00.txt": "c0b34661abda569b3c6cd5c768d71a0ade3f1223514549c3d3bbf0f779a485f5"
+  },
+  "intrinsic_shadow_observation_version": "1.0.0",
+  "measurements": {
+    "coverage_bias": {
+      "gate_failed_count": 1,
+      "gate_passed_count": 6,
+      "gate_passed_fraction": 0.8571428571428571,
+      "gate_reason_code_distribution": {
+        "eligible": 6,
+        "insufficient_coverage": 1
+      },
+      "interpretation": "distribution only; no fairness conclusion",
+      "known_count_distribution": {
+        "3": 2,
+        "4": 1,
+        "5": 4
+      },
+      "source_family_count_distribution": {
+        "1": 1,
+        "2": 6
+      }
+    },
+    "extreme_value_sensitivity": {
+      "base_label": "anon-sweep (multi-family, five known)",
+      "interpretation": "single-dimension monotonic response; measurement only",
+      "rows": [
+        {
+          "dimension": "issuance_predictability",
+          "total_delta_by_value": {
+            "0.00": -0.016,
+            "0.25": -0.008,
+            "0.50": 0.0,
+            "0.75": 0.008,
+            "1.00": 0.016
+          }
+        },
+        {
+          "dimension": "control_dispersion",
+          "total_delta_by_value": {
+            "0.00": -0.016,
+            "0.25": -0.008,
+            "0.50": 0.0,
+            "0.75": 0.008,
+            "1.00": 0.016
+          }
+        },
+        {
+          "dimension": "supply_verifiability",
+          "total_delta_by_value": {
+            "0.00": -0.016,
+            "0.25": -0.008,
+            "0.50": 0.0,
+            "0.75": 0.008,
+            "1.00": 0.016
+          }
+        },
+        {
+          "dimension": "governance_capture_resistance",
+          "total_delta_by_value": {
+            "0.00": -0.016,
+            "0.25": -0.008,
+            "0.50": 0.0,
+            "0.75": 0.008,
+            "1.00": 0.016
+          }
+        },
+        {
+          "dimension": "holder_concentration",
+          "total_delta_by_value": {
+            "0.00": -0.016,
+            "0.25": -0.008,
+            "0.50": 0.0,
+            "0.75": 0.008,
+            "1.00": 0.016
+          }
+        }
+      ],
+      "sweep_values": [
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        1.0
+      ]
+    },
+    "factual_distance_vs_score_spread": {
+      "interpretation": "records factual-to-score mapping only; no ranking",
+      "rows": [
+        {
+          "factual_distance_l1": 0.6,
+          "known_count": 3,
+          "label": "asset:bench-anon-3known-boundary",
+          "signed_factual_distance": 0.6,
+          "total_delta": 0.0192
+        },
+        {
+          "factual_distance_l1": 2.2,
+          "known_count": 5,
+          "label": "asset:bench-anon-5known-high",
+          "signed_factual_distance": 2.2,
+          "total_delta": 0.0704
+        },
+        {
+          "factual_distance_l1": 2.2,
+          "known_count": 5,
+          "label": "asset:bench-anon-5known-low",
+          "signed_factual_distance": -2.2,
+          "total_delta": -0.0704
+        },
+        {
+          "factual_distance_l1": 0.75,
+          "known_count": 3,
+          "label": "asset:bench-anon-conflicted",
+          "signed_factual_distance": 0.75,
+          "total_delta": 0.024
+        },
+        {
+          "factual_distance_l1": 0.95,
+          "known_count": 4,
+          "label": "asset:bench-anon-future-gap",
+          "signed_factual_distance": 0.95,
+          "total_delta": 0.0304
+        },
+        {
+          "factual_distance_l1": 2.2,
+          "known_count": 5,
+          "label": "asset:bench-anon-stale",
+          "signed_factual_distance": 2.2,
+          "total_delta": 0.0
+        }
+      ],
+      "score_spread": {
+        "count": 6,
+        "max": 0.0704,
+        "min": -0.0704,
+        "range": 0.1408
+      }
+    },
+    "single_source_manipulation": {
+      "after": {
+        "gate_passed": false,
+        "source_family_count": 1,
+        "total_delta": 0.0
+      },
+      "base_label": "anon-manipulation (five known, multi-family)",
+      "before": {
+        "gate_passed": true,
+        "source_family_count": 2,
+        "total_delta": 0.048
+      },
+      "gate_flipped": true,
+      "interpretation": "single-family control zeroes every contribution"
+    }
+  },
+  "neutral_anchor_trust": 0.5,
+  "pit_cutoff": "2026-07-29T00:00:00Z",
+  "profiles": [
+    {
+      "conflict_detected": false,
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "reason_code": "eligible",
+          "signed_delta": 0.0064,
+          "status": "known"
+        },
+        {
+          "name": "control_dispersion",
+          "reason_code": "eligible",
+          "signed_delta": 0.0032,
+          "status": "known"
+        },
+        {
+          "name": "supply_verifiability",
+          "reason_code": "eligible",
+          "signed_delta": 0.0096,
+          "status": "known"
+        },
+        {
+          "name": "governance_capture_resistance",
+          "reason_code": "fact_unknown",
+          "signed_delta": 0.0,
+          "status": "unknown"
+        },
+        {
+          "name": "holder_concentration",
+          "reason_code": "fact_unknown",
+          "signed_delta": 0.0,
+          "status": "unknown"
+        }
+      ],
+      "facts_hash": "sha256:c797852f87c7593119074cb2c7afd306e606487f6470ea664b7e50b084868c20",
+      "gate": {
+        "known_count": 3,
+        "passed": true,
+        "reason_code": "eligible",
+        "required_known": 3,
+        "required_source_families": 2,
+        "source_family_count": 2
+      },
+      "label": "asset:bench-anon-3known-boundary",
+      "pit_visible_dimension_count": 5,
+      "total_delta": 0.0192
+    },
+    {
+      "conflict_detected": false,
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "reason_code": "eligible",
+          "signed_delta": 0.016,
+          "status": "known"
+        },
+        {
+          "name": "control_dispersion",
+          "reason_code": "eligible",
+          "signed_delta": 0.0128,
+          "status": "known"
+        },
+        {
+          "name": "supply_verifiability",
+          "reason_code": "eligible",
+          "signed_delta": 0.016,
+          "status": "known"
+        },
+        {
+          "name": "governance_capture_resistance",
+          "reason_code": "eligible",
+          "signed_delta": 0.0112,
+          "status": "known"
+        },
+        {
+          "name": "holder_concentration",
+          "reason_code": "eligible",
+          "signed_delta": 0.0144,
+          "status": "known"
+        }
+      ],
+      "facts_hash": "sha256:8b262144118268de3390e32352cd90610c27d11d86facbce112b22c5b7257818",
+      "gate": {
+        "known_count": 5,
+        "passed": true,
+        "reason_code": "eligible",
+        "required_known": 3,
+        "required_source_families": 2,
+        "source_family_count": 2
+      },
+      "label": "asset:bench-anon-5known-high",
+      "pit_visible_dimension_count": 5,
+      "total_delta": 0.0704
+    },
+    {
+      "conflict_detected": false,
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "reason_code": "eligible",
+          "signed_delta": -0.016,
+          "status": "known"
+        },
+        {
+          "name": "control_dispersion",
+          "reason_code": "eligible",
+          "signed_delta": -0.0128,
+          "status": "known"
+        },
+        {
+          "name": "supply_verifiability",
+          "reason_code": "eligible",
+          "signed_delta": -0.016,
+          "status": "known"
+        },
+        {
+          "name": "governance_capture_resistance",
+          "reason_code": "eligible",
+          "signed_delta": -0.0112,
+          "status": "known"
+        },
+        {
+          "name": "holder_concentration",
+          "reason_code": "eligible",
+          "signed_delta": -0.0144,
+          "status": "known"
+        }
+      ],
+      "facts_hash": "sha256:02329884549f5f87354487c0c251f48e7b479b42aa0f2451df70d23526306a0e",
+      "gate": {
+        "known_count": 5,
+        "passed": true,
+        "reason_code": "eligible",
+        "required_known": 3,
+        "required_source_families": 2,
+        "source_family_count": 2
+      },
+      "label": "asset:bench-anon-5known-low",
+      "pit_visible_dimension_count": 5,
+      "total_delta": -0.0704
+    },
+    {
+      "conflict_detected": false,
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "reason_code": "eligible",
+          "signed_delta": 0.0096,
+          "status": "known"
+        },
+        {
+          "name": "control_dispersion",
+          "reason_code": "eligible",
+          "signed_delta": 0.0064,
+          "status": "known"
+        },
+        {
+          "name": "supply_verifiability",
+          "reason_code": "eligible",
+          "signed_delta": 0.008,
+          "status": "known"
+        },
+        {
+          "name": "governance_capture_resistance",
+          "reason_code": "fact_unavailable",
+          "signed_delta": 0.0,
+          "status": "unknown"
+        },
+        {
+          "name": "holder_concentration",
+          "reason_code": "fact_unknown",
+          "signed_delta": 0.0,
+          "status": "unknown"
+        }
+      ],
+      "facts_hash": "sha256:d31d55f218d7e4434d53c1774be5885f8ee3bd2bd363dc38bb03772534bf50a9",
+      "gate": {
+        "known_count": 3,
+        "passed": true,
+        "reason_code": "eligible",
+        "required_known": 3,
+        "required_source_families": 2,
+        "source_family_count": 2
+      },
+      "label": "asset:bench-anon-conflicted",
+      "pit_visible_dimension_count": 4,
+      "total_delta": 0.024
+    },
+    {
+      "conflict_detected": false,
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "reason_code": "eligible",
+          "signed_delta": 0.0096,
+          "status": "known"
+        },
+        {
+          "name": "control_dispersion",
+          "reason_code": "eligible",
+          "signed_delta": 0.0064,
+          "status": "known"
+        },
+        {
+          "name": "supply_verifiability",
+          "reason_code": "eligible",
+          "signed_delta": 0.008,
+          "status": "known"
+        },
+        {
+          "name": "governance_capture_resistance",
+          "reason_code": "eligible",
+          "signed_delta": 0.0064,
+          "status": "known"
+        },
+        {
+          "name": "holder_concentration",
+          "reason_code": "fact_unavailable",
+          "signed_delta": 0.0,
+          "status": "unknown"
+        }
+      ],
+      "facts_hash": "sha256:db5f7122ab3af50f9ae65e036f2cad42d3219d1c9100f45798e080c4c8b23e66",
+      "gate": {
+        "known_count": 4,
+        "passed": true,
+        "reason_code": "eligible",
+        "required_known": 3,
+        "required_source_families": 2,
+        "source_family_count": 2
+      },
+      "label": "asset:bench-anon-future-gap",
+      "pit_visible_dimension_count": 4,
+      "total_delta": 0.0304
+    },
+    {
+      "conflict_detected": false,
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "reason_code": "coverage_gate_not_met",
+          "signed_delta": 0.0,
+          "status": "known"
+        },
+        {
+          "name": "control_dispersion",
+          "reason_code": "coverage_gate_not_met",
+          "signed_delta": 0.0,
+          "status": "known"
+        },
+        {
+          "name": "supply_verifiability",
+          "reason_code": "coverage_gate_not_met",
+          "signed_delta": 0.0,
+          "status": "known"
+        },
+        {
+          "name": "governance_capture_resistance",
+          "reason_code": "coverage_gate_not_met",
+          "signed_delta": 0.0,
+          "status": "known"
+        },
+        {
+          "name": "holder_concentration",
+          "reason_code": "coverage_gate_not_met",
+          "signed_delta": 0.0,
+          "status": "known"
+        }
+      ],
+      "facts_hash": "sha256:8b262144118268de3390e32352cd90610c27d11d86facbce112b22c5b7257818",
+      "gate": {
+        "known_count": 5,
+        "passed": false,
+        "reason_code": "insufficient_coverage",
+        "required_known": 3,
+        "required_source_families": 2,
+        "source_family_count": 1
+      },
+      "label": "asset:bench-anon-single-family",
+      "pit_visible_dimension_count": 5,
+      "total_delta": 0.0
+    },
+    {
+      "conflict_detected": false,
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "reason_code": "stale",
+          "signed_delta": 0.0,
+          "status": "stale"
+        },
+        {
+          "name": "control_dispersion",
+          "reason_code": "stale",
+          "signed_delta": 0.0,
+          "status": "stale"
+        },
+        {
+          "name": "supply_verifiability",
+          "reason_code": "stale",
+          "signed_delta": 0.0,
+          "status": "stale"
+        },
+        {
+          "name": "governance_capture_resistance",
+          "reason_code": "stale",
+          "signed_delta": 0.0,
+          "status": "stale"
+        },
+        {
+          "name": "holder_concentration",
+          "reason_code": "stale",
+          "signed_delta": 0.0,
+          "status": "stale"
+        }
+      ],
+      "facts_hash": "sha256:94de2b7a8b1dd276fb696652bf606a6a9f03ac4d9ac5bed456dd819876ab90f3",
+      "gate": {
+        "known_count": 5,
+        "passed": true,
+        "reason_code": "eligible",
+        "required_known": 3,
+        "required_source_families": 2,
+        "source_family_count": 2
+      },
+      "label": "asset:bench-anon-stale",
+      "pit_visible_dimension_count": 5,
+      "total_delta": 0.0
+    }
+  ],
+  "ranking": null,
+  "reproducibility": {
+    "record_order": "sorted by asset_id",
+    "synthetic_sweep_base": "asset:bench-anon-sweep-canonical (corpus-independent)"
+  },
+  "seed": 874
+}
