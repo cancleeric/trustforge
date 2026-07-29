@@ -4,7 +4,7 @@
 
 來源白名單（寫死，防 SSRF）：
   - Whale Alert 大額轉帳  https://api.whale-alert.io/v1/transactions
-  - Arkham Intelligence    https://api.arkhamintelligence.com/transfers
+  - Arkham Intelligence    https://api.arkm.com/transfers
 
 信號分層：
   - whale_onchain（鏈上可驗證的大額轉帳）：信譽 0.88
@@ -27,6 +27,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from . import safe_fetch
@@ -50,6 +51,16 @@ _WHALE_ALERT_SYMBOLS: dict[str, str] = {
     "bnb": "BNB",
     "xrp": "XRP", "ripple": "XRP",
     "arb": "ARB", "arbitrum": "ARB",
+}
+
+# Arkham chain identifiers used by the v1 transfers endpoint.
+_ARKHAM_COIN_CHAINS: dict[str, str] = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "BNB": "bsc",
+    "XRP": "xrp",
+    "ARB": "arbitrum",
 }
 
 # API key 環境變數名稱
@@ -103,6 +114,59 @@ def _classify_direction(from_owner: str, to_owner: str) -> tuple[str, str]:
         return "exchange_inflow", "轉入交易所（賣壓訊號，偏空）"
     else:
         return "whale_transfer", "鯨魚間轉帳"
+
+
+def _parse_iso_timestamp(value: object) -> float | None:
+    """Parse an ISO-8601 timestamp as a finite UTC Unix timestamp."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    timestamp = parsed.astimezone(timezone.utc).timestamp()
+    return timestamp if math.isfinite(timestamp) and timestamp >= 1_577_836_800 else None
+
+
+def _attribution_name(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in ("name", "label"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _extract_entity_name(address: object) -> str:
+    """Return Arkham entity/label name, falling back to a short address."""
+    if not isinstance(address, dict):
+        return "unknown"
+    for key in ("arkhamEntity", "entity", "arkhamLabel", "label"):
+        candidate = _attribution_name(address.get(key))
+        if candidate:
+            return candidate
+    raw_address = address.get("address")
+    if isinstance(raw_address, str) and raw_address.strip():
+        return raw_address.strip()[:10]
+    return "unknown"
+
+
+def _has_arkham_attribution(address: object) -> bool:
+    """Return whether an address contains a non-empty Arkham entity or label."""
+    if not isinstance(address, dict):
+        return False
+    return any(
+        bool(_attribution_name(address.get(key)))
+        for key in ("arkhamEntity", "entity", "arkhamLabel", "label")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +309,9 @@ class WhaleAlertSource(Source):
 class ArkhamIntelSource(Source):
     """Arkham Intelligence 連接器：追蹤已標記錢包（名人/機構）交易。
 
-    端點：GET https://api.arkhamintelligence.com/transfers
-    參數：apiKey, base, usdGte
+    端點：GET https://api.arkm.com/transfers
+    認證：API-Key header
+    參數：usdGte, timeLast, limit, chains
     環境變數：ARKHAM_API_KEY（選用；無 key 時降級為離線模式靜默跳過）
 
     信號語義：
@@ -266,14 +331,15 @@ class ArkhamIntelSource(Source):
             return []
 
         params: dict[str, str | int] = {
-            "apiKey": api_key,
             "usdGte": _MIN_VALUE_USD,
+            "timeLast": "1h",
+            "limit": 20,
         }
         if coin:
-            params["base"] = coin.lower()
+            params["chains"] = _ARKHAM_COIN_CHAINS[coin.upper()]
 
-        url = "https://api.arkhamintelligence.com/transfers?" + urlencode(params)
-        raw = _fetch_url(url)
+        url = "https://api.arkm.com/transfers?" + urlencode(params)
+        raw = _fetch_url(url, extra_headers={"API-Key": api_key})
         data = json.loads(raw)
 
         if not isinstance(data, dict):
@@ -296,44 +362,38 @@ class ArkhamIntelSource(Source):
     def _parse_transfer(self, transfer: dict, target_coin: str) -> Document | None:
         """解析單筆 Arkham 轉帳為 Document。"""
         # 幣種
-        token = transfer.get("token", {})
-        symbol = str(token.get("symbol", "")).upper() if isinstance(token, dict) else ""
+        symbol = str(transfer.get("tokenSymbol", "")).upper()
         if symbol not in _SUPPORTED_COINS:
             return None
         if target_coin and symbol != target_coin.upper():
             return None
 
         # 金額
-        amount_usd = _finite_num(transfer.get("unitValueUsd"), lo=_MIN_VALUE_USD)
+        amount_usd = _finite_num(transfer.get("historicalUSD"), lo=_MIN_VALUE_USD)
         if amount_usd is None:
             return None
 
         # 時間戳
-        block_ts = transfer.get("blockTimestamp")
-        ts = _finite_num(block_ts, lo=1_577_836_800) if block_ts else None
+        ts = _parse_iso_timestamp(transfer.get("blockTimestamp"))
         if ts is None:
             ts = time.time()
 
         # 實體標記（名人/機構名稱）
         from_entity = transfer.get("fromAddress", {})
         to_entity = transfer.get("toAddress", {})
-        from_label = ""
-        to_label = ""
-        if isinstance(from_entity, dict):
-            from_label = str(from_entity.get("arkhamLabel", "") or from_entity.get("address", "")[:10])
-        if isinstance(to_entity, dict):
-            to_label = str(to_entity.get("arkhamLabel", "") or to_entity.get("address", "")[:10])
+        from_label = _extract_entity_name(from_entity)
+        to_label = _extract_entity_name(to_entity)
 
         # 判斷是否鏈上驗證（有 Arkham 標記 = 已驗證）
         verified = bool(
-            (isinstance(from_entity, dict) and from_entity.get("arkhamLabel"))
-            or (isinstance(to_entity, dict) and to_entity.get("arkhamLabel"))
+            _has_arkham_attribution(from_entity)
+            or _has_arkham_attribution(to_entity)
         )
 
         # 判斷買/賣方向
         # 如果「已標記實體」是 toAddress → 買入；是 fromAddress → 賣出
-        entity_name = to_label if (isinstance(to_entity, dict) and to_entity.get("arkhamLabel")) else from_label
-        if isinstance(to_entity, dict) and to_entity.get("arkhamLabel"):
+        entity_name = to_label if _has_arkham_attribution(to_entity) else from_label
+        if _has_arkham_attribution(to_entity):
             action = "buy"
             action_desc = "買入"
         else:
