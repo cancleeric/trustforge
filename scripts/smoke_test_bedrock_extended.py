@@ -130,6 +130,9 @@ def run_extended_smoke() -> int:
             "correct": label == "entailment",
             "stance_model_id": stance_client.config.stance_model_id,
         })
+        # FR-1 fail-closed: label 驗證失敗 → 整體失敗
+        if label != "entailment":
+            all_pass = False
         # stance 呼叫後可能有 cost_events
         if stance_client.cost_events:
             ev = stance_client.cost_events[0]
@@ -164,6 +167,9 @@ def run_extended_smoke() -> int:
             "correct": label2 == "contradiction",
             "stance_model_id": stance_client2.config.stance_model_id,
         })
+        # FR-1 fail-closed: label 驗證失敗 → 整體失敗
+        if label2 != "contradiction":
+            all_pass = False
     except Exception as exc:
         elapsed = time.time() - t0
         test_contra.update({

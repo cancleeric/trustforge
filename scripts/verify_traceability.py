@@ -386,6 +386,10 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
         all_pass = False
     else:
         print(f"  ✓ 降級測試通過：pipeline 安全完成，降級標記={degraded_result.get('has_degradation_indication')}")
+    # FR-4 fail-closed: pipeline 完成但無降級標記 = 偽裝成功 = fail
+    if degraded_result.get("pipeline_completed") and not degraded_result.get("has_degradation_indication"):
+        print(f"  ✗ 降級測試：pipeline 完成但無降級標記（偽裝成功）")
+        all_pass = False
 
     if offline_only:
         results["overall"] = "pass (offline-only)" if all_pass else "fail"
@@ -395,11 +399,20 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
     # ── Section B: 線上推理完整驗證 ─────────────────────────────────────
     model_id = os.getenv("BEDROCK_MODEL_ID", "").strip()
     if not model_id:
-        print("⚠ BEDROCK_MODEL_ID 未設定，跳過線上驗證")
-        results["overall"] = "skip (no model_id)"
-        results["sections"]["online_test"] = {"status": "skipped", "reason": "BEDROCK_MODEL_ID not set"}
-        _write_artifact(results)
-        return 0  # 不算失敗，只是跳過
+        # FR-3 fail-closed: 未設定 MODEL_ID 時，無 --allow-skip 不得 exit 0
+        allow_skip = "--allow-skip" in sys.argv
+        if allow_skip:
+            print("⚠ BEDROCK_MODEL_ID 未設定，--allow-skip 生效，跳過線上驗證")
+            results["overall"] = "skip (no model_id, --allow-skip)"
+            results["sections"]["online_test"] = {"status": "skipped", "reason": "BEDROCK_MODEL_ID not set"}
+            _write_artifact(results)
+            return 0
+        else:
+            print("❌ BEDROCK_MODEL_ID 未設定且未提供 --allow-skip，exit 2", file=sys.stderr)
+            results["overall"] = "skip (no model_id, fail-closed)"
+            results["sections"]["online_test"] = {"status": "skipped", "reason": "BEDROCK_MODEL_ID not set, no --allow-skip"}
+            _write_artifact(results)
+            return 2  # 明確非成功：skipped ≠ pass
 
     print(f"▶ 線上推理驗證（model={model_id}, coin={coin}）...")
     docs = _build_fixture_docs(coin)
@@ -439,6 +452,12 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
         all_pass = False
     else:
         print(f"  ✓ claim_id 溯源：{trace_result['claim_ids_count']} 條引用")
+    # FR-2 fail-closed: 引用不存在的 claim_id → 失敗
+    if not trace_result["all_traceable"]:
+        print(f"  ✗ claim_id 不可追溯：{trace_result['untraceable_ids'][:5]}")
+        all_pass = False
+    elif trace_result["meets_minimum"]:
+        print(f"  ✓ 所有 claim_id 可追溯")
 
     # ── Section B.2: 行文層次驗證 ─────────────────────────────────────────
     print("▶ 行文層次驗證...")
@@ -512,6 +531,8 @@ if __name__ == "__main__":
     for arg in sys.argv[1:]:
         if arg == "--offline-only":
             offline_only = True
+        elif arg == "--allow-skip":
+            pass  # 已在 run_full_verification 中透過 sys.argv 讀取
         elif arg.startswith("--coin"):
             if "=" in arg:
                 coin = arg.split("=", 1)[1].upper()
