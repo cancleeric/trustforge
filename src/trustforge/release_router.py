@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Callable, Mapping, Protocol
 
 from cryptography.exceptions import InvalidSignature
@@ -144,6 +145,7 @@ class ReleaseRoutingLedger(Protocol):
         expected_head: str,
         reservation_id: str,
         cost_budget: CanaryCostBudget | None = None,
+        request_binding_digest: str | None = None,
     ) -> RoutingSnapshot:
         """Atomically reserve one capped B request before any B side effect."""
 
@@ -161,6 +163,11 @@ class ReleaseRoutingLedger(Protocol):
 
     def emergency_stop(self, *, ledger_id: str, reason: str) -> None:
         """Trip the separate durable one-way stop latch."""
+
+    def reconcile_stale_cost_reservations(
+        self, *, now: datetime, stale_after: timedelta
+    ) -> int:
+        """Charge abandoned signed reservations exactly once after restart."""
 
     def candidate_connection(
         self,
@@ -209,6 +216,7 @@ class ReleaseABRouter:
         request_headers: Mapping[str, str] | None = None,
         expected_control_head: str | None = None,
         cost_budget: CanaryCostBudget | None = None,
+        request_binding_digest: str | None = None,
     ) -> RoutedResponse:
         snapshot: RoutingSnapshot | None = None
         reservation_id = ""
@@ -240,10 +248,13 @@ class ReleaseABRouter:
                         reservation_id=reservation_id,
                     )
                 else:
+                    if request_binding_digest is None:
+                        return self._request_a_fallback(path, request_headers)
                     snapshot = self.ledger.reserve_candidate(
                         expected_head=snapshot.outcome_head,
                         reservation_id=reservation_id,
                         cost_budget=cost_budget,
+                        request_binding_digest=request_binding_digest,
                     )
                 break
             except Exception:

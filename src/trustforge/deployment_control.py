@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import http.client
 import errno
 import grp
@@ -42,6 +43,7 @@ from trustforge.release_router import (
 from trustforge.signed_event_ledger import SignedEventLedger
 
 Action = Literal["start", "stop", "promote", "rollback-a"]
+COST_RESERVATION_STALE_AFTER = timedelta(minutes=5)
 
 
 class DeploymentControlError(RuntimeError):
@@ -659,8 +661,9 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         terminal_transactions: set[str] = set()
         reservations: dict[tuple[str, str], bool] = {}
         cost_reservations: dict[tuple[str, str], dict[str, Any]] = {}
-        cost_totals: dict[tuple[str, str], tuple[int, int]] = {}
-        cost_scope_by_epoch: dict[str, tuple[str, int, int]] = {}
+        cost_totals: dict[str, tuple[int, int]] = {}
+        cost_scope_by_ramp: dict[str, tuple[object, ...]] = {}
+        deployment_ramp_budget_id: str | None = None
         known_canary_epochs: set[str] = set()
         current_canary_epoch: str | None = None
         projected_floor: datetime | None = None
@@ -929,21 +932,34 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                         raise DeploymentControlError(
                             "candidate cost reservation binding mismatch"
                         )
+                    if (
+                        deployment_ramp_budget_id is not None
+                        and deployment_ramp_budget_id
+                        != budget.ramp_budget_id
+                    ):
+                        raise DeploymentControlError(
+                            "candidate ramp budget identity changed"
+                        )
+                    deployment_ramp_budget_id = budget.ramp_budget_id
                     scope = (
-                        budget.ramp_budget_id,
                         budget.model_call_cap,
                         budget.monetary_cap_microusd,
+                        budget.active_artifact_digest,
+                        budget.candidate_artifact_digest,
+                        budget.ramp_id,
+                        budget.routing_policy_digest,
                     )
                     if (
-                        epoch in cost_scope_by_epoch
-                        and cost_scope_by_epoch[epoch] != scope
+                        budget.ramp_budget_id in cost_scope_by_ramp
+                        and cost_scope_by_ramp[budget.ramp_budget_id] != scope
                     ):
                         raise DeploymentControlError(
                             "candidate ramp has conflicting signed cost budgets"
                         )
-                    cost_scope_by_epoch[epoch] = scope
-                    total_key = (epoch, budget.ramp_budget_id)
-                    prior_calls, prior_cost = cost_totals.get(total_key, (0, 0))
+                    cost_scope_by_ramp[budget.ramp_budget_id] = scope
+                    prior_calls, prior_cost = cost_totals.get(
+                        budget.ramp_budget_id, (0, 0)
+                    )
                     next_calls = prior_calls + budget.per_request_model_calls
                     next_cost = prior_cost + budget.per_request_cost_microusd
                     if (
@@ -953,7 +969,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                         raise DeploymentControlError(
                             "candidate cost reservation exceeds signed cap"
                         )
-                    cost_totals[total_key] = (next_calls, next_cost)
+                    cost_totals[budget.ramp_budget_id] = (
+                        next_calls,
+                        next_cost,
+                    )
                     cost_reservations[key] = {
                         "budget_id": budget.budget_id,
                         "ramp_budget_id": budget.ramp_budget_id,
@@ -986,8 +1005,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     )
                 reservations[key] = True
                 cost_state = cost_reservations.get(key)
-                settled_calls = event.get("settled_model_calls", 0)
-                settled_cost = event.get("settled_cost_microusd", 0)
+                settled_calls = event.get("charged_max_model_calls", 0)
+                settled_cost = event.get("charged_max_cost_microusd", 0)
                 if cost_state is None:
                     if settled_calls != 0 or settled_cost != 0:
                         raise DeploymentControlError(
@@ -1027,9 +1046,9 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     or event.get("budget_id") != cost_state["budget_id"]
                     or event.get("ramp_budget_id")
                     != cost_state["ramp_budget_id"]
-                    or event.get("settled_model_calls")
+                    or event.get("charged_max_model_calls")
                     != cost_state["model_calls"]
-                    or event.get("settled_cost_microusd")
+                    or event.get("charged_max_cost_microusd")
                     != cost_state["cost_microusd"]
                     or event.get("control_head") != epoch
                     or event.get("reason") != "stale_reservation_charged"
@@ -1076,18 +1095,16 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             canary_epoch=current_canary_epoch or "",
             candidate_model_calls=sum(
                 int(item["model_calls"])
-                for (epoch, _reservation_id), item in cost_reservations.items()
-                if epoch == current_canary_epoch
+                for item in cost_reservations.values()
             ),
             candidate_cost_microusd=sum(
                 int(item["cost_microusd"])
-                for (epoch, _reservation_id), item in cost_reservations.items()
-                if epoch == current_canary_epoch
+                for item in cost_reservations.values()
             ),
             outstanding_cost_reservations=sum(
                 1
-                for (epoch, _reservation_id), item in cost_reservations.items()
-                if epoch == current_canary_epoch and not item["settled"]
+                for item in cost_reservations.values()
+                if not item["settled"]
             ),
             control_event_head=records[-1]["event_hash"],
             outcome_head=(
@@ -1364,12 +1381,14 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         expected_head: str,
         reservation_id: str,
         cost_budget: CanaryCostBudget | None = None,
+        request_binding_digest: str | None = None,
     ) -> RoutingSnapshot:
         with self.ledger.coordination_lock():
             return self._reserve_candidate_locked(
                 expected_head=expected_head,
                 reservation_id=reservation_id,
                 cost_budget=cost_budget,
+                request_binding_digest=request_binding_digest,
             )
 
     def _reserve_candidate_locked(
@@ -1378,11 +1397,17 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         expected_head: str,
         reservation_id: str,
         cost_budget: CanaryCostBudget | None = None,
+        request_binding_digest: str | None = None,
     ) -> RoutingSnapshot:
         if len(reservation_id) != 32 or any(
             character not in "0123456789abcdef" for character in reservation_id
         ):
             raise DeploymentControlError("candidate reservation id is invalid")
+        if cost_budget is not None:
+            self._reconcile_stale_cost_reservations_locked(
+                trusted_now=self._current_time(),
+                stale_after=COST_RESERVATION_STALE_AFTER,
+            )
         state = self.routing_snapshot()
         if (
             state.outcome_head != expected_head
@@ -1402,6 +1427,20 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             "reserved_cost_microusd": 0,
         }
         if cost_budget is not None:
+            if (
+                request_binding_digest is None
+                or len(request_binding_digest) != 71
+                or not request_binding_digest.startswith("sha256:")
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in request_binding_digest[7:]
+                )
+                or not hmac.compare_digest(
+                    request_binding_digest,
+                    cost_budget.request_binding_digest,
+                )
+            ):
+                raise LedgerError("candidate request binding is invalid")
             try:
                 verify_budget(
                     cost_budget,
@@ -1413,7 +1452,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     candidate_artifact_digest=self.candidate.release_digest,
                     ramp_id=self.policy.ramp_id,
                     routing_policy_digest=self.policy.policy_digest,
-                    request_binding_digest=cost_budget.request_binding_digest,
+                    request_binding_digest=request_binding_digest,
                 )
             except CanaryCostBudgetError as exc:
                 raise LedgerError("candidate cost budget is invalid") from exc
@@ -1421,7 +1460,6 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 item["event"]
                 for item in self._outcome_records(deployment_ledger_id)
                 if item["event"].get("kind") == "candidate_reservation"
-                and item["event"].get("canary_epoch") == canary_epoch
                 and item["event"].get("cost_budget") is not None
             ]
             if any(
@@ -1443,7 +1481,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             cost_fields = {
                 "budget_id": cost_budget.budget_id,
                 "ramp_budget_id": cost_budget.ramp_budget_id,
-                "request_binding_digest": cost_budget.request_binding_digest,
+                "request_binding_digest": request_binding_digest,
                 "reserved_model_calls": cost_budget.per_request_model_calls,
                 "reserved_cost_microusd": cost_budget.per_request_cost_microusd,
                 "reserved_at": self._current_time().isoformat(),
@@ -1513,8 +1551,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             if reservation is None:
                 raise LedgerError("candidate outcome has no reservation")
             canary_epoch = str(reservation["canary_epoch"])
-            settled_model_calls = int(reservation.get("reserved_model_calls", 0))
-            settled_cost_microusd = int(
+            charged_max_model_calls = int(
+                reservation.get("reserved_model_calls", 0)
+            )
+            charged_max_cost_microusd = int(
                 reservation.get("reserved_cost_microusd", 0)
             )
             state = self.routing_snapshot()
@@ -1533,8 +1573,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                         "error_kind": error_kind,
                         "budget_id": reservation.get("budget_id", ""),
                         "ramp_budget_id": reservation.get("ramp_budget_id", ""),
-                        "settled_model_calls": settled_model_calls,
-                        "settled_cost_microusd": settled_cost_microusd,
+                        "charged_max_model_calls": charged_max_model_calls,
+                        "charged_max_cost_microusd": charged_max_cost_microusd,
                         "automatic_stop": next_errors >= self.stop_after_errors,
                         "nonce": f"outcome:{reservation_id}",
                     },
@@ -1556,10 +1596,20 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             raise DeploymentControlError("operator time is not current")
         reconciled = 0
         with self.ledger.coordination_lock():
-            control_records = self._records()
-            ledger_id = control_records[0]["ledger_id"]
-            records = self._outcome_records(ledger_id)
-            terminal = {
+            reconciled = self._reconcile_stale_cost_reservations_locked(
+                trusted_now=trusted_now,
+                stale_after=stale_after,
+            )
+        return reconciled
+
+    def _reconcile_stale_cost_reservations_locked(
+        self, *, trusted_now: datetime, stale_after: timedelta
+    ) -> int:
+        """Charge stale signed reservations while coordination lock is held."""
+        control_records = self._records()
+        ledger_id = control_records[0]["ledger_id"]
+        records = self._outcome_records(ledger_id)
+        terminal = {
                 (
                     str(item["event"].get("canary_epoch", "")),
                     str(item["event"].get("reservation_id", "")),
@@ -1567,43 +1617,46 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 for item in records
                 if item["event"].get("kind")
                 in {"candidate_result", "candidate_cost_reconciliation"}
-            }
-            for item in records:
-                event = item["event"]
-                key = (
-                    str(event.get("canary_epoch", "")),
-                    str(event.get("reservation_id", "")),
-                )
-                if (
-                    event.get("kind") != "candidate_reservation"
-                    or event.get("cost_budget") is None
-                    or key in terminal
-                    or trusted_now - _utc(str(event.get("reserved_at", "")))
-                    < stale_after
-                ):
-                    continue
-                head = self._outcome_records(ledger_id)[-1]["event_hash"]
-                self.outcome_ledger.append(
-                    {
-                        "kind": "candidate_cost_reconciliation",
-                        "deployment_ledger_id": ledger_id,
-                        "canary_epoch": key[0],
-                        "control_head": key[0],
-                        "reservation_id": key[1],
-                        "budget_id": event["budget_id"],
-                        "ramp_budget_id": event["ramp_budget_id"],
-                        "settled_model_calls": event["reserved_model_calls"],
-                        "settled_cost_microusd": event[
-                            "reserved_cost_microusd"
-                        ],
-                        "reason": "stale_reservation_charged",
-                        "reconciled_at": trusted_now.isoformat(),
-                        "nonce": f"cost-reconcile:{key[0]}:{key[1]}",
-                    },
-                    expected_head=head,
-                )
-                terminal.add(key)
-                reconciled += 1
+        }
+        reconciled = 0
+        for item in records:
+            event = item["event"]
+            key = (
+                str(event.get("canary_epoch", "")),
+                str(event.get("reservation_id", "")),
+            )
+            if (
+                event.get("kind") != "candidate_reservation"
+                or event.get("cost_budget") is None
+                or key in terminal
+                or trusted_now - _utc(str(event.get("reserved_at", "")))
+                < stale_after
+            ):
+                continue
+            head = self._outcome_records(ledger_id)[-1]["event_hash"]
+            self.outcome_ledger.append(
+                {
+                    "kind": "candidate_cost_reconciliation",
+                    "deployment_ledger_id": ledger_id,
+                    "canary_epoch": key[0],
+                    "control_head": key[0],
+                    "reservation_id": key[1],
+                    "budget_id": event["budget_id"],
+                    "ramp_budget_id": event["ramp_budget_id"],
+                    "charged_max_model_calls": event[
+                        "reserved_model_calls"
+                    ],
+                    "charged_max_cost_microusd": event[
+                        "reserved_cost_microusd"
+                    ],
+                    "reason": "stale_reservation_charged",
+                    "reconciled_at": trusted_now.isoformat(),
+                    "nonce": f"cost-reconcile:{key[0]}:{key[1]}",
+                },
+                expected_head=head,
+            )
+            terminal.add(key)
+            reconciled += 1
         return reconciled
 
     @contextmanager

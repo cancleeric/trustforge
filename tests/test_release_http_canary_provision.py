@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import socket
 import stat
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -177,6 +178,26 @@ def test_unsupported_path_is_a_only_even_for_enabled_policy():
 
 
 def _valid_payload():
+    budget = {
+        "deployment_ledger_id": "ledger-1",
+        "canary_epoch": "sha256:" + "a" * 64,
+        "active_artifact_digest": "sha256:" + "b" * 64,
+        "candidate_artifact_digest": "sha256:" + "c" * 64,
+        "ramp_id": "ramp-1",
+        "routing_policy_digest": "sha256:" + "d" * 64,
+        "ramp_budget_id": "sha256:" + "e" * 64,
+        "request_binding_digest": "sha256:" + "f" * 64,
+        "model_call_cap": 2,
+        "monetary_cap_microusd": 100,
+        "per_request_model_calls": 1,
+        "per_request_cost_microusd": 50,
+        "issued_at": "2026-07-30T00:00:00+00:00",
+        "expires_at": "2026-07-30T01:00:00+00:00",
+        "nonce": "fixture-budget",
+        "key_id": "cost-budget-1",
+        "signature": "00" * 64,
+        "receipt_version": "trustforge.canary-cost-budget/v1",
+    }
     return {
         "schema": provision.ALLOWLIST_SCHEMA,
         "activation_contract": provision.ACTIVATION_CONTRACT,
@@ -187,14 +208,142 @@ def _valid_payload():
                 "trusted_identity": "operator@example.test",
                 "endpoint": "analyze",
                 "assets": ["BTC"],
+                "query_digest": "sha256:" + "1" * 64,
+                "question_type": "multi_source",
+                "live_mode": False,
+                "sample_mode": False,
+                "data_mode": "live",
+                "llm_mode": "off",
+                "online_stance_mode": True,
                 "active_release_digest": "sha256:" + "b" * 64,
                 "candidate_release_digest": "sha256:" + "c" * 64,
                 "ramp_id": "ramp-1",
                 "control_ledger_id": "ledger-1",
                 "policy_digest": "sha256:" + "d" * 64,
+                "cost_budget": budget,
             }
         ],
     }
+
+
+def test_request_v2_accepts_only_path_and_presigned_budget(monkeypatch):
+    budget = _valid_payload()["entries"][0]["cost_budget"]
+    payload = {
+        "schema": provision.REQUEST_SCHEMA,
+        "entries": [
+            {
+                "trusted_identity": "operator@example.test",
+                "path": "/api/analyze?coin=BTC",
+                "live_token_digest": "",
+                "cost_budget": budget,
+            }
+        ],
+    }
+    raw = provision.canonical_json(payload) + b"\n"
+    monkeypatch.setattr(
+        provision,
+        "read_regular_file",
+        lambda *_args, **_kwargs: (
+            raw,
+            SimpleNamespace(st_uid=0, st_mode=0o100600, st_nlink=1),
+        ),
+    )
+    assert provision._request(provision.Path("/root/request.json")) == payload[
+        "entries"
+    ]
+
+
+def test_main_runs_authenticated_payload_and_atomic_publish_pipeline(
+    monkeypatch, capsys
+):
+    snippet = b"reviewed-nginx-snippet"
+    records = [
+        {
+            "ledger_id": "ledger-1",
+            "event_hash": "sha256:" + "a" * 64,
+            "event": {"kind": "deployment_initialized"},
+        }
+    ]
+
+    class Lock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Ledger:
+        def coordination_lock(self):
+            return Lock()
+
+        def read(self):
+            return records
+
+    observed = {}
+    monkeypatch.setattr(provision.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(provision, "_real_nginx_config", lambda: "nginx")
+    monkeypatch.setattr(provision, "_json_file", lambda _path: {})
+    monkeypatch.setattr(
+        provision,
+        "read_regular_file",
+        lambda *_args, **_kwargs: (
+            snippet,
+            SimpleNamespace(st_uid=0, st_mode=0o100644, st_nlink=1),
+        ),
+    )
+    monkeypatch.setattr(provision, "_control_ledger", lambda *_args, **_kwargs: Ledger())
+    monkeypatch.setattr(
+        provision,
+        "_payload",
+        lambda args, nginx, history, expected: (
+            observed.update(
+                args=args,
+                nginx=nginx,
+                history=history,
+                expected=expected,
+            )
+            or _valid_payload()
+        ),
+    )
+    monkeypatch.setattr(
+        provision,
+        "_publish",
+        lambda output, payload: (
+            observed.update(output=output, payload=payload)
+            or "published-digest"
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "provision_release_http_canary_allowlist.py",
+            "--request",
+            "/root/request.json",
+            "--runtime",
+            "/etc/runtime.json",
+            "--keys",
+            "/etc/keys.json",
+            "--control-bootstrap",
+            "/ledger/bootstrap.json",
+            "--control-events",
+            "/ledger/events.jsonl",
+            "--control-head",
+            "/ledger/head.json",
+            "--output",
+            "/etc/allowlist.json",
+            "--nginx-snippet",
+            "/etc/nginx/snippet",
+            "--expected-nginx-snippet-sha256",
+            provision.hashlib.sha256(snippet).hexdigest(),
+        ],
+    )
+    assert provision.main() == 0
+    assert observed["nginx"] == "nginx"
+    assert observed["history"] == records
+    assert observed["expected"] == snippet
+    assert observed["payload"]["schema"] == provision.ALLOWLIST_SCHEMA
+    assert capsys.readouterr().out.strip() == "published-digest"
 
 
 def test_publish_atomically_rereads_and_validates_root_only_output(

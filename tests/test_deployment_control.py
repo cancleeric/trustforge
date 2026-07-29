@@ -161,7 +161,14 @@ def _control(tmp_path, *, clock=lambda: NOW):
     return control
 
 
-def _cost_budget(control, *, request_digest=_digest("q"), calls=2, cost=100):
+def _cost_budget(
+    control,
+    *,
+    request_digest=_digest("a"),
+    calls=2,
+    cost=100,
+    **binding_overrides,
+):
     snapshot = control.routing_snapshot()
     unsigned = {
         "deployment_ledger_id": snapshot.ledger_id,
@@ -182,6 +189,7 @@ def _cost_budget(control, *, request_digest=_digest("q"), calls=2, cost=100):
         "key_id": "budget-1",
         "receipt_version": BUDGET_VERSION,
     }
+    unsigned.update(binding_overrides)
     signature = (
         Ed25519PrivateKey.from_private_bytes(BUDGET_KEY)
         .sign(BUDGET_DOMAIN + canonical_json(unsigned))
@@ -391,6 +399,7 @@ def test_signed_cost_budget_caps_model_calls_and_money_under_concurrency(tmp_pat
                     expected_head=control.routing_snapshot().outcome_head,
                     reservation_id=f"{index:032x}",
                     cost_budget=budget,
+                    request_binding_digest=budget.request_binding_digest,
                 )
                 outcomes.append("reserved")
                 return
@@ -423,6 +432,7 @@ def test_stale_signed_cost_reservation_is_conservatively_reconciled_after_restar
         expected_head=control.routing_snapshot().outcome_head,
         reservation_id="9" * 32,
         cost_budget=budget,
+        request_binding_digest=budget.request_binding_digest,
     )
     current[0] = NOW + timedelta(minutes=2)
     restarted = DeploymentControlLedger(
@@ -442,12 +452,40 @@ def test_stale_signed_cost_reservation_is_conservatively_reconciled_after_restar
         clock=lambda: current[0],
     )
     assert restarted.routing_snapshot().outstanding_cost_reservations == 1
-    assert restarted.reconcile_stale_cost_reservations(
-        now=current[0], stale_after=timedelta(minutes=1)
-    ) == 1
-    assert restarted.reconcile_stale_cost_reservations(
-        now=current[0], stale_after=timedelta(minutes=1)
-    ) == 0
+    competing = DeploymentControlLedger(
+        control.ledger,
+        outcome_ledger=control.outcome_ledger,
+        authorization_keys={"auth-1": _public(AUTH_KEY)},
+        completion_keys={"complete-1": _public(COMPLETE_KEY)},
+        target=control.target,
+        target_confirmation=control.target_confirmation,
+        active=control.active,
+        candidate=control.candidate,
+        policy=control.policy,
+        evidence_bundle_digest=control.evidence_bundle_digest,
+        stop_after_errors=2,
+        cost_budget_keys={"budget-1": _public(BUDGET_KEY)},
+        require_distributed_lock=False,
+        clock=lambda: current[0],
+    )
+    results = []
+
+    def reconcile(instance):
+        results.append(
+            instance.reconcile_stale_cost_reservations(
+                now=current[0], stale_after=timedelta(minutes=1)
+            )
+        )
+
+    workers = [
+        threading.Thread(target=reconcile, args=(instance,))
+        for instance in (restarted, competing)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert sorted(results) == [0, 1]
     assert restarted.routing_snapshot().outstanding_cost_reservations == 0
     encoded = canonical_json(
         [item["event"] for item in restarted.outcome_ledger.read()]
@@ -486,17 +524,100 @@ def test_one_signed_ramp_cap_is_shared_across_distinct_query_bindings(tmp_path):
         expected_head=control.routing_snapshot().outcome_head,
         reservation_id="6" * 32,
         cost_budget=first_budget,
+        request_binding_digest=first_budget.request_binding_digest,
     )
     control.reserve_candidate(
         expected_head=first.outcome_head,
         reservation_id="7" * 32,
         cost_budget=second_budget,
+        request_binding_digest=second_budget.request_binding_digest,
     )
     with pytest.raises(LedgerError, match="exhausted"):
         control.reserve_candidate(
             expected_head=control.routing_snapshot().outcome_head,
             reservation_id="5" * 32,
             cost_budget=first_budget,
+            request_binding_digest=first_budget.request_binding_digest,
+        )
+
+
+@pytest.mark.parametrize(
+    "budget_overrides",
+    [
+        {"candidate_artifact_digest": _digest("d")},
+        {"ramp_id": "other-ramp"},
+    ],
+)
+def test_signed_cost_budget_cannot_replay_across_release_or_ramp(
+    tmp_path, budget_overrides
+):
+    control = _control(tmp_path)
+    _start_canary(control, "binding-replay")
+    budget = _cost_budget(control, **budget_overrides)
+    with pytest.raises(LedgerError, match="cost budget is invalid"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="4" * 32,
+            cost_budget=budget,
+            request_binding_digest=budget.request_binding_digest,
+        )
+
+
+def test_router_computed_request_binding_must_match_signed_budget(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "query-replay")
+    budget = _cost_budget(control, request_digest=_digest("1"))
+    with pytest.raises(LedgerError, match="request binding"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="3" * 32,
+            cost_budget=budget,
+            request_binding_digest=_digest("2"),
+        )
+
+
+def test_stop_start_same_ramp_does_not_reset_durable_cost_cap(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "durable-cap-1")
+    first_budget = _cost_budget(control)
+    first = control.reserve_candidate(
+        expected_head=control.routing_snapshot().outcome_head,
+        reservation_id="1" * 32,
+        cost_budget=first_budget,
+        request_binding_digest=first_budget.request_binding_digest,
+    )
+    control.reserve_candidate(
+        expected_head=first.outcome_head,
+        reservation_id="2" * 32,
+        cost_budget=first_budget,
+        request_binding_digest=first_budget.request_binding_digest,
+    )
+    control.prepare(
+        "stop",
+        _authorization(control, "stop", "stop-durable-cap"),
+        now=NOW,
+    )
+    _start_canary(control, "durable-cap-2")
+    restarted_state = control.routing_snapshot()
+    assert restarted_state.candidate_model_calls == 4
+    assert restarted_state.candidate_cost_microusd == 200
+    next_epoch_budget = _cost_budget(control)
+    with pytest.raises(LedgerError, match="exhausted"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="3" * 32,
+            cost_budget=next_epoch_budget,
+            request_binding_digest=next_epoch_budget.request_binding_digest,
+        )
+    rotated_budget_id = _cost_budget(
+        control, ramp_budget_id=_digest("e")
+    )
+    with pytest.raises(LedgerError, match="identity changed"):
+        control.reserve_candidate(
+            expected_head=control.routing_snapshot().outcome_head,
+            reservation_id="4" * 32,
+            cost_budget=rotated_budget_id,
+            request_binding_digest=rotated_budget_id.request_binding_digest,
         )
 
 

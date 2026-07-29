@@ -11,7 +11,7 @@ import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from trustforge.agent.shadow_contracts import canonical_json
 from trustforge.canary_cost_budget import (
@@ -24,12 +24,13 @@ from trustforge.safe_fs import read_regular_file
 
 ALLOWLIST_PATH = Path("/etc/trustforge/release-router-allowlist.json")
 ACTIVATION_CONTRACT = "trustforge.release-http-canary-activation/v2"
-ALLOWLIST_SCHEMA = "trustforge.release-http-canary-allowlist/v2"
+ALLOWLIST_SCHEMA = "trustforge.release-http-canary-allowlist/v3"
 _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9._-]{0,19}\Z")
 _QUERY_FIELDS = frozenset({"type", "coin", "coin2", "q", "live", "sample", "real"})
 _DEFAULT_QUERY = "分析該幣種近期市場狀況"
 _QUERY_DOMAIN = b"trustforge.release-http-canary-query.v1\x00"
 _IDENTITY_DOMAIN = b"trustforge.release-http-canary-identity.v1\x00"
+_LIVE_TOKEN_DOMAIN = b"trustforge.release-http-canary-live-token.v1\x00"
 _BINDING_DOMAIN = b"trustforge.release-http-canary-request-binding.v1\x00"
 
 
@@ -46,7 +47,12 @@ class CanaryRequest:
 
     @property
     def cost_bearing(self) -> bool:
-        return self.llm_mode == "bedrock"
+        """Compatibility alias: every live-data execution can call a model."""
+        return self.data_mode == "live"
+
+    def model_calls_possible(self, *, online_stance_mode: bool) -> bool:
+        del online_stance_mode
+        return self.cost_bearing
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +66,21 @@ class CanaryAllowlistEntry:
     sample_mode: bool
     data_mode: str
     llm_mode: str
+    online_stance_mode: bool
     active_release_digest: str
     candidate_release_digest: str
     ramp_id: str
     control_ledger_id: str
     policy_digest: str
     cost_budget: CanaryCostBudget | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryRoutingDecision:
+    subject: str | None
+    control_head: str | None
+    cost_budget: CanaryCostBudget | None
+    request_binding_digest: str | None
 
 
 class ReleaseHTTPCanaryPolicy:
@@ -79,17 +94,40 @@ class ReleaseHTTPCanaryPolicy:
         control_ledger_head: str | None = None,
         budget_keyring: Mapping[str, bytes] | None = None,
         clock=None,
+        cost_bearing_enabled: bool = True,
+        online_stance_requested_fn: Callable[[], bool] | None = None,
+        live_token_validator: Callable[[str], bool] | None = None,
     ):
         self._entries = entries
         self.trusted_proxy_uid = trusted_proxy_uid
         self.control_ledger_head = control_ledger_head
         self._budget_keyring = dict(budget_keyring or {})
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._cost_bearing_enabled = bool(cost_bearing_enabled)
+        self._online_stance_requested = online_stance_requested_fn or (lambda: False)
+        self._live_token_validator = live_token_validator or (lambda _token: False)
 
     @classmethod
     def disabled(cls) -> "ReleaseHTTPCanaryPolicy":
         """Construct the only no-provision state: no identity can ever reach B."""
-        return cls((), trusted_proxy_uid=None)
+        return cls(
+            (),
+            trusted_proxy_uid=None,
+            cost_bearing_enabled=False,
+        )
+
+    def without_cost_bearing(self) -> "ReleaseHTTPCanaryPolicy":
+        """Keep free cohorts available while forcing every paid mode to A."""
+        return ReleaseHTTPCanaryPolicy(
+            self._entries,
+            trusted_proxy_uid=self.trusted_proxy_uid,
+            control_ledger_head=self.control_ledger_head,
+            budget_keyring=self._budget_keyring,
+            clock=self._clock,
+            cost_bearing_enabled=False,
+            online_stance_requested_fn=self._online_stance_requested,
+            live_token_validator=self._live_token_validator,
+        )
 
     @classmethod
     def load(
@@ -98,12 +136,38 @@ class ReleaseHTTPCanaryPolicy:
         *,
         budget_keyring: Mapping[str, bytes] | None = None,
         clock=None,
+        online_stance_requested_fn: Callable[[], bool] | None = None,
+        live_token_validator: Callable[[str], bool] | None = None,
     ) -> "ReleaseHTTPCanaryPolicy":
         raw, info = read_regular_file(path, maximum_bytes=128 * 1024)
         if info.st_uid != 0 or info.st_mode & 0o077:
             raise ReleaseRoutingError("canary allowlist ownership or mode is unsafe")
         try:
             payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReleaseRoutingError("canary allowlist is invalid") from exc
+        return cls.from_payload(
+            payload,
+            budget_keyring=budget_keyring,
+            clock=clock,
+            online_stance_requested_fn=online_stance_requested_fn,
+            live_token_validator=live_token_validator,
+        )
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: object,
+        *,
+        budget_keyring: Mapping[str, bytes] | None = None,
+        clock=None,
+        online_stance_requested_fn: Callable[[], bool] | None = None,
+        live_token_validator: Callable[[str], bool] | None = None,
+    ) -> "ReleaseHTTPCanaryPolicy":
+        """Validate the shared provisioner/runtime allowlist contract."""
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError
             if set(payload) != {
                 "schema",
                 "activation_contract",
@@ -117,7 +181,7 @@ class ReleaseHTTPCanaryPolicy:
             if payload["activation_contract"] != ACTIVATION_CONTRACT:
                 raise ValueError
             entries = tuple(_entry(value) for value in payload["entries"])
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+        except (TypeError, ValueError, KeyError) as exc:
             raise ReleaseRoutingError("canary allowlist is invalid") from exc
         proxy_uid = payload["trusted_proxy_uid"]
         control_head = payload["control_ledger_head"]
@@ -138,26 +202,36 @@ class ReleaseHTTPCanaryPolicy:
             control_ledger_head=control_head,
             budget_keyring=budget_keyring,
             clock=clock,
+            online_stance_requested_fn=online_stance_requested_fn,
+            live_token_validator=live_token_validator,
         )
 
-    def _routing_admission(
+    def routing_decision(
         self,
         *,
         trusted_identity: str | None,
         path: str,
         snapshot: RoutingSnapshot,
         cost_budget: CanaryCostBudget | None = None,
-    ) -> tuple[str | None, str | None, CanaryCostBudget | None]:
+        live_token: str | None = None,
+    ) -> CanaryRoutingDecision:
         if (
             self.trusted_proxy_uid is None
             or self.control_ledger_head != snapshot.control_event_head
             or trusted_identity is None
             or not (1 <= len(trusted_identity.encode()) <= 256)
         ):
-            return None, None, None
+            return CanaryRoutingDecision(None, None, None, None)
         request = parse_canary_request(path)
         if request is None:
-            return None, None, None
+            return CanaryRoutingDecision(None, None, None, None)
+        # Capability, not a mutable cross-process observation: any real/off
+        # candidate may enable online stance after admission.
+        online_stance_mode = request.data_mode == "live"
+        if request.live_mode and (
+            not live_token or not self._live_token_validator(live_token)
+        ):
+            return CanaryRoutingDecision(None, None, None, None)
         match = CanaryAllowlistEntry(
             trusted_identity=trusted_identity,
             endpoint=request.endpoint,
@@ -168,6 +242,7 @@ class ReleaseHTTPCanaryPolicy:
             sample_mode=request.sample_mode,
             data_mode=request.data_mode,
             llm_mode=request.llm_mode,
+            online_stance_mode=online_stance_mode,
             active_release_digest=snapshot.active.release_digest,
             candidate_release_digest=snapshot.candidate.release_digest,
             ramp_id=snapshot.policy.ramp_id,
@@ -190,19 +265,38 @@ class ReleaseHTTPCanaryPolicy:
             None,
         )
         if matching_entry is None:
-            return None, None, None
+            return CanaryRoutingDecision(None, None, None, None)
         if request.sample_mode:
-            return None, None, None
-        binding = _request_binding(trusted_identity, request, snapshot)
+            return CanaryRoutingDecision(None, None, None, None)
+        live_token_digest = (
+            live_token_binding_digest(live_token)
+            if request.live_mode and live_token
+            else ""
+        )
+        binding = _request_binding(
+            trusted_identity,
+            request,
+            snapshot,
+            online_stance_mode=online_stance_mode,
+            live_token_digest=live_token_digest,
+        )
         request_digest = request_binding_digest(
-            trusted_identity, request, snapshot
+            trusted_identity,
+            request,
+            snapshot,
+            online_stance_mode=online_stance_mode,
+            live_token_digest=live_token_digest,
         )
         # live/Bedrock is never admitted merely because cohort assignment
         # selected B. It additionally needs an exact signed monetary budget.
-        if request.cost_bearing:
+        if request.model_calls_possible(
+            online_stance_mode=online_stance_mode
+        ):
+            if not self._cost_bearing_enabled:
+                return CanaryRoutingDecision(None, None, None, None)
             cost_budget = cost_budget or matching_entry.cost_budget
             if cost_budget is None:
-                return None, None, None
+                return CanaryRoutingDecision(None, None, None, None)
             try:
                 verify_budget(
                     cost_budget,
@@ -217,12 +311,17 @@ class ReleaseHTTPCanaryPolicy:
                     request_binding_digest=request_digest,
                 )
             except CanaryCostBudgetError:
-                return None, None, None
+                return CanaryRoutingDecision(None, None, None, None)
         subject = "sha256:" + hashlib.sha256(
             b"trustforge.release-http-canary-subject.v1\x00"
             + canonical_json(binding)
         ).hexdigest()
-        return subject, snapshot.control_event_head, cost_budget
+        return CanaryRoutingDecision(
+            subject,
+            snapshot.control_event_head,
+            cost_budget,
+            request_digest,
+        )
 
     def routing_subject(
         self,
@@ -231,15 +330,17 @@ class ReleaseHTTPCanaryPolicy:
         path: str,
         snapshot: RoutingSnapshot,
         cost_budget: CanaryCostBudget | None = None,
+        live_token: str | None = None,
     ) -> tuple[str | None, str | None]:
         """Return opaque cohort subject/head without exposing identity or query."""
-        subject, head, _budget = self._routing_admission(
+        decision = self.routing_decision(
             trusted_identity=trusted_identity,
             path=path,
             snapshot=snapshot,
             cost_budget=cost_budget,
+            live_token=live_token,
         )
-        return subject, head
+        return decision.subject, decision.control_head
 
     def routing_admission(
         self,
@@ -247,13 +348,16 @@ class ReleaseHTTPCanaryPolicy:
         trusted_identity: str | None,
         path: str,
         snapshot: RoutingSnapshot,
+        live_token: str | None = None,
     ) -> tuple[str | None, str | None, CanaryCostBudget | None]:
-        """Separate deterministic cohort identity from signed budget admission."""
-        return self._routing_admission(
+        """Backward-compatible three-value admission API."""
+        decision = self.routing_decision(
             trusted_identity=trusted_identity,
             path=path,
             snapshot=snapshot,
+            live_token=live_token,
         )
+        return decision.subject, decision.control_head, decision.cost_budget
 
     def authenticated_identity(
         self, connection: socket.socket, claimed_identity: str | None
@@ -278,6 +382,9 @@ def _request_binding(
     trusted_identity: str,
     request: CanaryRequest,
     snapshot: RoutingSnapshot,
+    *,
+    online_stance_mode: bool,
+    live_token_digest: str,
 ) -> dict[str, object]:
     return {
         "endpoint": request.endpoint,
@@ -288,6 +395,8 @@ def _request_binding(
         "sample_mode": request.sample_mode,
         "data_mode": request.data_mode,
         "llm_mode": request.llm_mode,
+        "online_stance_mode": online_stance_mode,
+        "live_token_digest": live_token_digest,
         "trusted_identity_digest": _secret_digest(
             _IDENTITY_DOMAIN, trusted_identity
         ),
@@ -304,12 +413,28 @@ def request_binding_digest(
     trusted_identity: str,
     request: CanaryRequest,
     snapshot: RoutingSnapshot,
+    *,
+    online_stance_mode: bool = False,
+    live_token_digest: str = "",
 ) -> str:
     """Return the opaque exact-request identity used by signed cost budgets."""
     return "sha256:" + hashlib.sha256(
         _BINDING_DOMAIN
-        + canonical_json(_request_binding(trusted_identity, request, snapshot))
+        + canonical_json(
+            _request_binding(
+                trusted_identity,
+                request,
+                snapshot,
+                online_stance_mode=online_stance_mode,
+                live_token_digest=live_token_digest,
+            )
+        )
     ).hexdigest()
+
+
+def live_token_binding_digest(token: str) -> str:
+    """Bind a live credential opaquely; raw token never enters signed evidence."""
+    return _secret_digest(_LIVE_TOKEN_DOMAIN, token)
 
 
 def _entry(value: object) -> CanaryAllowlistEntry:
@@ -325,6 +450,7 @@ def _entry(value: object) -> CanaryAllowlistEntry:
         "sample_mode",
         "data_mode",
         "llm_mode",
+        "online_stance_mode",
         "active_release_digest",
         "candidate_release_digest",
         "ramp_id",
@@ -346,13 +472,20 @@ def _entry(value: object) -> CanaryAllowlistEntry:
     if (
         not isinstance(value["live_mode"], bool)
         or not isinstance(value["sample_mode"], bool)
+        or not isinstance(value["online_stance_mode"], bool)
         or value["question_type"] not in {"multi_source", "comparison"}
         or value["data_mode"] not in {"live", "sample"}
         or value["llm_mode"] not in {"off", "bedrock"}
+        or (
+            value["data_mode"] == "live"
+            and value["online_stance_mode"] is not True
+        )
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["query_digest"])
     ):
         raise ValueError
     encoded_budget = value["cost_budget"]
+    if value["data_mode"] == "live" and encoded_budget is None:
+        raise ValueError
     if encoded_budget is not None:
         if not isinstance(encoded_budget, dict):
             raise ValueError
@@ -366,6 +499,7 @@ def _entry(value: object) -> CanaryAllowlistEntry:
             "trusted_identity",
             "live_mode",
             "sample_mode",
+            "online_stance_mode",
             "cost_budget",
         }
     }
@@ -377,6 +511,7 @@ def _entry(value: object) -> CanaryAllowlistEntry:
         assets=normalized,
         live_mode=value["live_mode"],
         sample_mode=value["sample_mode"],
+        online_stance_mode=value["online_stance_mode"],
         cost_budget=encoded_budget,
         **text_fields,
     )

@@ -129,7 +129,12 @@ class _Ledger:
         )
 
     def reserve_candidate(
-        self, *, expected_head, reservation_id, cost_budget=None
+        self,
+        *,
+        expected_head,
+        reservation_id,
+        cost_budget=None,
+        request_binding_digest=None,
     ):
         assert expected_head == self.head
         self.cost_budgets.append(cost_budget)
@@ -217,7 +222,7 @@ def test_real_separate_http_releases_route_limited_b_without_core_import():
         assert "trustforge_core" not in __import__("inspect").getsource(
             __import__("trustforge.release_router", fromlist=["*"])
         )
-        assert ledger.cost_budgets == [None]
+        assert ledger.cost_budgets == [None, None]
     finally:
         a_server.shutdown()
         b_server.shutdown()
