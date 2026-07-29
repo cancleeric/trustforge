@@ -133,6 +133,15 @@ body {
 .tf-glossary-popover b { margin-bottom: 3px; color: var(--color-tf-text); }
 .tf-glossary-popover .tf-glossary-risk { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--color-tf-border); color: var(--color-tf-warn); }
 .tf-glossary-popover .tf-glossary-risk i { margin-right: 4px; font-style: normal; }
+/* #847：滑鼠停留浮出的白話短句。刻意**不用** `white-space: nowrap` ——
+   原始 issue 寫「≤200px 單行不換行」，但那正是 N80 剛修掉的那一類缺陷：
+   窄螢幕 + 英文版時單行會直接頂出視窗。這裡改成最多兩行、超過才截斷，
+   寬度仍由 JS 量過視窗後寫入（見 GlossaryTerm.updatePosition）。 */
+.tf-glossary-popover.is-hint { max-height: none; padding: 7px 10px; }
+.tf-glossary-popover.is-hint span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+/* 新手模式才把可解釋的名詞畫底線，提示「這個字可以看解釋」。
+   一般模式維持現狀，報告畫面不會多出裝飾。 */
+html[data-tf-beginner="1"] .tf-glossary > button { text-decoration: underline dotted currentColor; text-underline-offset: 3px; }
 /* N51：移除 `.hermes-right-rail .tf-glossary-popover { left: auto; right: 0 }`。
    popover 現在 portal 到 <body>，這條選擇器再也選不到它；而且它本身有害——
    元件已用 inline style 指定 left 與 width，再補一個 right 會讓 left/width/right

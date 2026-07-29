@@ -87,6 +87,14 @@ export default function HermesDashboard() {
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [firstRunOpen, setFirstRunOpen] = useState(() => !qaMode && shouldShowHermesOnboarding() && searchParams.get('tour') !== '1')
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
+  // #847：把新手模式掛到 <html> 上。名詞解釋的小卡是 portal 到 <body> 的
+  // （見 GlossaryTerm 的 N51 註解），儀表板容器上的 class 傳不進去，只有根節點
+  // 兩邊都看得到。除了旗標本身，沒有任何行為綁在這裡。
+  useEffect(() => {
+    const root = document.documentElement
+    if (beginnerMode) root.dataset.tfBeginner = '1'
+    else delete root.dataset.tfBeginner
+  }, [beginnerMode])
   const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
   const [whaleSummary, setWhaleSummary] = useState<WhaleSummary | null>(null)
