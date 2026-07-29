@@ -92,8 +92,8 @@ Context endpoint returns: `included_refs`, `excluded_refs` (with reasons), `excl
 
 ## Test Evidence
 
-Evidence is commit-bound to
-`ef14855bd8e898f1c8ca2a4167f78324ea4df846`.
+Evidence is commit-bound by the immutable exact-HEAD SHA recorded in the PR
+review disposition; this document does not embed a self-referential commit.
 
 | Test scope | Recorded result |
 |------------|-----------------|

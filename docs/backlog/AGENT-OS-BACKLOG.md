@@ -124,10 +124,10 @@ Agent OS 為 TrustForge Hermes 建立可治理的 Memory、Task Skill、Tool Cap
 
 | ID | Item | Status |
 |----|------|--------|
-| H-39 | Runtime Integration | Implemented / in review — [#922](https://github.com/cancleeric/trustforge/issues/922); mandatory regression and lineage gates remain open |
+| H-39 | Runtime Integration | Implemented / final review — [#922](https://github.com/cancleeric/trustforge/issues/922); regression and lineage gates pass |
 | H-40 | Admin Summary API | Implemented / in review — [#923](https://github.com/cancleeric/trustforge/issues/923); real-handler auth success is covered |
 | H-41 | Admin UI Rails | Implemented / in review — [#924](https://github.com/cancleeric/trustforge/issues/924); desktop/mobile Eye review remains open |
-| H-42 | Replay/E2E/Release | In review / blocked — [#925](https://github.com/cancleeric/trustforge/issues/925); replay, regression, lineage, CISO, and Eye gates are not complete |
+| H-42 | Replay/E2E/Release | Automated scope complete / human gates pending — [#925](https://github.com/cancleeric/trustforge/issues/925); replay, regression and lineage pass，仍待 CISO/CPO、`/codex-review` 與 Eye |
 
 Statuses are implementation states, not release approval. No item above is `Done`
 until all mandatory #925 gates and human dispositions are complete.

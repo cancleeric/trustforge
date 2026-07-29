@@ -75,7 +75,7 @@ Governance index:
 
 | 文件 | 說明 |
 |------|------|
-| [audit/AGOS-SECURITY-DISPOSITION.md](audit/AGOS-SECURITY-DISPOSITION.md) | Agent OS #914/#925 安全控制、測試證據、已知限制與待完成審查；目前仍待 CISO/CPO、`/codex-review`、人工 UI Eye scan，以及真 HTTP 成功回應缺陷修正 |
+| [audit/AGOS-SECURITY-DISPOSITION.md](audit/AGOS-SECURITY-DISPOSITION.md) | Agent OS #914/#925 安全控制、測試證據與已知限制；authenticated HTTP E2E 已通過，目前仍待 exact-HEAD CISO/CPO、`/codex-review` 與人工 UI Eye scan |
 
 
 ## reports/ — 事故與調查報告
