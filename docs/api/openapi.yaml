@@ -1918,6 +1918,7 @@ paths:
                 data:
                   daily_cap_usd: {config: 1.0, env: "3.0", default: 3.0, effective: 1.0, source: config}
                   bedrock_enabled: {config: true, bedrock_model_id_set: true, effective: true, source: config}
+                  multi_angle_narration_enabled: {config: null, env: null, default: true, effective: true, source: default}
                   live_token: {config_configured: true, config_last4: "a9f2", env_configured: false, effective_configured: true, source: config}
                   version: 7
                   updated_at: "2026-07-07T03:00:00+00:00"
@@ -1951,6 +1952,11 @@ paths:
           `BEDROCK_MODEL_ID` env 未設 → 仍寫入，回應 `warnings` 附
           「開關開了也不會有真呼叫」誠實警告。`null`＝清除 config 層
           開關（回落下一層：env/default，見 PR-3 budget_guard 整合）。
+        - `multi_angle_narration_enabled`：嚴格 bool（`"true"` 字串不算）。
+          `null`＝清除 Admin 層並回到預設開啟。實際呼叫仍須與全域
+          Bedrock、model pricing、daily cap/reservation 安全閘全部 AND。
+          `TRUSTFORGE_MULTI_ANGLE_NARRATION` 是 Admin 不可覆蓋的緊急阻斷
+          層：未設定或精確 `1` 放行，`0`、空值或非法值 fail-closed 關閉。
         - `live_token`：長度 24–512 的可見 ASCII（0x21–0x7E）明文，
           server 落庫前轉 sha256（明文不落庫、不進審計、**不回顯**）。
           `null`＝清除 runtime token（回落 env token）。
@@ -1975,6 +1981,9 @@ paths:
                   maximum: 50
                 bedrock_enabled:
                   type: [boolean, "null"]
+                multi_angle_narration_enabled:
+                  type: [boolean, "null"]
+                  description: Admin hot switch；null 回到預設 true，但 env emergency kill switch 與全域 Bedrock/cost gates 仍可阻擋
                 live_token:
                   type: [string, "null"]
                   minLength: 24
@@ -1986,6 +1995,7 @@ paths:
             example:
               daily_cap_usd: 1.0
               bedrock_enabled: true
+              multi_angle_narration_enabled: true
               expected_version: 7
       responses:
         "200":
@@ -2012,7 +2022,8 @@ paths:
             驗證失敗——`invalid_cap`（cap 越界/非有限數/非數字）或
             `bad_request`（`expected_version` 缺席/不合法、無任何設定
             欄位、不支援的欄位、bedrock_enabled 非嚴格 bool、live_token
-            不符長度/字元集規則、JSON 解析失敗）。
+            不符長度/字元集規則、multi_angle_narration_enabled 非嚴格
+            bool、JSON 解析失敗）。
           content:
             application/json:
               schema:
@@ -2317,7 +2328,7 @@ components:
         函式——`budget_guard.daily_cap_usd_resolved` / `web._bedrock_allowed`
         ——不另行重算，避免顯示值與實際採用值分岔）。token 相關只有
         configured bool + 末 4 碼，絕無明文/完整 hash。
-      required: [daily_cap_usd, bedrock_enabled, live_token, version, updated_at, updated_by, exists, version_corrupt]
+      required: [daily_cap_usd, bedrock_enabled, multi_angle_narration_enabled, live_token, version, updated_at, updated_by, exists, version_corrupt]
       properties:
         daily_cap_usd:
           type: object
@@ -2355,6 +2366,30 @@ components:
               type: string
               enum: [config, env, config_read_error]
               description: 生效層；config 未設定過＝env（v0.7.0 語意）；config_read_error＝讀取異常 fail-closed。注意 env 亦涵蓋「`BEDROCK_MODEL_ID` 未設 → 直接短路 false、不讀 config」分支（生效與否確實由 env 決定）
+        multi_angle_narration_enabled:
+          type: object
+          description: |
+            五方向分析完成後最多一次 LLM 綜合敘述。Admin 值未設定時
+            default=true；env emergency kill switch 不可被 Admin 覆蓋；
+            effective 再與全域 Bedrock、model pricing 與 daily cap 閘 AND。
+          required: [config, env, default, effective, source]
+          properties:
+            config:
+              type: [boolean, "null"]
+              description: Admin hot config；null＝使用內建預設 true
+            env:
+              type: [string, "null"]
+              description: "`TRUSTFORGE_MULTI_ANGLE_NARRATION` 原始值；未設定/精確 1 放行，0/空值/非法值 fail-closed"
+            default:
+              type: boolean
+              const: true
+            effective:
+              type: boolean
+              description: Admin/default、env emergency layer、全域 Bedrock 與成本閘全部 AND 後的實際狀態
+            source:
+              type: string
+              enum: [config, default, env_override, config_read_error, global_gate_blocked]
+              description: env_override＝env 緊急阻斷；global_gate_blocked＝feature switch 開啟但 Bedrock/pricing/cap 阻擋
         live_token:
           type: object
           required: [config_configured, config_last4, env_configured, effective_configured, source]

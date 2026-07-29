@@ -447,12 +447,10 @@ class _FakeCW:
         self.calls.append(kwargs)
 
 
-def test_budget_guard_backend_down_emits_metric_and_falls_back(
+def test_budget_guard_backend_down_emits_metric_and_fails_closed(
     monkeypatch, caplog
 ):
-    """#75：DynamoDB 後端不可用時——(1) 不 fail-open：fallback 回 process-local
-    預留、第一筆仍成功；(2) 送 CloudWatch 指標 BudgetGuardMultiInstanceProtectionDisabled；
-    (3) 記 warning log（證明多實例保護已暫時失效、非靜默降級）。"""
+    """DynamoDB authority failure rejects admission and never reserves local."""
     import logging
 
     from trustforge import budget_guard, budget_counter, cloudwatch_metrics
@@ -471,17 +469,15 @@ def test_budget_guard_backend_down_emits_metric_and_falls_back(
 
     with caplog.at_level(logging.WARNING, logger="trustforge.budget_guard"):
         cost = budget_guard.try_reserve_request_budget()
-    assert cost is not None, "後端失效應 fallback 回 process-local 預留"
-    assert "多實例保護已暫時失效" in caplog.text
+    assert cost is None
+    assert budget_guard._RESERVATION._reserved == 0
+    assert "fail-closed" in caplog.text
     metric_calls = [c for c in fake_cw.calls if c.get("MetricData")]
     assert metric_calls, "應送出 BudgetGuardMultiInstanceProtectionDisabled 指標"
     assert (
         metric_calls[0]["MetricData"][0]["MetricName"]
         == cloudwatch_metrics.BUDGET_GUARD_BACKEND_DOWN_METRIC
     )
-    # release 也失敗 → 同樣送指標（冷卻期內不重複送）
-    budget_guard.release_request_budget(cost)
-    # 冷卻：同一瞬間只送一次（reserve 已送，release 在冷卻內不重送）
     assert len([c for c in fake_cw.calls if c.get("MetricData")]) == 1
 
 
@@ -537,3 +533,20 @@ def test_batch_preflight_fails_closed_when_shared_backend_unreadable(monkeypatch
     )
 
     assert bg.request_budget_available(5) is False
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, "local"),
+        ("local", "local"),
+        ("LOCAL", "local"),
+        ("dynamodb", "dynamodb"),
+        (" DynamoDB ", "dynamodb"),
+        ("invalid", "local"),
+    ],
+)
+def test_budget_reservation_backend_public_semantics(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", raw)
+    assert bg.budget_reservation_backend() == expected

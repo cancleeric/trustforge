@@ -58,6 +58,34 @@ _OVERCLAIM_TERMS = (
 )
 
 
+def test_openapi_admin_multi_angle_narration_contract_is_complete():
+    spec = _OPENAPI_PATH.read_text(encoding="utf-8")
+    admin_path = spec.split("  /api/admin/config:", 1)[1].split(
+        "\n  /api/admin/", 1
+    )[0]
+    schema = spec.split("    AdminConfigData:", 1)[1].split(
+        "\n    AdminAuditRecord:", 1
+    )[0]
+
+    assert (
+        "required: [daily_cap_usd, bedrock_enabled, "
+        "multi_angle_narration_enabled, live_token"
+    ) in schema
+    assert "multi_angle_narration_enabled:" in schema
+    assert "required: [config, env, default, effective, source]" in schema
+    assert (
+        "enum: [config, default, env_override, config_read_error, "
+        "global_gate_blocked]"
+    ) in schema
+    assert "const: true" in schema
+
+    assert "multi_angle_narration_enabled:" in admin_path
+    assert "Admin hot switch" in admin_path
+    assert "multi_angle_narration_enabled: true" in admin_path
+    assert "multi_angle_narration_enabled 非嚴格" in admin_path
+    assert "TRUSTFORGE_MULTI_ANGLE_NARRATION" in admin_path
+
+
 def _real_documented_paths() -> set[str]:
     """從 `web.py::Handler.do_GET` 原始碼推導本次 OpenAPI spec 應該涵蓋的
     路由集合（`if u.path == "/xxx":` 字面比對），不手動硬編一份清單——
