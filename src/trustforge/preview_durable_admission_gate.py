@@ -343,7 +343,7 @@ class DurableAdmissionGate:
         if not self._owns_present(proof):
             raise ValueError("exact quarantine proof required")
         assert proof.handle is not None
-        if interval.earliest < proof.handle.lease_until:
+        if interval.earliest <= proof.handle.lease_until:
             raise ValueError("reservation lease remains active")
         from trustforge.preview_terminal_reconcile import (
             TerminalDisposition,
@@ -357,12 +357,25 @@ class DurableAdmissionGate:
         )
 
     def append_recovery_open_action(
-        self, proof: QuarantineProof, terminal_request: dict[str, object]
+        self, proof: QuarantineProof, terminal_plan: object
     ) -> dict[str, object]:
         """Bind D1's terminal transition and fence OPEN in one transaction."""
 
         if not self._owns_present(proof):
             raise ValueError("exact quarantine proof required")
+        from trustforge.preview_terminal_reconcile import (
+            CompiledTerminalPlan,
+            TerminalDisposition,
+        )
+
+        if (
+            type(terminal_plan) is not CompiledTerminalPlan
+            or terminal_plan.replay
+            or terminal_plan.intent.disposition
+            is not TerminalDisposition.PRE_PROVIDER_ABORT
+            or terminal_plan.intent.handle != proof.handle
+        ):
+            raise ValueError("canonical pre-provider terminal plan required")
         assert proof.binding is not None
         current = self._control
         if (
@@ -371,13 +384,10 @@ class DurableAdmissionGate:
             or current.binding != proof.binding
         ):
             raise ValueError("stale quarantine proof")
+        terminal_request = terminal_plan.transact_write_items_request()
         actions = terminal_request.get("TransactItems")
         if type(actions) is not list or not 1 <= len(actions) < 100:
             raise ValueError("invalid terminal request")
-        assert proof.handle is not None
-        _validate_recovery_reservation_action(
-            actions[0], self._table, proof.handle
-        )
         following = _Control(
             GateState.OPEN, current.generation, current.version + 1, None
         )
@@ -793,33 +803,6 @@ def _reserved_item(handle: AdmissionHandle) -> dict[str, object]:
     if handle.circuit_half_open_owner is not None:
         native["circuit_half_open_owner"] = handle.circuit_half_open_owner
     return _ddb_map(native)
-
-
-def _validate_recovery_reservation_action(
-    action: object, table: str, handle: AdmissionHandle
-) -> None:
-    if type(action) is not dict or set(action) != {"Put"}:
-        raise ValueError("invalid recovery reservation action")
-    body = action["Put"]
-    if type(body) is not dict:
-        raise ValueError("invalid recovery reservation action")
-    item = _copy_ddb_map(_reserved_item(handle))
-    item["status"] = {"S": "terminal"}
-    item["version"] = {"N": "1"}
-    item["terminal_disposition"] = {"S": "pre_provider_abort"}
-    if (
-        body.get("TableName") != table
-        or body.get("Item") != item
-        or type(body.get("ConditionExpression")) is not str
-        or not body["ConditionExpression"]
-        or type(body.get("ExpressionAttributeNames")) is not dict
-        or type(body.get("ExpressionAttributeValues")) is not dict
-    ):
-        raise ValueError("invalid recovery reservation action")
-
-
-def _copy_ddb_map(value: dict[str, object]) -> dict[str, object]:
-    return {key: dict(item) for key, item in value.items()}  # type: ignore[arg-type]
 
 
 def _ddb_map(value: dict[str, object]) -> dict[str, object]:

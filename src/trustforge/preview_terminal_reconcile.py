@@ -172,10 +172,35 @@ class _Snapshot:
     circuit: CircuitSnapshot
 
 
-@dataclass(frozen=True, slots=True)
+_TERMINAL_PLAN_FACTORY = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class CompiledTerminalPlan:
     write_request: Mapping[str, object]
     replay: bool
+    intent: TerminalIntent = dataclass_field(repr=False)
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        write_request: Mapping[str, object],
+        replay: bool,
+        intent: TerminalIntent,
+    ) -> "CompiledTerminalPlan":
+        if (
+            token is not _TERMINAL_PLAN_FACTORY
+            or type(replay) is not bool
+            or type(intent) is not TerminalIntent
+            or type(write_request) is not MappingProxyType
+        ):
+            raise ValueError("invalid compiled terminal plan")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "write_request", write_request)
+        object.__setattr__(instance, "replay", replay)
+        object.__setattr__(instance, "intent", intent)
+        return instance
 
     def transact_write_items_request(self) -> dict[str, object]:
         return _thaw(self.write_request)  # type: ignore[return-value]
@@ -374,7 +399,9 @@ def compile_terminal(
     if type(snapshot) is not _Snapshot:
         raise ValueError("invalid terminal snapshot")
     if snapshot.terminal_replay:
-        return CompiledTerminalPlan(MappingProxyType({}), True)
+        return CompiledTerminalPlan._create(
+            _TERMINAL_PLAN_FACTORY, MappingProxyType({}), True, intent
+        )
     actions: list[dict[str, object]] = []
     terminal_item = _terminal_item(intent, snapshot.reservation)
     actions.append(
@@ -419,9 +446,11 @@ def compile_terminal(
     ]
     if len(set(keys)) != len(keys):
         raise ValueError("duplicate terminal action")
-    return CompiledTerminalPlan(
+    return CompiledTerminalPlan._create(
+        _TERMINAL_PLAN_FACTORY,
         _freeze({"TransactItems": [_serialize_action(action) for action in actions]}),
         False,
+        intent,
     )
 
 

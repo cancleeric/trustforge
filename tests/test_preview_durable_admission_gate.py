@@ -26,7 +26,14 @@ from trustforge.preview_durable_admission_gate import (
     append_quarantine_action,
 )
 from trustforge.preview_admission_executor import AdmissionOutcome, PreviewAdmissionExecutor
-from trustforge.preview_terminal_reconcile import TerminalDisposition
+from trustforge.preview_terminal_reconcile import (
+    CompiledTerminalPlan,
+    TerminalDisposition,
+    TerminalIntent,
+    build_terminal_read_request,
+    compile_terminal,
+    decode_terminal_responses,
+)
 from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
 
 
@@ -255,7 +262,7 @@ def test_present_requires_exact_strong_quarantine_and_absent_never_opens():
     intent = gate.pre_provider_abort_intent(
         present,
         TrustedUtcInterval(
-            plan.handle.lease_until, plan.handle.lease_until + 0.1
+            plan.handle.lease_until + 0.1, plan.handle.lease_until + 0.2
         ),
     )
     assert intent.disposition is TerminalDisposition.PRE_PROVIDER_ABORT
@@ -549,7 +556,8 @@ def test_transactional_proof_failure_never_mints_present(mode):
     assert gate.ready is False
 
 
-def test_pre_provider_abort_requires_trusted_lease_expiry():
+@pytest.mark.parametrize("earliest_delta", [0.0, -0.1])
+def test_pre_provider_abort_requires_trusted_lease_expiry(earliest_delta):
     client = FakeGateClient(_open())
     gate = DurableAdmissionGate(client, "preview-store")
     plan = _plan()
@@ -567,7 +575,8 @@ def test_pre_provider_abort_requires_trusted_lease_expiry():
         gate.pre_provider_abort_intent(
             proof,
             TrustedUtcInterval(
-                plan.handle.lease_until - 0.1, plan.handle.lease_until + 0.1
+                plan.handle.lease_until + earliest_delta,
+                plan.handle.lease_until + 0.1,
             ),
         )
 
@@ -588,18 +597,16 @@ def test_execute_finalize_vs_recovery_terminal_barrier_has_one_winner():
         BillingMode="PAY_PER_REQUEST",
     )
     plan = _plan()
-    seed = FakeGateClient(_open())
-    seed_gate = DurableAdmissionGate(seed, "preview-store")
+    raw.put_item(TableName="preview-store", Item=_open())
+    seed_gate = DurableAdmissionGate(raw, "preview-store")
     binding = seed_gate.begin(
         plan,
         dispatch_lower=plan.handle.created_lower,
         dispatch_upper=plan.handle.created_upper,
     )
     assert binding is not None
-    quarantined = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    raw.transact_write_items(**append_quarantine_action(plan, seed_gate, binding))
     reserved = _reserved_item(plan.handle)
-    raw.put_item(TableName="preview-store", Item=quarantined)
-    raw.put_item(TableName="preview-store", Item=reserved)
 
     barrier = threading.Barrier(2, timeout=3)
 
@@ -620,30 +627,19 @@ def test_execute_finalize_vs_recovery_terminal_barrier_has_one_winner():
     client = BarrierClient()
     gate = DurableAdmissionGate(client, "preview-store")
     proof = gate.prove_present(binding, plan.handle)
-    terminal = deepcopy(reserved)
-    terminal["status"] = {"S": "terminal"}
-    terminal["version"] = {"N": "1"}
-    terminal["terminal_disposition"] = {"S": "pre_provider_abort"}
-    terminal_request = {
-        "TransactItems": [
-            {
-                "Put": {
-                    "TableName": "preview-store",
-                    "Item": terminal,
-                    "ConditionExpression": "#status=:reserved AND #version=:zero",
-                    "ExpressionAttributeNames": {
-                        "#status": "status",
-                        "#version": "version",
-                    },
-                    "ExpressionAttributeValues": {
-                        ":reserved": {"S": "reserved"},
-                        ":zero": {"N": "0"},
-                    },
-                }
-            }
-        ]
-    }
-    recovery = gate.append_recovery_open_action(proof, terminal_request)
+    interval = TrustedUtcInterval(
+        plan.handle.lease_until + 0.1, plan.handle.lease_until + 0.2
+    )
+    intent = gate.pre_provider_abort_intent(proof, interval)
+    terminal_read = raw.transact_get_items(
+        **build_terminal_read_request(intent, "preview-store")
+    )
+    terminal_plan = compile_terminal(
+        intent,
+        "preview-store",
+        decode_terminal_responses(intent, terminal_read["Responses"]),
+    )
+    recovery = gate.append_recovery_open_action(proof, terminal_plan)
     outcomes: list[str] = []
 
     def finalize() -> None:
@@ -723,3 +719,97 @@ def test_confirmed_stale_open_cas_refreshes_for_later_generation():
     )
     assert following is not None
     assert following.generation == 2
+
+
+@mock_aws
+def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
+    client = boto3.client("dynamodb", region_name="us-east-1")
+    client.create_table(
+        TableName="preview-store",
+        KeySchema=[
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    client.put_item(TableName="preview-store", Item=_open())
+    gate = DurableAdmissionGate(client, "preview-store")
+    admission = _plan()
+    binding = gate.begin(
+        admission,
+        dispatch_lower=admission.handle.created_lower,
+        dispatch_upper=admission.handle.created_upper,
+    )
+    assert binding is not None
+    client.transact_write_items(
+        **append_quarantine_action(admission, gate, binding)
+    )
+    proof = gate.prove_present(binding, admission.handle)
+    interval = TrustedUtcInterval(
+        admission.handle.lease_until + 0.1,
+        admission.handle.lease_until + 0.2,
+    )
+    intent = gate.pre_provider_abort_intent(proof, interval)
+    read = client.transact_get_items(
+        **build_terminal_read_request(intent, "preview-store")
+    )
+    snapshot = decode_terminal_responses(intent, read["Responses"])
+    sealed = compile_terminal(intent, "preview-store", snapshot)
+
+    with pytest.raises(ValueError):
+        gate.append_recovery_open_action(proof, {})  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        CompiledTerminalPlan({}, False, intent)  # type: ignore[call-arg]
+
+    mutated = sealed.transact_write_items_request()
+    mutated["TransactItems"][0]["Put"]["ConditionExpression"] = "forged"
+    mutated["TransactItems"].append({"Delete": {}})
+    appended = gate.append_recovery_open_action(proof, sealed)
+    assert appended["TransactItems"][0]["Put"]["ConditionExpression"] != "forged"
+    assert all("Delete" not in action for action in appended["TransactItems"])
+
+    wrong_disposition = TerminalIntent(
+        admission.handle,
+        interval,
+        TerminalDisposition.KNOWN_FAILURE,
+        actual_tokens=0,
+        actual_micro_usd=0,
+    )
+    wrong_read = client.transact_get_items(
+        **build_terminal_read_request(wrong_disposition, "preview-store")
+    )
+    wrong_plan = compile_terminal(
+        wrong_disposition,
+        "preview-store",
+        decode_terminal_responses(wrong_disposition, wrong_read["Responses"]),
+    )
+    with pytest.raises(ValueError):
+        gate.append_recovery_open_action(proof, wrong_plan)
+
+    forged_handle = replace(admission.handle, reserved_tokens=1)
+    forged_intent = TerminalIntent(
+        forged_handle, interval, TerminalDisposition.PRE_PROVIDER_ABORT
+    )
+    forged_read = client.transact_get_items(
+        **build_terminal_read_request(forged_intent, "preview-store")
+    )
+    with pytest.raises(ValueError):
+        decode_terminal_responses(forged_intent, forged_read["Responses"])
+
+    terminal_request = sealed.transact_write_items_request()
+    client.transact_write_items(**terminal_request)
+    replay_read = client.transact_get_items(
+        **build_terminal_read_request(intent, "preview-store")
+    )
+    replay = compile_terminal(
+        intent,
+        "preview-store",
+        decode_terminal_responses(intent, replay_read["Responses"]),
+    )
+    assert replay.replay is True
+    with pytest.raises(ValueError):
+        gate.append_recovery_open_action(proof, replay)
