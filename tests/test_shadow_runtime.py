@@ -808,3 +808,85 @@ def test_intrinsic_shadow_failure_degrades_to_none_and_keeps_observation(
     assert result.status == "success"
     payload = _latest_observation_payload(path)
     assert payload["intrinsic_shadow"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #876: canonical scorer candidate diff wired into the observation
+# worker.  Shadow-only: never touches official fields; flag-off byte parity.
+# ---------------------------------------------------------------------------
+
+
+def test_intrinsic_candidate_flag_on_records_candidate_diff(
+    monkeypatch, tmp_path,
+):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
+    monkeypatch.setenv("TRUSTFORGE_SHADOW_INTRINSIC_ENABLED", "1")
+    monkeypatch.setenv("TRUSTFORGE_SHADOW_INTRINSIC_CANDIDATE_ENABLED", "1")
+
+    result = _observe(
+        request_id="hermes-candidate-on", intrinsic_view_fn=_known_intrinsic_view,
+    )
+    assert result.status == "success"
+    payload = _latest_observation_payload(path)
+    intrinsic = payload["intrinsic_shadow"]
+    assert isinstance(intrinsic, dict)
+    candidate = intrinsic["intrinsic_candidate"]
+    assert candidate["schema_version"] == "1.0.0"
+    # _known_intrinsic_view uses three high-value known dims -> positive delta.
+    assert candidate["total_delta"] > 0.0
+    assert abs(candidate["total_delta"]) <= 0.08
+    assert 0.0 <= candidate["candidate_raw"] <= 1.0
+    assert 0.0 <= candidate["candidate_calibrated"] <= 1.0
+    assert candidate["candidate_facts_hash"].startswith("sha256:")
+    # Constraint #2: candidate never carries a direction.
+    assert "direction" not in candidate
+    assert not any("direction" in key for key in candidate)
+    # AC2: official fields are unchanged by the candidate presence.
+    assert payload["confidence_delta"] == result.parity.delta_confidence
+    assert payload["trust_delta"] == result.parity.delta_trust
+
+
+def test_intrinsic_candidate_flag_off_leaves_payload_without_candidate(
+    monkeypatch, tmp_path,
+):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
+    monkeypatch.setenv("TRUSTFORGE_SHADOW_INTRINSIC_ENABLED", "1")
+    monkeypatch.delenv("TRUSTFORGE_SHADOW_INTRINSIC_CANDIDATE_ENABLED", raising=False)
+
+    result = _observe(
+        request_id="hermes-candidate-off", intrinsic_view_fn=_known_intrinsic_view,
+    )
+    assert result.status == "success"
+    payload = _latest_observation_payload(path)
+    intrinsic = payload["intrinsic_shadow"]
+    assert isinstance(intrinsic, dict)
+    # Flag off -> no candidate diff merged; baseline intrinsic payload intact.
+    assert "intrinsic_candidate" not in intrinsic
+    assert intrinsic["affects_official_score"] is False
+
+
+def test_intrinsic_candidate_is_independent_of_intrinsic_capture_failure(
+    monkeypatch, tmp_path,
+):
+    """If the intrinsic observation layer fails, the candidate diff is skipped.
+
+    The candidate block only runs when an intrinsic_shadow dict exists, so a
+    broken view degrades to ``intrinsic_shadow=None`` with no candidate diff
+    and the observation still succeeds (fail-closed, no official impact).
+    """
+    path = tmp_path / "private" / "shadow.sqlite3"
+    _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
+    monkeypatch.setenv("TRUSTFORGE_SHADOW_INTRINSIC_ENABLED", "1")
+    monkeypatch.setenv("TRUSTFORGE_SHADOW_INTRINSIC_CANDIDATE_ENABLED", "1")
+
+    result = _observe(
+        request_id="hermes-candidate-broken-view", intrinsic_view_fn=_broken_intrinsic_view,
+    )
+    assert result.status == "success"
+    payload = _latest_observation_payload(path)
+    assert payload["intrinsic_shadow"] is None
