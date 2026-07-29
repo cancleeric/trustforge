@@ -7,8 +7,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -37,6 +39,71 @@ FORBIDDEN_AUTHORITY_NAMES = frozenset(
         "eligible",
         "publication",
         "publication_authority",
+    }
+)
+FORBIDDEN_AUTHORITY_TOKENS = re.compile(
+    r"(?i)(actor|raw.?public.?key|signer|trust.?anchor|verdict|"
+    r"release.?eligib|publication.?authority|(?:^|[^a-z])pass(?:[^a-z]|$))"
+)
+ALLOWED_MANIFEST_KEYS = frozenset(
+    {
+        "schema",
+        "vcs",
+        "commit",
+        "tree",
+        "sources",
+        "path",
+        "mode",
+        "size",
+        "sha256",
+        "cargo_resolution",
+        "packages",
+        "third_party_dependencies",
+        "vendor_entries",
+        "name",
+        "version",
+        "source",
+        "checksum",
+        "generated",
+        "recipe",
+        "toolchain",
+        "target",
+        "rustc",
+        "cargo",
+        "rustup",
+        "linker",
+        "target_libdir_entries",
+        "host_sysroot_entries",
+        "host_platform",
+        "os_build",
+        "kernel",
+        "environment",
+        "build",
+        "argv",
+        "offline",
+        "locked",
+        "frozen",
+        "rustflags",
+        "runtime_closure",
+        "method",
+        "pt_interp",
+        "dt_needed",
+        "package_entries",
+        "type",
+        "PATH",
+        "HOME",
+        "CARGO_HOME",
+        "RUSTC",
+        "SOURCE_DATE_EPOCH",
+        "TZ",
+        "LC_ALL",
+        "LANG",
+        "CARGO_INCREMENTAL",
+        "CARGO_NET_OFFLINE",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTFLAGS",
+        "WRAPPER_AND_AMBIENT_KNOBS",
     }
 )
 
@@ -85,13 +152,22 @@ def _canonical_json(value: Any) -> bytes:
 def _reject_authority_metadata(value: Any) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            normalized = key.casefold().replace("-", "_")
-            if normalized in FORBIDDEN_AUTHORITY_NAMES:
+            normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+            if (
+                key not in ALLOWED_MANIFEST_KEYS
+                or normalized
+                in {
+                    re.sub(r"[^a-z0-9]", "", item) for item in FORBIDDEN_AUTHORITY_NAMES
+                }
+                or FORBIDDEN_AUTHORITY_TOKENS.search(key)
+            ):
                 raise BuildBlocked(f"authority metadata is forbidden: {key}")
             _reject_authority_metadata(child)
     elif isinstance(value, list):
         for child in value:
             _reject_authority_metadata(child)
+    elif isinstance(value, str) and FORBIDDEN_AUTHORITY_TOKENS.search(value):
+        raise BuildBlocked("authority metadata value is forbidden")
 
 
 def _git_identity(source_root: Path) -> dict[str, str]:
@@ -116,6 +192,8 @@ def _regular_files(root: Path) -> list[Path]:
         if path.is_symlink():
             raise BuildBlocked(f"symlink is forbidden: {path}")
         if path.is_file():
+            if path.stat().st_nlink != 1:
+                raise BuildBlocked(f"multiply-linked file is forbidden: {path}")
             files.append(path)
         elif not path.is_dir():
             raise BuildBlocked(f"special file is forbidden: {path}")
@@ -179,6 +257,8 @@ def _resolve_tool(name: str, *, sysroot: Path | None = None) -> Path:
 def _tool_record(
     path: Path, version: str, logical_name: str | None = None
 ) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink() or path.stat().st_nlink != 1:
+        raise BuildBlocked(f"tool is not a singly-linked regular file: {path}")
     return {
         "name": logical_name or path.name,
         "size": path.stat().st_size,
@@ -203,6 +283,9 @@ def _toolchain(cargo: Path, rustc: Path, source_root: Path) -> dict[str, Any]:
         raise BuildBlocked(f"target sysroot is unavailable: {TARGET}")
     linker = _resolve_tool("rust-lld", sysroot=sysroot)
     sysroot_files = [_entry(path, sysroot) for path in _regular_files(target_libdir)]
+    host_sysroot_files = [
+        _entry(path, sysroot) for path in _regular_files(sysroot / "lib")
+    ]
     if not any("libc-" in item["path"] for item in sysroot_files):
         raise BuildBlocked("target libc closure is absent")
     return {
@@ -214,30 +297,65 @@ def _toolchain(cargo: Path, rustc: Path, source_root: Path) -> dict[str, Any]:
             _run([str(linker), "-flavor", "gnu", "--version"], cwd=source_root),
             "rust-lld",
         ),
+        "rustup": _tool_record(
+            _resolve_tool("rustup"),
+            _run([str(_resolve_tool("rustup")), "--version"], cwd=source_root),
+            "rustup",
+        ),
         "target_libdir_entries": sysroot_files,
+        "host_sysroot_entries": host_sysroot_files,
+        "host_platform": {
+            "os_build": _run(["/usr/bin/sw_vers", "-buildVersion"], cwd=source_root),
+            "kernel": _run(["/usr/bin/uname", "-mrs"], cwd=source_root),
+        },
     }
 
 
 def _elf_static_assertions(binary: Path) -> dict[str, Any]:
     data = binary.read_bytes()
-    if data[:4] != b"\x7fELF":
-        raise BuildBlocked("runtime is not ELF")
-    readelf = shutil.which("readelf") or shutil.which("llvm-readelf")
-    if readelf is None:
-        # Rust's musl target is self-contained. Conservatively scan the ELF
-        # string table as well as recording the target sysroot closure.
-        if b"libc.so" in data or b"ld-linux" in data or b"/lib/ld-" in data:
-            raise BuildBlocked("runtime contains a dynamic loader reference")
-        return {
-            "method": "elf-byte-static-closure",
-            "pt_interp": False,
-            "dt_needed": [],
-        }
-    program = _run([readelf, "-l", str(binary)], cwd=binary.parent)
-    dynamic = _run([readelf, "-d", str(binary)], cwd=binary.parent)
-    if "INTERP" in program or "(NEEDED)" in dynamic:
-        raise BuildBlocked("runtime has an ambient dynamic dependency")
-    return {"method": readelf, "pt_interp": False, "dt_needed": []}
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        raise BuildBlocked("runtime is not a bounds-valid ELF64 file")
+    if data[4] != 2 or data[5] not in (1, 2):
+        raise BuildBlocked("only ELF64 with known endianness is supported")
+    endian = "<" if data[5] == 1 else ">"
+    header = struct.unpack_from(endian + "HHIQQQIHHHHHH", data, 16)
+    phoff, shoff = header[4], header[5]
+    phentsize, phnum = header[8], header[9]
+    shentsize, shnum = header[10], header[11]
+    if phentsize < 56 or shentsize < 64:
+        raise BuildBlocked("ELF table entry size is invalid")
+    if phoff + phentsize * phnum > len(data) or shoff + shentsize * shnum > len(data):
+        raise BuildBlocked("ELF table exceeds file bounds")
+    for index in range(phnum):
+        p_type = struct.unpack_from(endian + "I", data, phoff + index * phentsize)[0]
+        if p_type == 3:
+            raise BuildBlocked("runtime contains PT_INTERP")
+    needed = 0
+    for index in range(shnum):
+        offset = shoff + index * shentsize
+        sh_type = struct.unpack_from(endian + "I", data, offset + 4)[0]
+        sh_offset, sh_size, sh_entsize = (
+            struct.unpack_from(endian + "QQ", data, offset + 24)[0],
+            struct.unpack_from(endian + "Q", data, offset + 32)[0],
+            struct.unpack_from(endian + "Q", data, offset + 56)[0],
+        )
+        if sh_type != 8 and sh_offset + sh_size > len(data):
+            raise BuildBlocked("ELF section exceeds file bounds")
+        if sh_type == 6:
+            entry_size = sh_entsize or 16
+            if entry_size < 16 or sh_size % entry_size:
+                raise BuildBlocked("ELF dynamic section is malformed")
+            for position in range(sh_offset, sh_offset + sh_size, entry_size):
+                tag = struct.unpack_from(endian + "q", data, position)[0]
+                if tag == 1:
+                    needed += 1
+    if needed:
+        raise BuildBlocked("runtime contains DT_NEEDED")
+    return {
+        "method": "bounds-checked-elf64-parser/v1",
+        "pt_interp": False,
+        "dt_needed": [],
+    }
 
 
 def _cargo_resolution(crate: Path) -> dict[str, Any]:
@@ -275,6 +393,57 @@ def _cargo_resolution(crate: Path) -> dict[str, Any]:
     }
 
 
+def _validate_toolchain_lock(crate: Path, toolchain: dict[str, Any]) -> None:
+    lock_path = crate / "toolchain-lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    expected_keys = {
+        "schema",
+        "target",
+        "cargo_sha256",
+        "rustc_sha256",
+        "rust_lld_sha256",
+        "rustup_sha256",
+        "host_sysroot_tree_sha256",
+        "host_os_build",
+        "host_kernel",
+        "target_sysroot_tree_sha256",
+    }
+    if set(lock) != expected_keys:
+        raise BuildBlocked("toolchain lock schema is not exact")
+    target_tree = hashlib.sha256(
+        _canonical_json(toolchain["target_libdir_entries"])
+    ).hexdigest()
+    host_tree = hashlib.sha256(
+        _canonical_json(toolchain["host_sysroot_entries"])
+    ).hexdigest()
+    observed = {
+        "schema": "trustforge.native-toolchain-lock/v1",
+        "target": TARGET,
+        "cargo_sha256": toolchain["cargo"]["sha256"],
+        "rustc_sha256": toolchain["rustc"]["sha256"],
+        "rust_lld_sha256": toolchain["linker"]["sha256"],
+        "rustup_sha256": toolchain["rustup"]["sha256"],
+        "host_sysroot_tree_sha256": host_tree,
+        "host_os_build": toolchain["host_platform"]["os_build"],
+        "host_kernel": toolchain["host_platform"]["kernel"],
+        "target_sysroot_tree_sha256": target_tree,
+    }
+    if lock != observed:
+        raise BuildBlocked(
+            "toolchain or host/target sysroot differs from repository lock"
+        )
+
+
+def _reject_ancestor_cargo_config(path: Path) -> None:
+    for ancestor in (path, *path.parents):
+        cargo_dir = ancestor / ".cargo"
+        for name in ("config", "config.toml"):
+            if (cargo_dir / name).exists():
+                raise BuildBlocked(
+                    f"ambient ancestor Cargo config is forbidden: {cargo_dir / name}"
+                )
+
+
 def _write_archive(stage: Path, archive_path: Path) -> None:
     with tarfile.open(archive_path, "w", format=tarfile.USTAR_FORMAT) as archive:
         for path in sorted(stage.rglob("*"), key=lambda item: item.as_posix()):
@@ -299,6 +468,7 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         Path("Cargo.toml"),
         Path("Cargo.lock"),
         Path("rust-toolchain.toml"),
+        Path("toolchain-lock.json"),
         Path(".cargo/config.toml"),
         Path("generated/source_epoch.rs"),
         Path("src/main.rs"),
@@ -316,7 +486,11 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         )
     source_entries = [_entry(crate / path, crate) for path in sorted(found)]
     builder_path = source_root / "scripts/build_native_hermetic_package.py"
-    if not builder_path.is_file() or builder_path.is_symlink():
+    if (
+        not builder_path.is_file()
+        or builder_path.is_symlink()
+        or builder_path.stat().st_nlink != 1
+    ):
         raise BuildBlocked("canonical builder source is missing or unsafe")
     builder_entry = _entry(builder_path, source_root)
     builder_entry["path"] = builder_path.relative_to(source_root).as_posix()
@@ -329,13 +503,26 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     cargo = _resolve_tool("cargo")
     rustc = _resolve_tool("rustc")
     toolchain = _toolchain(cargo, rustc, source_root)
+    _validate_toolchain_lock(crate, toolchain)
     linker = _resolve_tool(
         "rust-lld",
         sysroot=Path(_run([str(rustc), "--print", "sysroot"], cwd=source_root)),
     )
     output_dir.mkdir(parents=True, exist_ok=False)
+    _reject_ancestor_cargo_config(output_dir)
     build_crate = output_dir / ".build-input"
     shutil.copytree(crate, build_crate)
+    snapshot_entries = [
+        _entry(path, build_crate)
+        for path in _regular_files(build_crate)
+        if "target" not in path.relative_to(build_crate).parts
+    ]
+    if [
+        {**item, "path": item["path"]}
+        for item in source_entries
+        if item["path"] != "scripts/build_native_hermetic_package.py"
+    ] != snapshot_entries:
+        raise BuildBlocked("source snapshot does not match pinned source identities")
     with tempfile.TemporaryDirectory(prefix="nf1-cargo-home-") as cargo_home:
         target_dir = output_dir / ".target"
         environment = {
@@ -404,23 +591,40 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         },
         "toolchain": toolchain,
         "environment": {
-            key: (
-                "toolchain:rust-lld"
-                if key == "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER"
-                else environment[key]
-            )
-            for key in (
-                "SOURCE_DATE_EPOCH",
-                "TZ",
-                "LC_ALL",
-                "LANG",
-                "CARGO_INCREMENTAL",
-                "CARGO_NET_OFFLINE",
-                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER",
-                "RUSTUP_TOOLCHAIN",
-            )
+            "PATH": "toolchain:bin-only",
+            "HOME": "isolated:non-user-empty-home",
+            "CARGO_HOME": "isolated:fresh-empty-cargo-home",
+            "RUSTC": "toolchain:locked-rustc",
+            "SOURCE_DATE_EPOCH": environment["SOURCE_DATE_EPOCH"],
+            "TZ": environment["TZ"],
+            "LC_ALL": environment["LC_ALL"],
+            "LANG": environment["LANG"],
+            "CARGO_INCREMENTAL": environment["CARGO_INCREMENTAL"],
+            "CARGO_NET_OFFLINE": environment["CARGO_NET_OFFLINE"],
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER": (
+                "toolchain:locked-rust-lld"
+            ),
+            "RUSTUP_TOOLCHAIN": environment["RUSTUP_TOOLCHAIN"],
+            "RUSTFLAGS": environment["RUSTFLAGS"].replace(
+                str(build_crate), "/build-input"
+            ),
+            "WRAPPER_AND_AMBIENT_KNOBS": "rejected:not-in-subprocess-environment",
         },
         "build": {
+            "argv": [
+                "cargo",
+                "build",
+                "--manifest-path",
+                "/build-input/Cargo.toml",
+                "--release",
+                "--target",
+                TARGET,
+                "--target-dir",
+                "/build-output",
+                "--locked",
+                "--offline",
+                "--frozen",
+            ],
             "offline": True,
             "locked": True,
             "frozen": True,
@@ -435,6 +639,15 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         "package_entries": package_entries,
     }
     _reject_authority_metadata(provenance)
+    if _git_identity(source_root) != identity:
+        raise BuildBlocked("source VCS identity changed during build")
+    current_entries = [_entry(crate / path, crate) for path in sorted(found)]
+    if current_entries != source_entries[:-1]:
+        raise BuildBlocked("source inputs changed during build")
+    end_toolchain = _toolchain(cargo, rustc, source_root)
+    _validate_toolchain_lock(crate, end_toolchain)
+    if end_toolchain != toolchain:
+        raise BuildBlocked("toolchain closure changed during build")
     manifest = output_dir / "native-hermetic-provenance.json"
     manifest.write_bytes(_canonical_json(provenance))
     archive = output_dir / "native-hermetic-package.tar"

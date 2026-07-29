@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import copy
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -47,6 +49,8 @@ def test_authority_metadata_is_rejected() -> None:
         "PASS",
         "eligibility",
         "publication_authority",
+        "actorId",
+        "release_eligibility",
     ):
         with pytest.raises(MODULE.BuildBlocked, match="authority metadata"):
             MODULE._reject_authority_metadata({"nested": [{key: "forbidden"}]})
@@ -67,6 +71,83 @@ def test_symlink_input_is_rejected(tmp_path: Path) -> None:
     _git("commit", "-qm", "add symlink", cwd=source)
     with pytest.raises(MODULE.BuildBlocked, match="symlink"):
         MODULE.build(source, tmp_path / "output")
+
+
+def test_hardlinked_input_is_rejected(tmp_path: Path) -> None:
+    source = _source_repo(tmp_path)
+    original = source / "native/hermetic-package/src/main.rs"
+    original.with_name("alias.rs").hardlink_to(original)
+    _git("add", ".", cwd=source)
+    _git("commit", "-qm", "add hardlink", cwd=source)
+    with pytest.raises(MODULE.BuildBlocked, match="multiply-linked"):
+        MODULE.build(source, tmp_path / "output")
+
+
+def test_hostile_output_ancestor_cargo_config_is_rejected(tmp_path: Path) -> None:
+    source = _source_repo(tmp_path)
+    hostile = tmp_path / "hostile"
+    (hostile / ".cargo").mkdir(parents=True)
+    (hostile / ".cargo/config.toml").write_text("[build]\nrustflags=['bad']\n")
+    with pytest.raises(MODULE.BuildBlocked, match="ancestor Cargo config"):
+        MODULE.build(source, hostile / "output")
+
+
+def _elf(*, interp: bool = False, needed: bool = False) -> bytes:
+    phnum = 1 if interp else 0
+    shnum = 1 if needed else 0
+    phoff = 64
+    shoff = phoff + phnum * 56
+    dynamic_offset = shoff + shnum * 64
+    data = bytearray(dynamic_offset + (16 if needed else 0))
+    data[:16] = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
+    struct.pack_into(
+        "<HHIQQQIHHHHHH",
+        data,
+        16,
+        2,
+        62,
+        1,
+        0,
+        phoff,
+        shoff,
+        0,
+        64,
+        56,
+        phnum,
+        64,
+        shnum,
+        0,
+    )
+    if interp:
+        struct.pack_into("<I", data, phoff, 3)
+    if needed:
+        struct.pack_into("<I", data, shoff + 4, 6)
+        struct.pack_into("<QQ", data, shoff + 24, dynamic_offset, 16)
+        struct.pack_into("<Q", data, shoff + 56, 16)
+        struct.pack_into("<qQ", data, dynamic_offset, 1, 0)
+    return bytes(data)
+
+
+def test_bounds_checked_elf_parser_rejects_false_and_dynamic_elf(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime"
+    for payload, match in (
+        (b"\x7fELFfake libc.so", "bounds-valid"),
+        (_elf(interp=True), "PT_INTERP"),
+        (_elf(needed=True), "DT_NEEDED"),
+    ):
+        path.write_bytes(payload)
+        with pytest.raises(MODULE.BuildBlocked, match=match):
+            MODULE._elf_static_assertions(path)
+    path.write_bytes(_elf())
+    assert MODULE._elf_static_assertions(path)["pt_interp"] is False
+
+
+def test_authority_value_is_rejected() -> None:
+    for value in ("use signer capability", "release PASS", "trust-anchor"):
+        with pytest.raises(MODULE.BuildBlocked, match="value"):
+            MODULE._reject_authority_metadata({"schema": value})
 
 
 @pytest.mark.parametrize("tool_name", ["cargo", "rustc", "rust-lld"])
@@ -90,6 +171,31 @@ def test_toolchain_or_linker_mutation_changes_provenance(
     after = MODULE._tool_record(mutated, "pinned")
     assert before["sha256"] != after["sha256"]
     assert before["size"] != after["size"]
+
+
+@pytest.mark.parametrize("tool_name", ["cargo", "rust-lld"])
+def test_mutated_tool_is_injected_into_builder_and_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_name: str
+) -> None:
+    source = _source_repo(tmp_path)
+    original_resolve = MODULE._resolve_tool
+    rustc = original_resolve("rustc")
+    sysroot = Path(
+        subprocess.check_output([str(rustc), "--print", "sysroot"], text=True).strip()
+    )
+    original = original_resolve(tool_name, sysroot=sysroot)
+    mutated = tmp_path / tool_name
+    shutil.copy2(original, mutated)
+    mutated.write_bytes(mutated.read_bytes() + b"NF1 injected mutation")
+
+    def resolve(name: str, *, sysroot=None):
+        if name == tool_name:
+            return mutated
+        return original_resolve(name, sysroot=sysroot)
+
+    monkeypatch.setattr(MODULE, "_resolve_tool", resolve)
+    with pytest.raises(MODULE.BuildBlocked, match="repository lock"):
+        MODULE.build(source, tmp_path / "output")
 
 
 def test_ambient_cargo_configuration_is_ignored(
@@ -132,6 +238,7 @@ def test_two_independent_clean_clones_are_byte_identical(tmp_path: Path) -> None
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
+        "toolchain-lock.json",
         ".cargo/config.toml",
         "generated/source_epoch.rs",
         "src/main.rs",
@@ -143,6 +250,50 @@ def test_two_independent_clean_clones_are_byte_identical(tmp_path: Path) -> None
     assert manifest["cargo_resolution"]["vendor_entries"] == []
     assert manifest["runtime_closure"]["pt_interp"] is False
     assert manifest["runtime_closure"]["dt_needed"] == []
+    assert manifest["build"]["argv"][0] == "cargo"
+    assert manifest["environment"]["HOME"] == "isolated:non-user-empty-home"
+
+
+def test_concurrent_source_change_blocks_at_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source_repo(tmp_path)
+    original_run = MODULE._run
+    changed = False
+
+    def run_and_mutate(argv, *, cwd, env=None):
+        nonlocal changed
+        result = original_run(argv, cwd=cwd, env=env)
+        if len(argv) > 1 and argv[1] == "build" and not changed:
+            changed = True
+            path = source / "native/hermetic-package/src/main.rs"
+            path.write_bytes(path.read_bytes() + b"\n// concurrent mutation\n")
+        return result
+
+    monkeypatch.setattr(MODULE, "_run", run_and_mutate)
+    with pytest.raises(MODULE.BuildBlocked, match="dirty|VCS identity|source inputs"):
+        MODULE.build(source, tmp_path / "output")
+
+
+def test_concurrent_tool_change_blocks_end_reverification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source_repo(tmp_path)
+    original_toolchain = MODULE._toolchain
+    calls = 0
+
+    def changed_at_end(cargo, rustc, source_root):
+        nonlocal calls
+        calls += 1
+        observed = original_toolchain(cargo, rustc, source_root)
+        if calls > 1:
+            observed = copy.deepcopy(observed)
+            observed["linker"]["sha256"] = "0" * 64
+        return observed
+
+    monkeypatch.setattr(MODULE, "_toolchain", changed_at_end)
+    with pytest.raises(MODULE.BuildBlocked, match="repository lock|changed"):
+        MODULE.build(source, tmp_path / "output")
 
 
 @pytest.mark.parametrize(

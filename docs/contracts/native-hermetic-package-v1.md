@@ -50,10 +50,14 @@ explicitly empty. Adding one without a content-bound vendor tree returns
 - `native-hermetic-digests.json`: SHA-256 identities for the manifest, archive
   and runtime.
 
-The runtime must be ELF and have neither `PT_INTERP` nor `DT_NEEDED`. If an
-ELF inspection tool is unavailable, the builder performs a conservative loader
-reference scan and records that method; any suspected dynamic dependency
-blocks.
+The runtime must be a bounds-valid ELF64 file and have neither `PT_INTERP` nor
+`DT_NEEDED`. The builder parses ELF/program/section/dynamic table boundaries
+itself; it never translates a missing external `readelf` into PASS.
+
+The repository toolchain lock pins `rustup`, Cargo, rustc, rust-lld, the full
+host Rust sysroot/shared closure, the full target musl sysroot/libc closure and
+the host OS/kernel identity. Self-reported versions alone are insufficient.
+Every tool and closure is rehashed after the build.
 
 ## Reproducibility and negative evidence
 
