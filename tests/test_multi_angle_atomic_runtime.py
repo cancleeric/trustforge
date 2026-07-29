@@ -671,7 +671,8 @@ def test_batch_allocation_zero_cap_consumes_slot_and_cannot_later_go_live(
             flow._stage_claim_extraction(package)
 
 
-def test_restart_reuses_deterministic_owner_but_cannot_reconsume_slot(tmp_path):
+def test_restart_reuses_deterministic_owner_but_cannot_reconsume_slot(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: False)
     with AnalysisFlow(tmp_path / "flow.db") as flow:
         result = flow.submit_multi_angle(
             "BTC", "owner binding", caller_id="caller", idempotency_key="owner-key"
@@ -686,7 +687,8 @@ def test_restart_reuses_deterministic_owner_but_cannot_reconsume_slot(tmp_path):
         assert restarted["allocation_owner_token"] == first["allocation_owner_token"]
 
 
-def test_same_package_step1_retry_cannot_consume_twice(tmp_path):
+def test_same_package_step1_retry_cannot_consume_twice(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: False)
     with AnalysisFlow(tmp_path / "flow.db") as flow:
         result = flow.submit_multi_angle(
             "BTC", "step1 once", caller_id="caller", idempotency_key="step1-key"
@@ -726,6 +728,7 @@ def test_same_package_step2_retry_cannot_consume_twice(tmp_path, monkeypatch):
 
 
 def test_atomic_claim_extraction_caps_prompt_documents(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: False)
     observed = []
 
     class FakeClient:
