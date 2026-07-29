@@ -56,6 +56,8 @@ STAGES = ("source_ingestion", "claim_extraction", "trust_reasoning", "evidence_a
 # sitting stuck indefinitely. It is also well above the 30s max retry backoff
 # used elsewhere in this module, so it never races an in-flight retry.
 STALE_RUNNING_JOB_THRESHOLD_SECONDS = 600
+_WAL_NEGOTIATION_LOCK = threading.Lock()
+_SCHEMA_INIT_LOCK = threading.Lock()
 MODES: dict[str, tuple[QuestionType, str]] = {
     "risk": (QuestionType.MULTI_SOURCE, "評估{coin}整體信任狀態，並標記任何正在形成的操縱風險。"),
     "sentiment": (QuestionType.MULTI_SOURCE, "分析{coin}市場情緒、分歧與反方訊號。"),
@@ -78,6 +80,12 @@ def _bounded_text(value: str, *, chars: int, byte_cap: int) -> str:
     text = str(value)[:chars]
     encoded = text.encode("utf-8")[:byte_cap]
     return encoded.decode("utf-8", errors="ignore")
+
+
+def _atomic_owner_token(batch_id: str, mode: str, job_id: str) -> str:
+    """Return the stable authority owner for an immutable allocation identity."""
+    identity = f"{batch_id}\0{mode}\0{job_id}".encode("utf-8")
+    return f"allocation-{hashlib.sha256(identity).hexdigest()[:48]}"
 
 
 def _multi_angle_doc_line(doc) -> str:
@@ -445,7 +453,11 @@ class AnalysisFlow:
         self._adopted: set[str] = set()
         self._atomic_batch_store = atomic_batch_store
         if not readonly:
-            self._init_schema()
+            # The additive migrations below use inspect-then-ALTER. Serialize
+            # construction within this process so concurrent HTTP requests
+            # cannot both act on the same stale table_info result.
+            with _SCHEMA_INIT_LOCK:
+                self._init_schema()
 
     def _readonly_store_missing(self) -> bool:
         return self.readonly and not self.path.exists()
@@ -463,9 +475,20 @@ class AnalysisFlow:
                 isolation_level=None, check_same_thread=False, **kwargs,
             )
             conn.row_factory = sqlite3.Row
-            if not self.readonly:
-                conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute(f"PRAGMA busy_timeout={2000 if self.readonly else 10000}")
+            try:
+                conn.execute(
+                    f"PRAGMA busy_timeout={2000 if self.readonly else 10000}"
+                )
+                if not self.readonly:
+                    # ThreadingHTTPServer may construct several flow instances
+                    # concurrently. WAL negotiation is database-global, so
+                    # serialize it within this process; other processes remain
+                    # bounded by SQLite's connection/busy timeout above.
+                    with _WAL_NEGOTIATION_LOCK:
+                        conn.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                conn.close()
+                raise
             self._local.conn = conn
             with self._connections_lock: self._connections.append(conn)
         return conn
@@ -579,7 +602,10 @@ class AnalysisFlow:
         """)
         # SQLite deployments created before manual priority support need an
         # additive migration.  Defaults preserve the previous scheduled-job
-        # semantics for every existing row.
+        # semantics for every existing row. BEGIN IMMEDIATE makes the
+        # inspect-then-ALTER sequence safe across processes as well as threads:
+        # a waiter re-reads table_info only after the active migrator commits.
+        conn.execute("BEGIN IMMEDIATE")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(analysis_jobs)").fetchall()}
         if "origin" not in columns:
             conn.execute("ALTER TABLE analysis_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'scheduled'")
@@ -633,6 +659,7 @@ class AnalysisFlow:
                 """ALTER TABLE analysis_atomic_projection_queue
                    ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'"""
             )
+        conn.commit()
         TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
         # memory existed. Deterministic IDs make this migration restart-safe.
@@ -1861,9 +1888,9 @@ class AnalysisFlow:
         failures = self._conn().execute(
             """SELECT d.job_id,d.error FROM analysis_dead_letters d
                JOIN analysis_jobs j USING(job_id)
-               JOIN analysis_atomic_owners o USING(job_id)
                LEFT JOIN analysis_atomic_terminal_failures f USING(job_id)
-               WHERE j.state='failed' AND f.job_id IS NULL"""
+               WHERE j.state='failed' AND j.atomic_batch_id IS NOT NULL
+                 AND f.job_id IS NULL"""
         ).fetchall()
         for failure in failures:
             terminal = (
@@ -1898,18 +1925,62 @@ class AnalysisFlow:
         if state not in {"failed", "timeout"}:
             raise ValueError("invalid atomic failure state")
         row = self._conn().execute(
-            """SELECT o.batch_id,o.mode,o.owner_token,j.atomic_batch_id
-               FROM analysis_atomic_owners o JOIN analysis_jobs j USING(job_id)
+            """SELECT j.atomic_batch_id AS batch_id,j.atomic_mode AS mode,
+                      o.owner_token
+               FROM analysis_jobs j
                JOIN analysis_dead_letters d USING(job_id)
-               WHERE o.job_id=? AND j.state='failed'""",
+               LEFT JOIN analysis_atomic_owners o USING(job_id)
+               WHERE j.job_id=? AND j.state='failed'
+                 AND j.atomic_batch_id IS NOT NULL
+                 AND j.atomic_mode IS NOT NULL""",
             (job_id,),
         ).fetchone()
-        if row is None or row["batch_id"] != row["atomic_batch_id"]:
+        if row is None:
             return False
         authority = self._atomic_store()
+        owner_token = row["owner_token"] or _atomic_owner_token(
+            row["batch_id"], row["mode"], job_id
+        )
+        config_version = os.getenv(
+            "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
+        ).strip() or "local-v1"
+        expected_batch_cost = (
+            Decimal(str(budget_guard.multi_angle_angle_max_cost_usd()))
+            * len(MODES)
+        ).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
+        if row["owner_token"] is None:
+            try:
+                authority.claim_allocation(
+                    batch_id=row["batch_id"], mode=row["mode"], job_id=job_id,
+                    owner_token=owner_token, config_version=config_version,
+                    expected_amount_usd=expected_batch_cost / len(MODES),
+                )
+            except Exception:
+                # A different authority owner, malformed allocation, or
+                # unavailable authority is never permission to steal or release.
+                return False
+            self._conn().execute(
+                """INSERT INTO analysis_atomic_owners
+                   (job_id,batch_id,mode,owner_token,claimed_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(job_id) DO UPDATE SET
+                     batch_id=excluded.batch_id,mode=excluded.mode,
+                     owner_token=excluded.owner_token
+                   WHERE analysis_atomic_owners.owner_token=excluded.owner_token""",
+                (job_id, row["batch_id"], row["mode"], owner_token, time.time()),
+            )
+        projected = self._conn().execute(
+            """SELECT batch_id,mode,owner_token FROM analysis_atomic_owners
+               WHERE job_id=?""",
+            (job_id,),
+        ).fetchone()
+        if projected is None or tuple(projected) != (
+            row["batch_id"], row["mode"], owner_token
+        ):
+            return False
         statuses = authority.call_accounting_state(
             batch_id=row["batch_id"], mode=row["mode"], job_id=job_id,
-            owner_token=row["owner_token"],
+            owner_token=owner_token,
         )
         if "uncertain" in statuses.values():
             return False
@@ -1918,11 +1989,11 @@ class AnalysisFlow:
                 continue
             authority.cancel_call_slot(
                 batch_id=row["batch_id"], mode=row["mode"], job_id=job_id,
-                owner_token=row["owner_token"], slot=slot,
+                owner_token=owner_token, slot=slot,
             )
         authority.record_job_terminal(
             batch_id=row["batch_id"], mode=row["mode"], job_id=job_id,
-            owner_token=row["owner_token"], state=state,
+            owner_token=owner_token, state=state,
         )
         self._conn().execute(
             """INSERT OR REPLACE INTO analysis_atomic_terminal_failures
@@ -2224,12 +2295,22 @@ class AnalysisFlow:
                     )
                     # In-process retries retain intermediate objects. After a daemon
                     # restart adopt_due_retries safely reconstructs from stage 1.
-                    def release_in_process() -> None:
+                    retry_package = {
+                        **package,
+                        "retries": dict(package.get("retries", {})),
+                    }
+
+                    def release_in_process(
+                        retry_job_id: str = job_id,
+                        retry_stage: str = stage,
+                        retry_payload: dict = retry_package,
+                    ) -> None:
                         cursor = self._conn().execute(
                             "DELETE FROM analysis_retry_queue WHERE job_id=? AND stage=? AND next_retry_at<=?",
-                            (job_id, stage, time.time()),
+                            (retry_job_id, retry_stage, time.time()),
                         )
-                        if cursor.rowcount: self._put_package(stage, package)
+                        if cursor.rowcount:
+                            self._put_package(retry_stage, retry_payload)
                     timer = threading.Timer(delay, release_in_process)
                     timer.daemon = True; timer.start()
                     self._timers.append(timer)
@@ -2310,7 +2391,8 @@ class AnalysisFlow:
         batch_allocation = bool(batch_id)
         if batch_allocation:
             owner_token = package.setdefault(
-                "allocation_owner_token", f"attempt-{secrets.token_hex(24)}"
+                "allocation_owner_token",
+                _atomic_owner_token(batch_id, job["atomic_mode"], job["job_id"]),
             )
             config_version = os.getenv(
                 "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""

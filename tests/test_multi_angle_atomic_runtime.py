@@ -349,7 +349,7 @@ def test_batch_allocation_zero_cap_consumes_slot_and_cannot_later_go_live(
             flow._stage_claim_extraction(package)
 
 
-def test_restart_attempt_owner_cannot_reconsume_claimed_allocation(tmp_path):
+def test_restart_reuses_deterministic_owner_but_cannot_reconsume_slot(tmp_path):
     with AnalysisFlow(tmp_path / "flow.db") as flow:
         result = flow.submit_multi_angle(
             "BTC", "owner binding", caller_id="caller", idempotency_key="owner-key"
@@ -357,10 +357,11 @@ def test_restart_attempt_owner_cannot_reconsume_claimed_allocation(tmp_path):
         job_id = result["job_ids"]["risk"]
         first = flow._stage_source_ingestion({"job_id": job_id})
         flow._stage_claim_extraction(first)
-        assert first["allocation_owner_token"].startswith("attempt-")
+        assert first["allocation_owner_token"].startswith("allocation-")
         restarted = flow._stage_source_ingestion({"job_id": job_id})
         with pytest.raises(MultiAngleAuthorityError):
             flow._stage_claim_extraction(restarted)
+        assert restarted["allocation_owner_token"] == first["allocation_owner_token"]
 
 
 def test_same_package_step1_retry_cannot_consume_twice(tmp_path):

@@ -365,6 +365,54 @@ def test_final_dead_letter_is_durable_before_failure_finalizer(
     assert all(item == ("failed", "failed", 1) for item in observed)
 
 
+def test_concurrent_flow_initialization_serializes_wal_negotiation(tmp_path):
+    path = tmp_path / "concurrent-init.sqlite3"
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def initialize():
+        try:
+            barrier.wait(timeout=2)
+            with AnalysisFlow(path):
+                pass
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=initialize) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def test_wal_negotiation_failure_is_bounded_and_closes_connection(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    class Connection:
+        row_factory = None
+
+        def execute(self, statement):
+            calls.append(statement)
+            if statement == "PRAGMA journal_mode=WAL":
+                raise sqlite3.OperationalError("database is locked")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.sqlite3.connect", lambda *_args, **_kwargs: Connection()
+    )
+    started = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        AnalysisFlow(tmp_path / "locked.sqlite3")
+    assert time.monotonic() - started < 1
+    assert calls == ["PRAGMA busy_timeout=10000", "PRAGMA journal_mode=WAL", "close"]
+
+
 def test_prune_keeps_referenced_snapshots(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")
