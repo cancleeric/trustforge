@@ -146,7 +146,7 @@ def validate_evidence_eligible(entry: MemoryEntry) -> None:
 # ─── Migration ───────────────────────────────────────────────────────────────
 
 
-def upgrade(conn: sqlite3.Connection) -> None:
+def _upgrade(conn: sqlite3.Connection) -> None:
     """Create Memory OS tables (idempotent).
 
     NOTE: Authorization is checked by ensure_schema() BEFORE this function
@@ -262,7 +262,7 @@ class MemoryRepository:
         """
         from .agos_db_auth import verify_db_authorization
         verify_db_authorization("memory_os")
-        upgrade(self._connect())
+        _upgrade(self._connect())
 
     def save(self, entry: MemoryEntry) -> None:
         """Insert a memory entry. Fails on duplicate (provider, content_hash).

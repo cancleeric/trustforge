@@ -336,14 +336,14 @@ class SkillLoader:
         conn.commit()
         return proposal
 
-    def approve_activation(self, proposal_id: str, approved_by: str, *, sandbox_passed: bool = False) -> None:
+    def approve_activation(self, proposal_id: str, approved_by: str) -> None:
         """Approve an activation proposal.
 
         Requires external sandbox evidence file at:
           /tmp/eric-sandbox-{skill_id}-{revision_hash[:16]}.evidence
 
-        The file must exist and contain "sandbox_passed {skill_id} {date}".
-        This is NOT a caller boolean — it requires out-of-band evidence.
+        The file must exist and contain "sandbox_passed {skill_id} YYYY-MM-DD".
+        skill_id validated to [a-z0-9-] only (no path traversal).
         """
         conn = self._registry._connect()
         row = conn.execute(
@@ -358,15 +358,26 @@ class SkillLoader:
         skill_id = row[1]
         revision_hash = row[2]
 
-        # Verify external sandbox evidence file exists
+        import re as _re
+        if not _re.match(r'^[a-z0-9][a-z0-9\-]*$', skill_id):
+            raise ValueError(
+                f"skill_id '{skill_id}' contains invalid characters; "
+                f"must match [a-z0-9-]"
+            )
+
         from pathlib import Path
         from datetime import datetime, timezone as tz
-        today = datetime.now(tz.utc).strftime("%Y-%m-%d")
-        evidence_path = Path(f"/tmp/eric-sandbox-{skill_id}-{revision_hash[:16]}.evidence")
+        from .agos_db_auth import _is_pytest
 
-        # In pytest, bypass file check (same pattern as DB auth)
-        import sys
-        if "_pytest.config" not in sys.modules:
+        today = datetime.now(tz.utc).strftime("%Y-%m-%d")
+        filename = f"eric-sandbox-{skill_id}-{revision_hash[:16]}.evidence"
+        evidence_path = Path("/tmp") / filename
+
+        resolved = evidence_path.resolve()
+        if not (str(resolved).startswith("/tmp/") or str(resolved).startswith("/private/tmp/")):
+            raise ValueError(f"sandbox evidence path escapes /tmp: {resolved}")
+
+        if not _is_pytest():
             if not evidence_path.exists():
                 raise ValueError(
                     f"sandbox evidence file not found: {evidence_path}\n"
@@ -378,7 +389,7 @@ class SkillLoader:
                 raise ValueError(
                     f"sandbox evidence content mismatch.\n"
                     f"  Expected: '{expected}'\n"
-                    f"  Got: '{content}'"
+                    f"  Got:      '{content}'"
                 )
 
         conn.execute(

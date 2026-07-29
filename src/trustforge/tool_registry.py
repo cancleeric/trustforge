@@ -130,7 +130,7 @@ def invocation_output_hash(output: dict[str, Any] | str) -> str:
 # ─── Migration ───────────────────────────────────────────────────────────────
 
 
-def upgrade(conn: sqlite3.Connection) -> None:
+def _upgrade(conn: sqlite3.Connection) -> None:
     """Create Tool Registry tables (idempotent).
 
     NOTE: Authorization is checked by ensure_schema() BEFORE this function
@@ -241,7 +241,7 @@ class ToolRegistryRepository:
         """
         from .agos_db_auth import verify_db_authorization
         verify_db_authorization("tool_registry")
-        upgrade(self._connect())
+        _upgrade(self._connect())
 
     # ─── Tool Capability CRUD ────────────────────────────────────────────
 
@@ -380,9 +380,14 @@ class ToolRegistryRepository:
     # ─── Invocation Audit ────────────────────────────────────────────────
 
     def record_invocation(self, inv: ToolInvocation) -> None:
-        """Record a tool invocation (append-only)."""
-        if inv.status not in VALID_STATUSES:
-            raise ValueError(f"invalid status: {inv.status!r}")
+        """Record a tool invocation (append-only).
+
+        Status MUST be 'pending' on INSERT — this is the only valid initial state.
+        """
+        if inv.status != "pending":
+            raise ValueError(
+                f"invocation must be recorded with status='pending', got '{inv.status}'"
+            )
 
         conn = self._connect()
         conn.execute(
@@ -415,11 +420,16 @@ class ToolRegistryRepository:
     ) -> None:
         """Update an invocation's completion status.
 
-        State-machine guard: only 'pending' invocations can be completed.
-        Raises ValueError if invocation not found or already completed.
+        State-machine: only pending → {success,failed,timeout,rejected} allowed.
+        Raises ValueError on:
+          - invocation not found
+          - already completed (not pending)
+          - target status is 'pending' (pending→pending not allowed)
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"invalid status: {status!r}")
+        if status == "pending":
+            raise ValueError("cannot transition to 'pending'; use a terminal status")
 
         conn = self._connect()
         row = conn.execute(

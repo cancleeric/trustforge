@@ -16,7 +16,7 @@ from trustforge.tool_registry import (
     invocation_input_hash,
     invocation_output_hash,
     rollback,
-    upgrade,
+    _upgrade as upgrade,
 )
 
 
@@ -299,8 +299,8 @@ class TestInvocationAudit:
 
     def test_invalid_status_raises(self, repo: ToolRegistryRepository):
         repo.register_tool(_make_cap(tool_id="status-tool"))
-        inv = _make_invocation(tool_id="status-tool", status="invalid_status")
-        with pytest.raises(ValueError, match="invalid status"):
+        inv = _make_invocation(tool_id="status-tool", status="success")
+        with pytest.raises(ValueError, match="must be recorded with status='pending'"):
             repo.record_invocation(inv)
 
 

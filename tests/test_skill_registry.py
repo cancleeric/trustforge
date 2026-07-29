@@ -18,7 +18,7 @@ from trustforge.skill_registry import (
     TaskSkill,
     revision_hash_for,
     rollback,
-    upgrade,
+    _upgrade as upgrade,
 )
 
 

@@ -122,7 +122,7 @@ def revision_hash_for(content: dict[str, Any]) -> str:
 # ─── Migration ───────────────────────────────────────────────────────────────
 
 
-def upgrade(conn: sqlite3.Connection) -> None:
+def _upgrade(conn: sqlite3.Connection) -> None:
     """Create Skill Registry tables (idempotent).
 
     NOTE: Authorization is checked by ensure_schema() BEFORE this function
@@ -230,7 +230,7 @@ class SkillRegistryRepository:
         """
         from .agos_db_auth import verify_db_authorization
         verify_db_authorization("skill_registry")
-        upgrade(self._connect())
+        _upgrade(self._connect())
 
     # ─── Skill CRUD ──────────────────────────────────────────────────────
 

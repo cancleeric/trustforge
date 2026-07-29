@@ -18,7 +18,7 @@ from trustforge.memory_os import (
     MemoryRepository,
     memory_content_hash,
     rollback,
-    upgrade,
+    _upgrade as upgrade,
     validate_evidence_eligible,
 )
 

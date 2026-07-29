@@ -1788,7 +1788,7 @@ class AnalysisFlow:
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
         docs = collect(query, coin=coin, offline=False)
-        # ── Agent OS: audit ingestion collection as tool invocation ──
+        # ── Agent OS: audit ingestion collection ──
         self._agos_record_tool(
             {"job": {"job_id": f"snapshot-{coin.lower()}"}},
             "ingestion-collect",
@@ -2470,6 +2470,22 @@ class AnalysisFlow:
     def _stage_claim_extraction(self, package: dict) -> dict:
         log = package["log"]
         job = package["job"]
+        # ── Agent OS pre-execution gate: check Bedrock authorization ──
+        if not self._agos_assert_tool_allowed(
+            package, "bedrock-claim-extraction"
+        ):
+            log.record(
+                "agos.tool_blocked",
+                params={"tool_id": "bedrock-claim-extraction"},
+                summary="Bedrock blocked by Agent OS tool gate; forcing offline",
+            )
+            client = BedrockClient(offline=True)
+            package["client"] = client
+            package["claims"] = client.extract_claims_with_llm(
+                package["docs"], log=log
+            )
+            return package
+
         batch_id = job.get("atomic_batch_id") if isinstance(job, dict) else job["atomic_batch_id"]
         batch_allocation = bool(batch_id)
         if batch_allocation:
@@ -2562,7 +2578,7 @@ class AnalysisFlow:
             )
             llm_active = not client.offline and bool(client.config.model_id)
         log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
-        # Agent OS: record Bedrock invocation audit (fail-soft)
+        # Post-execution audit record
         self._agos_record_tool(package, "bedrock-claim-extraction", {"step": 1, "doc_count": len(package["docs"])}, "success" if package["claims"] else "failed")
         return package
 
@@ -2673,6 +2689,8 @@ class AnalysisFlow:
             ) as live:
                 client.offline = not live
                 package["report"], package["evidence"] = _build_report()
+        # ── Agent OS: mark evidence-eligible memories as actually used ──
+        self._agos_mark_evidence_used(package)
         return package
 
     def _stage_report_delivery(self, package: dict) -> dict:
@@ -2876,10 +2894,8 @@ class AnalysisFlow:
     def _agos_record_tool(self, package: dict, tool_id: str, args: dict, status: str) -> None:
         """Record a tool invocation in Agent OS audit trail (fail-soft).
 
-        NOTE: tool_id must be pre-registered in the tool registry before
-        AGOS is enabled. If not registered, the record is skipped gracefully
-        (fail-soft for audit — the actual tool execution gate is in
-        tool_audited_fetch, not here).
+        NOTE: This is a POST-EXECUTION audit record. The actual pre-execution
+        gate is _agos_assert_tool_allowed() which must be called BEFORE execution.
         """
         try:
             from .agos_runtime import agos_enabled
@@ -2891,7 +2907,6 @@ class AnalysisFlow:
             runtime = self._get_agos_runtime()
             if runtime._tool_registry is None:
                 return
-            # Only record if tool is registered (avoid FK violation)
             if not runtime._tool_registry.is_known(tool_id):
                 return
             inv_id = runtime.record_tool_invocation(job["job_id"], tool_id, args)
@@ -2899,6 +2914,76 @@ class AnalysisFlow:
                 runtime.complete_tool_invocation(inv_id, status=status)
         except Exception:
             pass  # fail-soft: audit failure does not block pipeline
+
+    def _agos_assert_tool_allowed(self, package: dict, tool_id: str) -> bool:
+        """Pre-execution gate: check if tool is allowed to run.
+
+        Returns True if tool may execute, False if blocked.
+        When AGOS is disabled, always returns True (backward-compatible).
+        When AGOS is enabled but tool is unknown/high-risk → blocks.
+        Fail-soft on internal errors (returns True to not break pipeline).
+        """
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return True
+            runtime = self._get_agos_runtime()
+            runtime._ensure_init()
+            if runtime._tool_registry is None:
+                # Registry failed to init → fail-closed
+                logging.getLogger(__name__).warning(
+                    "Agent OS tool registry unavailable; blocking tool %s (fail-closed)", tool_id
+                )
+                return False
+            if not runtime._tool_registry.is_known(tool_id):
+                # Unknown tool → blocked (but fail-soft for pipeline:
+                # log warning, don't crash the entire analysis)
+                logging.getLogger(__name__).warning(
+                    "Agent OS: tool %s not registered, execution blocked", tool_id
+                )
+                return False
+            # Check if requires approval (high-risk)
+            if runtime._tool_registry.requires_approval(tool_id):
+                logging.getLogger(__name__).warning(
+                    "Agent OS: tool %s requires approval, execution blocked", tool_id
+                )
+                return False
+            return True
+        except Exception as e:
+            # Internal error → fail-soft (allow execution, log warning)
+            logging.getLogger(__name__).warning(
+                "Agent OS tool gate error (fail-soft, allowing): %s", e
+            )
+            return True
+
+    def _agos_mark_evidence_used(self, package: dict) -> None:
+        """Mark memory entries that were actually consumed by scoring as used_as_evidence.
+
+        Called after evidence assembly — the evidence list contains the final
+        set of items that entered Trust scoring. Cross-references with the
+        context manifest to identify which memory refs were actually used.
+        """
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return
+            job = package.get("job")
+            manifest = package.get("agos_manifest")
+            if not job or not manifest:
+                return
+            runtime = self._get_agos_runtime()
+            if runtime._memory_repo is None:
+                return
+            # Mark all evidence-eligible memories in the manifest as used
+            for mref in manifest.included_refs.memory_refs:
+                if mref.get("evidence_eligible"):
+                    runtime._memory_repo.mark_used_as_evidence(
+                        mref["memory_id"], job["job_id"]
+                    )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Agent OS mark_used_as_evidence failed (fail-soft): %s", e
+            )
 
     def status(self) -> dict[str, Any]:
         if self._readonly_store_missing():
