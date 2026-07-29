@@ -280,12 +280,19 @@ class ContextBuilder:
 
         Processes references, applies exclusion logic, computes deterministic hash.
         """
-        included = IncludedRefs(
-            snapshot_ref=snapshot_ref,
-            question_ref=question_ref,
-        )
+        included = IncludedRefs(snapshot_ref=snapshot_ref)
         excluded: list[ExcludedRef] = []
         token_used = 0
+
+        if question_ref is not None:
+            question_cost = estimate_tokens(question_ref)
+            if question_cost > token_budget:
+                excluded.append(
+                    ExcludedRef("question", "question", EXCLUSION_OVER_BUDGET)
+                )
+            else:
+                included.question_ref = question_ref
+                token_used = question_cost
 
         # 1. Process memory refs
         for mref in (memory_refs or []):

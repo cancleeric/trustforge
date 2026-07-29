@@ -209,6 +209,16 @@ class AgosRuntime:
             # retryable within the same process.
             self._initialized = True
         except Exception as e:
+            # Never expose repositories whose schema initialization only
+            # partially completed. Close and clear every component so the
+            # next call performs a clean retry.
+            self.close()
+            self._retrieval_adapter = None
+            self._context_builder = None
+            self._tool_registry = None
+            self._skill_loader = None
+            self._skill_registry = None
+            self._memory_repo = None
             self._initialized = False
             logger.warning(f"Agent OS initialization failed: {e}")
 

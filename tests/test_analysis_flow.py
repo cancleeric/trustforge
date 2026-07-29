@@ -29,6 +29,27 @@ def _docs() -> list[Document]:
     ]
 
 
+def test_empty_ingestion_is_a_successful_tool_invocation(tmp_path, monkeypatch):
+    flow = AnalysisFlow(tmp_path / "empty-ingestion.sqlite3")
+    completed: list[dict[str, object]] = []
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: [])
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(flow, "_agos_begin_tool", lambda *args: "inv-empty")
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+
+    flow.create_snapshot("BTC")
+
+    assert completed == [
+        {"invocation_id": "inv-empty", "output": [], "status": "success"}
+    ]
+
+
 def test_matrix_is_snapshot_isolated_and_atomically_published(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")

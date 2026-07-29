@@ -1809,7 +1809,7 @@ class AnalysisFlow:
         self._agos_complete_tool(
             invocation_id,
             output=raw,
-            status="success" if docs else "failed",
+            status="success",
         )
         encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         revision = hashlib.sha256(encoded.encode()).hexdigest()

@@ -86,6 +86,10 @@ class TestContextBuild:
         ):
             runtime._ensure_init()
             assert runtime._initialized is False
+            assert runtime._memory_repo is None
+            assert runtime._skill_registry is None
+            assert runtime._tool_registry is None
+            assert runtime._context_builder is None
 
             runtime._ensure_init()
             assert runtime._initialized is True

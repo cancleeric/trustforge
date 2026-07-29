@@ -185,6 +185,18 @@ class TestBuild:
 
 
 class TestExclusion:
+    def test_question_is_counted_against_budget(self, builder: ContextBuilder):
+        manifest = builder.build(
+            run_id="run-question-budget",
+            question_ref="x" * 100,
+            token_budget=10,
+        )
+        assert manifest.token_used == 0
+        assert manifest.included_refs.question_ref is None
+        assert manifest.excluded_refs == [
+            ExcludedRef("question", "question", EXCLUSION_OVER_BUDGET)
+        ]
+
     def test_over_budget_excluded(self, builder: ContextBuilder, memory_repo: MemoryRepository):
         # Pre-save entry in DB
         memory_repo.save(MemoryEntry(
