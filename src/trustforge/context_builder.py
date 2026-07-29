@@ -385,13 +385,15 @@ class ContextBuilder:
 
         # 3. Process tool refs
         for tool_id in (tool_refs or []):
-            if self._tool_registry:
-                if not self._tool_registry.is_known(tool_id):
-                    excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_STALE))
-                    continue
-                if self._tool_registry.requires_approval(tool_id):
-                    excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_APPROVAL_REQUIRED))
-                    continue
+            if self._tool_registry is None:
+                excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_STALE))
+                continue
+            if not self._tool_registry.is_known(tool_id):
+                excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_STALE))
+                continue
+            if self._tool_registry.requires_approval(tool_id):
+                excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_APPROVAL_REQUIRED))
+                continue
 
             capability = self._tool_registry.get_tool(tool_id)
             if capability is None:

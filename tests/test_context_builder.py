@@ -191,6 +191,24 @@ class TestBuild:
 
 
 class TestExclusion:
+    def test_tool_ref_without_registry_is_excluded_stale(
+        self, tmp_path: Path
+    ):
+        builder = ContextBuilder(
+            tool_registry=None, db_path=tmp_path / "no-tool-registry.db"
+        )
+        try:
+            manifest = builder.build(
+                run_id="run-no-tool-registry", tool_refs=["missing-tool"]
+            )
+            assert manifest.included_refs.tool_refs == []
+            assert [
+                (ref.ref_id, ref.ref_type, ref.reason)
+                for ref in manifest.excluded_refs
+            ] == [("missing-tool", "tool", EXCLUSION_STALE)]
+        finally:
+            builder.close()
+
     def test_question_is_counted_against_budget(self, builder: ContextBuilder):
         manifest = builder.build(
             run_id="run-question-budget",
