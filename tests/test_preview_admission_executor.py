@@ -33,9 +33,10 @@ from trustforge.preview_durable_admission_gate import (
 from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
 from trustforge.preview_trusted_clock import PreviewTrustedClock
 from trustforge.quota_key_lifecycle import (
+    DurableQuotaKeyLifecycleAuthority,
+    LIFECYCLE_CONTROL_KEY,
     QuotaKey,
     QuotaKeyLifecycle,
-    QuotaKeyLifecycleAuthority,
 )
 
 
@@ -108,12 +109,25 @@ class FakeClient:
         self.control_put_calls: list[dict[str, object]] = []
         self.reservation_item = None
         self.finalize_calls: list[dict[str, object]] = []
+        self.lifecycle_item = None
+
+    def describe_table(self, **kwargs):
+        del kwargs
+        date = datetime.fromtimestamp(2_000_000_000, UTC).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        return {"ResponseMetadata": {"HTTPHeaders": {"date": date}}}
 
     def get_item(self, **kwargs):
+        if kwargs["Key"] == LIFECYCLE_CONTROL_KEY:
+            return {} if self.lifecycle_item is None else {"Item": self.lifecycle_item}
         self.control_get_calls.append(kwargs)
         return {"Item": self.control_item}
 
     def put_item(self, **kwargs):
+        if kwargs.get("Item", {}).get("sk") == LIFECYCLE_CONTROL_KEY["sk"]:
+            self.lifecycle_item = kwargs["Item"]
+            return {}
         self.control_put_calls.append(kwargs)
         self.control_item = kwargs["Item"]
         return {"ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "gate"}}
@@ -153,8 +167,8 @@ class FakeClient:
             isinstance(self.write, dict)
             and self.write.get("ResponseMetadata", {}).get("HTTPStatusCode") == 200
         ):
-            self.control_item = kwargs["TransactItems"][-1]["Put"]["Item"]
-            self.reservation_item = kwargs["TransactItems"][-2]["Put"]["Item"]
+            self.control_item = kwargs["TransactItems"][-2]["Put"]["Item"]
+            self.reservation_item = kwargs["TransactItems"][-3]["Put"]["Item"]
         return self.write
 
 
@@ -186,7 +200,7 @@ class _BoundExecutor:
 
 
 def _executor(client, table_name: str = "preview-store"):
-    authority = _lifecycle_authority(table_name)
+    authority = _lifecycle_authority(client, table_name)
     executor = PreviewAdmissionExecutor(
         client,
         table_name,
@@ -203,25 +217,26 @@ def _executor(client, table_name: str = "preview-store"):
     return _BoundExecutor(executor, authority, client)
 
 
-def _lifecycle_authority(table_name: str):
-    clock_client = _AuthorityClockClient()
-    authority = QuotaKeyLifecycleAuthority(
+def _lifecycle_authority(client, table_name: str):
+    authority = DurableQuotaKeyLifecycleAuthority(
         PreviewTrustedClock(
-            dynamodb_client=clock_client,
+            dynamodb_client=client,
             table_name=table_name,
             monotonic_clock=lambda: 0.0,
             wall_clock=lambda: 2_000_000_000.0,
-        )
+        ),
+        dynamodb_client=client,
+        table_name=table_name,
     )
     authority.install(
         QuotaKeyLifecycle(
             generation=1,
-            issued=TrustedUtcInterval(1_999_999_800, 1_999_999_801),
+            issued=TrustedUtcInterval(1_999_999_950, 1_999_999_951),
             current=QuotaKey(
                 version=1,
                 key_id="quota-1",
                 key_bytes=b"k" * 32,
-                activated=1_999_999_900,
+                activated=1_999_999_960,
             ),
         )
     )
@@ -544,7 +559,7 @@ def test_factory_configures_exactly_one_sdk_attempt(monkeypatch):
 
     executor = PreviewAdmissionExecutor.from_boto3(
         "preview-store",
-        lifecycle_authority=_lifecycle_authority("preview-store"),
+        lifecycle_authority=_lifecycle_authority(fake, "preview-store"),
         region_name="us-east-1",
     )
 
@@ -599,6 +614,9 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
         def transact_get_items(self, **kwargs):
             return client.transact_get_items(**kwargs)
 
+        def describe_table(self, **kwargs):
+            return _AuthorityClockClient().describe_table(**kwargs)
+
         def get_item(self, **kwargs):
             return client.get_item(**kwargs)
 
@@ -606,7 +624,7 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
             return client.put_item(**kwargs)
 
         def transact_write_items(self, **kwargs):
-            reservation = kwargs["TransactItems"][-2]["Put"]["Item"]
+            reservation = kwargs["TransactItems"][-3]["Put"]["Item"]
             client.put_item(
                 TableName="preview-store",
                 Item={
@@ -671,6 +689,9 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
                 reads_complete.wait()
             return response
 
+        def describe_table(self, **kwargs):
+            return _AuthorityClockClient().describe_table(**kwargs)
+
         def get_item(self, **kwargs):
             return client.get_item(**kwargs)
 
@@ -721,7 +742,7 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
     assert shared_client.write_attempts == 2
 
     items = client.scan(TableName="preview-store")["Items"]
-    assert len(items) == 11
+    assert len(items) == 12
     reservation_items = [
         item for item in items if item["kind"]["S"] == "preview_reservation"
     ]

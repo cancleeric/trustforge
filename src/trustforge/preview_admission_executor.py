@@ -25,7 +25,7 @@ from trustforge.preview_durable_admission_gate import (
 from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
 from trustforge.quota_key_lifecycle import (
     BoundAdmissionRequest,
-    QuotaKeyLifecycleAuthority,
+    DurableQuotaKeyLifecycleAuthority,
 )
 
 
@@ -158,7 +158,7 @@ class PreviewAdmissionExecutor:
         table_name: str,
         *,
         durable_gate: DurableAdmissionGate,
-        lifecycle_authority: QuotaKeyLifecycleAuthority,
+        lifecycle_authority: DurableQuotaKeyLifecycleAuthority,
     ) -> None:
         if not callable(getattr(client, "transact_get_items", None)) or not callable(
             getattr(client, "transact_write_items", None)
@@ -177,7 +177,7 @@ class PreviewAdmissionExecutor:
         ):
             raise ValueError("invalid durable admission gate")
         self._durable_gate = durable_gate
-        if type(lifecycle_authority) is not QuotaKeyLifecycleAuthority:
+        if type(lifecycle_authority) is not DurableQuotaKeyLifecycleAuthority:
             raise ValueError("invalid quota lifecycle authority")
         self._lifecycle_authority = lifecycle_authority
         self._ambiguity: AdmissionAmbiguity | None = None
@@ -240,7 +240,7 @@ class PreviewAdmissionExecutor:
         cls,
         table_name: str,
         *,
-        lifecycle_authority: QuotaKeyLifecycleAuthority,
+        lifecycle_authority: DurableQuotaKeyLifecycleAuthority,
         region_name: str | None = None,
     ) -> "PreviewAdmissionExecutor":
         """Create a low-level client whose SDK performs exactly one attempt."""
@@ -270,15 +270,15 @@ class PreviewAdmissionExecutor:
     def execute(self, bound: BoundAdmissionRequest) -> AdmissionExecutionResult:
         if type(bound) is not BoundAdmissionRequest:
             return _UNAVAILABLE
-        request = self._lifecycle_authority.validate_admission(bound)
-        if request is None:
-            return _UNAVAILABLE
         # A latched instance must perform zero further DynamoDB I/O. A concurrent
         # execution may finish its read, but the second check under the write gate
         # prevents its write from crossing an ambiguous predecessor.
         with self._write_gate:
             if self._latched_closed or not self._durable_gate.ready:
                 return _UNAVAILABLE
+        request = self._lifecycle_authority.validate_admission(bound)
+        if request is None:
+            return _UNAVAILABLE
 
         try:
             read_request = build_transact_get_request(request, self._table_name)
@@ -326,6 +326,15 @@ class PreviewAdmissionExecutor:
                 write_request = append_quarantine_action(
                     plan, self._durable_gate, binding
                 )
+                condition = self._lifecycle_authority.admission_condition(bound)
+                actions = write_request.get("TransactItems")
+                if (
+                    condition is None
+                    or type(actions) is not list
+                    or len(actions) >= 100
+                ):
+                    raise ValueError("lifecycle condition unavailable")
+                actions.append(condition)
             except ValueError:
                 self._latched_closed = True
                 return _UNAVAILABLE

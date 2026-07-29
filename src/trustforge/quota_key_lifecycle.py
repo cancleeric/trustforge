@@ -496,6 +496,43 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
         except Exception:
             return False
 
+    def validate_admission(
+        self, bound: BoundAdmissionRequest
+    ) -> AdmissionCompileRequest | None:
+        request = super().validate_admission(bound)
+        if request is None or not self.durable_current(bound._digests._snapshot):
+            return None
+        return request
+
+    def admission_condition(
+        self, bound: BoundAdmissionRequest
+    ) -> dict[str, object] | None:
+        request = self.validate_admission(bound)
+        if request is None or self._durable_fingerprint is None:
+            return None
+        return {
+            "ConditionCheck": {
+                "TableName": self._table,
+                "Key": LIFECYCLE_CONTROL_KEY,
+                "ConditionExpression": (
+                    "#kind=:kind AND #schema=:schema "
+                    "AND #generation=:generation AND #fingerprint=:fingerprint"
+                ),
+                "ExpressionAttributeNames": {
+                    "#kind": "kind",
+                    "#schema": "schema_version",
+                    "#generation": "generation",
+                    "#fingerprint": "config_fingerprint",
+                },
+                "ExpressionAttributeValues": {
+                    ":kind": {"S": "quota_key_lifecycle_control"},
+                    ":schema": {"N": "1"},
+                    ":generation": {"N": str(request.lifecycle_generation)},
+                    ":fingerprint": {"S": self._durable_fingerprint},
+                },
+            }
+        }
+
     def _read_metadata(self) -> dict[str, object] | None:
         response = self._client.get_item(
             TableName=self._table,
