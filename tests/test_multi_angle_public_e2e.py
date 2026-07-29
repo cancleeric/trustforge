@@ -91,6 +91,45 @@ def _wait_until(predicate, *, timeout=10):
     raise AssertionError(f"bounded condition was not met; last={last!r}")
 
 
+def _wait_for_completed_stages(daemon, job_ids, *, timeout=10):
+    expected = {
+        (job_id, stage)
+        for job_id in job_ids
+        for stage in analysis_flow.STAGES
+    }
+    placeholders = ",".join("?" for _ in job_ids)
+    deadline = time.monotonic() + timeout
+    observed = {}
+    while time.monotonic() < deadline:
+        rows = daemon._conn().execute(
+            "SELECT job_id,stage,state FROM analysis_stage_runs "
+            f"WHERE job_id IN ({placeholders})",
+            tuple(job_ids),
+        ).fetchall()
+        observed = {
+            (row["job_id"], row["stage"]): row["state"]
+            for row in rows
+        }
+        if set(observed) == expected and all(
+            state == "completed" for state in observed.values()
+        ):
+            return rows
+        threading.Event().wait(0.02)
+
+    missing = sorted(expected - set(observed))
+    incomplete = sorted(
+        (job_id, stage, state)
+        for (job_id, stage), state in observed.items()
+        if state != "completed"
+    )
+    unexpected = sorted(set(observed) - expected)
+    raise AssertionError(
+        "analysis stages did not reach completed before timeout; "
+        f"missing={missing!r}; incomplete={incomplete!r}; "
+        f"unexpected={unexpected!r}"
+    )
+
+
 @pytest.mark.serial
 def test_public_http_multi_angle_runs_real_durable_pipeline(
     tmp_path, monkeypatch
@@ -193,12 +232,8 @@ def test_public_http_multi_angle_runs_real_durable_pipeline(
         assert {row["mode"]: row["state"] for row in rows} == {
             mode: "completed" for mode in MODES
         }
-        job_ids = set(submitted["data"]["job_ids"].values())
-        stage_rows = daemon._conn().execute(
-            "SELECT job_id,stage,state FROM analysis_stage_runs "
-            "WHERE job_id IN (?,?,?,?,?)",
-            tuple(job_ids),
-        ).fetchall()
+        job_ids = tuple(submitted["data"]["job_ids"].values())
+        stage_rows = _wait_for_completed_stages(daemon, job_ids)
         assert {
             (row["job_id"], row["stage"], row["state"]) for row in stage_rows
         } == {
