@@ -205,9 +205,9 @@ def get_evidence_eligible_memories(manifest: ContextManifest) -> list[dict[str, 
 
 
 def _ensure_manifest_table(conn: sqlite3.Connection) -> None:
-    from .agos_db_auth import verify_db_authorization
+    from .agos_db_auth import AGOS_SCHEMA_AUTH_PURPOSE, verify_db_authorization
 
-    verify_db_authorization("context_manifest")
+    verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS context_manifests (
             manifest_id TEXT PRIMARY KEY,

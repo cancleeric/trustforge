@@ -16,6 +16,9 @@ from pathlib import Path
 import stat
 
 
+AGOS_SCHEMA_AUTH_PURPOSE = "agos-schema-closeout"
+
+
 class DBAuthorizationError(PermissionError):
     """Raised when a DB migration lacks valid file-based authorization."""
 

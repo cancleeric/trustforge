@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from trustforge.agos_db_auth import (
+    AGOS_SCHEMA_AUTH_PURPOSE,
     DBAuthorizationError,
     _is_pytest,
     _token_path,
@@ -91,9 +92,9 @@ def test_fake_pytest_module_cannot_bypass(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("module", "purpose"),
     [
-        (memory_os, "memory_os"),
-        (skill_registry, "skill_registry"),
-        (tool_registry, "tool_registry"),
+        (memory_os, AGOS_SCHEMA_AUTH_PURPOSE),
+        (skill_registry, AGOS_SCHEMA_AUTH_PURPOSE),
+        (tool_registry, AGOS_SCHEMA_AUTH_PURPOSE),
     ],
 )
 def test_direct_upgrade_authorizes_before_empty_db_mutation(
@@ -115,9 +116,9 @@ def test_direct_upgrade_authorizes_before_empty_db_mutation(
 @pytest.mark.parametrize(
     ("module", "purpose", "version_key"),
     [
-        (memory_os, "memory_os", "memory_os_version"),
-        (skill_registry, "skill_registry", "skill_registry_version"),
-        (tool_registry, "tool_registry", "tool_registry_version"),
+        (memory_os, AGOS_SCHEMA_AUTH_PURPOSE, "memory_os_version"),
+        (skill_registry, AGOS_SCHEMA_AUTH_PURPOSE, "skill_registry_version"),
+        (tool_registry, AGOS_SCHEMA_AUTH_PURPOSE, "tool_registry_version"),
     ],
 )
 def test_direct_upgrade_authorizes_existing_old_schema(
@@ -141,9 +142,9 @@ def test_direct_upgrade_authorizes_existing_old_schema(
 @pytest.mark.parametrize(
     ("module", "purpose"),
     [
-        (memory_os, "memory_os"),
-        (skill_registry, "skill_registry"),
-        (tool_registry, "tool_registry"),
+        (memory_os, AGOS_SCHEMA_AUTH_PURPOSE),
+        (skill_registry, AGOS_SCHEMA_AUTH_PURPOSE),
+        (tool_registry, AGOS_SCHEMA_AUTH_PURPOSE),
     ],
 )
 def test_rollback_authorizes_before_mutation(
@@ -171,7 +172,35 @@ def test_context_manifest_authorizes_before_mutation() -> None:
     ) as authorize:
         with pytest.raises(DBAuthorizationError, match="blocked"):
             context_builder._ensure_manifest_table(conn)
-    authorize.assert_called_once_with("context_manifest")
+    authorize.assert_called_once_with(AGOS_SCHEMA_AUTH_PURPOSE)
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall() == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        memory_os._upgrade,
+        skill_registry._upgrade,
+        tool_registry._upgrade,
+        context_builder._ensure_manifest_table,
+    ],
+)
+def test_all_schema_paths_accept_real_umbrella_receipt(
+    mutation: object, tmp_path: Path
+) -> None:
+    """Exercise the real verifier with one umbrella receipt for every schema."""
+    receipt = tmp_path / (
+        f"eric-auth-{datetime.now(timezone.utc).strftime('%Y%m%d')}-"
+        "trustforge-agos-schema-closeout.token"
+    )
+    receipt.touch()
+    conn = sqlite3.connect(":memory:")
+
+    with patch("trustforge.agos_db_auth._token_path", return_value=receipt):
+        mutation(conn)  # type: ignore[operator]
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+    ).fetchone()[0] > 0

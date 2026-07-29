@@ -127,9 +127,9 @@ def _upgrade(conn: sqlite3.Connection) -> None:
 
     Authorization is checked here so direct callers cannot bypass the guard.
     """
-    from .agos_db_auth import verify_db_authorization
+    from .agos_db_auth import AGOS_SCHEMA_AUTH_PURPOSE, verify_db_authorization
 
-    verify_db_authorization("skill_registry")
+    verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -181,9 +181,9 @@ def _upgrade(conn: sqlite3.Connection) -> None:
 
 def rollback(conn: sqlite3.Connection) -> None:
     """Drop Skill Registry tables."""
-    from .agos_db_auth import verify_db_authorization
+    from .agos_db_auth import AGOS_SCHEMA_AUTH_PURPOSE, verify_db_authorization
 
-    verify_db_authorization("skill_registry")
+    verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
     conn.executescript("""
         DROP TABLE IF EXISTS skill_dependencies;
         DROP TABLE IF EXISTS skill_revisions;
