@@ -58,7 +58,7 @@ export default function AdminAgosPage() {
     setSearchRunId(rid)
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
+      'X-Admin-Token': token,
     }
     const base = `/api/admin/agos`
 

@@ -133,12 +133,9 @@ def invocation_output_hash(output: dict[str, Any] | str) -> str:
 def upgrade(conn: sqlite3.Connection) -> None:
     """Create Tool Registry tables (idempotent).
 
-    Requires valid DB authorization token (enforced when AGOS is enabled
-    and not in test mode). See docs/contracts/TOOL-CAPABILITY-CONTRACT.md.
+    NOTE: Authorization is checked by ensure_schema() BEFORE this function
+    is called. Do not call upgrade() directly — use ensure_schema().
     """
-    from .agos_db_auth import verify_db_authorization
-    verify_db_authorization("tool_registry")
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -238,7 +235,12 @@ class ToolRegistryRepository:
         return self._conn
 
     def ensure_schema(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist.
+
+        Authorization is verified BEFORE any file I/O.
+        """
+        from .agos_db_auth import verify_db_authorization
+        verify_db_authorization("tool_registry")
         upgrade(self._connect())
 
     # ─── Tool Capability CRUD ────────────────────────────────────────────
@@ -414,21 +416,23 @@ class ToolRegistryRepository:
         """Update an invocation's completion status.
 
         State-machine guard: only 'pending' invocations can be completed.
-        Already-completed invocations are rejected (no overwrite).
+        Raises ValueError if invocation not found or already completed.
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"invalid status: {status!r}")
 
         conn = self._connect()
-        # State-machine guard: only transition from 'pending'
         row = conn.execute(
             "SELECT status FROM tool_invocations WHERE invocation_id = ?",
             (invocation_id,),
         ).fetchone()
         if row is None:
-            return  # Invocation not found — graceful no-op
+            raise ValueError(f"invocation not found: {invocation_id!r}")
         if row[0] != "pending":
-            return  # Already completed — do not overwrite
+            raise ValueError(
+                f"invocation {invocation_id!r} is already '{row[0]}'; "
+                f"only 'pending' invocations can be completed"
+            )
 
         conn.execute(
             """UPDATE tool_invocations

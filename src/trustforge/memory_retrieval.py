@@ -144,9 +144,8 @@ def count_by_category(
     entries = repo.find_by_run(run_id)
     historical = sum(1 for e in entries if not e.evidence_eligible)
     evidence = sum(1 for e in entries if e.evidence_eligible)
-    # used_as_evidence: set by runtime (#922) when actually consumed by scoring
-    # For now, return 0 as placeholder
-    return {"historical": historical, "evidence": evidence, "used_as_evidence": 0}
+    used_as_evidence = repo.count_used_as_evidence(run_id)
+    return {"historical": historical, "evidence": evidence, "used_as_evidence": used_as_evidence}
 
 
 # ─── Memory Retrieval Adapter ────────────────────────────────────────────────

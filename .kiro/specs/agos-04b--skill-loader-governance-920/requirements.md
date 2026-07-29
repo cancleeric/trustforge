@@ -40,7 +40,7 @@ def discover_skills(
 ```python
 def resolve_dependencies(skill_id: str) -> list[SkillRevision]:
     """Resolve all transitive `requires` dependencies, returning ordered revisions.
-    
+
     Raises if any dependency is stale/broken/missing active revision.
     """
 ```

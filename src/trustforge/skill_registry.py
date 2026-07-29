@@ -125,12 +125,9 @@ def revision_hash_for(content: dict[str, Any]) -> str:
 def upgrade(conn: sqlite3.Connection) -> None:
     """Create Skill Registry tables (idempotent).
 
-    Requires valid DB authorization token (enforced when AGOS is enabled
-    and not in test mode). See docs/contracts/TASK-SKILL-CONTRACT.md.
+    NOTE: Authorization is checked by ensure_schema() BEFORE this function
+    is called. Do not call upgrade() directly — use ensure_schema().
     """
-    from .agos_db_auth import verify_db_authorization
-    verify_db_authorization("skill_registry")
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -227,7 +224,12 @@ class SkillRegistryRepository:
         return self._conn
 
     def ensure_schema(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist.
+
+        Authorization is verified BEFORE any file I/O.
+        """
+        from .agos_db_auth import verify_db_authorization
+        verify_db_authorization("skill_registry")
         upgrade(self._connect())
 
     # ─── Skill CRUD ──────────────────────────────────────────────────────

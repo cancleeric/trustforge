@@ -149,12 +149,9 @@ def validate_evidence_eligible(entry: MemoryEntry) -> None:
 def upgrade(conn: sqlite3.Connection) -> None:
     """Create Memory OS tables (idempotent).
 
-    Requires valid DB authorization token (enforced when AGOS is enabled
-    and not in test mode). See docs/contracts/MEMORY-OS-CONTRACT.md.
+    NOTE: Authorization is checked by ensure_schema() BEFORE this function
+    is called. Do not call upgrade() directly — use ensure_schema().
     """
-    from .agos_db_auth import verify_db_authorization
-    verify_db_authorization("memory_os")
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -198,6 +195,13 @@ def upgrade(conn: sqlite3.Connection) -> None:
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_link_unique
             ON memory_links(from_memory_id, to_memory_id, relation);
+
+        CREATE TABLE IF NOT EXISTS memory_evidence_usage (
+            memory_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            used_at TEXT NOT NULL,
+            PRIMARY KEY (memory_id, run_id)
+        );
     """)
 
     _set_version(conn, _MIGRATION_VERSION)
@@ -207,6 +211,7 @@ def upgrade(conn: sqlite3.Connection) -> None:
 def rollback(conn: sqlite3.Connection) -> None:
     """Drop Memory OS tables."""
     conn.executescript("""
+        DROP TABLE IF EXISTS memory_evidence_usage;
         DROP TABLE IF EXISTS memory_links;
         DROP TABLE IF EXISTS memory_entries;
     """)
@@ -250,7 +255,13 @@ class MemoryRepository:
         return self._conn
 
     def ensure_schema(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist.
+
+        Authorization is verified BEFORE any file I/O (sqlite3.connect).
+        If auth fails, no DB file or WAL is created.
+        """
+        from .agos_db_auth import verify_db_authorization
+        verify_db_authorization("memory_os")
         upgrade(self._connect())
 
     def save(self, entry: MemoryEntry) -> None:
@@ -331,6 +342,24 @@ class MemoryRepository:
             (limit,),
         ).fetchall()
         return [self._row_to_entry(r) for r in rows]
+
+    def mark_used_as_evidence(self, memory_id: str, run_id: str) -> None:
+        """Record that a memory entry was used as evidence in a specific run."""
+        conn = self._connect()
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_evidence_usage (memory_id, run_id, used_at) VALUES (?, ?, ?)",
+            (memory_id, run_id, _now_iso()),
+        )
+        conn.commit()
+
+    def count_used_as_evidence(self, run_id: str) -> int:
+        """Count memories actually used as evidence in a run."""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT count(*) FROM memory_evidence_usage WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return row[0] if row else 0
 
     def link(self, from_id: str, to_id: str, relation: str) -> None:
         """Create a relationship link between two memory entries.

@@ -1788,6 +1788,13 @@ class AnalysisFlow:
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
         docs = collect(query, coin=coin, offline=False)
+        # ── Agent OS: audit ingestion collection as tool invocation ──
+        self._agos_record_tool(
+            {"job": {"job_id": f"snapshot-{coin.lower()}"}},
+            "ingestion-collect",
+            {"coin": coin, "query": query},
+            "success" if docs else "failed",
+        )
         raw = [doc_to_dict(doc) for doc in docs]
         encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         revision = hashlib.sha256(encoded.encode()).hexdigest()

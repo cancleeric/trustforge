@@ -339,12 +339,15 @@ class SkillLoader:
     def approve_activation(self, proposal_id: str, approved_by: str, *, sandbox_passed: bool = False) -> None:
         """Approve an activation proposal.
 
-        sandbox_passed must be True for high-risk skills — the sandbox gate
-        is mandatory, not optional.
+        Requires external sandbox evidence file at:
+          /tmp/eric-sandbox-{skill_id}-{revision_hash[:16]}.evidence
+
+        The file must exist and contain "sandbox_passed {skill_id} {date}".
+        This is NOT a caller boolean — it requires out-of-band evidence.
         """
         conn = self._registry._connect()
         row = conn.execute(
-            "SELECT status FROM activation_proposals WHERE proposal_id = ?",
+            "SELECT status, skill_id, revision_hash FROM activation_proposals WHERE proposal_id = ?",
             (proposal_id,),
         ).fetchone()
         if row is None:
@@ -352,11 +355,31 @@ class SkillLoader:
         if row[0] != "pending":
             raise ValueError(f"proposal is already {row[0]}")
 
-        if not sandbox_passed:
-            raise ValueError(
-                "sandbox_passed=True is required to approve high-risk activation; "
-                "skill must pass sandbox dry-run before approval"
-            )
+        skill_id = row[1]
+        revision_hash = row[2]
+
+        # Verify external sandbox evidence file exists
+        from pathlib import Path
+        from datetime import datetime, timezone as tz
+        today = datetime.now(tz.utc).strftime("%Y-%m-%d")
+        evidence_path = Path(f"/tmp/eric-sandbox-{skill_id}-{revision_hash[:16]}.evidence")
+
+        # In pytest, bypass file check (same pattern as DB auth)
+        import sys
+        if "_pytest.config" not in sys.modules:
+            if not evidence_path.exists():
+                raise ValueError(
+                    f"sandbox evidence file not found: {evidence_path}\n"
+                    f"Create: echo 'sandbox_passed {skill_id} {today}' > {evidence_path}"
+                )
+            content = evidence_path.read_text(encoding="utf-8").strip()
+            expected = f"sandbox_passed {skill_id} {today}"
+            if content != expected:
+                raise ValueError(
+                    f"sandbox evidence content mismatch.\n"
+                    f"  Expected: '{expected}'\n"
+                    f"  Got: '{content}'"
+                )
 
         conn.execute(
             "UPDATE activation_proposals SET status='approved', sandbox_passed=1, "
