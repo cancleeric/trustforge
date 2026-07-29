@@ -1,0 +1,36 @@
+[Unit]
+Description=TrustForge intrinsic promotion recommendation receipt
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+Restart=on-failure
+RestartSec=60s
+User=trustforge-receipt
+Group=trustforge-release
+UMask=0077
+WorkingDirectory=@ROOT@
+ExecStart=@PYTHON@ @ROOT@/scripts/run_intrinsic_promotion_receipt.py run --shadow-db /var/lib/trustforge/shadow/shadow.sqlite3 --shadow-release-identity %d/shadow-release-identity.json --stale-after-days 30 --release-manifest /opt/trustforge/manifest.json --release-artifact /opt/trustforge/app.zip --benchmark-manifest @ROOT@/data/asset_intrinsic_benchmark/manifest.json --benchmark-corpus @ROOT@/data/asset_intrinsic_benchmark/profiles.json --repo-root @ROOT@ --receipt-keyring %d/receipt-keyring.json --ledger-root /var/lib/trustforge/security-ledger
+LoadCredential=receipt-keyring.json:/etc/trustforge/keys/intrinsic-promotion-receipt.json
+LoadCredential=shadow-release-identity.json:/etc/trustforge/shadow-release-identity.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/trustforge/security-ledger
+ReadOnlyPaths=/var/lib/trustforge/shadow/shadow.sqlite3
+ReadOnlyPaths=/opt/trustforge/manifest.json
+ReadOnlyPaths=/opt/trustforge/app.zip
+ReadOnlyPaths=@ROOT@/data/asset_intrinsic_benchmark
