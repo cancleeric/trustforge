@@ -192,7 +192,31 @@ class AgosRuntime:
                 "tools": self._data_dir / "tool_registry.db",
                 "context": self._data_dir / "context_manifests.db",
             }
-            if self._read_only and not all(path.is_file() for path in store_paths.values()):
+            if self._read_only:
+                if store_paths["memory"].is_file():
+                    self._memory_repo = MemoryRepository(
+                        db_path=store_paths["memory"], read_only=True
+                    )
+                    self._retrieval_adapter = MemoryRetrievalAdapter(
+                        self._memory_repo
+                    )
+                if store_paths["skills"].is_file():
+                    self._skill_registry = SkillRegistryRepository(
+                        db_path=store_paths["skills"], read_only=True
+                    )
+                    self._skill_loader = SkillLoader(self._skill_registry)
+                if store_paths["tools"].is_file():
+                    self._tool_registry = ToolRegistryRepository(
+                        db_path=store_paths["tools"], read_only=True
+                    )
+                if store_paths["context"].is_file():
+                    self._context_builder = ContextBuilder(
+                        memory_repo=self._memory_repo,
+                        skill_loader=self._skill_loader,
+                        tool_registry=self._tool_registry,
+                        db_path=store_paths["context"],
+                        read_only=True,
+                    )
                 self._initialized = True
                 return
 

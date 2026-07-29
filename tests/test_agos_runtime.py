@@ -91,6 +91,45 @@ class TestContextBuild:
         finally:
             read_runtime.close()
 
+    def test_read_only_runtime_mounts_available_stores_independently(
+        self, tmp_path: Path
+    ):
+        from trustforge.memory_os import (
+            MemoryEntry,
+            MemoryRepository,
+            memory_content_hash,
+        )
+
+        data_dir = tmp_path / "partial-agos-stores"
+        memory_repo = MemoryRepository(data_dir / "memory_os.db")
+        memory_repo.ensure_schema()
+        memory_repo.save(
+            MemoryEntry(
+                memory_id="partial-memory",
+                kind="episodic",
+                provider="partial-test",
+                content_hash=memory_content_hash("partial content"),
+                content_ref="partial content",
+                published_at="2026-07-30T00:00:00Z",
+                retrieved_at="2026-07-30T00:00:00Z",
+                run_id="partial-run",
+            )
+        )
+        memory_repo.close()
+
+        read_runtime = AgosRuntime(data_dir=data_dir, read_only=True)
+        try:
+            read_runtime._ensure_init()
+            memories = read_runtime.lineage.get_run_memories("partial-run")
+            assert [item["memory_id"] for item in memories] == [
+                "partial-memory"
+            ]
+            assert read_runtime._skill_registry is None
+            assert read_runtime._tool_registry is None
+            assert read_runtime._context_builder is None
+        finally:
+            read_runtime.close()
+
     def test_analysis_flow_uses_thread_local_agos_runtimes(
         self, tmp_path: Path, monkeypatch
     ):
