@@ -20,6 +20,10 @@ from typing import Callable, Sequence
 from trustforge_core import KernelOutput, run_kernel
 
 from trustforge.asset_intrinsic_shadow import build_intrinsic_shadow_observation
+from trustforge.asset_intrinsic_candidate import (
+    CANDIDATE_SCHEMA_VERSION,
+    compute_candidate_shadow,
+)
 
 from .kernel_mapper import to_kernel_input
 from .shadow import ShadowParityResult, compare_outputs
@@ -38,6 +42,12 @@ _OBSERVE_FLAG = "KERNEL_SHADOW_OBSERVE"
 # independently of the parity observation.  When off, no intrinsic view is
 # resolved and intrinsic_shadow stays None (AC6: no writes, no behavior diff).
 _INTRINSIC_FLAG = "TRUSTFORGE_SHADOW_INTRINSIC_ENABLED"
+# Issue #876: canonical scorer candidate diff is captured only when this flag
+# is on, independently of the parity observation.  When off, no candidate diff
+# is computed and the intrinsic_shadow payload is byte-identical to the
+# baseline (AC5: flag-off byte parity; candidate is shadow-only, never
+# promoted).
+_INTRINSIC_CANDIDATE_FLAG = "TRUSTFORGE_SHADOW_INTRINSIC_CANDIDATE_ENABLED"
 _HARD_TIMEOUT_MS = 1_000.0
 _SINGLE_FLIGHT = threading.BoundedSemaphore(value=1)
 _POISON_LOCK = threading.Lock()
@@ -52,6 +62,7 @@ _CHILD_ENV_NAMES = (
     "TRUSTFORGE_SHADOW_CANDIDATE_ARTIFACT_DIGEST",
     "TRUSTFORGE_ASSET_INTRINSIC_RECORDS_PATH",
     "TRUSTFORGE_SHADOW_INTRINSIC_ENABLED",
+    "TRUSTFORGE_SHADOW_INTRINSIC_CANDIDATE_ENABLED",
 )
 
 
@@ -239,6 +250,7 @@ def _observation_worker(
         # market judgment.  The intrinsic flag gates resolution (AC6); any
         # failure degrades to None so the observation still records parity.
         intrinsic_shadow = None
+        intrinsic_view = None
         if _enabled(_INTRINSIC_FLAG) and monotonic_fn() <= deadline:
             try:
                 view_fn = intrinsic_view_fn or _default_intrinsic_view_fn
@@ -252,6 +264,34 @@ def _observation_worker(
                     )
             except Exception:
                 intrinsic_shadow = None
+        # Issue #876: capture the canonical scorer candidate diff as a pure
+        # read-only extension of the intrinsic_shadow payload.  This never
+        # touches the official confidence, calibrated confidence, decision
+        # state, direction, or market judgment, and it is fail-closed
+        # (compute_candidate_shadow never raises).  Gated independently so the
+        # flag-OFF path leaves the payload byte-identical (AC5).
+        if (
+            _enabled(_INTRINSIC_CANDIDATE_FLAG)
+            and isinstance(intrinsic_shadow, dict)
+            and monotonic_fn() <= deadline
+        ):
+            candidate = compute_candidate_shadow(
+                output, intrinsic_view, query=query,
+            )
+            intrinsic_shadow = dict(intrinsic_shadow)
+            intrinsic_shadow["intrinsic_candidate"] = {
+                "schema_version": CANDIDATE_SCHEMA_VERSION,
+                "baseline_raw": candidate.baseline_raw,
+                "candidate_raw": candidate.candidate_raw,
+                "total_delta": candidate.total_delta,
+                "baseline_calibrated": candidate.baseline_calibrated,
+                "candidate_calibrated": candidate.candidate_calibrated,
+                "calibrated_delta": candidate.calibrated_delta,
+                "baseline_decision_state": candidate.baseline_decision_state,
+                "candidate_decision_state": candidate.candidate_decision_state,
+                "decision_state_changed": candidate.decision_state_changed,
+                "candidate_facts_hash": candidate.facts_hash,
+            }
         observed_at = datetime.fromtimestamp(
             observed_epoch, tz=timezone.utc,
         ).isoformat().replace("+00:00", "Z")
