@@ -198,7 +198,13 @@ def test_all_schema_paths_accept_real_umbrella_receipt(
     receipt.touch()
     conn = sqlite3.connect(":memory:")
 
-    with patch("trustforge.agos_db_auth._token_path", return_value=receipt):
+    with (
+        patch("trustforge.agos_db_auth._token_path", return_value=receipt),
+        patch(
+            "trustforge.agos_db_auth.verify_db_authorization",
+            wraps=verify_db_authorization,
+        ),
+    ):
         mutation(conn)  # type: ignore[operator]
 
     assert conn.execute(
