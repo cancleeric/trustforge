@@ -126,6 +126,7 @@ fi
 echo "--- Test 10: production activation requires a completed manual report ---"
 if grep -q 'verify_analysis_report "$TARGET"' deploy/activate_release.sh \
   && grep -q 'verify_production_analysis_report.py' deploy/activate_release.sh \
+  && grep -q 'http://127.0.0.1:8080' deploy/activate_release.sh \
   && grep -q -- '--timeout-seconds 600' deploy/activate_release.sh; then
   pass "activation requires completed manual report"
 else

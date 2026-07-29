@@ -158,7 +158,7 @@ verify_analysis_report() {
   local iid="$1"
   local rcmdid
   rcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","/usr/bin/python3.11 scripts/verify_production_analysis_report.py --base-url http://localhost --timeout-seconds 600 --poll-seconds 5"]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","/usr/bin/python3.11 scripts/verify_production_analysis_report.py --base-url http://127.0.0.1:8080 --timeout-seconds 600 --poll-seconds 5"]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$rcmdid" ] || [ "$rcmdid" = "None" ]; then
     echo "[activate] ERROR: analysis report E2E send-command failed" >&2
