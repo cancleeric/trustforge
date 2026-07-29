@@ -235,8 +235,9 @@ def _lifecycle_authority(client, table_name: str):
             current=QuotaKey(
                 version=1,
                 key_id="quota-1",
-                key_bytes=b"k" * 32,
+                key_bytes=bytes(range(32)),
                 activated=1_999_999_960,
+                source_revision="ssm-v1",
             ),
         )
     )

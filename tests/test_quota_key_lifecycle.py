@@ -70,12 +70,13 @@ def _authority(second: int = 2_000_000_000):
 
 def _key(version: int, activated: int, *, previous: bool = False) -> QuotaKey:
     return QuotaKey(
-        version,
-        f"quota-{version}",
-        bytes([version]) * 32,
-        activated - (100 if previous else 0),
-        activated if previous else None,
-        activated + MIN_OVERLAP_SECONDS if previous else None,
+        version=version,
+        key_id=f"quota-{version}",
+        key_bytes=bytes((index + version) % 256 for index in range(32)),
+        activated=activated - (100 if previous else 0),
+        source_revision=f"ssm-v{version}",
+        superseded=activated if previous else None,
+        retire_not_before=activated + MIN_OVERLAP_SECONDS if previous else None,
     )
 
 
@@ -150,7 +151,13 @@ def test_single_uses_one_identity_layout_and_global_once():
         lambda value: QuotaKeyLifecycle(
             value.generation,
             value.issued,
-            QuotaKey(2, "quota-2", b"x" * 31, value.current.activated),
+            QuotaKey(
+                2,
+                "quota-2",
+                b"x" * 31,
+                value.current.activated,
+                "ssm-v2",
+            ),
             value.previous,
         ),
     ],
@@ -167,6 +174,7 @@ def replace_previous(current: QuotaKey) -> QuotaKey:
         current.key_id,
         current.key_bytes,
         current.activated - 1,
+        current.source_revision,
         current.activated,
         current.activated + MIN_OVERLAP_SECONDS,
     )
@@ -191,8 +199,9 @@ def test_generation_rollback_and_same_generation_conflict_rejected():
                 QuotaKey(
                     2,
                     "other",
-                    b"z" * 32,
+                    bytes(range(32)),
                     lifecycle.current.activated,
+                    "ssm-other",
                 ),
                 lifecycle.previous,
             )
@@ -284,7 +293,7 @@ def test_durable_authority_bootstrap_overlap_and_exact_response_loss_proof():
     assert client.puts[-1]["ExpressionAttributeValues"][":generation"] == {"N": "1"}
 
 
-def test_durable_authority_rejects_skip_overlap_and_restart():
+def test_durable_authority_allows_exact_attach_but_rejects_skip_overlap():
     client = DurableClockClient(2_000_000_000)
     clock = PreviewTrustedClock(
         dynamodb_client=client,
@@ -301,8 +310,7 @@ def test_durable_authority_rejects_skip_overlap_and_restart():
         _key(1, 1_999_999_922),
     )
     authority.install(bootstrap)
-    with pytest.raises(ValueError):
-        authority.install(bootstrap)
+    assert authority.install(bootstrap).lifecycle == bootstrap
     with pytest.raises(ValueError):
         authority.install(
             QuotaKeyLifecycle(

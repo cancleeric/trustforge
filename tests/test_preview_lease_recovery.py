@@ -187,7 +187,9 @@ def _durable_lifecycle(client):
         QuotaKeyLifecycle(
             1,
             TrustedUtcInterval(second - 10, second - 9),
-            QuotaKey(1, "quota-1", b"k" * 32, second - 5),
+            QuotaKey(
+                1, "quota-1", bytes(range(32)), second - 5, "ssm-v1"
+            ),
         )
     )
     return authority

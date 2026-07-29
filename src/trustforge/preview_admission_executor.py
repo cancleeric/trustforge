@@ -177,7 +177,11 @@ class PreviewAdmissionExecutor:
         ):
             raise ValueError("invalid durable admission gate")
         self._durable_gate = durable_gate
-        if type(lifecycle_authority) is not DurableQuotaKeyLifecycleAuthority:
+        if (
+            type(lifecycle_authority) is not DurableQuotaKeyLifecycleAuthority
+            or lifecycle_authority._client is not client
+            or lifecycle_authority._table != table_name
+        ):
             raise ValueError("invalid quota lifecycle authority")
         self._lifecycle_authority = lifecycle_authority
         self._ambiguity: AdmissionAmbiguity | None = None

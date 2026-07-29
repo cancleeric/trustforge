@@ -64,6 +64,7 @@ class QuotaKey:
     key_id: str
     key_bytes: bytes = field(repr=False)
     activated: int
+    source_revision: str
     superseded: int | None = None
     retire_not_before: int | None = None
 
@@ -76,6 +77,11 @@ class QuotaKey:
             or len(self.key_id) > 64
             or type(self.key_bytes) is not bytes
             or len(self.key_bytes) < 32
+            or len(set(self.key_bytes)) < 8
+            or type(self.source_revision) is not str
+            or not self.source_revision
+            or len(self.source_revision) > 128
+            or self.source_revision != self.source_revision.strip()
             or type(self.activated) is not int
             or self.activated < 0
             or (self.superseded is None)
@@ -443,13 +449,18 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
             raise ValueError("invalid quota lifecycle")
         with self._lock:
             now = self._trusted_now()
+            desired = _lifecycle_metadata(lifecycle)
+            current = self._read_metadata()
+            if current == desired:
+                self._lifecycle = lifecycle
+                self._observed = now
+                self._durable_fingerprint = desired["config_fingerprint"]
+                return self._snapshot(now)
             if (
                 lifecycle.issued.latest > now.earliest
                 or now.latest - lifecycle.issued.earliest > MAX_SNAPSHOT_AGE_SECONDS
             ):
                 raise ValueError("stale lifecycle transition")
-            desired = _lifecycle_metadata(lifecycle)
-            current = self._read_metadata()
             if current is None:
                 if lifecycle.generation != 1 or lifecycle.mode is not LifecycleMode.SINGLE:
                     raise ValueError("invalid lifecycle bootstrap")
@@ -477,10 +488,16 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
                 request["ExpressionAttributeNames"] = names
                 request["ExpressionAttributeValues"] = values
             try:
-                self._client.put_item(**request)
+                response = self._client.put_item(**request)
             except Exception:
                 if self._read_metadata() != desired:
                     raise ValueError("unresolved lifecycle write") from None
+            else:
+                if (
+                    not _confirmed_ddb_success(response)
+                    and self._read_metadata() != desired
+                ):
+                    raise ValueError("unresolved lifecycle write")
             self._lifecycle = lifecycle
             self._observed = now
             self._durable_fingerprint = desired["config_fingerprint"]
@@ -546,17 +563,6 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
         return _decode_metadata(response["Item"])
 
 
-def _key_fingerprint(key: QuotaKey) -> str:
-    return hashlib.sha256(
-        b"TrustForge/PAP1/quota-key-fingerprint/v1\x00"
-        + str(key.version).encode()
-        + b"\x00"
-        + key.key_id.encode()
-        + b"\x00"
-        + key.key_bytes
-    ).hexdigest()
-
-
 def _lifecycle_metadata(lifecycle: QuotaKeyLifecycle) -> dict[str, object]:
     value: dict[str, object] = {
         "pk": "PAP#1#QUOTA-KEY",
@@ -566,13 +572,13 @@ def _lifecycle_metadata(lifecycle: QuotaKeyLifecycle) -> dict[str, object]:
         "generation": lifecycle.generation,
         "mode": lifecycle.mode.value,
         "current_version": lifecycle.current.version,
-        "current_fingerprint": _key_fingerprint(lifecycle.current),
+        "current_source_revision": lifecycle.current.source_revision,
         "issued_earliest": lifecycle.issued.earliest,
         "issued_latest": lifecycle.issued.latest,
     }
     if lifecycle.previous is not None:
         value["previous_version"] = lifecycle.previous.version
-        value["previous_fingerprint"] = _key_fingerprint(lifecycle.previous)
+        value["previous_source_revision"] = lifecycle.previous.source_revision
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     value["config_fingerprint"] = hashlib.sha256(
         b"TrustForge/PAP1/quota-lifecycle-config/v1\x00" + canonical
@@ -596,7 +602,8 @@ def _require_transition(
     if current["mode"] == "single" and desired["mode"] == "overlap":
         if (
             desired.get("previous_version") != current["current_version"]
-            or desired.get("previous_fingerprint") != current["current_fingerprint"]
+            or desired.get("previous_source_revision")
+            != current["current_source_revision"]
             or desired["current_version"] != current["current_version"] + 1
         ):
             raise ValueError("invalid overlap predecessor")
@@ -608,7 +615,8 @@ def _require_transition(
             or retirement.lifecycle_generation != current["generation"]
             or retirement.previous_quota_key_version != current["previous_version"]
             or desired["current_version"] != current["current_version"]
-            or desired["current_fingerprint"] != current["current_fingerprint"]
+            or desired["current_source_revision"]
+            != current["current_source_revision"]
         ):
             raise ValueError("retirement proof required")
         return
@@ -645,13 +653,13 @@ def _decode_metadata(item: object) -> dict[str, object]:
         "generation",
         "mode",
         "current_version",
-        "current_fingerprint",
+        "current_source_revision",
         "issued_earliest",
         "issued_latest",
         "config_fingerprint",
     }
     if mode == "overlap":
-        expected |= {"previous_version", "previous_fingerprint"}
+        expected |= {"previous_version", "previous_source_revision"}
     if (
         set(decoded) != expected
         or decoded.get("pk") != "PAP#1#QUOTA-KEY"
@@ -672,6 +680,18 @@ def _decode_metadata(item: object) -> dict[str, object]:
     if not hmac.compare_digest(str(fingerprint), expected_fingerprint):
         raise ValueError("malformed lifecycle fingerprint")
     return decoded
+
+
+def _confirmed_ddb_success(response: object) -> bool:
+    if type(response) is not dict:
+        return False
+    metadata = response.get("ResponseMetadata")
+    return (
+        type(metadata) is dict
+        and metadata.get("HTTPStatusCode") == 200
+        and type(metadata.get("RequestId")) is str
+        and bool(metadata["RequestId"])
+    )
 
 
 def _quota_hmac(key: QuotaKey, material: bytes) -> str:
