@@ -134,6 +134,11 @@ def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
 
     monkeypatch.setattr(train.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(train, "production_identity", lambda: ("a" * 40, "b" * 64))
+    monkeypatch.setattr(
+        train,
+        "capture_active_pointer",
+        lambda digest: {"digest": digest, "version": "v0.27.4"},
+    )
     monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
     monkeypatch.setattr(train, "verify_frontend_identity", lambda sha: "assets/index-release.js")
     monkeypatch.setattr(train, "production_instance", lambda: "i-production")
@@ -170,6 +175,11 @@ def test_production_deploy_stops_before_frontend_when_backend_identity_mismatche
         lambda command, **kwargs: calls.append(command),
     )
     monkeypatch.setattr(train, "production_identity", lambda: ("b" * 40, "c" * 64))
+    monkeypatch.setattr(
+        train,
+        "capture_active_pointer",
+        lambda digest: {"digest": digest, "version": "v0.27.4"},
+    )
     rollback_calls = []
     monkeypatch.setattr(
         train,
@@ -181,11 +191,23 @@ def test_production_deploy_stops_before_frontend_when_backend_identity_mismatche
         train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
 
     assert calls == [["/bin/zsh", "-lc", "TRUSTFORGE_BOOTSTRAP=0 bash deploy/deploy_ec2.sh"]]
-    assert rollback_calls == [(tmp_path, "b" * 40, "c" * 64)]
+    assert rollback_calls == [
+        (
+            tmp_path,
+            "b" * 40,
+            "c" * 64,
+            {"digest": "c" * 64, "version": "v0.27.4"},
+        )
+    ]
 
 
 def test_production_deploy_restores_backend_when_backend_command_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(train, "production_identity", lambda: ("p" * 40, "q" * 64))
+    monkeypatch.setattr(
+        train,
+        "capture_active_pointer",
+        lambda digest: {"digest": digest, "version": "v0.27.4"},
+    )
     monkeypatch.setattr(
         train.subprocess,
         "run",
@@ -201,7 +223,14 @@ def test_production_deploy_restores_backend_when_backend_command_fails(monkeypat
     with pytest.raises(RuntimeError, match="backend post-activation failed"):
         train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
 
-    assert rollback_calls == [(tmp_path, "p" * 40, "q" * 64)]
+    assert rollback_calls == [
+        (
+            tmp_path,
+            "p" * 40,
+            "q" * 64,
+            {"digest": "q" * 64, "version": "v0.27.4"},
+        )
+    ]
 
 
 def test_production_deploy_restores_backend_when_frontend_fails(monkeypatch, tmp_path):
@@ -215,6 +244,11 @@ def test_production_deploy_restores_backend_when_frontend_fails(monkeypatch, tmp
     monkeypatch.setattr(train.subprocess, "run", fake_subprocess_run)
     identities = iter([("p" * 40, "q" * 64), ("a" * 40, "b" * 64)])
     monkeypatch.setattr(train, "production_identity", lambda: next(identities))
+    monkeypatch.setattr(
+        train,
+        "capture_active_pointer",
+        lambda digest: {"digest": digest, "version": "v0.27.4"},
+    )
     monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
     monkeypatch.setattr(train, "production_instance", lambda: "i-production")
     monkeypatch.setattr(
@@ -250,13 +284,25 @@ def test_production_deploy_restores_backend_when_frontend_fails(monkeypatch, tmp
             "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
         )
     ]
-    assert rollback_calls == [(tmp_path, "p" * 40, "q" * 64)]
+    assert rollback_calls == [
+        (
+            tmp_path,
+            "p" * 40,
+            "q" * 64,
+            {"digest": "q" * 64, "version": "v0.27.4"},
+        )
+    ]
 
 
 def test_production_deploy_restores_both_layers_when_public_frontend_check_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(train.subprocess, "run", lambda *args, **kwargs: None)
     identities = iter([("p" * 40, "q" * 64), ("a" * 40, "b" * 64)])
     monkeypatch.setattr(train, "production_identity", lambda: next(identities))
+    monkeypatch.setattr(
+        train,
+        "capture_active_pointer",
+        lambda digest: {"digest": digest, "version": "v0.27.4"},
+    )
     monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
     monkeypatch.setattr(train, "production_instance", lambda: "i-production")
     monkeypatch.setattr(
@@ -297,7 +343,14 @@ def test_production_deploy_restores_both_layers_when_public_frontend_check_fails
             "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
         )
     ]
-    assert backend_rollbacks == [(tmp_path, "p" * 40, "q" * 64)]
+    assert backend_rollbacks == [
+        (
+            tmp_path,
+            "p" * 40,
+            "q" * 64,
+            {"digest": "q" * 64, "version": "v0.27.4"},
+        )
+    ]
 
 
 def test_restore_backend_reactivates_verified_previous_artifact(monkeypatch, tmp_path):
@@ -306,7 +359,7 @@ def test_restore_backend_reactivates_verified_previous_artifact(monkeypatch, tmp
 
     def fake_run(command, **kwargs):
         if command[:3] == ["aws", "s3", "cp"]:
-            return json.dumps({"git_sha": expected_sha, "version": "v0.27.4"})
+            return json.dumps({"git_sha": expected_sha})
         raise AssertionError(command)
 
     monkeypatch.setattr(train, "run", fake_run)
@@ -329,11 +382,17 @@ def test_restore_backend_reactivates_verified_previous_artifact(monkeypatch, tmp
         lambda digest: runtime_checks.append(digest),
     )
 
-    train.restore_backend(tmp_path, expected_sha, expected_digest)
+    train.restore_backend(
+        tmp_path,
+        expected_sha,
+        expected_digest,
+        {"digest": expected_digest, "version": "v0.27.4", "uploaded_at": "legacy"},
+    )
 
     assert calls[0][0][:4] == ["aws", "s3", "cp", "-"]
     assert json.loads(calls[0][1]["input"]) == {
         "digest": expected_digest,
+        "uploaded_at": "legacy",
         "version": "v0.27.4",
     }
     assert calls[1][0] == [
@@ -343,6 +402,31 @@ def test_restore_backend_reactivates_verified_previous_artifact(monkeypatch, tmp
         "i-0123456789abcdef0",
     ]
     assert runtime_checks == [expected_digest]
+
+
+def test_capture_active_pointer_preserves_complete_legacy_pointer(monkeypatch):
+    expected_digest = "b" * 64
+    pointer = {
+        "digest": expected_digest,
+        "uploaded_at": "2026-07-28T00:00:00Z",
+        "version": "v0.27.4-g4e91340",
+    }
+    monkeypatch.setattr(train, "run", lambda *args, **kwargs: json.dumps(pointer))
+
+    assert train.capture_active_pointer(expected_digest) == pointer
+
+
+def test_capture_active_pointer_rejects_digest_drift(monkeypatch):
+    monkeypatch.setattr(
+        train,
+        "run",
+        lambda *args, **kwargs: json.dumps(
+            {"digest": "c" * 64, "version": "v0.27.4"}
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="changed during pre-state"):
+        train.capture_active_pointer("b" * 64)
 
 
 def test_restore_frontend_atomically_switches_to_previous_release(monkeypatch):
@@ -368,6 +452,7 @@ def test_restore_frontend_atomically_switches_to_previous_release(monkeypatch):
     assert "systemctl daemon-reload" in calls[0][1]
     assert "nginx -t" in calls[0][1]
     assert "systemctl reload nginx" in calls[0][1]
+    assert "for attempt in $(seq 1 15)" in "\n".join(calls[0][1])
 
 
 @pytest.mark.parametrize(

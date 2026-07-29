@@ -191,6 +191,32 @@ def production_identity() -> tuple[str, str]:
     return sha, digest
 
 
+def capture_active_pointer(expected_digest: str) -> dict[str, object]:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        raise RuntimeError("production active digest is invalid")
+    bucket = f"trustforge-deploy-{PRODUCTION_ACCOUNT}"
+    pointer = json.loads(
+        run(
+            [
+                "aws",
+                "s3",
+                "cp",
+                f"s3://{bucket}/pointers/active.json",
+                "-",
+                "--region",
+                PRODUCTION_REGION,
+            ],
+            capture=True,
+        )
+    )
+    if pointer.get("digest") != expected_digest:
+        raise RuntimeError("production active pointer changed during pre-state capture")
+    version = pointer.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", version):
+        raise RuntimeError("production active pointer version is invalid")
+    return pointer
+
+
 def verify_runtime_identity(expected_digest: str) -> None:
     health = run(["curl", "-fsS", "--max-time", "15", f"{PRODUCTION_URL}/healthz"], capture=True).strip()
     if health != "ok":
@@ -398,7 +424,11 @@ def restore_frontend(
             "nginx -t",
             "systemctl reload nginx",
             "systemctl try-restart trustforge",
-            "curl -fsS http://localhost/healthz >/dev/null",
+            (
+                "ready=0; for attempt in $(seq 1 15); do "
+                "if curl -fsS --max-time 2 http://localhost/healthz >/dev/null; "
+                "then ready=1; break; fi; sleep 2; done; test \"$ready\" = 1"
+            ),
             f"rm -f {snapshot}",
         ],
     )
@@ -410,7 +440,12 @@ def discard_frontend_snapshot(instance: str, snapshot: str) -> None:
     run_ssm(instance, [f"rm -f {snapshot}"])
 
 
-def restore_backend(main_tree: Path, expected_sha: str, expected_digest: str) -> None:
+def restore_backend(
+    main_tree: Path,
+    expected_sha: str,
+    expected_digest: str,
+    expected_pointer: dict[str, object],
+) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
         raise RuntimeError("rollback backend SHA is invalid")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
@@ -432,11 +467,16 @@ def restore_backend(main_tree: Path, expected_sha: str, expected_digest: str) ->
     )
     if manifest.get("git_sha") != expected_sha:
         raise RuntimeError("rollback backend manifest SHA mismatch")
-    version = str(manifest.get("version", ""))
-    if not version:
-        raise RuntimeError("rollback backend manifest version is missing")
+    if expected_pointer.get("digest") != expected_digest:
+        raise RuntimeError("rollback backend pointer digest mismatch")
+    version = expected_pointer.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", version):
+        raise RuntimeError("rollback backend pointer version is invalid")
+    manifest_version = manifest.get("version")
+    if manifest_version is not None and manifest_version != version:
+        raise RuntimeError("rollback backend manifest version mismatch")
     instance = production_instance()
-    pointer = json.dumps({"digest": expected_digest, "version": version}, sort_keys=True)
+    pointer = json.dumps(expected_pointer, sort_keys=True)
     subprocess.run(
         [
             "aws",
@@ -465,6 +505,7 @@ def restore_backend(main_tree: Path, expected_sha: str, expected_digest: str) ->
 
 def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> dict[str, str]:
     previous_sha, previous_digest = production_identity()
+    previous_pointer = capture_active_pointer(previous_digest)
     env = dict(
         os.environ,
         TRUSTFORGE_RELEASE_SHA=main_sha,
@@ -520,7 +561,7 @@ def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> di
             except Exception as rollback_error:
                 rollback_errors.append(f"frontend: {rollback_error}")
         try:
-            restore_backend(main_tree, previous_sha, previous_digest)
+            restore_backend(main_tree, previous_sha, previous_digest, previous_pointer)
         except Exception as rollback_error:
             rollback_errors.append(f"backend: {rollback_error}")
         if rollback_errors:
