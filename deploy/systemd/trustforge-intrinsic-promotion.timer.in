@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly TrustForge intrinsic promotion recommendation
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+AccuracySec=1s
+Unit=trustforge-intrinsic-promotion.service
+
+[Install]
+WantedBy=timers.target
