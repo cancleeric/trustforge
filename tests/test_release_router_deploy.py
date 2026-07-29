@@ -35,7 +35,14 @@ def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, P
     source = tmp_path / "release_router_service.py"
     source.write_text("print('isolated-router')\n")
     python_runtime = tmp_path / "python"
-    shutil.copy2(sys.executable, python_runtime)
+    runtime_source = Path(sys.executable)
+    shutil.copyfile(runtime_source, python_runtime)
+    python_runtime.chmod(0o755)
+    pyvenv = tmp_path / "pyvenv.cfg"
+    pyvenv.write_text(
+        f"home = {runtime_source.resolve().parent}\n"
+        f"version = {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
+    )
     python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
     site_prefix = Path(".venv/lib") / python_version / "site-packages"
     package = tmp_path / "__init__.py"
@@ -65,11 +72,26 @@ def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, P
     )
     files = {
         Path(".venv/bin/python"): (python_runtime, "0555"),
+        Path(".venv/pyvenv.cfg"): (pyvenv, "0444"),
         Path("scripts/release_router_service.py"): (source, "0444"),
         site_prefix / "trustforge/__init__.py": (package, "0444"),
         site_prefix / "trustforge-0.0.test.dist-info/METADATA": (metadata, "0444"),
         site_prefix / "trustforge-0.0.test.dist-info/RECORD": (record, "0444"),
     }
+    # uv's macOS CPython executable loads libpython relative to itself.  A
+    # fixture that copies only ``sys.executable`` creates an artifact that
+    # aborts under dyld before the isolation assertion can run.
+    runtime_library = (
+        runtime_source.resolve().parent.parent
+        / "lib"
+        / f"libpython{sys.version_info.major}.{sys.version_info.minor}.dylib"
+    )
+    if runtime_library.is_file():
+        runtime_library_copy = tmp_path / runtime_library.name
+        shutil.copyfile(runtime_library, runtime_library_copy)
+        files[
+            Path(".venv/lib") / runtime_library.name
+        ] = (runtime_library_copy, "0444")
     directories = sorted(
         {
             parent

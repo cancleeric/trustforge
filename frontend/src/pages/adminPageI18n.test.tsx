@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { HermesI18nProvider, useHermesI18n } from '../hermes/hermesI18n'
 import AdminPage from './AdminPage'
 import type { AdminConfigData } from '../lib/types'
+import { getAdminConfig, putAdminConfig } from '../lib/endpoints'
 
 vi.mock('../lib/adminConsole', async () => {
   const actual = await vi.importActual<typeof import('../lib/adminConsole')>('../lib/adminConsole')
@@ -20,6 +21,7 @@ function makeBaseConfig(): AdminConfigData {
   return {
     daily_cap_usd: { config: 5, env: null, default: 3, effective: 5, source: 'config' },
     bedrock_enabled: { config: false, bedrock_model_id_set: true, effective: false, source: 'config' },
+    multi_angle_narration_enabled: { config: null, env: null, default: true, effective: false, source: 'global_gate_blocked' },
     hermes_autonomy_enabled: { config: null, env: null, effective: true, source: 'default' },
     live_token: { config_configured: false, config_last4: null, env_configured: false, effective_configured: false, source: 'default' },
     version: 1,
@@ -65,6 +67,7 @@ function LocaleSwitcher() {
 describe('AdminPage i18n', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(getAdminConfig).mockResolvedValue({ ok: true, data: makeBaseConfig() })
     document.cookie = 'trustforge_hermes_locale=; Max-Age=0'
   })
 
@@ -92,5 +95,80 @@ describe('AdminPage i18n', () => {
     expect(screen.getByText('Configuration Change Audit (last 50)')).toBeInTheDocument()
     expect(screen.getByText('No configuration change records yet.')).toBeInTheDocument()
     expect(screen.queryByText('管理控制台')).not.toBeInTheDocument()
+  })
+
+  it('default ON remains a distinct Admin control when env/global gates block it, and PUTs false', async () => {
+    const config = makeBaseConfig()
+    config.multi_angle_narration_enabled = {
+      config: null,
+      env: '',
+      default: true,
+      effective: false,
+      source: 'env_override',
+    }
+    vi.mocked(getAdminConfig).mockResolvedValue({ ok: true, data: config })
+    vi.mocked(putAdminConfig).mockResolvedValue({
+      ok: true,
+      data: {
+        ...config,
+        multi_angle_narration_enabled: {
+          ...config.multi_angle_narration_enabled,
+          config: false,
+        },
+        version: 2,
+      },
+    })
+
+    render(<HermesI18nProvider><AdminPage /></HermesI18nProvider>)
+
+    await waitFor(() => expect(screen.getByText('五方向分析 LLM 綜合敘述')).toBeInTheDocument())
+    expect(screen.getByText('env_override')).toBeInTheDocument()
+    expect(screen.getByText('已關閉／被全域閘阻擋')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '關閉 LLM 綜合敘述' }))
+    await waitFor(() => expect(putAdminConfig).toHaveBeenCalledWith(
+      'test-token',
+      { multi_angle_narration_enabled: false },
+      1,
+    ))
+  })
+
+  it('config OFF can be enabled while global gate status stays truthful in English', async () => {
+    const config = makeBaseConfig()
+    config.multi_angle_narration_enabled = {
+      config: false,
+      env: null,
+      default: true,
+      effective: false,
+      source: 'global_gate_blocked',
+    }
+    vi.mocked(getAdminConfig).mockResolvedValue({ ok: true, data: config })
+    vi.mocked(putAdminConfig).mockResolvedValue({
+      ok: true,
+      data: {
+        ...config,
+        multi_angle_narration_enabled: {
+          ...config.multi_angle_narration_enabled,
+          config: true,
+        },
+        version: 2,
+      },
+    })
+
+    render(
+      <HermesI18nProvider>
+        <LocaleSwitcher />
+        <AdminPage />
+      </HermesI18nProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'use English' }))
+
+    await waitFor(() => expect(screen.getByText('Multi-angle LLM Synthesis Narration')).toBeInTheDocument())
+    expect(screen.getByText('global_gate_blocked')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Enable LLM synthesis narration' }))
+    await waitFor(() => expect(putAdminConfig).toHaveBeenCalledWith(
+      'test-token',
+      { multi_angle_narration_enabled: true },
+      1,
+    ))
   })
 })

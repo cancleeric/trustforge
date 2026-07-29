@@ -31,10 +31,10 @@ process 內多執行緒的並行 TOCTOU（codex HIGH，已修），但**多實�
     - 後續 → 只有「目前 reserved_total 還沒超過剩餘空間」才放行；超了就
       `ConditionalCheckFailedException` → 回 `False`（拒絕，呼叫端 degrade）。
 
-後端不可用（憑證/網路/throttle/表不存在）時 raise `BudgetBackendError`，
-呼叫端（`budget_guard.try_reserve_request_budget`/`release_request_budget`）
-據此 fallback 回 process-local `BudgetReservation`，不讓預留整個 fail-open
-（至少單 process 內仍會擋）。
+後端不可用（憑證/網路/throttle/表不存在）時 raise `BudgetBackendError`。
+呼叫端 `budget_guard.try_reserve_request_budget` 會 fail-closed 拒絕，不
+fallback process-local；release 則保留 shared reservation 等待 reconcile，
+避免跨 instance 的 authority provenance 失真。
 
 沿用既有 `trustforge-connector-cache` 表的保留字慣例不適用（那是 source_id/
 coin schema），這裡用獨立表（預設 `trustforge-budget-guard`，可用

@@ -724,43 +724,6 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
-  /api/module-telemetry:
-    get:
-      tags: [observability]
-      operationId: getModuleTelemetry
-      summary: 模組 runtime 遙測狀態
-      description: |
-        唯讀。未帶 `module_id` 時回傳所有模組遙測紀錄與總數；
-        帶 `module_id` 時回傳單一模組紀錄，找不到則回 404。
-      parameters:
-        - in: query
-          name: module_id
-          required: false
-          schema:
-            type: string
-          description: 可選的模組識別碼。
-      responses:
-        "200":
-          description: 模組遙測狀態
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        additionalProperties: true
-        "404":
-          description: 指定模組不存在
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-
   /api/asset-context:
     get:
       tags: [analysis]
@@ -955,105 +918,6 @@ paths:
                                   type: string
         "400":
           description: 缺少必要參數 asset
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-
-  /api/multi-angle:
-    get:
-      tags: [analysis]
-      operationId: getMultiAngle
-      summary: 五角度綜合分析結果
-      description: |
-        唯讀。回傳指定幣種的最新五角度綜合分析結果（MultiAngleReport）。
-        可選 `snapshot_id` 參數指定特定快照。查無結果時回 200 + null。
-      parameters:
-        - in: query
-          name: coin
-          required: true
-          schema:
-            type: string
-          description: 幣種代碼，例如 `BTC`。
-        - in: query
-          name: snapshot_id
-          required: false
-          schema:
-            type: string
-          description: 指定快照 ID（選填，不指定則取最新）。
-      responses:
-        "200":
-          description: 五角度綜合分析結果
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        properties:
-                          multi_angle:
-                            type: object
-                            nullable: true
-                            description: MultiAngleReport 或 null（查無結果）
-        "400":
-          description: 參數錯誤
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-    post:
-      tags: [analysis]
-      operationId: postMultiAngle
-      summary: 觸發五角度綜合分析
-      description: |
-        建立同一份 immutable snapshot，同時為五個分析角度各排入一個 job。
-        五 job 全部完成後自動觸發 synthesis。
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [coin]
-              properties:
-                coin:
-                  type: string
-                  description: 幣種代碼
-                question:
-                  type: string
-                  description: 分析問題（選填，有預設模板）
-                locale:
-                  type: string
-                  description: 敘事語系（選填，預設 zh-Hant）
-      responses:
-        "200":
-          description: 五角度分析已排入佇列
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        required: [snapshot_id, job_ids, coin]
-                        properties:
-                          snapshot_id:
-                            type: string
-                          job_ids:
-                            type: object
-                          coin:
-                            type: string
-        "400":
-          description: 參數錯誤
           content:
             application/json:
               schema:
@@ -1372,6 +1236,9 @@ paths:
       tags: [analysis]
       operationId: getMultiAngleAnalysis
       summary: 讀取同一 snapshot 的五角度綜合報告
+      description: |
+        唯讀。回傳指定幣種最新或指定 snapshot 的 MultiAngleReport；
+        尚未完成或查無結果時仍回 200，`data.multi_angle` 為 null。
       parameters:
         - in: query
           name: coin
@@ -1386,13 +1253,34 @@ paths:
           description: 綜合報告；尚未完成時 data.multi_angle 為 null
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/OkEnvelope"}
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [multi_angle]
+                        properties:
+                          multi_angle:
+                            type: [object, "null"]
+                            description: 完成的 MultiAngleReport，或尚未完成時為 null。
         "400": {$ref: "#/components/responses/BadRequest"}
         "502": {$ref: "#/components/responses/UpstreamError"}
     post:
       tags: [analysis]
       operationId: submitMultiAngleAnalysis
       summary: 原子建立同 snapshot 的五個分析工作
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          description: 同一 caller 的 logical submission 重試須沿用此鍵。
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9._:-]+$'
       requestBody:
         required: true
         content:
@@ -1409,10 +1297,34 @@ paths:
           description: 五個工作已完整入列，回傳 snapshot_id 與逐角度 job_ids
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/OkEnvelope"}
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [snapshot_id, job_ids, coin]
+                        properties:
+                          snapshot_id: {type: string}
+                          job_ids:
+                            type: object
+                            required: [risk, sentiment, fundamentals, news, catalyst]
+                            additionalProperties: false
+                            properties:
+                              risk: {type: string}
+                              sentiment: {type: string}
+                              fundamentals: {type: string}
+                              news: {type: string}
+                              catalyst: {type: string}
+                          coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        "202":
+          description: 相同冪等請求仍在建立中；回傳同一 request_id，應以相同 key 重試。
         "400": {$ref: "#/components/responses/BadRequest"}
         "409":
-          description: 唯讀預檢顯示目前可觀測額度不足以啟動五個工作（未預扣款）
+          description: 冪等鍵重用於不同 payload，或預算預檢未通過
+        "429":
+          description: caller-scoped analysis-write 限流
         "503":
           description: 佇列無法同時容納五個工作
         "502": {$ref: "#/components/responses/UpstreamError"}
@@ -2054,6 +1966,7 @@ paths:
                 data:
                   daily_cap_usd: {config: 1.0, env: "3.0", default: 3.0, effective: 1.0, source: config}
                   bedrock_enabled: {config: true, bedrock_model_id_set: true, effective: true, source: config}
+                  multi_angle_narration_enabled: {config: null, env: null, default: true, effective: true, source: default}
                   live_token: {config_configured: true, config_last4: "a9f2", env_configured: false, effective_configured: true, source: config}
                   version: 7
                   updated_at: "2026-07-07T03:00:00+00:00"
@@ -2087,6 +2000,11 @@ paths:
           `BEDROCK_MODEL_ID` env 未設 → 仍寫入，回應 `warnings` 附
           「開關開了也不會有真呼叫」誠實警告。`null`＝清除 config 層
           開關（回落下一層：env/default，見 PR-3 budget_guard 整合）。
+        - `multi_angle_narration_enabled`：嚴格 bool（`"true"` 字串不算）。
+          `null`＝清除 Admin 層並回到預設開啟。實際呼叫仍須與全域
+          Bedrock、model pricing、daily cap/reservation 安全閘全部 AND。
+          `TRUSTFORGE_MULTI_ANGLE_NARRATION` 是 Admin 不可覆蓋的緊急阻斷
+          層：未設定或精確 `1` 放行，`0`、空值或非法值 fail-closed 關閉。
         - `live_token`：長度 24–512 的可見 ASCII（0x21–0x7E）明文，
           server 落庫前轉 sha256（明文不落庫、不進審計、**不回顯**）。
           `null`＝清除 runtime token（回落 env token）。
@@ -2111,6 +2029,9 @@ paths:
                   maximum: 50
                 bedrock_enabled:
                   type: [boolean, "null"]
+                multi_angle_narration_enabled:
+                  type: [boolean, "null"]
+                  description: Admin hot switch；null 回到預設 true，但 env emergency kill switch 與全域 Bedrock/cost gates 仍可阻擋
                 live_token:
                   type: [string, "null"]
                   minLength: 24
@@ -2122,6 +2043,7 @@ paths:
             example:
               daily_cap_usd: 1.0
               bedrock_enabled: true
+              multi_angle_narration_enabled: true
               expected_version: 7
       responses:
         "200":
@@ -2148,7 +2070,8 @@ paths:
             驗證失敗——`invalid_cap`（cap 越界/非有限數/非數字）或
             `bad_request`（`expected_version` 缺席/不合法、無任何設定
             欄位、不支援的欄位、bedrock_enabled 非嚴格 bool、live_token
-            不符長度/字元集規則、JSON 解析失敗）。
+            不符長度/字元集規則、multi_angle_narration_enabled 非嚴格
+            bool、JSON 解析失敗）。
           content:
             application/json:
               schema:
@@ -2453,7 +2376,7 @@ components:
         函式——`budget_guard.daily_cap_usd_resolved` / `web._bedrock_allowed`
         ——不另行重算，避免顯示值與實際採用值分岔）。token 相關只有
         configured bool + 末 4 碼，絕無明文/完整 hash。
-      required: [daily_cap_usd, bedrock_enabled, live_token, version, updated_at, updated_by, exists, version_corrupt]
+      required: [daily_cap_usd, bedrock_enabled, multi_angle_narration_enabled, live_token, version, updated_at, updated_by, exists, version_corrupt]
       properties:
         daily_cap_usd:
           type: object
@@ -2491,6 +2414,30 @@ components:
               type: string
               enum: [config, env, config_read_error]
               description: 生效層；config 未設定過＝env（v0.7.0 語意）；config_read_error＝讀取異常 fail-closed。注意 env 亦涵蓋「`BEDROCK_MODEL_ID` 未設 → 直接短路 false、不讀 config」分支（生效與否確實由 env 決定）
+        multi_angle_narration_enabled:
+          type: object
+          description: |
+            五方向分析完成後最多一次 LLM 綜合敘述。Admin 值未設定時
+            default=true；env emergency kill switch 不可被 Admin 覆蓋；
+            effective 再與全域 Bedrock、model pricing 與 daily cap 閘 AND。
+          required: [config, env, default, effective, source]
+          properties:
+            config:
+              type: [boolean, "null"]
+              description: Admin hot config；null＝使用內建預設 true
+            env:
+              type: [string, "null"]
+              description: "`TRUSTFORGE_MULTI_ANGLE_NARRATION` 原始值；未設定/精確 1 放行，0/空值/非法值 fail-closed"
+            default:
+              type: boolean
+              const: true
+            effective:
+              type: boolean
+              description: Admin/default、env emergency layer、全域 Bedrock 與成本閘全部 AND 後的實際狀態
+            source:
+              type: string
+              enum: [config, default, env_override, config_read_error, global_gate_blocked]
+              description: env_override＝env 緊急阻斷；global_gate_blocked＝feature switch 開啟但 Bedrock/pricing/cap 阻擋
         live_token:
           type: object
           required: [config_configured, config_last4, env_configured, effective_configured, source]

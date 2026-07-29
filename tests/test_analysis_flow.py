@@ -295,6 +295,124 @@ def test_nonretryable_failure_enters_dead_letter_with_attempt_history(tmp_path, 
     assert flow.requeue_dead_letter("missing") is False
 
 
+def test_worker_success_never_finalizes_atomic_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "success.sqlite3")
+    calls = []
+    flow._finalize_atomic_failure = lambda *args: calls.append(args)
+    snapshot = flow.create_snapshot("BTC")
+    flow.enqueue_matrix(snapshot)
+    flow.start(); flow.join(); flow.stop()
+    assert calls == []
+
+
+def test_retry_attempts_one_and_two_do_not_finalize_before_dead_letter(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "retry.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    flow.enqueue_matrix(snapshot)
+    observed = []
+
+    def finalize(failed_job_id, state):
+        dead = flow._conn().execute(
+            "SELECT attempts FROM analysis_dead_letters WHERE job_id=?",
+            (failed_job_id,),
+        ).fetchone()
+        observed.append((failed_job_id, state, dead[0] if dead else None))
+        return False
+
+    flow._finalize_atomic_failure = finalize
+    flow._stage_claim_extraction = lambda _package: (_ for _ in ()).throw(
+        RuntimeError("transient")
+    )
+    flow.start()
+    deadline = time.time() + 8
+    while time.time() < deadline and not observed:
+        time.sleep(0.05)
+    flow.stop()
+    assert observed
+    assert all(state == "failed" and attempts == 3 for _, state, attempts in observed)
+
+
+def test_final_dead_letter_is_durable_before_failure_finalizer(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "dead.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    flow.enqueue_matrix(snapshot)
+    observed = []
+
+    def finalize(failed_job_id, state):
+        job_state = flow._conn().execute(
+            "SELECT state FROM analysis_jobs WHERE job_id=?", (failed_job_id,)
+        ).fetchone()[0]
+        dead = flow._conn().execute(
+            "SELECT attempts FROM analysis_dead_letters WHERE job_id=?",
+            (failed_job_id,),
+        ).fetchone()
+        observed.append((state, job_state, dead[0]))
+        return False
+
+    flow._finalize_atomic_failure = finalize
+    flow._stage_claim_extraction = lambda _package: (_ for _ in ()).throw(
+        ValueError("permanent")
+    )
+    flow.start(); flow.join(); flow.stop()
+    assert len(observed) == 5
+    assert all(item == ("failed", "failed", 1) for item in observed)
+
+
+def test_concurrent_flow_initialization_serializes_wal_negotiation(tmp_path):
+    path = tmp_path / "concurrent-init.sqlite3"
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def initialize():
+        try:
+            barrier.wait(timeout=2)
+            with AnalysisFlow(path):
+                pass
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=initialize) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def test_wal_negotiation_failure_is_bounded_and_closes_connection(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    class Connection:
+        row_factory = None
+
+        def execute(self, statement):
+            calls.append(statement)
+            if statement == "PRAGMA journal_mode=WAL":
+                raise sqlite3.OperationalError("database is locked")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.sqlite3.connect", lambda *_args, **_kwargs: Connection()
+    )
+    started = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        AnalysisFlow(tmp_path / "locked.sqlite3")
+    assert time.monotonic() - started < 1
+    assert calls == ["PRAGMA busy_timeout=10000", "PRAGMA journal_mode=WAL", "close"]
+
+
 def test_prune_keeps_referenced_snapshots(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")
@@ -671,9 +789,9 @@ def test_bedrock_live_attempt_records_ledger_before_releasing_reservation(tmp_pa
         order.append("append_run")
         return result
 
-    def _tracking_release(amount):
+    def _tracking_release(amount, **kwargs):
         order.append("release")
-        return real_release(amount)
+        return real_release(amount, **kwargs)
 
     monkeypatch.setattr("trustforge.analysis_flow.append_run", _slow_append_run)
     monkeypatch.setattr("trustforge.analysis_flow.budget_guard.release_request_budget", _tracking_release)
@@ -701,9 +819,9 @@ def test_bedrock_live_attempt_releases_reservation_even_when_ledger_accounting_r
     released = {}
     real_release = budget_guard.release_request_budget
 
-    def _tracking_release(amount):
+    def _tracking_release(amount, **kwargs):
         released["amount"] = amount
-        return real_release(amount)
+        return real_release(amount, **kwargs)
 
     monkeypatch.setattr("trustforge.analysis_flow.append_run", _boom)
     monkeypatch.setattr("trustforge.analysis_flow.budget_guard.release_request_budget", _tracking_release)

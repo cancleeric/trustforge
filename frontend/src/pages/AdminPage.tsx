@@ -418,6 +418,7 @@ export default function AdminPage() {
   // ── 已解鎖畫面 ──────────────────────────────────────────────────────
   const cap = config.daily_cap_usd
   const bedrock = config.bedrock_enabled
+  const multiAngleNarration = config.multi_angle_narration_enabled
   const hermesAutonomy = config.hermes_autonomy_enabled
   const liveToken = config.live_token
   const capCheck = validateCapInput(capInput)
@@ -567,6 +568,45 @@ export default function AdminPage() {
               </button>
             )}
           </div>
+        )}
+      </SectionCard>
+
+      <SectionCard title={t('adminMultiAngleNarrationSectionTitle')}>
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-tf-text2">
+          <span>
+            {t('adminEffectiveLabel')}
+            <strong className={multiAngleNarration.effective ? 'text-tf-warn' : 'text-tf-text'}>
+              {multiAngleNarration.effective
+                ? t('adminMultiAngleNarrationOnLabel')
+                : t('adminMultiAngleNarrationOffLabel')}
+            </strong>
+          </span>
+          <SourceBadge source={multiAngleNarration.source} />
+        </div>
+        <p className="mb-3 text-xs text-tf-muted">
+          {t('adminMultiAngleNarrationDesc')}
+          {multiAngleNarration.env !== null
+            ? ` ${t('adminMultiAngleNarrationEnvPrefix')}「${multiAngleNarration.env}」`
+            : ''}
+        </p>
+        {multiAngleNarration.config !== false ? (
+          <button
+            type="button"
+            disabled={saving || config.version_corrupt}
+            onClick={() => doPut({ multi_angle_narration_enabled: false })}
+            className={BTN_PRIMARY}
+          >
+            {t('adminMultiAngleNarrationSwitchOff')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={saving || config.version_corrupt}
+            onClick={() => doPut({ multi_angle_narration_enabled: true })}
+            className={BTN_PLAIN}
+          >
+            {t('adminMultiAngleNarrationSwitchOn')}
+          </button>
         )}
       </SectionCard>
 

@@ -341,6 +341,47 @@ def request_max_cost_usd() -> float:
     return max(estimate_request_max_cost_usd(), DEFAULT_REQUEST_MAX_USD)
 
 
+def multi_angle_angle_max_cost_usd() -> float:
+    """Complete one-angle upper bound: claim extraction + narrative.
+
+    Claim extraction is capped by ``MULTI_ANGLE_MAX_CLAIM_DOCS`` in
+    ``analysis_flow``; 32k input tokens conservatively covers 50 bounded
+    snippets plus identifiers/metadata. Narrative uses the existing configured
+    worst-case input bound. Both calls use the configured Bedrock model and
+    configured maximum output tokens. An explicit operator request-max override
+    remains a floor; the specialised estimate must never reserve less than it.
+    """
+    from .ledger import estimate_cost
+
+    model = _narrative_worst_case_model_id()
+    try:
+        output = int(os.getenv("BEDROCK_MAX_TOKENS", "1024"))
+    except ValueError as exc:
+        raise ValueError("BEDROCK_MAX_TOKENS must be an integer") from exc
+    if not 1 <= output <= 8192:
+        raise ValueError("BEDROCK_MAX_TOKENS must be within 1..8192")
+    raw_narrative_tokens = os.getenv(
+        "TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS", "8000"
+    )
+    try:
+        narrative_input_tokens = int(raw_narrative_tokens)
+    except ValueError as exc:
+        raise ValueError(
+            "TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS must be an integer"
+        ) from exc
+    if not 8_000 <= narrative_input_tokens <= 1_000_000:
+        raise ValueError(
+            "TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS must be within 8000..1000000"
+        )
+    claim = estimate_cost(model, 32_000, output)
+    narrative = estimate_cost(model, narrative_input_tokens, output)
+    return max(claim + narrative, request_max_cost_usd(), DEFAULT_REQUEST_MAX_USD)
+
+
+def atomic_batch_exclusive_enabled() -> bool:
+    return os.getenv("TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE", "").strip() == "1"
+
+
 # ---------------------------------------------------------------------------
 # D2.5 / #76（真實 worst-case accounting 取代固定 $0.05）：單次 /api/analyze
 # 請求「最壞情況」可能觸發的 Bedrock 花費保守上界，改以「實際會用到的模型
@@ -535,38 +576,62 @@ class BudgetReservation:
 _RESERVATION = BudgetReservation()
 
 
-def _budget_counter_backend() -> DynamoDBBudgetCounter | None:
+def _budget_counter_backend(
+    backend: str | None = None,
+) -> DynamoDBBudgetCounter | None:
     """選擇 budget 預留的後端：env `TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb`
     時回傳共享 `DynamoDBBudgetCounter`（多實例安全，見 #75）；其餘（含未設定）
     回傳 `None`，呼叫端走 process-local `BudgetReservation`（單 process 部署
     足夠，預設行為不變）。
 
-    後端不可用（`BudgetBackendError`）時由呼叫端 fallback 回 process-local，
-    不讓預留整個 fail-open——但「選擇哪個後端」本身不是錯誤，這裡只做 env
-    判斷，不碰網路。
+    後端不可用（`BudgetBackendError`）時 configured DynamoDB 路徑
+    fail-closed 拒絕，不得 fallback process-local；「選擇哪個後端」本身
+    不碰網路。
     """
-    if os.getenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "local").strip().lower() == "dynamodb":
+    resolved_backend = backend or budget_reservation_backend()
+    if resolved_backend not in {"local", "dynamodb"}:
+        raise ValueError(f"unsupported budget reservation backend: {resolved_backend!r}")
+    if resolved_backend == "dynamodb":
         from .budget_counter import _default_counter
 
         return _default_counter()
     return None
 
 
+def budget_reservation_backend() -> str:
+    """Return the configured reservation authority: ``local`` or ``dynamodb``.
+
+    This is a stable, side-effect-free runtime contract for accounting callers
+    which must decide whether a process-local fallback is sufficient evidence
+    to release a reservation.  In particular, process-local unledgered spend
+    can cover a local reservation, but can never authorize release of shared
+    DynamoDB capacity.
+    """
+    return (
+        "dynamodb"
+        if os.getenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "local").strip().lower()
+        == "dynamodb"
+        else "local"
+    )
+
+
 def try_reserve_request_budget(
-    ledger: Ledger | None = None, *, now_fn=time.time
+    ledger: Ledger | None = None, *, now_fn=time.time, backend: str | None = None
 ) -> float | None:
     """對外入口：`pipeline.run()` 在放行真 Bedrock（narrative 或
     online-stance）前呼叫。
 
     #75：啟用 DynamoDB 後端（`TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb`）時，
     預留走跨實例共享的原子 conditional counter（所有 process 共用同一份
-    `reserved_total`），多實例部署不再各自計數、互不見而超支；後端暫時不可用
-    時 fallback 回 process-local `BudgetReservation`（至少單 process 內仍
-    擋），不讓預留整個 fail-open。預設（未設 env）行為與修 #75 前逐字相同
-    （純 process-local）。
+    `reserved_total`），多實例部署不再各自計數、互不見而超支；後端暫時
+    不可用時 fail-closed 回 `None`，絕不 fallback process-local。預設
+    （未設 env）仍是純 process-local。
     """
-    backend = _budget_counter_backend()
-    if backend is None:
+    if atomic_batch_exclusive_enabled():
+        return None
+    backend_name = backend or budget_reservation_backend()
+    counter = _budget_counter_backend(backend_name)
+    if counter is None:
         return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
 
     cap = daily_cap_usd()
@@ -583,23 +648,20 @@ def try_reserve_request_budget(
         )
         return None
     try:
-        ok = backend.try_reserve(spent_daily=spent, cost=cost, cap=cap, now=now_fn())
+        ok = counter.try_reserve(spent_daily=spent, cost=cost, cap=cap, now=now_fn())
     except BudgetBackendError:
-        # 後端不可用：fallback 回 process-local 預留（不 fail-open 成完全不擋）。
-        # 【CISO #75 可見性】多實例預留保護在這段期間**暫時失效**：各 process
-        # 各自 process-local 計數互不可見，多實例部署的每日硬上限可能被並行撐
-        # 爆成 N 倍。已送 CloudWatch 指標 + 記 warning，絕不靜默降級。
-        _log.warning(
-            "[budget_guard] DynamoDB budget counter 不可用，fallback 回 process-local 預留"
-            "【CISO #75 殘餘風險】多實例保護已暫時失效：多 process/多機部署時各"
-            " process 的 process-local 預留互不可見，每日 $N 硬上限可能被並行撐爆成"
-            " N 倍；請檢查 trustforge-budget-guard 表是否存在、實例角色是否掛載"
-            " trustforge-budget-guard IAM policy、DynamoDB 是否可用。已送出 CloudWatch"
-            " 指標 BudgetGuardMultiInstanceProtectionDisabled 標記此降級。",
+        # Shared authority unavailable means provenance cannot be established.
+        # Never fall back to process-local: that would create a reservation
+        # which later code could mistake for shared capacity and release on the
+        # wrong authority after an env/config transition.
+        _log.error(
+            "[budget_guard] DynamoDB budget counter 不可用；fail-closed 拒絕"
+            "本次預留，不 fallback process-local。請檢查 shared authority。"
+            "已送出 BudgetGuardMultiInstanceProtectionDisabled 指標。",
             exc_info=True,
         )
         _maybe_emit_budget_backend_down_metric(now_fn())
-        return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
+        return None
     return cost if ok else None
 
 
@@ -614,6 +676,8 @@ def request_budget_available(
     """
     if count <= 0:
         raise ValueError("count must be positive")
+    if atomic_batch_exclusive_enabled():
+        return False
     backend = _budget_counter_backend()
     cap = daily_cap_usd()
     cost = round(request_max_cost_usd() * count, 6)
@@ -629,30 +693,31 @@ def request_budget_available(
         return False
 
 
-def release_request_budget(amount: float | None) -> None:
+def release_request_budget(
+    amount: float | None, *, backend: str | None = None
+) -> None:
     """對外入口：pipeline 完成或失敗後呼叫，釋放預留。
 
-    #75：若走 DynamoDB 後端，釋放回共享的 `reserved_total`；後端不可用只記
-    warning、不 raise（reconcile 失敗不該讓 pipeline 炸）。process-local
-    路徑行為不變。
+    `backend` 可綁定預留當下的 authority，避免 env 中途切換後釋放錯後端。
+    DynamoDB 後端不可用只記 error、不 fallback local，保留 shared
+    reservation 等待 reconcile。省略參數維持既有呼叫相容。
     """
-    backend = _budget_counter_backend()
-    if backend is None or amount is None:
+    backend_name = backend or budget_reservation_backend()
+    counter = _budget_counter_backend(backend_name)
+    if counter is None or amount is None:
         _RESERVATION.release(amount)
         return
     try:
-        backend.release(amount)
+        counter.release(amount)
     except BudgetBackendError:
-        # 【CISO #75 可見性】釋放也失敗 → 同樣證明多實例後端不可用，送指標
-        # + 記 warning，不靜默。process-local 仍做 reconcile。
-        _log.warning(
+        # Explicit shared provenance must never mutate local reservations.
+        _log.error(
             "[budget_guard] DynamoDB budget counter 釋放失敗（後端不可用），"
-            "【CISO #75 殘餘風險】多實例保護已暫時失效（同 try_reserve 路徑說明）。"
-            "已送出 CloudWatch 指標 BudgetGuardMultiInstanceProtectionDisabled。",
+            "保留 shared reservation 等待 reconcile；不 fallback local。"
+            "已送出 BudgetGuardMultiInstanceProtectionDisabled 指標。",
             exc_info=True,
         )
         _maybe_emit_budget_backend_down_metric()
-        _RESERVATION.release(amount)
 
 
 def _reset_reservation_for_tests() -> None:
@@ -664,22 +729,15 @@ def _reset_reservation_for_tests() -> None:
 
 
 # ---------------------------------------------------------------------------
-# #75 CISO 可見性：DynamoDB 後端失效時送指標 + 警告（避免靜默降級）
+# #75 CISO 可見性：DynamoDB 後端失效時送指標 + 拒絕 admission
 # ---------------------------------------------------------------------------
 # 背景：啟用 `TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb` 後，若表不存在 / 實例
 # 角色未掛 `trustforge-budget-guard` IAM policy / DynamoDB 不可用，
-# `try_reserve` 會拋 `BudgetBackendError`，呼叫端 fallback 回 process-local
-# `BudgetReservation`。**但 process-local 只擋單 process 內的並行 race，多實例
-# （多 process／多機器）部署時各 process 的 reserved 互不可見，每日 `$N` 硬上限
-# 會被並行撐爆成 N 倍**——這正是 #75 原本要解的多實例風險，靜默 fallback 等於
-# 把保護關掉卻不讓維運發現。因此這裡**不靜默**：每次偵測到後端失效，都送一條
-# CloudWatch 指標 `BudgetGuardMultiInstanceProtectionDisabled` 並記 warning log，
-# 證明多實例保護已失效。
-#
-# 殘餘風險（必須記錄）：DynamoDB 不可用期間，多實例預留上限暫時失效，退化回
-# 「每個 process 各自 process-local 計數」——單 process 內仍安全，跨 process
-# 的每日上限在這段時間內無法強制收斂（見 `budget_counter.py` docstring）。後端
-# 恢復後，下一次 `try_reserve` 走 DynamoDB 路徑，原子收斂自動恢復。
+# `try_reserve` 會拋 `BudgetBackendError`。Configured shared authority 不可用
+# 時一律 fail-closed 拒絕本次 admission，絕不 fallback process-local；否則
+# reservation provenance 會在多 instance 間失真。每次偵測到失效仍送
+# CloudWatch 指標 `BudgetGuardMultiInstanceProtectionDisabled` 並記 error，
+# 供維運修復 shared authority。
 _BUDGET_BACKEND_DOWN_METRIC_COOLDOWN = 300.0
 _last_backend_down_metric_ts = 0.0
 _backend_down_metric_lock = threading.Lock()

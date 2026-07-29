@@ -34,6 +34,13 @@ function validAdminConfigData(): AdminConfigData {
       effective: false,
       source: 'config',
     },
+    multi_angle_narration_enabled: {
+      config: null,
+      env: null,
+      default: true,
+      effective: false,
+      source: 'global_gate_blocked',
+    },
     hermes_autonomy_enabled: {
       config: false,
       env: null,

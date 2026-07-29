@@ -744,6 +744,14 @@ export interface AdminBedrockView {
   source: string
 }
 
+export interface AdminBooleanSwitchView {
+  config: boolean | null
+  env: string | null
+  default: boolean
+  effective: boolean
+  source: string
+}
+
 export interface AdminLiveTokenView {
   config_configured: boolean
   /** 末 4 碼；token 過短時後端回 null（避免 last4 洩露過半明文）。 */
@@ -756,6 +764,7 @@ export interface AdminLiveTokenView {
 export interface AdminConfigData {
   daily_cap_usd: AdminCapView
   bedrock_enabled: AdminBedrockView
+  multi_angle_narration_enabled: AdminBooleanSwitchView
   hermes_autonomy_enabled: {
     config: boolean | null
     env: string | null
@@ -779,6 +788,7 @@ export interface AdminConfigData {
 export interface AdminConfigChanges {
   daily_cap_usd?: number | null
   bedrock_enabled?: boolean | null
+  multi_angle_narration_enabled?: boolean | null
   hermes_autonomy_enabled?: boolean | null
   live_token?: string | null
 }

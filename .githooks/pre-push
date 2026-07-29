@@ -88,6 +88,7 @@ case "$PYTEST_WORKERS" in
     ;;
 esac
 run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
+run_gate "YAML duplicate keys" "$PYTHON" scripts/check_yaml_duplicate_keys.py
 run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json
 run_gate "competition QA" env TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 "$PYTHON" scripts/run_question_bank.py --limit 24 --out out/pre-push/question-bank-results.json
 if [ ! -x frontend/node_modules/.bin/vitest ]; then
