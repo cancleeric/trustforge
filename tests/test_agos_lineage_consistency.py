@@ -9,7 +9,7 @@ import pytest
 
 from trustforge.agos_admin_api import dispatch_admin_agos
 from trustforge.agos_runtime import AgosRuntime
-from trustforge.memory_os import MemoryEntry
+from trustforge.memory_os import MemoryEntry, memory_content_hash
 from trustforge.memory_retrieval import MemoryRef
 from trustforge.skill_registry import SkillRevision, TaskSkill, revision_hash_for
 from trustforge.tool_registry import ToolCapability
@@ -34,7 +34,7 @@ def test_runtime_memory_skill_tool_and_context_equal_admin_api(tmp_path: Path) -
                 memory_id="lineage-memory",
                 kind="episodic",
                 provider="coingecko",
-                content_hash="b" * 64,
+                content_hash=memory_content_hash("BTC price observation"),
                 content_ref="BTC price observation",
                 published_at="2026-07-01T00:00:00Z",
                 retrieved_at="2026-07-01T00:01:00Z",

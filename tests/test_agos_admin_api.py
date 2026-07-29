@@ -20,7 +20,7 @@ from trustforge.agos_admin_api import (
     handle_admin_tools,
 )
 from trustforge.agos_runtime import AgosRuntime
-from trustforge.memory_os import MemoryEntry
+from trustforge.memory_os import MemoryEntry, memory_content_hash
 from trustforge.memory_retrieval import MemoryRef
 from trustforge.tool_registry import ToolCapability
 
@@ -111,7 +111,8 @@ class TestMemoriesEndpoint:
         # Add memory entry
         runtime._memory_repo.save(MemoryEntry(
             memory_id="mem-1", kind="episodic", provider="test",
-            content_hash="a" * 64, content_ref="sensitive content here",
+            content_hash=memory_content_hash("sensitive content here"),
+            content_ref="sensitive content here",
             published_at="2026-07-01T00:00:00Z",
             retrieved_at="2026-07-01T00:00:00Z",
             evidence_eligible=True, run_id="run-mem-api",

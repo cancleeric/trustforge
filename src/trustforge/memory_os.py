@@ -127,12 +127,15 @@ def validate_evidence_eligible(entry: MemoryEntry) -> None:
 
     if not entry.content_hash or not _SHA256_PATTERN.match(entry.content_hash):
         errors.append("valid SHA-256 content_hash is required (64 hex chars)")
+    elif entry.content_hash != memory_content_hash(entry.content_ref):
+        errors.append("content_hash must match content_ref")
 
     if entry.kind == "dialogue":
         errors.append("dialogue memory cannot be evidence")
 
-    # Historical conclusion guard: hermes-* provider + semantic kind
-    if entry.kind == "semantic" and entry.provider.startswith("hermes-"):
+    # Anything produced by Hermes is a historical conclusion regardless of
+    # caller-controlled kind and can never be promoted to source evidence.
+    if entry.provider.startswith("hermes-"):
         errors.append(
             "historical conclusions (hermes-* provider) cannot be evidence"
         )

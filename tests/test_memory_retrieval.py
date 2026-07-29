@@ -19,7 +19,7 @@ def _authorize_schema_for_tests(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda purpose: None,
     )
 
-from trustforge.memory_os import MemoryEntry, MemoryRepository
+from trustforge.memory_os import MemoryEntry, MemoryRepository, memory_content_hash
 from trustforge.memory_retrieval import (
     MemoryRef,
     MemoryRetrievalAdapter,
@@ -212,7 +212,7 @@ class TestRetrievalAdapter:
                 memory_id="pre-1",
                 kind="episodic",
                 provider="coingecko",
-                content_hash="b" * 64,
+                content_hash=memory_content_hash("BTC price data"),
                 content_ref="BTC price data",
                 published_at="2026-07-01T00:00:00Z",
                 retrieved_at="2026-07-01T00:00:00Z",
@@ -353,7 +353,7 @@ class TestCategoryCounter:
         repo.save(
             MemoryEntry(
                 memory_id="c1", kind="episodic", provider="coingecko",
-                content_hash="e" * 64, content_ref="ref1",
+                content_hash=memory_content_hash("ref1"), content_ref="ref1",
                 published_at="2026-07-01T00:00:00Z",
                 retrieved_at="2026-07-01T00:00:00Z",
                 evidence_eligible=True, run_id=run_id,

@@ -116,10 +116,11 @@ class TestContextBuild:
         with _enable_agos():
             runtime._ensure_init()
             # Pre-save entry so context builder can verify from DB
-            from trustforge.memory_os import MemoryEntry
+            from trustforge.memory_os import MemoryEntry, memory_content_hash
             runtime._memory_repo.save(MemoryEntry(
                 memory_id="m1", kind="episodic", provider="coingecko",
-                content_hash="a" * 64, content_ref="BTC price data",
+                content_hash=memory_content_hash("BTC price data"),
+                content_ref="BTC price data",
                 published_at="2026-07-01T00:00:00Z",
                 retrieved_at="2026-07-01T00:00:00Z",
                 evidence_eligible=True,
@@ -355,7 +356,7 @@ class TestToolAudit:
 
 class TestMemoryCountDisclosure:
     def test_counts_reflect_persisted_lineage(self, runtime: AgosRuntime):
-        from trustforge.memory_os import MemoryEntry
+        from trustforge.memory_os import MemoryEntry, memory_content_hash
 
         with _enable_agos():
             runtime._ensure_init()
@@ -364,7 +365,7 @@ class TestMemoryCountDisclosure:
                     memory_id=memory_id,
                     kind="episodic",
                     provider="test",
-                    content_hash=(memory_id[0] * 64),
+                    content_hash=memory_content_hash(memory_id),
                     content_ref=memory_id,
                     published_at="2026-07-01T00:00:00Z",
                     retrieved_at="2026-07-01T00:00:00Z",

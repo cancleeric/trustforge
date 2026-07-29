@@ -30,7 +30,7 @@ from trustforge.context_builder import (
     get_evidence_eligible_memories,
     manifest_summary,
 )
-from trustforge.memory_os import MemoryEntry, MemoryRepository
+from trustforge.memory_os import MemoryEntry, MemoryRepository, memory_content_hash
 from trustforge.memory_retrieval import MemoryRef
 from trustforge.skill_loader import FrozenSkillEntry, FrozenSkillManifest, SkillLoader
 from trustforge.skill_registry import (
@@ -126,7 +126,8 @@ class TestBuild:
         # Pre-save entries in DB so context builder can verify them
         memory_repo.save(MemoryEntry(
             memory_id="m1", kind="episodic", provider="coingecko",
-            content_hash="a" * 64, content_ref="BTC price data from coingecko",
+            content_hash=memory_content_hash("BTC price data from coingecko"),
+            content_ref="BTC price data from coingecko",
             published_at="2026-07-01T00:00:00Z",
             retrieved_at="2026-07-01T00:00:00Z",
             evidence_eligible=True,
@@ -145,7 +146,9 @@ class TestBuild:
         manifest = builder.build(run_id="run-2", memory_refs=refs)
 
         assert len(manifest.included_refs.memory_refs) == 2
-        assert manifest.included_refs.memory_refs[0]["content_hash"] == "a" * 64
+        assert manifest.included_refs.memory_refs[0]["content_hash"] == (
+            memory_content_hash("BTC price data from coingecko")
+        )
         assert manifest.included_refs.memory_refs[1]["content_hash"] == "b" * 64
         assert manifest.token_used > 0
 
@@ -272,7 +275,7 @@ class TestExclusion:
             memory_id="expired-1",
             kind="episodic",
             provider="test",
-            content_hash="a" * 64,
+            content_hash=memory_content_hash("ref"),
             content_ref="ref",
             published_at="2026-01-01T00:00:00Z",
             retrieved_at="2026-01-01T00:00:00Z",
@@ -300,7 +303,7 @@ class TestExclusion:
             memory_id=f"invalid-expiry-{expires_at}",
             kind="episodic",
             provider="test",
-            content_hash="d" * 64,
+            content_hash=memory_content_hash("data"),
             content_ref="data",
             published_at="2026-07-01T00:00:00Z",
             retrieved_at="2026-07-01T00:00:00Z",
@@ -397,7 +400,7 @@ class TestHelpers:
     def test_manifest_summary(self, builder: ContextBuilder, memory_repo: MemoryRepository):
         memory_repo.save(MemoryEntry(
             memory_id="sum-1", kind="episodic", provider="p1",
-            content_hash="d" * 64, content_ref="BTC data",
+            content_hash=memory_content_hash("BTC data"), content_ref="BTC data",
             published_at="2026-07-01T00:00:00Z",
             retrieved_at="2026-07-01T00:00:00Z", evidence_eligible=True,
         ))
@@ -419,7 +422,8 @@ class TestHelpers:
     def test_get_evidence_eligible_memories(self, builder: ContextBuilder, memory_repo: MemoryRepository):
         memory_repo.save(MemoryEntry(
             memory_id="elig-1", kind="episodic", provider="coingecko",
-            content_hash="f" * 64, content_ref="eligible content",
+            content_hash=memory_content_hash("eligible content"),
+            content_ref="eligible content",
             published_at="2026-07-01T00:00:00Z",
             retrieved_at="2026-07-01T00:00:00Z", evidence_eligible=True,
         ))

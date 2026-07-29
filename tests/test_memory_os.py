@@ -176,9 +176,11 @@ class TestRepositoryCRUD:
 
     def test_find_eligible_evidence(self, repo: MemoryRepository):
         # Eligible entry
+        content_ref = "ref://eligible"
         repo.save(
             _make_entry(
-                content_hash="2" * 64,
+                content_hash=memory_content_hash(content_ref),
+                content_ref=content_ref,
                 evidence_eligible=True,
                 kind="episodic",
                 provider="coingecko",
@@ -202,12 +204,14 @@ class TestRepositoryCRUD:
 
 class TestEvidenceEligibility:
     def test_valid_entry_passes(self):
+        content_ref = "ref://valid-evidence"
         entry = _make_entry(
             kind="episodic",
             provider="coingecko",
             published_at="2026-07-01T00:00:00Z",
             retrieved_at="2026-07-01T00:01:00Z",
-            content_hash="a" * 64,
+            content_hash=memory_content_hash(content_ref),
+            content_ref=content_ref,
             evidence_eligible=True,
         )
         # Should not raise
@@ -239,12 +243,37 @@ class TestEvidenceEligibility:
             validate_evidence_eligible(entry)
 
     def test_historical_conclusion_fails(self):
+        content_ref = "ref://historical-conclusion"
         entry = _make_entry(
             kind="semantic",
             provider="hermes-analysis",
+            content_hash=memory_content_hash(content_ref),
+            content_ref=content_ref,
             evidence_eligible=True,
         )
         with pytest.raises(ValueError, match="historical conclusions"):
+            validate_evidence_eligible(entry)
+
+    @pytest.mark.parametrize("kind", ["episodic", "procedural"])
+    def test_historical_conclusion_cannot_bypass_guard_with_kind(self, kind: str):
+        content_ref = f"ref://historical-{kind}"
+        entry = _make_entry(
+            kind=kind,
+            provider="hermes-analysis",
+            content_hash=memory_content_hash(content_ref),
+            content_ref=content_ref,
+            evidence_eligible=True,
+        )
+        with pytest.raises(ValueError, match="historical conclusions"):
+            validate_evidence_eligible(entry)
+
+    def test_content_hash_must_match_content_ref(self):
+        entry = _make_entry(
+            content_hash=memory_content_hash("ref://different-content"),
+            content_ref="ref://actual-content",
+            evidence_eligible=True,
+        )
+        with pytest.raises(ValueError, match="content_hash must match content_ref"):
             validate_evidence_eligible(entry)
 
     def test_historical_question_context_fails(self):
