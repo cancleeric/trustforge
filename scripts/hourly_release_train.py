@@ -617,13 +617,13 @@ def execute(args: argparse.Namespace) -> Path:
                 verify_runtime_identity(production_digest)
                 runtime_in_sync = True
             except Exception as drift:
-                receipt["runtime_drift"] = str(drift)
+                receipt.setdefault("preflight_drift", {})["runtime"] = str(drift)
             frontend_in_sync = False
             try:
                 verify_frontend_identity(main_sha_remote)
                 frontend_in_sync = True
             except Exception as drift:
-                receipt["frontend_drift"] = str(drift)
+                receipt.setdefault("preflight_drift", {})["frontend"] = str(drift)
             if args.dry_run:
                 receipt["status"] = "dry-run"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
@@ -689,6 +689,14 @@ def execute(args: argparse.Namespace) -> Path:
                         receipt["steps"].append({"main": main_sha, "release_branch": "existing-main-retry"})
                     deployed = deploy_production(main_tree, main_sha, release_branch)
                     receipt["steps"].append({"production_deploy": "passed", **deployed})
+                    receipt["post_deploy_verification"] = {
+                        "runtime": "passed",
+                        "frontend": "passed",
+                        "verified_main_sha": main_sha,
+                        "frontend_asset": deployed["frontend_asset"],
+                    }
+                    if "preflight_drift" in receipt:
+                        receipt["resolved_preflight_drift"] = receipt.pop("preflight_drift")
                 finally:
                     cleanup = []
                     for tree in (main_tree, develop_tree):

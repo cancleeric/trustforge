@@ -587,4 +587,12 @@ def test_execute_does_not_noop_when_public_frontend_is_stale(monkeypatch, tmp_pa
 
     assert deploy_calls
     assert recorded[-1]["status"] == "completed"
-    assert recorded[-1]["frontend_drift"] == "stale frontend"
+    assert "frontend_drift" not in recorded[-1]
+    assert "preflight_drift" not in recorded[-1]
+    assert recorded[-1]["resolved_preflight_drift"]["frontend"] == "stale frontend"
+    assert recorded[-1]["post_deploy_verification"] == {
+        "runtime": "passed",
+        "frontend": "passed",
+        "verified_main_sha": "a" * 40,
+        "frontend_asset": "assets/index-release.js",
+    }
