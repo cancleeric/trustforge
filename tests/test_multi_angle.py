@@ -570,7 +570,7 @@ class TestNarrateSynthesis:
         assert result == "這是 LLM 產生的摘要文字，描述五角度偏多的共識。"
 
     def test_llm_failure_degrades(self, monkeypatch):
-        """LLM raises → gracefully falls back to synthesis_summary."""
+        """Provider errors escape so the caller can account before fallback."""
         from trustforge.multi_angle import narrate_synthesis
         monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "1")
 
@@ -582,8 +582,8 @@ class TestNarrateSynthesis:
             def complete(self, system, prompt):
                 raise RuntimeError("Bedrock timeout")
 
-        result = narrate_synthesis(report, client=FakeClient())
-        assert result == report.synthesis_summary
+        with pytest.raises(RuntimeError, match="Bedrock timeout"):
+            narrate_synthesis(report, client=FakeClient())
 
     def test_structural_fields_unchanged(self, monkeypatch):
         """narrate_synthesis never modifies report's structural fields."""

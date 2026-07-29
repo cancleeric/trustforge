@@ -40,6 +40,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -67,6 +68,7 @@ from .budget_guard import (
     DEFAULT_BEDROCK_DAILY_USD_CAP,
     daily_cap_exceeded,
     daily_cap_usd_resolved,
+    narrative_model_priced,
     online_stance_requested,
     warn_if_bedrock_model_unpriced,
 )
@@ -1021,6 +1023,27 @@ def _check_status_rate_limit(ip: str, scope: str = "status") -> None:
             raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
         ts.append(now)
         _status_rate_buckets[bucket_key] = ts
+
+
+def _check_analysis_write_rate_limit(ip: str) -> None:
+    """Public analysis writes use the shared counter across server instances.
+
+    This cost-bearing public write fails closed when the shared backend is
+    unavailable; a process-local fallback would multiply the allowance by the
+    number of server instances.
+    """
+    try:
+        allowed = rate_limit_store.try_increment(
+            "analysis-write", ip, _STATUS_RATE_WINDOW, _STATUS_RATE_MAX,
+        )
+    except rate_limit_store.RateLimitBackendError as exc:
+        logging.error(
+            "TrustForge analysis-write shared rate limit unavailable; "
+            "rejecting cost-bearing write: %s", exc,
+        )
+        raise TooManyRequests("分析提交保護暫時無法確認，請稍後再試") from exc
+    if not allowed:
+        raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
 
 
 def _check_online_stance_rate_limit(ip: str) -> None:
@@ -5669,14 +5692,32 @@ def _handle_api_multi_angle_get(qs: dict | None = None) -> tuple[int, str]:
 
 def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, str]:
     """`POST /api/multi-angle`：觸發五角度綜合分析（#809）。"""
+    idempotency_key = str(headers.get("Idempotency-Key", "")).strip()
+    if not idempotency_key:
+        return 400, _json_envelope_err("missing_idempotency_key", "必須提供 Idempotency-Key")
+    if len(idempotency_key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]+", idempotency_key):
+        return 400, _json_envelope_err(
+            "invalid_idempotency_key",
+            "Idempotency-Key 須為 1–128 個英數字或 . _ : -",
+        )
     try:
         content_length = int(headers.get("Content-Length", 0))
+        if content_length < 0:
+            raise ValueError
+        if content_length > 4096:
+            return 413, _json_envelope_err("payload_too_large", "body 上限 4096 bytes")
         body = json.loads(rfile.read(content_length)) if content_length else {}
     except (json.JSONDecodeError, ValueError):
         return 400, _json_envelope_err("invalid_json", "請求 body 須為有效 JSON")
+    if not isinstance(body, dict):
+        return 400, _json_envelope_err("invalid_json", "請求 body 須為 JSON object")
     coin = str(body.get("coin", "")).strip().upper()
     question = str(body.get("question", "")).strip()
     locale = str(body.get("locale", "zh-Hant"))
+    if len(coin) > 16 or len(question) > 500 or len(locale) > 32:
+        return 400, _json_envelope_err(
+            "validation_error", "coin、question 或 locale 超過長度上限"
+        )
     if not coin:
         return 400, _json_envelope_err("missing_param", "必須提供 coin")
     from .schema import COIN_POOL
@@ -5687,14 +5728,35 @@ def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, s
     try:
         from .analysis_flow import (
             AnalysisFlow,
+            MultiAngleAuthorityError,
             MultiAngleBudgetError,
             MultiAngleCapacityError,
+            MultiAngleIdempotencyConflictError,
+            MultiAngleRequestInProgressError,
         )
         with AnalysisFlow() as flow:
-            result = flow.submit_multi_angle(coin, question, locale=locale)
+            result = flow.submit_multi_angle(
+                coin, question, locale=locale,
+                caller_id=client_ip, idempotency_key=idempotency_key,
+                admission_check=lambda: _check_analysis_write_rate_limit(client_ip),
+            )
         return 200, _json_envelope_ok(result)
+    except MultiAngleIdempotencyConflictError as exc:
+        return 409, _json_envelope_err("idempotency_key_conflict", str(exc))
+    except MultiAngleRequestInProgressError as exc:
+        return 202, _json_envelope_ok(
+            {"request_id": exc.request_id, "state": "processing"}
+        )
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
     except MultiAngleBudgetError as exc:
         return 409, _json_envelope_err("multi_angle_budget_unavailable", str(exc))
+    except MultiAngleAuthorityError as exc:
+        logging.error(
+            "multi_angle_authority_unavailable phase=http_submit error_type=%s",
+            type(exc).__name__,
+        )
+        return 503, _json_envelope_err("multi_angle_authority_unavailable", str(exc))
     except MultiAngleCapacityError as exc:
         return 503, _json_envelope_err("multi_angle_queue_unavailable", str(exc))
     except ValueError as exc:
@@ -7862,6 +7924,17 @@ def _admin_config_view(config: "admin_config.AdminConfig") -> dict:
     token_configured, token_source = _live_token_resolved()
     from .hermes import autonomy_enabled
     autonomy_effective, autonomy_source = autonomy_enabled()
+    narration_switch, narration_source = (
+        admin_config.multi_angle_narration_enabled_resolved(config)
+    )
+    narration_effective = (
+        narration_switch
+        and bedrock_effective
+        and narrative_model_priced()
+        and not daily_cap_exceeded()
+    )
+    if narration_switch and not narration_effective:
+        narration_source = "global_gate_blocked"
     return {
         "daily_cap_usd": {
             "config": pub["daily_cap_usd"],
@@ -7902,6 +7975,13 @@ def _admin_config_view(config: "admin_config.AdminConfig") -> dict:
             "env": os.getenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED"),
             "effective": autonomy_effective,
             "source": autonomy_source,
+        },
+        "multi_angle_narration_enabled": {
+            "config": pub["multi_angle_narration_enabled"],
+            "env": os.getenv("TRUSTFORGE_MULTI_ANGLE_NARRATION"),
+            "default": True,
+            "effective": narration_effective,
+            "source": narration_source,
         },
         "version": pub["version"],
         "updated_at": pub["updated_at"],
@@ -7952,7 +8032,10 @@ def _read_admin_put_body(headers, rfile) -> tuple[dict | None, tuple[int, str] |
 
 
 _ADMIN_PUT_ALLOWED_FIELDS = frozenset(
-    {"daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token", "expected_version"}
+    {
+        "daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled",
+        "multi_angle_narration_enabled", "live_token", "expected_version",
+    }
 )
 
 
@@ -7971,7 +8054,10 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
         return 400, _json_envelope_err(
             "bad_request", "expected_version 必須是非負整數（item 不存在時傳 0）"
         )
-    if not any(k in payload for k in ("daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token")):
+    if not any(k in payload for k in (
+        "daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled",
+        "multi_angle_narration_enabled", "live_token",
+    )):
         return 400, _json_envelope_err("bad_request", "至少要提供一個設定欄位")
 
     if "daily_cap_usd" in payload and payload["daily_cap_usd"] is not None:
@@ -8003,6 +8089,15 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
     if "hermes_autonomy_enabled" in payload and payload["hermes_autonomy_enabled"] is not None:
         if not isinstance(payload["hermes_autonomy_enabled"], bool):
             return 400, _json_envelope_err("bad_request", "hermes_autonomy_enabled 必須是 bool")
+
+    if (
+        "multi_angle_narration_enabled" in payload
+        and payload["multi_angle_narration_enabled"] is not None
+        and not isinstance(payload["multi_angle_narration_enabled"], bool)
+    ):
+        return 400, _json_envelope_err(
+            "bad_request", "multi_angle_narration_enabled 必須是 bool"
+        )
 
     if "live_token" in payload and payload["live_token"] is not None:
         token = payload["live_token"]
@@ -8071,7 +8166,10 @@ def _handle_api_admin_config_put(headers, rfile, client_ip: str) -> tuple[int, s
 
     changes = {
         k: payload[k]
-        for k in ("daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token")
+        for k in (
+            "daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled",
+            "multi_angle_narration_enabled", "live_token",
+        )
         if k in payload
     }
     warnings: list[str] = []

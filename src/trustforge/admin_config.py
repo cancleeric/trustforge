@@ -116,7 +116,8 @@ ADMIN_AUDIT_SOURCE = "__admin_audit__"
 _ALLOWED_CHANGE_FIELDS = frozenset(
     {
         "daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled",
-        "live_token", "disabled_sources", "enabled_sources",
+        "multi_angle_narration_enabled", "live_token", "disabled_sources",
+        "enabled_sources",
     }
 )
 
@@ -197,6 +198,7 @@ class AdminConfig:
     daily_cap_usd: float | None = None
     bedrock_enabled: bool | None = None
     hermes_autonomy_enabled: bool | None = None
+    multi_angle_narration_enabled: bool | None = None
     live_token_hash: str | None = None
     live_token_last4: str | None = None
     # issue #155：被明確關掉的連接器名稱集合（如 {"coindesk", "sec-gov"}）。
@@ -223,6 +225,7 @@ class AdminConfig:
             "daily_cap_usd": self.daily_cap_usd,
             "bedrock_enabled": self.bedrock_enabled,
             "hermes_autonomy_enabled": self.hermes_autonomy_enabled,
+            "multi_angle_narration_enabled": self.multi_angle_narration_enabled,
             "live_token_last4": self.live_token_last4,
             "live_token_configured": self.live_token_hash is not None,
             "disabled_sources": sorted(self.disabled_sources) if self.disabled_sources else [],
@@ -448,6 +451,10 @@ def _config_from_item(item: dict[str, Any]) -> AdminConfig:
         daily_cap_usd=_parse_cap(item.get("daily_cap_usd")),
         bedrock_enabled=_parse_bool(item.get("bedrock_enabled"), "bedrock_enabled"),
         hermes_autonomy_enabled=_parse_bool(item.get("hermes_autonomy_enabled"), "hermes_autonomy_enabled"),
+        multi_angle_narration_enabled=_parse_bool(
+            item.get("multi_angle_narration_enabled"),
+            "multi_angle_narration_enabled",
+        ),
         live_token_hash=_parse_str(
             item.get("live_token_hash"), "live_token_hash", sensitive=True
         ),
@@ -618,6 +625,38 @@ def get_config_cached_failsoft(
     return config
 
 
+def multi_angle_narration_enabled_resolved(
+    config: AdminConfig | None = None,
+) -> tuple[bool, str]:
+    """Resolve the hot multi-angle narration switch.
+
+    The feature defaults on, but ``TRUSTFORGE_MULTI_ANGLE_NARRATION`` is an
+    emergency allow/deny layer which Admin cannot override.  Unset or exactly
+    ``"1"`` allows narration; ``"0"``, an explicitly empty value, and every
+    other value fail closed.  A config read failure also fails closed.
+    """
+    if "TRUSTFORGE_MULTI_ANGLE_NARRATION" in os.environ:
+        raw_env = os.environ["TRUSTFORGE_MULTI_ANGLE_NARRATION"]
+        if raw_env != "1":
+            if raw_env != "0":
+                _log.warning(
+                    "[admin_config] TRUSTFORGE_MULTI_ANGLE_NARRATION 值無效"
+                    "（%r；只接受 1/0），fail-closed 關閉 narration",
+                    raw_env,
+                )
+            return False, "env_override"
+
+    if config is None:
+        try:
+            config = get_config_cached()
+        except Exception:
+            return False, "config_read_error"
+
+    if config.multi_angle_narration_enabled is None:
+        return True, "default"
+    return config.multi_angle_narration_enabled, "config"
+
+
 # ---------------------------------------------------------------------------
 # 寫入（CAS）+ 審計
 # ---------------------------------------------------------------------------
@@ -667,6 +706,12 @@ def _validate_changes(changes: dict[str, Any]) -> None:
     if "hermes_autonomy_enabled" in changes and changes["hermes_autonomy_enabled"] is not None:
         if not isinstance(changes["hermes_autonomy_enabled"], bool):
             raise ValueError("hermes_autonomy_enabled 必須是 bool")
+    if (
+        "multi_angle_narration_enabled" in changes
+        and changes["multi_angle_narration_enabled"] is not None
+        and not isinstance(changes["multi_angle_narration_enabled"], bool)
+    ):
+        raise ValueError("multi_angle_narration_enabled 必須是 bool")
     if "live_token" in changes and changes["live_token"] is not None:
         token = changes["live_token"]
         if not isinstance(token, str) or not token:
@@ -759,6 +804,9 @@ def put_config(
     new_autonomy = current.hermes_autonomy_enabled
     if "hermes_autonomy_enabled" in changes:
         new_autonomy = changes["hermes_autonomy_enabled"]
+    new_narration = current.multi_angle_narration_enabled
+    if "multi_angle_narration_enabled" in changes:
+        new_narration = changes["multi_angle_narration_enabled"]
     new_hash = current.live_token_hash
     new_last4 = current.live_token_last4
     if "live_token" in changes:
@@ -792,6 +840,7 @@ def put_config(
         new_cap == current.daily_cap_usd
         and new_enabled == current.bedrock_enabled
         and new_autonomy == current.hermes_autonomy_enabled
+        and new_narration == current.multi_angle_narration_enabled
         and new_hash == current.live_token_hash
         and new_last4 == current.live_token_last4
         and new_disabled == current.disabled_sources
@@ -814,6 +863,8 @@ def put_config(
         item["bedrock_enabled"] = new_enabled
     if new_autonomy is not None:
         item["hermes_autonomy_enabled"] = new_autonomy
+    if new_narration is not None:
+        item["multi_angle_narration_enabled"] = new_narration
     if new_hash is not None:
         item["live_token_hash"] = new_hash
     if new_last4 is not None:
@@ -859,6 +910,12 @@ def put_config(
         change_entries.append(
             {"field": "hermes_autonomy_enabled", "old": current.hermes_autonomy_enabled, "new": new_autonomy}
         )
+    if "multi_angle_narration_enabled" in changes:
+        change_entries.append({
+            "field": "multi_angle_narration_enabled",
+            "old": current.multi_angle_narration_enabled,
+            "new": new_narration,
+        })
     if "live_token" in changes:
         old_masked, new_masked = _mask_token_change(
             current.live_token_hash is not None, changes["live_token"], new_last4
@@ -913,6 +970,7 @@ def put_config(
         daily_cap_usd=new_cap,
         bedrock_enabled=new_enabled,
         hermes_autonomy_enabled=new_autonomy,
+        multi_angle_narration_enabled=new_narration,
         live_token_hash=new_hash,
         live_token_last4=new_last4,
         disabled_sources=new_disabled,

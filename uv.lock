@@ -1199,6 +1199,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -1214,6 +1215,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3,<4" },
+    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6,<7" },
 ]
 provides-extras = ["dev"]
 

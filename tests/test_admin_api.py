@@ -428,6 +428,50 @@ def test_get_config_shape_and_layers(admin_enabled, monkeypatch):
     assert data["updated_by"] == "admin@203.0.113.5"
 
 
+@pytest.mark.parametrize(
+    ("env_present", "env_value", "bedrock_allowed", "expected", "source"),
+    [
+        (True, "0", True, False, "env_override"),
+        (False, None, False, False, "global_gate_blocked"),
+        (False, None, True, True, "config"),
+    ],
+)
+def test_admin_narration_view_effective_source_matrix(
+    monkeypatch,
+    env_present,
+    env_value,
+    bedrock_allowed,
+    expected,
+    source,
+):
+    if env_present:
+        monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", env_value)
+    else:
+        monkeypatch.delenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", raising=False)
+    monkeypatch.setattr(web, "daily_cap_usd_resolved", lambda: (3.0, "default"))
+    monkeypatch.setattr(
+        web, "_bedrock_allowed_resolved", lambda: (bedrock_allowed, "config")
+    )
+    monkeypatch.setattr(web, "_live_token_resolved", lambda: (False, "none"))
+    monkeypatch.setattr(web, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(web, "daily_cap_exceeded", lambda: False)
+    monkeypatch.setattr(
+        "trustforge.hermes.autonomy_enabled", lambda: (False, "default")
+    )
+
+    view = web._admin_config_view(
+        _fake_config(multi_angle_narration_enabled=True)
+    )["multi_angle_narration_enabled"]
+
+    assert view == {
+        "config": True,
+        "env": env_value if env_present else None,
+        "default": True,
+        "effective": expected,
+        "source": source,
+    }
+
+
 def test_get_config_never_leaks_token_material(admin_enabled, monkeypatch):
     """GET 絕不回 live token 明文/完整 hash（env live token 也只回 bool）。"""
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
@@ -589,6 +633,14 @@ def test_put_unknown_field_400(admin_enabled, put_recorder):
 
 def test_put_bedrock_enabled_strict_bool(admin_enabled, put_recorder):
     code, _, _ = _put_config('{"bedrock_enabled": "true", "expected_version": 1}')
+    assert code == 400
+    assert "changes" not in put_recorder
+
+
+def test_put_multi_angle_narration_enabled_strict_bool(admin_enabled, put_recorder):
+    code, _, _ = _put_config(
+        '{"multi_angle_narration_enabled": "true", "expected_version": 1}'
+    )
     assert code == 400
     assert "changes" not in put_recorder
 

@@ -50,9 +50,54 @@ from trustforge.admin_config import (
     get_config_cached,
     hash_live_token,
     list_audit,
+    multi_angle_narration_enabled_resolved,
     put_config,
     verify_live_token,
 )
+
+
+@pytest.mark.parametrize(
+    ("env_present", "env_value", "config_value", "expected", "source"),
+    [
+        (False, None, None, True, "default"),
+        (False, None, True, True, "config"),
+        (False, None, False, False, "config"),
+        (True, "1", True, True, "config"),
+        (True, "0", True, False, "env_override"),
+        (True, "", True, False, "env_override"),
+        (True, "yes", True, False, "env_override"),
+    ],
+)
+def test_multi_angle_narration_resolver_env_is_unoverrideable_kill_switch(
+    monkeypatch, env_present, env_value, config_value, expected, source
+):
+    if env_present:
+        monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", env_value)
+    else:
+        monkeypatch.delenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", raising=False)
+
+    assert multi_angle_narration_enabled_resolved(
+        AdminConfig(multi_angle_narration_enabled=config_value)
+    ) == (expected, source)
+
+
+@pytest.mark.parametrize("raw", ["", "yes", "TRUE"])
+def test_multi_angle_narration_invalid_env_warns(monkeypatch, caplog, raw):
+    monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", raw)
+
+    assert multi_angle_narration_enabled_resolved(
+        AdminConfig(multi_angle_narration_enabled=True)
+    ) == (False, "env_override")
+    assert "值無效" in caplog.text
+
+
+def test_multi_angle_narration_env_zero_is_quiet_valid_off(monkeypatch, caplog):
+    monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "0")
+
+    assert multi_angle_narration_enabled_resolved(
+        AdminConfig(multi_angle_narration_enabled=True)
+    ) == (False, "env_override")
+    assert "值無效" not in caplog.text
 
 
 def _store_with_mock_table() -> tuple[AdminConfigStore, MagicMock]:
@@ -277,6 +322,28 @@ def test_put_config_writes_hermes_autonomy_toggle():
     assert result.config.hermes_autonomy_enabled is False
     assert {
         "field": "hermes_autonomy_enabled",
+        "old": None,
+        "new": False,
+    } in json.loads(audit_item["changes_json"])
+
+
+def test_put_config_writes_multi_angle_narration_hot_switch_and_audit():
+    store, mock_table = _store_with_mock_table()
+    mock_table.get_item.return_value = {"Item": dict(GOOD_ITEM)}
+
+    result = put_config(
+        {"multi_angle_narration_enabled": False},
+        expected_version=7,
+        actor="admin@1.2.3.4",
+        store=store,
+    )
+
+    config_item = mock_table.put_item.call_args_list[0].kwargs["Item"]
+    audit_item = mock_table.put_item.call_args_list[1].kwargs["Item"]
+    assert config_item["multi_angle_narration_enabled"] is False
+    assert result.config.multi_angle_narration_enabled is False
+    assert {
+        "field": "multi_angle_narration_enabled",
         "old": None,
         "new": False,
     } in json.loads(audit_item["changes_json"])
