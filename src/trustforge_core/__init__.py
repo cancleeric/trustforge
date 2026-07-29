@@ -71,6 +71,14 @@ from .scoring import (
     score_claim,
     source_reputation,
     stable_sigmoid,
+    classify_decision_state,
+)
+from .candidate_composition import (
+    CANDIDATE_SCHEMA_VERSION,
+    CandidateComposition,
+    CandidateShadow,
+    IntrinsicCandidateFacts,
+    compose_intrinsic_candidate,
 )
 
 __all__ = [
@@ -139,4 +147,10 @@ __all__ = [
     "score_claim",
     "source_reputation",
     "stable_sigmoid",
+    "classify_decision_state",
+    "CANDIDATE_SCHEMA_VERSION",
+    "CandidateComposition",
+    "CandidateShadow",
+    "IntrinsicCandidateFacts",
+    "compose_intrinsic_candidate",
 ]
