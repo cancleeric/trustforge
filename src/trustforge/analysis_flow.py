@@ -2555,6 +2555,8 @@ class AnalysisFlow:
             )
             llm_active = not client.offline and bool(client.config.model_id)
         log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
+        # Agent OS: record Bedrock invocation audit (fail-soft)
+        self._agos_record_tool(package, "bedrock-claim-extraction", {"step": 1, "doc_count": len(package["docs"])}, "success" if package["claims"] else "failed")
         return package
 
     def _stage_trust_reasoning(self, package: dict) -> dict:
@@ -2771,24 +2773,76 @@ class AnalysisFlow:
     # ─── Agent OS Integration Hooks ──────────────────────────────────────
 
     def _agos_build_context(self, package: dict) -> None:
-        """Build Agent OS context manifest at run start (fail-soft)."""
+        """Build Agent OS context manifest at run start (fail-soft).
+
+        Performs:
+          1. Memory retrieval — maps question context to formal memory refs
+          2. Skill selection — discovers and freezes active analysis skills
+          3. Context manifest — builds immutable manifest with all refs
+        """
         try:
             from .agos_runtime import AgosRuntime, agos_enabled
             if not agos_enabled():
                 return
             job = package["job"]
             runtime = self._get_agos_runtime()
+            runtime._ensure_init()
+
+            # 1. Memory retrieval: register retrieval_context as formal memory
+            memory_refs = None
+            if runtime._retrieval_adapter and package.get("retrieval_context"):
+                items = [
+                    {"content": str(ctx.get("question", "")), "published_at": ctx.get("timestamp")}
+                    for ctx in package["retrieval_context"]
+                ]
+                if items:
+                    memory_refs = runtime._retrieval_adapter.retrieve_from_source(
+                        items,
+                        run_id=job["job_id"],
+                        source_provider="question_context_history",
+                        kind="episodic",
+                        reason="question_context_retrieval",
+                    )
+
+            # 2. Skill selection: discover active analysis skills
+            skill_ids = None
+            if runtime._skill_loader:
+                active_skills = runtime._skill_loader.discover(family="analysis")
+                if active_skills:
+                    skill_ids = [s.skill_id for s in active_skills]
+
+            # 3. Tool inventory: list registered tools for this run
+            tool_ids = None
+            if runtime._tool_registry:
+                tools = runtime._tool_registry.list_tools()
+                tool_ids = [t.tool_id for t in tools]
+
+            # 4. Build context manifest
             manifest = runtime.build_context(
                 job["job_id"],
                 question=job["question"],
                 snapshot_ref=job["snapshot_id"],
+                memory_refs=memory_refs,
+                skill_ids=skill_ids,
+                tool_ids=tool_ids,
             )
             if manifest:
                 package["agos_manifest"] = manifest
                 package["log"].record(
                     "agos.context_manifest",
-                    params={"manifest_id": manifest.manifest_id, "content_hash": manifest.content_hash},
-                    summary=f"Agent OS context manifest created ({manifest.token_used}/{manifest.token_budget} tokens)",
+                    params={
+                        "manifest_id": manifest.manifest_id,
+                        "content_hash": manifest.content_hash,
+                        "memory_count": len(manifest.included_refs.memory_refs),
+                        "skill_count": len(manifest.included_refs.skill_refs),
+                        "tool_count": len(manifest.included_refs.tool_refs),
+                    },
+                    summary=(
+                        f"Agent OS context: {len(manifest.included_refs.memory_refs)} memories, "
+                        f"{len(manifest.included_refs.skill_refs)} skills, "
+                        f"{len(manifest.included_refs.tool_refs)} tools "
+                        f"({manifest.token_used}/{manifest.token_budget} tokens)"
+                    ),
                 )
         except Exception as e:
             logging.getLogger(__name__).warning("Agent OS context build failed (fail-soft): %s", e)
@@ -2811,6 +2865,22 @@ class AnalysisFlow:
             from .agos_runtime import AgosRuntime
             self._agos_runtime_instance = AgosRuntime()
         return self._agos_runtime_instance
+
+    def _agos_record_tool(self, package: dict, tool_id: str, args: dict, status: str) -> None:
+        """Record a tool invocation in Agent OS audit trail (fail-soft)."""
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return
+            job = package.get("job")
+            if not job:
+                return
+            runtime = self._get_agos_runtime()
+            inv_id = runtime.record_tool_invocation(job["job_id"], tool_id, args)
+            if inv_id:
+                runtime.complete_tool_invocation(inv_id, status=status)
+        except Exception:
+            pass  # fail-soft
 
     def status(self) -> dict[str, Any]:
         if self._readonly_store_missing():

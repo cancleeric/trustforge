@@ -57,29 +57,16 @@ def _set_admin_token():
 
 
 class TestAuthorization:
-    def test_no_token_configured_fails(self):
-        with patch.dict(os.environ, {"TRUSTFORGE_ADMIN_TOKEN": ""}):
-            assert check_admin_auth({"Authorization": "Bearer anything"}) is False
+    """Auth is handled by web.py outer gate (_admin_auth_check + X-Admin-Token).
+    dispatch_admin_agos does NOT do its own auth — test that it proceeds directly."""
 
-    def test_wrong_token_fails(self):
-        with patch.dict(os.environ, {"TRUSTFORGE_ADMIN_TOKEN": "secret"}):
-            assert check_admin_auth({"Authorization": "Bearer wrong"}) is False
-
-    def test_correct_token_passes(self):
-        with patch.dict(os.environ, {"TRUSTFORGE_ADMIN_TOKEN": "secret"}):
-            assert check_admin_auth({"Authorization": "Bearer secret"}) is True
-
-    def test_missing_auth_header_fails(self):
-        with patch.dict(os.environ, {"TRUSTFORGE_ADMIN_TOKEN": "secret"}):
-            assert check_admin_auth({}) is False
-
-    def test_dispatch_unauthorized(self, runtime, _set_admin_token):
+    def test_dispatch_proceeds_without_internal_auth(self, runtime, _set_admin_token):
+        """dispatch_admin_agos trusts the caller (web.py) already authenticated."""
         status, body = dispatch_admin_agos(
-            "/api/admin/agos/memories", "run_id=x", {"Authorization": "Bearer wrong"}, runtime
+            "/api/admin/agos/memories", "run_id=x", {}, runtime
         )
-        assert status == 401
-        assert body["status"] == "error"
-        assert body["error"]["code"] == "UNAUTHORIZED"
+        # Should NOT return 401 — auth is not this module's job
+        assert status == 200
 
 
 # ─── Response Envelope Tests ─────────────────────────────────────────────────

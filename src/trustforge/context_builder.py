@@ -273,11 +273,17 @@ class ContextBuilder:
 
         # 1. Process memory refs
         for mref in (memory_refs or []):
-            # Check stale (expired)
+            # Re-verify evidence_eligible from DB (never trust caller flag)
+            actual_eligible = False
             if self._memory_repo:
                 entry = self._memory_repo.get(mref.memory_id)
-                if entry and entry.expires_at:
-                    # Simple expiry check: if expires_at is set and looks past
+                if entry is None:
+                    # Memory not in DB — exclude as stale
+                    excluded.append(ExcludedRef(mref.memory_id, "memory", EXCLUSION_STALE))
+                    continue
+                actual_eligible = entry.evidence_eligible
+                # Check stale (expired)
+                if entry.expires_at:
                     try:
                         exp_dt = datetime.fromisoformat(entry.expires_at.replace("Z", "+00:00"))
                         if exp_dt < datetime.now(timezone.utc):
@@ -285,6 +291,9 @@ class ContextBuilder:
                             continue
                     except (ValueError, TypeError):
                         pass
+            else:
+                # No repo available — cannot verify, default to non-evidentiary
+                actual_eligible = False
 
             # Token budget check
             token_cost = estimate_tokens(mref.content_preview)
@@ -298,7 +307,7 @@ class ContextBuilder:
                 "kind": mref.kind,
                 "rank": mref.rank,
                 "reason": mref.reason,
-                "evidence_eligible": mref.evidence_eligible,
+                "evidence_eligible": actual_eligible,  # DB-verified, not caller-supplied
             })
 
         # 2. Process skill manifest

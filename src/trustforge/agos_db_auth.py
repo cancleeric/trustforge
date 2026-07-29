@@ -1,79 +1,93 @@
 """Agent OS DB Authorization Guard.
 
 All Agent OS DB schema changes (#916, #917, #918) require Eric's same-day
-authorization token before migration can run. This module enforces that
-requirement at the migration entry point.
+authorization token file before migration can run.
 
-The token is provided via environment variable TRUSTFORGE_AGOS_DB_AUTH_TOKEN.
-The expected format is: "agos-{purpose}-{YYYY-MM-DD}" where the date must
-match today (UTC).
+Token file path (immutable convention):
+    /tmp/eric-auth-YYYYMMDD-trustforge-{purpose}.token
 
-If the token is missing or invalid, migration MUST NOT proceed (fail-closed).
-In test environments (TRUSTFORGE_TESTING=1), the check is bypassed.
+The file must:
+  1. Exist on disk at the expected path (today's date, correct purpose)
+  2. Contain a single line matching: "authorized {purpose} YYYY-MM-DD"
+
+If the file is missing, unreadable, malformed, or dated wrong,
+migration MUST NOT proceed (fail-closed). There is NO environment
+variable bypass — the only bypass is pytest (detected by the presence
+of a _pytest module in sys.modules, not an env var that callers can set).
 
 Issue: #916, #917, #918 | Epic: #914
 """
 from __future__ import annotations
 
-import os
-import re
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 class DBAuthorizationError(PermissionError):
-    """Raised when DB migration lacks valid authorization."""
+    """Raised when DB migration lacks valid file-based authorization."""
     pass
 
 
 def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def _today_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _token_path(purpose: str) -> Path:
+    """Canonical token file path. Convention is non-negotiable."""
+    return Path(f"/tmp/eric-auth-{_today_utc()}-trustforge-{purpose}.token")
+
+
+def _is_pytest() -> bool:
+    """Detect if running under pytest (test harness only)."""
+    return "_pytest" in sys.modules or "pytest" in sys.modules
+
+
 def verify_db_authorization(purpose: str) -> None:
-    """Verify that a valid same-day authorization token exists for the given purpose.
+    """Verify that Eric's same-day file-based authorization token exists.
 
-    Token format: "agos-{purpose}-{YYYY-MM-DD}"
-    Purpose examples: "memory_os", "skill_registry", "tool_registry"
+    Expected file: /tmp/eric-auth-YYYYMMDD-trustforge-{purpose}.token
+    Expected content (first line): "authorized {purpose} YYYY-MM-DD"
 
-    Raises DBAuthorizationError if token is missing, malformed, or expired.
-    Bypassed when TRUSTFORGE_TESTING=1 (test environments only).
+    Raises DBAuthorizationError if:
+      - File does not exist
+      - File is not readable
+      - Content does not match expected format
+      - Date in content does not match today
+
+    The ONLY bypass is running under pytest. No environment variable can
+    override this check.
     """
-    # Bypass in test environments
-    if os.getenv("TRUSTFORGE_TESTING", "0") == "1":
+    # pytest bypass — detected by module presence, not by env var
+    if _is_pytest():
         return
 
-    # Bypass if AGOS is not enabled (schema won't be used in production)
-    if os.getenv("TRUSTFORGE_AGOS_ENABLED", "0") != "1":
-        return
+    token_file = _token_path(purpose)
+    today_iso = _today_iso()
 
-    token = os.getenv("TRUSTFORGE_AGOS_DB_AUTH_TOKEN", "")
-    if not token:
+    if not token_file.exists():
         raise DBAuthorizationError(
-            f"DB migration for '{purpose}' requires authorization. "
-            f"Set TRUSTFORGE_AGOS_DB_AUTH_TOKEN=agos-{purpose}-{_today_utc()} "
-            f"(Eric must issue same-day token)."
+            f"DB migration for '{purpose}' requires authorization.\n"
+            f"Expected token file: {token_file}\n"
+            f"Eric must create: echo 'authorized {purpose} {today_iso}' > {token_file}"
         )
 
-    # Parse and validate token
-    pattern = re.compile(r"^agos-(.+)-(\d{4}-\d{2}-\d{2})$")
-    match = pattern.match(token)
-    if not match:
+    try:
+        content = token_file.read_text(encoding="utf-8").strip()
+    except OSError as e:
         raise DBAuthorizationError(
-            f"Invalid token format. Expected: agos-{purpose}-{_today_utc()}"
-        )
+            f"Cannot read token file {token_file}: {e}"
+        ) from e
 
-    token_purpose = match.group(1)
-    token_date = match.group(2)
-    today = _today_utc()
-
-    if token_purpose != purpose:
+    expected_content = f"authorized {purpose} {today_iso}"
+    if content != expected_content:
         raise DBAuthorizationError(
-            f"Token purpose mismatch: token is for '{token_purpose}', "
-            f"but migration requires '{purpose}'"
-        )
-
-    if token_date != today:
-        raise DBAuthorizationError(
-            f"Token expired: issued for {token_date}, today is {today}. "
-            f"Tokens are valid for same-day only."
+            f"Token file content mismatch.\n"
+            f"  Expected: '{expected_content}'\n"
+            f"  Got:      '{content}'\n"
+            f"Token may be for wrong purpose or expired (must match today)."
         )

@@ -306,9 +306,14 @@ class AgosRuntime:
         """
         if agos_enabled():
             self._ensure_init()
-            # Enforcement gate — raises PermissionError if tool can't run
-            if self._tool_registry is not None:
-                self._tool_registry.assert_executable(tool_id)
+            # Enforcement gate — raises PermissionError if tool can't run.
+            # If registry failed to initialize, we BLOCK (fail-closed).
+            if self._tool_registry is None:
+                raise PermissionError(
+                    f"tool '{tool_id}' cannot execute: Agent OS tool registry "
+                    f"failed to initialize (fail-closed)"
+                )
+            self._tool_registry.assert_executable(tool_id)
 
         inv_id = self.record_tool_invocation(run_id, tool_id, args)
 

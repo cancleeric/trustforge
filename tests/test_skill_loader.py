@@ -308,7 +308,7 @@ class TestActivationGovernance:
         ))
 
         proposal = loader.propose_activation("hr-approve", rev_hash, "needed")
-        loader.approve_activation(proposal.proposal_id, "eric")
+        loader.approve_activation(proposal.proposal_id, "eric", sandbox_passed=True)
 
         assert loader.is_activation_approved("hr-approve", rev_hash) is True
 
@@ -342,10 +342,10 @@ class TestActivationGovernance:
             )
         )
         proposal = loader.propose_activation("hr-double", "hash789", "test")
-        loader.approve_activation(proposal.proposal_id, "eric")
+        loader.approve_activation(proposal.proposal_id, "eric", sandbox_passed=True)
 
         with pytest.raises(ValueError, match="already approved"):
-            loader.approve_activation(proposal.proposal_id, "eric")
+            loader.approve_activation(proposal.proposal_id, "eric", sandbox_passed=True)
 
     def test_freeze_after_approval_succeeds(self, registry, loader):
         registry.save_skill(
@@ -364,7 +364,7 @@ class TestActivationGovernance:
         ))
 
         proposal = loader.propose_activation("hr-freeze-ok", rev_hash, "approved")
-        loader.approve_activation(proposal.proposal_id, "eric")
+        loader.approve_activation(proposal.proposal_id, "eric", sandbox_passed=True)
 
         # Now freeze should succeed
         manifest = loader.freeze_manifest("run-hr", ["hr-freeze-ok"])

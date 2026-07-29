@@ -118,7 +118,10 @@ def _int_param(params: dict[str, str], key: str, default: int) -> int:
 def handle_admin_memories(
     params: dict[str, str], runtime: AgosRuntime
 ) -> tuple[int, dict[str, Any]]:
-    """GET /api/admin/agos/memories"""
+    """GET /api/admin/agos/memories
+
+    Returns: kind, eligibility, lineage (rank/reason), selection reason, provider, timestamps.
+    """
     run_id = params.get("run_id", "")
     kind = params.get("kind", "")
     show_content = params.get("show_content", "false").lower() == "true"
@@ -134,6 +137,33 @@ def handle_admin_memories(
     if kind:
         memories = [m for m in memories if m.get("kind") == kind]
 
+    # Enrich with governance fields from context manifest
+    manifest = runtime.lineage.get_run_context(run_id)
+    lineage_map: dict[str, dict[str, Any]] = {}
+    if manifest:
+        for mref in manifest.included_refs.memory_refs:
+            lineage_map[mref["memory_id"]] = {
+                "rank": mref.get("rank"),
+                "reason": mref.get("reason"),
+                "evidence_eligible": mref.get("evidence_eligible", False),
+                "inclusion_status": "included",
+            }
+        for eref in manifest.excluded_refs:
+            if eref.ref_type == "memory":
+                lineage_map[eref.ref_id] = {
+                    "rank": None,
+                    "reason": eref.reason,
+                    "evidence_eligible": False,
+                    "inclusion_status": f"excluded:{eref.reason}",
+                }
+
+    for m in memories:
+        gov = lineage_map.get(m["memory_id"], {})
+        m["lineage_rank"] = gov.get("rank")
+        m["selection_reason"] = gov.get("reason", "not_in_manifest")
+        m["evidence_eligible_verified"] = gov.get("evidence_eligible", m.get("evidence_eligible", False))
+        m["inclusion_status"] = gov.get("inclusion_status", "not_in_manifest")
+
     # Redact content
     memories = [_redact_memory(m, show_content) for m in memories]
 
@@ -143,9 +173,11 @@ def handle_admin_memories(
 def handle_admin_skills(
     params: dict[str, str], runtime: AgosRuntime
 ) -> tuple[int, dict[str, Any]]:
-    """GET /api/admin/agos/skills"""
+    """GET /api/admin/agos/skills
+
+    Returns: revision, dependencies, risk_class, lifecycle, frozen state.
+    """
     run_id = params.get("run_id", "")
-    family = params.get("family", "")
     page = _int_param(params, "page", 1)
     page_size = _int_param(params, "page_size", 20)
 
@@ -156,23 +188,38 @@ def handle_admin_skills(
     if manifest is None:
         return admin_response(_paginate([], page, page_size))
 
-    items = [
-        {
+    items = []
+    for e in manifest.entries:
+        item: dict[str, Any] = {
             "skill_id": e.skill_id,
             "revision_hash": e.revision_hash,
             "reason": e.reason,
+            "frozen_at": manifest.created_at,
         }
-        for e in manifest.entries
-    ]
+        # Enrich from registry if available
+        if runtime._skill_registry:
+            skill = runtime._skill_registry.get_skill(e.skill_id)
+            if skill:
+                item["family"] = skill.family
+                item["risk_class"] = skill.risk_class
+                item["lifecycle"] = skill.lifecycle
+                item["side_effect_class"] = skill.side_effect_class
+            deps = runtime._skill_registry.get_dependencies(e.skill_id)
+            item["dependencies"] = [
+                {"to": d.to_skill_id, "relation": d.relation} for d in deps
+            ]
+        items.append(item)
 
-    # Filter by family (would need skill lookup, skip in MVP — just pass through)
     return admin_response(_paginate(items, page, page_size))
 
 
 def handle_admin_tools(
     params: dict[str, str], runtime: AgosRuntime
 ) -> tuple[int, dict[str, Any]]:
-    """GET /api/admin/agos/tools"""
+    """GET /api/admin/agos/tools
+
+    Returns: side_effect_class, approval, hashes, evidence_class, status.
+    """
     run_id = params.get("run_id", "")
     status_filter = params.get("status", "")
     page = _int_param(params, "page", 1)
@@ -182,6 +229,19 @@ def handle_admin_tools(
         return admin_error("BAD_REQUEST", "run_id parameter is required", 400)
 
     invocations = runtime.lineage.get_run_invocations(run_id)
+
+    # Enrich with tool capability metadata
+    for inv in invocations:
+        if runtime._tool_registry:
+            cap = runtime._tool_registry.get_tool(inv.get("tool_id", ""))
+            if cap:
+                inv["side_effect_class"] = cap.side_effect_class
+                inv["evidence_class"] = cap.evidence_class
+                inv["approval_requirement"] = cap.approval_requirement
+            else:
+                inv["side_effect_class"] = "unknown"
+                inv["evidence_class"] = "unknown"
+                inv["approval_requirement"] = "unknown"
 
     # Filter by status
     if status_filter:
@@ -232,11 +292,11 @@ def dispatch_admin_agos(
     """Dispatch /api/admin/agos/* requests.
 
     Returns (status_code, response_body_dict).
-    """
-    # Authorization check
-    if not check_admin_auth(headers):
-        return admin_error("UNAUTHORIZED", "Admin token required", 401)
 
+    NOTE: Authorization is handled by the outer web.py _admin_auth_check()
+    which validates X-Admin-Token before this function is called. This
+    function does NOT perform its own auth check to avoid dual-gate confusion.
+    """
     params = _parse_params(query_string)
 
     if path == "/api/admin/agos/memories":

@@ -87,6 +87,16 @@ class TestContextBuild:
 
     def test_build_context_with_memory_refs(self, runtime: AgosRuntime):
         with _enable_agos():
+            runtime._ensure_init()
+            # Pre-save entry so context builder can verify from DB
+            from trustforge.memory_os import MemoryEntry
+            runtime._memory_repo.save(MemoryEntry(
+                memory_id="m1", kind="episodic", provider="coingecko",
+                content_hash="a" * 64, content_ref="BTC price data",
+                published_at="2026-07-01T00:00:00Z",
+                retrieved_at="2026-07-01T00:00:00Z",
+                evidence_eligible=True,
+            ))
             refs = [
                 MemoryRef(
                     memory_id="m1", kind="episodic", rank=1,

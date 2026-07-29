@@ -114,7 +114,22 @@ class TestBuild:
         assert manifest.included_refs.snapshot_ref == "snap-abc"
         assert manifest.included_refs.question_ref == "q-123"
 
-    def test_build_with_memory_refs(self, builder: ContextBuilder):
+    def test_build_with_memory_refs(self, builder: ContextBuilder, memory_repo: MemoryRepository):
+        # Pre-save entries in DB so context builder can verify them
+        memory_repo.save(MemoryEntry(
+            memory_id="m1", kind="episodic", provider="coingecko",
+            content_hash="a" * 64, content_ref="BTC price data from coingecko",
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z",
+            evidence_eligible=True,
+        ))
+        memory_repo.save(MemoryEntry(
+            memory_id="m2", kind="episodic", provider="newsapi",
+            content_hash="b" * 64, content_ref="ETH data",
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z",
+            evidence_eligible=False,
+        ))
         refs = [
             _make_memory_ref("m1", rank=1),
             _make_memory_ref("m2", rank=2, content_preview="ETH data"),
@@ -160,8 +175,15 @@ class TestBuild:
 
 
 class TestExclusion:
-    def test_over_budget_excluded(self, builder: ContextBuilder):
-        # Very low budget, long content
+    def test_over_budget_excluded(self, builder: ContextBuilder, memory_repo: MemoryRepository):
+        # Pre-save entry in DB
+        memory_repo.save(MemoryEntry(
+            memory_id="big", kind="episodic", provider="test",
+            content_hash="c" * 64, content_ref="x" * 1000,
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z",
+            evidence_eligible=False,
+        ))
         refs = [
             _make_memory_ref("big", content_preview="x" * 1000),
         ]
@@ -270,7 +292,19 @@ class TestPersistence:
 
 
 class TestHelpers:
-    def test_manifest_summary(self, builder: ContextBuilder):
+    def test_manifest_summary(self, builder: ContextBuilder, memory_repo: MemoryRepository):
+        memory_repo.save(MemoryEntry(
+            memory_id="sum-1", kind="episodic", provider="p1",
+            content_hash="d" * 64, content_ref="BTC data",
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z", evidence_eligible=True,
+        ))
+        memory_repo.save(MemoryEntry(
+            memory_id="sum-2", kind="episodic", provider="p2",
+            content_hash="e" * 64, content_ref="ETH",
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z", evidence_eligible=False,
+        ))
         refs = [_make_memory_ref("sum-1"), _make_memory_ref("sum-2", rank=2, content_preview="ETH")]
         manifest = builder.build(run_id="run-summary", memory_refs=refs, snapshot_ref="s")
 
@@ -280,7 +314,19 @@ class TestHelpers:
         assert summary["token_budget"] == 4096
         assert "token_used_pct" in summary
 
-    def test_get_evidence_eligible_memories(self, builder: ContextBuilder):
+    def test_get_evidence_eligible_memories(self, builder: ContextBuilder, memory_repo: MemoryRepository):
+        memory_repo.save(MemoryEntry(
+            memory_id="elig-1", kind="episodic", provider="coingecko",
+            content_hash="f" * 64, content_ref="eligible content",
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z", evidence_eligible=True,
+        ))
+        memory_repo.save(MemoryEntry(
+            memory_id="elig-2", kind="episodic", provider="newsapi",
+            content_hash="0" * 64, content_ref="no",
+            published_at="2026-07-01T00:00:00Z",
+            retrieved_at="2026-07-01T00:00:00Z", evidence_eligible=False,
+        ))
         refs = [
             _make_memory_ref("elig-1", evidence_eligible=True),
             _make_memory_ref("elig-2", rank=2, evidence_eligible=False, content_preview="no"),

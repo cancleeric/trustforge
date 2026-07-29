@@ -126,6 +126,7 @@ class SkillLoader:
                 proposed_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending','approved','rejected')),
+                sandbox_passed INTEGER NOT NULL DEFAULT 0,
                 decided_by TEXT,
                 decided_at TEXT
             );
@@ -233,6 +234,20 @@ class SkillLoader:
             for rev in revs:
                 if rev.skill_id not in seen:
                     seen.add(rev.skill_id)
+                    # Check transitive high-risk approval (every dep, not just top-level)
+                    dep_skill = self._registry.get_skill(rev.skill_id)
+                    if dep_skill and dep_skill.risk_class in HIGH_RISK_CLASSES:
+                        if not self.is_activation_approved(rev.skill_id, rev.revision_hash):
+                            raise ValueError(
+                                f"transitive high-risk dependency '{rev.skill_id}' "
+                                f"(risk_class={dep_skill.risk_class}) requires "
+                                f"activation approval before freezing"
+                            )
+                        if not self._sandbox_verified(rev.skill_id, rev.revision_hash):
+                            raise ValueError(
+                                f"high-risk skill '{rev.skill_id}' must pass sandbox "
+                                f"verification before freezing into manifest"
+                            )
                     entries.append(
                         FrozenSkillEntry(
                             skill_id=rev.skill_id,
@@ -321,8 +336,12 @@ class SkillLoader:
         conn.commit()
         return proposal
 
-    def approve_activation(self, proposal_id: str, approved_by: str) -> None:
-        """Approve an activation proposal."""
+    def approve_activation(self, proposal_id: str, approved_by: str, *, sandbox_passed: bool = False) -> None:
+        """Approve an activation proposal.
+
+        sandbox_passed must be True for high-risk skills — the sandbox gate
+        is mandatory, not optional.
+        """
         conn = self._registry._connect()
         row = conn.execute(
             "SELECT status FROM activation_proposals WHERE proposal_id = ?",
@@ -333,9 +352,15 @@ class SkillLoader:
         if row[0] != "pending":
             raise ValueError(f"proposal is already {row[0]}")
 
+        if not sandbox_passed:
+            raise ValueError(
+                "sandbox_passed=True is required to approve high-risk activation; "
+                "skill must pass sandbox dry-run before approval"
+            )
+
         conn.execute(
-            "UPDATE activation_proposals SET status='approved', decided_by=?, decided_at=? "
-            "WHERE proposal_id = ?",
+            "UPDATE activation_proposals SET status='approved', sandbox_passed=1, "
+            "decided_by=?, decided_at=? WHERE proposal_id = ?",
             (approved_by, _now_iso(), proposal_id),
         )
         conn.commit()
@@ -367,6 +392,22 @@ class SkillLoader:
         row = conn.execute(
             "SELECT 1 FROM activation_proposals "
             "WHERE skill_id = ? AND revision_hash = ? AND status = 'approved'",
+            (skill_id, revision_hash),
+        ).fetchone()
+        return row is not None
+
+    def _sandbox_verified(self, skill_id: str, revision_hash: str) -> bool:
+        """Check if a high-risk skill revision has passed sandbox verification.
+
+        Sandbox record is written when propose_activation is approved AND
+        sandbox_passed is explicitly set. Without sandbox evidence, the skill
+        cannot be frozen (fail-closed).
+        """
+        conn = self._registry._connect()
+        row = conn.execute(
+            "SELECT sandbox_passed FROM activation_proposals "
+            "WHERE skill_id = ? AND revision_hash = ? AND status = 'approved' "
+            "AND sandbox_passed = 1",
             (skill_id, revision_hash),
         ).fetchone()
         return row is not None

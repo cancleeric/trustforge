@@ -5,14 +5,6 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _agos_testing_mode(monkeypatch):
-    """Agent OS DB 授權 bypass：測試環境自動設定 TRUSTFORGE_TESTING=1，
-    讓 agos_db_auth.verify_db_authorization() 不要求真實授權 token。
-    """
-    monkeypatch.setenv("TRUSTFORGE_TESTING", "1")
-
-
-@pytest.fixture(autouse=True)
 def _isolate_cost_ledger(tmp_path, monkeypatch):
     """成本帳本測試隔離：預設寫入 tmp_path，而非真實 repo 的 `out/cost_ledger.jsonl`。
 
