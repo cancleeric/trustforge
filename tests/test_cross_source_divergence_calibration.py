@@ -200,6 +200,16 @@ class TestDivergenceFixture:
         ]
         scored = _docs_to_scored(docs)
 
+        # Guard: 確認方向詞推斷正確（防止 lexicon 變更導致靜默失敗）
+        obj_claims = [sc for sc in scored if sc.claim.doc.kind in ("price", "onchain")]
+        sent_claims = [sc for sc in scored if sc.claim.doc.kind in ("news", "social")]
+        assert any(sc.claim.direction == "bullish" for sc in obj_claims), (
+            f"客觀面應有 bullish claim，實得方向：{[sc.claim.direction for sc in obj_claims]}"
+        )
+        assert any(sc.claim.direction == "bearish" for sc in sent_claims), (
+            f"情緒面應有 bearish claim，實得方向：{[sc.claim.direction for sc in sent_claims]}"
+        )
+
         result = detect_cross_source_signal(scored)
         assert result is not None, (
             "應偵測到分歧訊號。"
@@ -226,6 +236,16 @@ class TestDivergenceFixture:
                  "機構 逢低 買入 BTC 累積 增持 看多 突破"),
         ]
         scored = _docs_to_scored(docs)
+
+        # Guard: 確認方向詞推斷正確
+        obj_claims = [sc for sc in scored if sc.claim.doc.kind in ("price", "onchain")]
+        sent_claims = [sc for sc in scored if sc.claim.doc.kind in ("news", "social")]
+        assert any(sc.claim.direction == "bearish" for sc in obj_claims), (
+            f"客觀面應有 bearish claim，實得方向：{[sc.claim.direction for sc in obj_claims]}"
+        )
+        assert any(sc.claim.direction == "bullish" for sc in sent_claims), (
+            f"情緒面應有 bullish claim，實得方向：{[sc.claim.direction for sc in sent_claims]}"
+        )
 
         result = detect_cross_source_signal(scored)
         assert result is not None, (
@@ -311,27 +331,17 @@ class TestNotTriggered:
     def test_no_trigger_neutral_dominant(self):
         """兩類都有 eligible 但主導方向為 neutral → None。
 
-        場景：客觀面有 bullish 和 bearish 各半（投票打平，最高票 < 0.3×total），
-        使得主導方向為 neutral。
+        場景：客觀面有 bullish、bearish 和 neutral，其中 neutral 的投票權重最高，
+        `_dominant` 回傳 "neutral"（neutral 以最高票贏得 max(weights)）。
         """
-        scored = [
-            _sc("p1", "price", "binance", "bullish", 0.60),
-            _sc("p2", "price", "kraken", "bearish", 0.60),
-            _sc("n1", "news", "coindesk", "bearish", 0.55),
-        ]
-        result = detect_cross_source_signal(scored)
-        # 客觀面 bullish weight == bearish weight → 主導是 neutral（佔比恰好 50%/50%，
-        # 最高票 = 0.5×total，超過 0.3）→ 其實會有主導
-        # 調整：讓三方都不達 0.3 門檻
         scored_neutral = [
             _sc("p1", "price", "binance", "bullish", 0.51),
             _sc("p2", "price", "kraken", "bearish", 0.51),
             _sc("p3", "price", "coinbase", "neutral", 0.80),
             _sc("n1", "news", "coindesk", "bearish", 0.55),
         ]
-        # 客觀面：bullish=0.51, bearish=0.51, neutral=0.80 → total=1.82
-        # 最高票=neutral(0.80) → 但 neutral 不是 valid direction → 實際上
-        # max(bullish, bearish)=0.51 < 0.3×1.82=0.546 → 主導為 neutral
+        # 客觀面：neutral weight(0.80) > bullish(0.51) > bearish(0.51)
+        # → _dominant 回傳 "neutral"（neutral 票重最高且超過 0.3×total）
         result = detect_cross_source_signal(scored_neutral)
         assert result is None, "客觀面主導 neutral 時應回 None"
 
@@ -369,6 +379,21 @@ class TestSourceNormalization:
         sources = ["binance", "coindesk", "glassnode"]
         keys = _independent_source_keys(sources)
         assert len(keys) == 3, f"期望 3 個獨立來源，實得 {len(keys)}: {keys}"
+
+    def test_alias_variants_collapse(self):
+        """已知別名（coindesk.com → coindesk、twitter → x）經 _canonical_source 收斂。"""
+        # _independent_source_keys 底層走 _normalize_source_key → _canonical_source
+        sources_coindesk = ["coindesk", "coindesk.com"]
+        keys_coindesk = _independent_source_keys(sources_coindesk)
+        assert len(keys_coindesk) == 1, (
+            f"coindesk / coindesk.com 應收斂為同一源，實得 {len(keys_coindesk)}: {keys_coindesk}"
+        )
+
+        sources_twitter = ["twitter", "x"]
+        keys_twitter = _independent_source_keys(sources_twitter)
+        assert len(keys_twitter) == 1, (
+            f"twitter / x 應收斂為同一源，實得 {len(keys_twitter)}: {keys_twitter}"
+        )
 
     def test_divergence_with_normalized_source_still_triggers(self):
         """正規化後 ≥2 個真正不同的獨立來源仍可觸發。"""
