@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import threading
 from typing import Callable
 
@@ -31,6 +32,11 @@ from trustforge.preview_durable_admission_gate import (
 )
 from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
 from trustforge.preview_trusted_clock import PreviewTrustedClock
+from trustforge.quota_key_lifecycle import (
+    QuotaKey,
+    QuotaKeyLifecycle,
+    QuotaKeyLifecycleAuthority,
+)
 
 
 def _request(reservation_id: str = "12345678-1234-4234-9234-123456789abc"):
@@ -152,8 +158,36 @@ class FakeClient:
         return self.write
 
 
+class _AuthorityClockClient:
+    def describe_table(self, **kwargs):
+        del kwargs
+        date = datetime.fromtimestamp(2_000_000_000, UTC).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        return {"ResponseMetadata": {"HTTPHeaders": {"date": date}}}
+
+
+class _BoundExecutor:
+    def __init__(self, executor, authority, client):
+        self._executor = executor
+        self._authority = authority
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._executor, name)
+
+    def execute(self, request):
+        snapshot = self._authority.snapshot()
+        bound = self._authority.bind_admission(
+            request, self._authority.derive(snapshot, b"executor-test-user")
+        )
+        self._client.request = bound.request
+        return self._executor.execute(bound)
+
+
 def _executor(client, table_name: str = "preview-store"):
-    return PreviewAdmissionExecutor(
+    authority = _lifecycle_authority(table_name)
+    executor = PreviewAdmissionExecutor(
         client,
         table_name,
         durable_gate=DurableAdmissionGate(
@@ -164,7 +198,34 @@ def _executor(client, table_name: str = "preview-store"):
                 table_name=table_name,
             ),
         ),
+        lifecycle_authority=authority,
     )
+    return _BoundExecutor(executor, authority, client)
+
+
+def _lifecycle_authority(table_name: str):
+    clock_client = _AuthorityClockClient()
+    authority = QuotaKeyLifecycleAuthority(
+        PreviewTrustedClock(
+            dynamodb_client=clock_client,
+            table_name=table_name,
+            monotonic_clock=lambda: 0.0,
+            wall_clock=lambda: 2_000_000_000.0,
+        )
+    )
+    authority.install(
+        QuotaKeyLifecycle(
+            generation=1,
+            issued=TrustedUtcInterval(1_999_999_800, 1_999_999_801),
+            current=QuotaKey(
+                version=1,
+                key_id="quota-1",
+                key_bytes=b"k" * 32,
+                activated=1_999_999_900,
+            ),
+        )
+    )
+    return authority
 
 
 def _client_error(
@@ -193,6 +254,18 @@ def _client_error(
         response,
         operation_name,
     )
+
+
+def test_executor_rejects_raw_compile_request_without_io():
+    request = _request()
+    client = FakeClient(request)
+    executor = _executor(client)
+
+    result = executor._executor.execute(request)  # type: ignore[arg-type]
+
+    assert result.outcome is AdmissionOutcome.UNAVAILABLE
+    assert client.read_calls == []
+    assert client.write_calls == []
 
 
 def test_confirmed_success_returns_handle_and_canonical_token():
@@ -470,7 +543,9 @@ def test_factory_configures_exactly_one_sdk_attempt(monkeypatch):
     monkeypatch.setattr(boto3, "client", client)
 
     executor = PreviewAdmissionExecutor.from_boto3(
-        "preview-store", region_name="us-east-1"
+        "preview-store",
+        lifecycle_authority=_lifecycle_authority("preview-store"),
+        region_name="us-east-1",
     )
 
     assert captured["service_name"] == "dynamodb"
@@ -661,7 +736,7 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
 
     expected_counters = {
         (spec.key["pk"], spec.key["sk"]): spec.increment
-        for spec in build_counter_specs(first_request)
+        for spec in build_counter_specs(executor._client.request)
     }
     counter_items = [
         item for item in items if item["kind"]["S"].startswith("preview_")

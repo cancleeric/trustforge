@@ -11,7 +11,6 @@ from typing import Protocol
 
 from trustforge.preview_admission_compiler import (
     AdmissionCompileDenied,
-    AdmissionCompileRequest,
     AdmissionDeniedReason,
     AdmissionHandle,
     build_transact_get_request,
@@ -24,6 +23,10 @@ from trustforge.preview_durable_admission_gate import (
     append_quarantine_action,
 )
 from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
+from trustforge.quota_key_lifecycle import (
+    BoundAdmissionRequest,
+    QuotaKeyLifecycleAuthority,
+)
 
 
 class DynamoAdmissionClient(Protocol):
@@ -155,6 +158,7 @@ class PreviewAdmissionExecutor:
         table_name: str,
         *,
         durable_gate: DurableAdmissionGate,
+        lifecycle_authority: QuotaKeyLifecycleAuthority,
     ) -> None:
         if not callable(getattr(client, "transact_get_items", None)) or not callable(
             getattr(client, "transact_write_items", None)
@@ -173,6 +177,9 @@ class PreviewAdmissionExecutor:
         ):
             raise ValueError("invalid durable admission gate")
         self._durable_gate = durable_gate
+        if type(lifecycle_authority) is not QuotaKeyLifecycleAuthority:
+            raise ValueError("invalid quota lifecycle authority")
+        self._lifecycle_authority = lifecycle_authority
         self._ambiguity: AdmissionAmbiguity | None = None
 
     @property
@@ -229,7 +236,13 @@ class PreviewAdmissionExecutor:
             return True
 
     @classmethod
-    def from_boto3(cls, table_name: str, *, region_name: str | None = None) -> "PreviewAdmissionExecutor":
+    def from_boto3(
+        cls,
+        table_name: str,
+        *,
+        lifecycle_authority: QuotaKeyLifecycleAuthority,
+        region_name: str | None = None,
+    ) -> "PreviewAdmissionExecutor":
         """Create a low-level client whose SDK performs exactly one attempt."""
 
         import boto3
@@ -251,9 +264,15 @@ class PreviewAdmissionExecutor:
                     table_name=table_name,
                 ),
             ),
+            lifecycle_authority=lifecycle_authority,
         )
 
-    def execute(self, request: AdmissionCompileRequest) -> AdmissionExecutionResult:
+    def execute(self, bound: BoundAdmissionRequest) -> AdmissionExecutionResult:
+        if type(bound) is not BoundAdmissionRequest:
+            return _UNAVAILABLE
+        request = self._lifecycle_authority.validate_admission(bound)
+        if request is None:
+            return _UNAVAILABLE
         # A latched instance must perform zero further DynamoDB I/O. A concurrent
         # execution may finish its read, but the second check under the write gate
         # prevents its write from crossing an ambiguous predecessor.
@@ -288,6 +307,12 @@ class PreviewAdmissionExecutor:
 
         with self._write_gate:
             if self._latched_closed or not self._durable_gate.ready:
+                return _UNAVAILABLE
+            # The read/compile phase is deliberately outside this lock. Revalidate
+            # immediately before any durable mutation so rotation or snapshot
+            # expiry cannot cross the transaction boundary.
+            request = self._lifecycle_authority.validate_admission(bound)
+            if request is None:
                 return _UNAVAILABLE
             binding = self._durable_gate.begin(
                 plan,
