@@ -124,8 +124,9 @@ def test_frontend_identity_retries_public_reload_window(monkeypatch):
     train.verify_frontend_identity(expected_sha)
     assert len(calls) == 2
     for command in calls:
-        assert command[command.index("--retry") + 1] == "4"
-        assert command[command.index("--retry-delay") + 1] == "2"
+        assert command[command.index("--retry") + 1] == "10"
+        assert command[command.index("--retry-delay") + 1] == "3"
+        assert command[command.index("--retry-max-time") + 1] == "45"
         assert "--retry-all-errors" in command
 
 
