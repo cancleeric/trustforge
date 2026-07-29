@@ -172,13 +172,45 @@ class _Snapshot:
     circuit: CircuitSnapshot
 
 
-@dataclass(frozen=True, slots=True)
+_TERMINAL_PLAN_FACTORY = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class CompiledTerminalPlan:
     write_request: Mapping[str, object]
     replay: bool
+    intent: TerminalIntent = dataclass_field(repr=False)
+    table_name: str
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        write_request: Mapping[str, object],
+        replay: bool,
+        intent: TerminalIntent,
+        table_name: str,
+    ) -> "CompiledTerminalPlan":
+        if (
+            token is not _TERMINAL_PLAN_FACTORY
+            or type(replay) is not bool
+            or type(intent) is not TerminalIntent
+            or type(write_request) is not MappingProxyType
+        ):
+            raise ValueError("invalid compiled terminal plan")
+        validated_table = _table(table_name)
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "write_request", write_request)
+        object.__setattr__(instance, "replay", replay)
+        object.__setattr__(instance, "intent", intent)
+        object.__setattr__(instance, "table_name", validated_table)
+        return instance
 
     def transact_write_items_request(self) -> dict[str, object]:
         return _thaw(self.write_request)  # type: ignore[return-value]
+
+    def client_request_token(self) -> str:
+        return _terminal_client_token(self.intent.handle.reservation_id)
 
 
 class DynamoTerminalClient(Protocol):
@@ -229,9 +261,7 @@ class PreviewTerminalReconciler:
                 return TerminalExecutionResult(TerminalOutcome.RECONCILED, replay=True)
             write = plan.transact_write_items_request()
             # A distinct deterministic token prevents admission/reconcile token reuse.
-            write["ClientRequestToken"] = _terminal_client_token(
-                intent.handle.reservation_id
-            )
+            write["ClientRequestToken"] = plan.client_request_token()
             try:
                 written = self._client.transact_write_items(**write)
             except Exception:  # noqa: BLE001 - prove exact commit before success
@@ -374,7 +404,9 @@ def compile_terminal(
     if type(snapshot) is not _Snapshot:
         raise ValueError("invalid terminal snapshot")
     if snapshot.terminal_replay:
-        return CompiledTerminalPlan(MappingProxyType({}), True)
+        return CompiledTerminalPlan._create(
+            _TERMINAL_PLAN_FACTORY, MappingProxyType({}), True, intent, table
+        )
     actions: list[dict[str, object]] = []
     terminal_item = _terminal_item(intent, snapshot.reservation)
     actions.append(
@@ -419,9 +451,12 @@ def compile_terminal(
     ]
     if len(set(keys)) != len(keys):
         raise ValueError("duplicate terminal action")
-    return CompiledTerminalPlan(
+    return CompiledTerminalPlan._create(
+        _TERMINAL_PLAN_FACTORY,
         _freeze({"TransactItems": [_serialize_action(action) for action in actions]}),
         False,
+        intent,
+        table,
     )
 
 
