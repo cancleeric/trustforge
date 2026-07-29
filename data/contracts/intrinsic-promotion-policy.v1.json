@@ -1,0 +1,19 @@
+{
+  "version": "intrinsic-promotion-policy.v1",
+  "min_observations": 200,
+  "min_assets": 5,
+  "min_days": 30,
+  "min_known": 3,
+  "min_families": 2,
+  "max_abs_delta": 0.08,
+  "brier_degradation_limit": 0.01,
+  "ece_degradation_limit": 0.01,
+  "labels_mature": false,
+  "min_eligible_fraction": 0.6,
+  "max_decision_flips": 0,
+  "max_coverage_disparity": 2,
+  "max_missingness_rate": 0.5,
+  "sensitivity_bound": 0.08,
+  "max_single_source_family_share": 0.6,
+  "corrupt_rate_max": 0.05
+}
