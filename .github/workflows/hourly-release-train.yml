@@ -57,6 +57,14 @@ jobs:
           test "$(aws sts get-caller-identity --query Account --output text)" = "795930814369"
           test "${AWS_ACCESS_KEY_ID#ASIA}" != "${AWS_ACCESS_KEY_ID}"
 
+      - name: Verify production SSM control plane
+        run: |
+          test "$(aws ssm describe-instance-information \
+            --region ap-southeast-2 \
+            --filters Key=InstanceIds,Values=i-0152b70368358a81c \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text)" = "Online"
+
       - name: Run verified promotion and production deployment
         env:
           BEDROCK_MODEL_ID: au.anthropic.claude-haiku-4-5-20251001-v1:0
