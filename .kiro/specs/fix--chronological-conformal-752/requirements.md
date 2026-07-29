@@ -44,9 +44,11 @@
 - Signal（evidence_strength）計算只能使用 t 及以前的資料。
 - Future 資料只作 outcome label，不進入 features。
 
-### FR-5: 移除假指標，報誠實統計
+### FR-5: 移除假指標，保留誠實研究門檻
 
-- 移除 conformal report 中的 `auc_proxy` / `promotion_check`。
+- 移除 conformal report 中基於假 `auc_proxy` 的 promotion check。
+- 保留 `promotion_checks` 作為研究品質門檻，但只能使用可直接驗證的
+  sample、source-family 與 held-out 統計，不得重新引入 AUC proxy。
 - 改報：joint error、conditional wrong rate、abstain rate、support、family counts。
 
 ### FR-6: Fail-Closed 邊界

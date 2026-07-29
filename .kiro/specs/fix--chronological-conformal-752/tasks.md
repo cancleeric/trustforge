@@ -25,7 +25,7 @@
 
 ## Task 4: 修正 Threshold 與報告
 
-- [x] 移除 `auc_proxy` / `promotion_check`
+- [x] 移除 `auc_proxy` 與基於它的 promotion check；保留誠實的 `promotion_checks` 研究門檻
 - [x] `conformal_threshold()` — nonconformity 分位數
 - [x] `_evaluate_split()` — 報 joint_error, abstain_rate, conditional_wrong, accuracy
 - [x] `ConformalResult` dataclass 含 `source_families` 計數
