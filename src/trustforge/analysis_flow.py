@@ -513,6 +513,8 @@ class AnalysisFlow:
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
+        self._agos_runtimes: list[Any] = []
+        self._agos_runtimes_lock = threading.Lock()
         # Every stage boundary is a safe handoff point. Priority queues preserve
         # manual priority through the complete flow without interrupting work
         # that is already executing.
@@ -2999,11 +3001,15 @@ class AnalysisFlow:
             logging.getLogger(__name__).warning("Agent OS finalize failed (fail-soft): %s", e)
 
     def _get_agos_runtime(self) -> "AgosRuntime":
-        """Lazy singleton for Agent OS runtime."""
-        if not hasattr(self, "_agos_runtime_instance"):
+        """Return a thread-local runtime for thread-bound SQLite repositories."""
+        runtime = getattr(self._local, "agos_runtime", None)
+        if runtime is None:
             from .agos_runtime import AgosRuntime
-            self._agos_runtime_instance = AgosRuntime()
-        return self._agos_runtime_instance
+            runtime = AgosRuntime()
+            self._local.agos_runtime = runtime
+            with self._agos_runtimes_lock:
+                self._agos_runtimes.append(runtime)
+        return runtime
 
     def _agos_begin_tool(self, package: dict, tool_id: str, args: dict) -> str | None:
         """Persist a pending receipt before an allowed external execution."""
@@ -3353,6 +3359,14 @@ class AnalysisFlow:
         self.close()
 
     def close(self) -> None:
+        with self._agos_runtimes_lock:
+            agos_runtimes, self._agos_runtimes = self._agos_runtimes, []
+        for runtime in agos_runtimes:
+            try:
+                runtime.close()
+            except Exception:
+                pass
+        self._local.agos_runtime = None
         with self._connections_lock:
             connections, self._connections = self._connections, []
         for conn in connections:

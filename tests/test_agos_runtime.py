@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -76,6 +77,25 @@ class TestFeatureFlag:
 
 
 class TestContextBuild:
+    def test_analysis_flow_uses_thread_local_agos_runtimes(self, tmp_path: Path):
+        flow = AnalysisFlow(tmp_path / "thread-local-runtime.db")
+        runtimes: list[AgosRuntime] = []
+
+        def resolve_runtime() -> None:
+            runtimes.append(flow._get_agos_runtime())
+
+        threads = [threading.Thread(target=resolve_runtime) for _ in range(2)]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert len(runtimes) == 2
+            assert runtimes[0] is not runtimes[1]
+            assert len(flow._agos_runtimes) == 2
+        finally:
+            flow.close()
+
     def test_read_only_runtime_does_not_bootstrap_tool_capabilities(
         self, data_dir: Path
     ):
