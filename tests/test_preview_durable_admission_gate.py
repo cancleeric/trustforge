@@ -321,6 +321,47 @@ def test_restart_retains_nominal_pending_binding_but_never_opens():
     assert binding.reservation_id not in repr(replacement.pending_binding)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "wrong"),
+    [
+        ("owner_digest", {"S": "d" * 64}),
+        ("identity_digest", {"S": "e" * 64}),
+        ("policy_digest", {"S": "f" * 64}),
+        ("reserved_tokens", {"N": "1"}),
+        ("reserved_micro_usd", {"N": "1"}),
+        ("epoch_minute", {"N": "28333332"}),
+        ("utc_day", {"S": "20231113"}),
+        ("key_version", {"N": "2"}),
+        ("schema_version", {"N": "2"}),
+        ("circuit_half_open_owner", {"S": "d" * 64}),
+    ],
+)
+def test_pending_same_uuid_hostile_handle_fingerprint_is_unresolved(
+    field_name, wrong
+):
+    client = FakeGateClient(_open())
+    gate = _gate(client)
+    plan = _plan()
+    binding = gate.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    reservation = _reserved_item(plan.handle)
+    reservation[field_name] = wrong
+    client.reservation_item = reservation
+    replacement = _gate(client)
+    writes_before = len(client.transact_write_calls)
+
+    proof = replacement.prove_pending_present()
+
+    assert proof.disposition is ProofDisposition.UNRESOLVED
+    assert replacement.ready is False
+    assert len(client.transact_write_calls) == writes_before
+
+
 def test_fingerprint_is_stable_domain_separated_sha256_without_secret():
     plan = _plan()
 

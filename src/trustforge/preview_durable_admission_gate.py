@@ -7,7 +7,7 @@ There is no missing-row bootstrap path in application code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 import hashlib
 import json
@@ -16,6 +16,7 @@ from typing import Protocol
 
 from trustforge.preview_admission_compiler import (
     RETENTION_SECONDS,
+    RESERVATION_LEASE_SECONDS,
     AdmissionHandle,
     CompiledAdmissionPlan,
 )
@@ -31,6 +32,7 @@ CONTROL_KIND = "preview_admission_quarantine"
 CONTROL_SCHEMA_VERSION = 1
 FINGERPRINT_VERSION = 1
 _DOMAIN = b"TrustForge/PAP1/admission-write-plan/v1\x00"
+_HANDLE_DOMAIN = b"TrustForge/PAP1/admission-handle/v1\x00"
 _MAX_GENERATION = 10**38 - 1
 
 
@@ -62,6 +64,7 @@ class DispatchBinding:
     generation: int = field(repr=False)
     reservation_id: str = field(repr=False)
     plan_fingerprint: str = field(repr=False)
+    handle_fingerprint: str = field(repr=False)
     dispatch_lower: int = field(repr=False)
     dispatch_upper: int = field(repr=False)
 
@@ -71,6 +74,7 @@ class DispatchBinding:
             or not 1 <= self.generation <= _MAX_GENERATION
             or not _uuid(self.reservation_id)
             or not _digest(self.plan_fingerprint)
+            or not _digest(self.handle_fingerprint)
             or type(self.dispatch_lower) is not int
             or type(self.dispatch_upper) is not int
             or not 0 <= self.dispatch_lower <= self.dispatch_upper
@@ -247,6 +251,7 @@ class DurableAdmissionGate:
                     current.generation + 1,
                     plan.handle.reservation_id,
                     fingerprint,
+                    admission_handle_fingerprint(plan.handle),
                     dispatch_lower,
                     dispatch_upper,
                 )
@@ -313,7 +318,9 @@ class DurableAdmissionGate:
                     "#pk=:pk AND #sk=:sk AND #kind=:kind AND #schema=:schema "
                     "AND #state=:state AND #generation=:generation "
                     "AND #version=:version AND #reservation=:reservation "
-                    "AND #fingerprint=:fingerprint AND #lower=:lower AND #upper=:upper"
+                    "AND #fingerprint=:fingerprint "
+                    "AND #handle_fingerprint=:handle_fingerprint "
+                    "AND #lower=:lower AND #upper=:upper"
                 ),
                 "ExpressionAttributeNames": _NAMES,
                 "ExpressionAttributeValues": _expected_values(current),
@@ -365,6 +372,76 @@ class DurableAdmissionGate:
             or control.state is not GateState.QUARANTINED
             or control.binding != binding
             or durable_handle != handle
+        ):
+            return unresolved
+        with self._lock:
+            self._control = control
+            self._closed = True
+        return QuarantineProof._create(
+            _PROOF_FACTORY,
+            ProofDisposition.PRESENT,
+            self._proof_nonce,
+            handle,
+            binding,
+        )
+
+    def prove_pending_present(self) -> QuarantineProof:
+        """Restart-safe exact proof of the pending reservation and fence."""
+
+        unresolved = QuarantineProof._create(
+            _PROOF_FACTORY, ProofDisposition.UNRESOLVED, self._proof_nonce
+        )
+        binding = self.pending_binding
+        if binding is None:
+            return unresolved
+        lease_until = binding.dispatch_upper + RESERVATION_LEASE_SECONDS
+        key = reservation_key(1, lease_until // 60, binding.reservation_id)
+        try:
+            response = self._client.transact_get_items(
+                TransactItems=[
+                    {"Get": {"TableName": self._table, "Key": CONTROL_KEY}},
+                    {
+                        "Get": {
+                            "TableName": self._table,
+                            "Key": _ddb_map(key),
+                        }
+                    },
+                ]
+            )
+            responses = response["Responses"]
+            if type(responses) is not list or len(responses) != 2:
+                return unresolved
+            control_response, reservation_response = responses
+            if (
+                type(control_response) is not dict
+                or set(control_response) != {"Item"}
+                or type(reservation_response) is not dict
+                or set(reservation_response) != {"Item"}
+            ):
+                return unresolved
+            control = _decode_control(control_response["Item"])
+            from trustforge.preview_lease_recovery import (
+                _decode_map,
+                _decode_reservation,
+            )
+
+            reservation = _decode_reservation(
+                _decode_map(reservation_response["Item"])
+            )
+            handle = reservation.handle
+        except Exception:
+            return unresolved
+        if (
+            control is None
+            or control.state is not GateState.QUARANTINED
+            or control.binding != binding
+            or reservation.disposition is not None
+            or handle.reservation_id != binding.reservation_id
+            or handle.created_lower != binding.dispatch_lower
+            or handle.created_upper != binding.dispatch_upper
+            or handle.lease_until != lease_until
+            or admission_handle_fingerprint(handle)
+            != binding.handle_fingerprint
         ):
             return unresolved
         with self._lock:
@@ -482,6 +559,73 @@ class DurableAdmissionGate:
                 },
             ],
         }
+
+    def execute_recovery(
+        self, authority: RecoveryAuthority, terminal_plan: object
+    ) -> bool:
+        """Execute D1 and OPEN once; ambiguity succeeds only by exact proof."""
+
+        try:
+            request = self.append_recovery_open_action(authority, terminal_plan)
+            response = self._client.transact_write_items(**request)
+        except Exception:
+            return self._prove_recovery_commit(authority)
+        if not _confirmed_2xx(response):
+            return self._prove_recovery_commit(authority)
+        current = self._control
+        if current is None or current.state is not GateState.QUARANTINED:
+            return False
+        self._control = _Control(
+            GateState.OPEN, current.generation, current.version + 1, None
+        )
+        self._closed = False
+        return True
+
+    def _prove_recovery_commit(self, authority: RecoveryAuthority) -> bool:
+        from trustforge.preview_terminal_reconcile import (
+            build_terminal_read_request,
+            decode_terminal_responses,
+        )
+
+        if (
+            type(authority) is not RecoveryAuthority
+            or authority._gate_nonce is not self._proof_nonce
+        ):
+            return False
+        current = self._control
+        if current is None or current.state is not GateState.QUARANTINED:
+            return False
+        expected = _Control(
+            GateState.OPEN, current.generation, current.version + 1, None
+        )
+        try:
+            request = build_terminal_read_request(
+                authority.intent, self._table
+            )
+            request["TransactItems"].append(
+                {"Get": {"TableName": self._table, "Key": CONTROL_KEY}}
+            )
+            response = self._client.transact_get_items(**request)
+            responses = response["Responses"]
+            if type(responses) is not list or len(responses) < 3:
+                return False
+            terminal = decode_terminal_responses(
+                authority.intent, responses[:-1]
+            )
+            control_response = responses[-1]
+            if (
+                type(control_response) is not dict
+                or set(control_response) != {"Item"}
+            ):
+                return False
+            control = _decode_control(control_response["Item"])
+        except Exception:
+            return False
+        if not terminal.terminal_replay or control != expected:
+            return False
+        self._control = control
+        self._closed = False
+        return True
 
     def _owns_present(self, proof: QuarantineProof) -> bool:
         return (
@@ -659,6 +803,16 @@ def admission_plan_fingerprint(plan: CompiledAdmissionPlan) -> str:
     return hashlib.sha256(_DOMAIN + encoded).hexdigest()
 
 
+def admission_handle_fingerprint(handle: AdmissionHandle) -> str:
+    if type(handle) is not AdmissionHandle:
+        raise ValueError("invalid admission handle")
+    handle.__post_init__()
+    encoded = json.dumps(
+        asdict(handle), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+    return hashlib.sha256(_HANDLE_DOMAIN + encoded).hexdigest()
+
+
 def append_quarantine_action(
     plan: CompiledAdmissionPlan, gate: DurableAdmissionGate, binding: DispatchBinding
 ) -> dict[str, object]:
@@ -681,6 +835,7 @@ _NAMES = {
     "#version": "version",
     "#reservation": "reservation_id",
     "#fingerprint": "plan_fingerprint",
+    "#handle_fingerprint": "handle_fingerprint",
     "#lower": "dispatch_lower",
     "#upper": "dispatch_upper",
 }
@@ -705,6 +860,7 @@ def _control_item(
             {
                 "reservation_id": {"S": binding.reservation_id},
                 "plan_fingerprint": {"S": binding.plan_fingerprint},
+                "handle_fingerprint": {"S": binding.handle_fingerprint},
                 "dispatch_lower": {"N": str(binding.dispatch_lower)},
                 "dispatch_upper": {"N": str(binding.dispatch_upper)},
             }
@@ -726,6 +882,7 @@ def _put_request(
                 if expected.binding is None
                 else (
                     " AND #reservation=:reservation AND #fingerprint=:fingerprint "
+                    "AND #handle_fingerprint=:handle_fingerprint "
                     "AND #lower=:lower AND #upper=:upper"
                 )
             )
@@ -735,7 +892,10 @@ def _put_request(
             for key, value in _NAMES.items()
             if expected.binding is not None
             or key
-            not in {"#reservation", "#fingerprint", "#lower", "#upper"}
+            not in {
+                "#reservation", "#fingerprint", "#handle_fingerprint",
+                "#lower", "#upper",
+            }
         },
         "ExpressionAttributeValues": _expected_values(expected),
     }
@@ -756,6 +916,7 @@ def _expected_values(control: _Control) -> dict[str, object]:
             {
                 ":reservation": {"S": control.binding.reservation_id},
                 ":fingerprint": {"S": control.binding.plan_fingerprint},
+                ":handle_fingerprint": {"S": control.binding.handle_fingerprint},
                 ":lower": {"N": str(control.binding.dispatch_lower)},
                 ":upper": {"N": str(control.binding.dispatch_upper)},
             }
@@ -772,7 +933,8 @@ def _decode_control(item: object) -> _Control | None:
     try:
         state = GateState(_s(item["state"]))
         expected = base if state is GateState.OPEN else base | {
-            "reservation_id", "plan_fingerprint", "dispatch_lower", "dispatch_upper"
+            "reservation_id", "plan_fingerprint", "handle_fingerprint",
+            "dispatch_lower", "dispatch_upper"
         }
         if (
             set(item) != expected
@@ -792,6 +954,7 @@ def _decode_control(item: object) -> _Control | None:
                 generation,
                 _s(item["reservation_id"]),
                 _s(item["plan_fingerprint"]),
+                _s(item["handle_fingerprint"]),
                 _n(item["dispatch_lower"]),
                 _n(item["dispatch_upper"]),
             )

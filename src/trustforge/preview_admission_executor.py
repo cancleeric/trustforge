@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
 from enum import StrEnum
+import math
+import re
 import threading
 from typing import Protocol
 
@@ -21,13 +23,73 @@ from trustforge.preview_durable_admission_gate import (
     DurableAdmissionGate,
     append_quarantine_action,
 )
-from trustforge.preview_trusted_clock import PreviewTrustedClock
+from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
 
 
 class DynamoAdmissionClient(Protocol):
     def transact_get_items(self, **kwargs: object) -> object: ...
 
     def transact_write_items(self, **kwargs: object) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionAmbiguity:
+    """Immutable, non-rendering material required to prove an ambiguous write."""
+
+    handle: AdmissionHandle = dataclass_field(repr=False)
+    write_fingerprint: str = dataclass_field(repr=False)
+    interval: TrustedUtcInterval = dataclass_field(repr=False)
+
+    def __post_init__(self) -> None:
+        try:
+            self.handle.__post_init__()
+        except (TypeError, ValueError):
+            raise ValueError("invalid admission ambiguity") from None
+        if (
+            type(self.handle) is not AdmissionHandle
+            or type(self.write_fingerprint) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", self.write_fingerprint)
+            or type(self.interval) is not TrustedUtcInterval
+            or not math.isfinite(self.interval.earliest)
+            or not math.isfinite(self.interval.latest)
+            or self.interval.earliest > self.interval.latest
+            or self.interval.earliest != self.handle.created_lower
+            or self.interval.latest != self.handle.created_upper
+        ):
+            raise ValueError("invalid admission ambiguity")
+
+
+_RESOLUTION_TOKEN = object()
+
+
+class AdmissionAmbiguityResolution:
+    """Composition-integrity result created by the concrete recovery service."""
+
+    __slots__ = ("_ambiguity", "_write_fingerprint")
+
+    def __init__(self, ambiguity: AdmissionAmbiguity, token: object) -> None:
+        if token is not _RESOLUTION_TOKEN or type(ambiguity) is not AdmissionAmbiguity:
+            raise ValueError("invalid ambiguity resolution")
+        self._ambiguity = ambiguity
+        self._write_fingerprint = ambiguity.write_fingerprint
+
+    def _proves(self, ambiguity: AdmissionAmbiguity) -> bool:
+        return (
+            self._ambiguity is ambiguity
+            and self._write_fingerprint == ambiguity.write_fingerprint
+        )
+
+
+def _confirmed_ambiguity_resolution(
+    ambiguity: AdmissionAmbiguity,
+) -> AdmissionAmbiguityResolution:
+    return AdmissionAmbiguityResolution(ambiguity, _RESOLUTION_TOKEN)
+
+
+class AdmissionAmbiguityResolver(Protocol):
+    def resolve(
+        self, ambiguity: AdmissionAmbiguity
+    ) -> AdmissionAmbiguityResolution | None: ...
 
 
 class AdmissionOutcome(StrEnum):
@@ -111,6 +173,60 @@ class PreviewAdmissionExecutor:
         ):
             raise ValueError("invalid durable admission gate")
         self._durable_gate = durable_gate
+        self._ambiguity: AdmissionAmbiguity | None = None
+
+    @property
+    def latched_closed(self) -> bool:
+        with self._write_gate:
+            return self._latched_closed or not self._durable_gate.ready
+
+    def resolve_ambiguity(self, resolver: AdmissionAmbiguityResolver) -> bool:
+        """Resolve under the same gate as writes; false/exception remains closed."""
+
+        with self._write_gate:
+            # Runtime exact-type sealing prevents a caller-supplied duck type
+            # from asserting success.  Importing here avoids a module cycle.
+            from trustforge.preview_lease_recovery import PreviewAmbiguityRecovery
+
+            if type(resolver) is not PreviewAmbiguityRecovery:
+                return False
+            ambiguity = self._ambiguity
+            if not self._latched_closed or ambiguity is None:
+                return False
+            try:
+                resolution = resolver.resolve(ambiguity)
+            except Exception:  # noqa: BLE001 - proof failures are fail closed
+                return False
+            if (
+                type(resolution) is not AdmissionAmbiguityResolution
+                or not resolution._proves(ambiguity)
+                or not self._durable_gate.ready
+            ):
+                return False
+            self._ambiguity = None
+            self._latched_closed = False
+            return True
+
+    def recover_pending(self, resolver: AdmissionAmbiguityResolver) -> bool:
+        """Recover a restart-visible durable quarantine under the write lock."""
+
+        with self._write_gate:
+            from trustforge.preview_lease_recovery import PreviewAmbiguityRecovery
+
+            if (
+                type(resolver) is not PreviewAmbiguityRecovery
+                or self._durable_gate.ready
+            ):
+                return False
+            try:
+                recovered = resolver.resolve_pending()
+            except Exception:  # noqa: BLE001 - recovery is fail closed
+                return False
+            if not recovered or not self._durable_gate.ready:
+                return False
+            self._ambiguity = None
+            self._latched_closed = False
+            return True
 
     @classmethod
     def from_boto3(cls, table_name: str, *, region_name: str | None = None) -> "PreviewAdmissionExecutor":
@@ -195,22 +311,37 @@ class PreviewAdmissionExecutor:
                     if not self._durable_gate.confirm_rejected(binding):
                         self._latched_closed = True
                     return _UNAVAILABLE
-                self._latched_closed = True
+                self._latch(plan.handle, binding)
                 self._durable_gate.close()
                 return _UNAVAILABLE
             if not _confirmed_success(response):
-                self._latched_closed = True
+                self._latch(plan.handle, binding)
                 self._durable_gate.close()
                 return _UNAVAILABLE
             if (
                 binding is None
                 or not self._durable_gate.confirm_admitted(binding, plan.handle)
             ):
-                self._latched_closed = True
+                self._latch(plan.handle, binding)
                 return _UNAVAILABLE
             return AdmissionExecutionResult(
                 AdmissionOutcome.ADMITTED, handle=plan.handle
             )
+
+    def _latch(
+        self,
+        handle: AdmissionHandle,
+        binding: DispatchBinding,
+    ) -> None:
+        # Called only while _write_gate is held.
+        self._ambiguity = AdmissionAmbiguity(
+            handle=handle,
+            write_fingerprint=binding.plan_fingerprint,
+            interval=TrustedUtcInterval(
+                handle.created_lower, handle.created_upper
+            ),
+        )
+        self._latched_closed = True
 
 
 def _confirmed_write_rejection(exc: Exception) -> bool:
