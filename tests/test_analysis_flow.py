@@ -531,8 +531,9 @@ def _claim_extraction_package() -> dict:
     }
 
 
-def test_claim_extraction_stays_offline_when_bedrock_gate_closed(tmp_path):
+def test_claim_extraction_stays_offline_when_bedrock_gate_closed(tmp_path, monkeypatch):
     """預設測試環境沒有 BEDROCK_MODEL_ID／live 閘關閉 → 維持離線，不記帳。"""
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")
     package = flow._stage_claim_extraction(_claim_extraction_package())
 
