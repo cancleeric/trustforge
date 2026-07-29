@@ -524,5 +524,86 @@
       {"issue":1037,"addresses":["J-2"],"state_at_review":"OPEN"}
     ],
     "final_gray_disposition": "Methodology remains asset-identity-blind and shadow labeling is honest, but four engineering criteria require remediation and sixteen criteria require external/elapsed evidence. Do not claim 11/11 complete. Keep #748 and #998 open."
+  },
+  "phase3_harper_review": {
+    "reviewer_role": "Harper (CISO)",
+    "reviewed_commit": "30f2ee8511b32dc51ecb2a326c49f812fe975f0f",
+    "reviewed_at": "2026-07-30",
+    "scope": "Security, cost, authorization, key custody, fail-closed behavior, rollback and evidence authenticity for A/B/C/E/F/G/H/I/J/K; D licensing/cost only.",
+    "independence_limits": [
+      "Does not replace gray CPO review.",
+      "Does not replace actual-branch Eye review.",
+      "Does not replace /codex-review adversarial review.",
+      "Does not erase or backdate HISTORICAL_GAP.",
+      "Does not treat fixture, synthetic, hermetic or skipped evidence as external release evidence."
+    ],
+    "summary": {
+      "rows_total": 70,
+      "rows_reviewed": 67,
+      "harper_pass": 48,
+      "remediate": 4,
+      "defer_external": 15,
+      "not_in_harper_scope": 3,
+      "historical_gap_rows_retained": 70,
+      "p0_release_blockers": 4,
+      "p1_engineering_findings": 4,
+      "security_disposition": "REMAIN_SHADOW_RELEASE_BLOCKED",
+      "parent_issue_748": "OPEN",
+      "audit_issue_998": "OPEN"
+    },
+    "result_sets": {
+      "HARPER_PASS": [
+        "A-1","A-2","A-3","A-4","A-5","A-6",
+        "B-1","B-2","B-3","B-4","B-5","B-6",
+        "C-2","C-3","C-4","C-6",
+        "D-4",
+        "E-1","E-2","E-3","E-4","E-5","E-6",
+        "F-1","F-2","F-3","F-4","F-5","F-6",
+        "G-2","G-3","G-4","G-6","G-7",
+        "H-2","H-3","H-4","H-5","H-6","H-7","H-8",
+        "I-1","I-2","I-3","I-4","I-5","I-6",
+        "J-3"
+      ],
+      "REMEDIATE": ["C-1","C-5","H-1","J-2"],
+      "DEFER_EXTERNAL": [
+        "D-5","F-7","G-1","G-5","I-7",
+        "J-1","J-4","J-5","J-6","J-7",
+        "K-1","K-2","K-3","K-4","K-5"
+      ],
+      "NOT_IN_HARPER_SCOPE": ["D-1","D-2","D-3"]
+    },
+    "findings": [
+      {
+        "severity": "P1",
+        "criterion_ids": ["C-1","C-5"],
+        "issue": 1035,
+        "finding": "Typed independent control-plane replay and canonical source-withdrawal PIT proof are absent."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["H-1"],
+        "issue": 1036,
+        "finding": "Candidate application is not behind the sole canonical core composition boundary."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["J-2"],
+        "issue": 1037,
+        "finding": "The hermetic drill bypasses the actual release-router request path."
+      }
+    ],
+    "release_blockers": [
+      {"severity":"P0","issue":1031,"criteria":["K-1","K-3","K-4","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1032,"criteria":["K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1033,"criteria":["K-1","K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1034,"criteria":["K-1","K-2","K-3","K-4","K-5"],"state_at_review":"OPEN"}
+    ],
+    "dependency_state": [
+      {"issue":1019,"state_at_review":"OPEN","disposition":"BLOCKED_EXTERNAL"},
+      {"issue":1035,"state_at_review":"OPEN"},
+      {"issue":1036,"state_at_review":"OPEN"},
+      {"issue":1037,"state_at_review":"OPEN"}
+    ],
+    "final_harper_disposition": "Programmatic fail-closed and shadow-isolation controls are substantial, but four engineering findings and four release-evidence P0 boundaries remain open. Keep the candidate shadow-only; do not claim 11/11 complete or production/release readiness."
   }
 }
