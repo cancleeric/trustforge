@@ -606,6 +606,48 @@
     ],
     "final_harper_disposition": "Programmatic fail-closed and shadow-isolation controls are substantial, but four engineering findings and four release-evidence P0 boundaries remain open. Keep the candidate shadow-only; do not claim 11/11 complete or production/release readiness."
   },
+  "phase3_eye_review": {
+    "reviewer_route": "Eye CLI plus actual-browser visual inspection",
+    "reviewed_commit": "06a4c3d0840a6ea2739a47253fe8c4f3c7393a9e",
+    "reviewed_at": "2026-07-30",
+    "scope": "Tracks E and I frontend surfaces only.",
+    "record": "docs/audits/ISSUE-998-PHASE-3-EYE-REVIEW-2026-07-30.md",
+    "independence_limits": [
+      "Static Eye CLI results and focused tests do not replace actual-browser visual inspection.",
+      "Playwright was not used as a substitute for human-visible Eye inspection.",
+      "Does not replace gray CPO, Harper CISO/cost, or /codex-review.",
+      "Does not erase or backdate HISTORICAL_GAP.",
+      "Does not implement feature remediation."
+    ],
+    "static_evidence": {
+      "asset_intrinsic_shadow_panel_direct_callers": 49,
+      "analysis_report_view_direct_callers": 9,
+      "historical_breaking_change_ranges_completed": 2,
+      "focused_frontend_test_files_passed": 2,
+      "focused_frontend_tests_passed": 17
+    },
+    "visual_matrix": {
+      "desktop_zh_tw": "BLOCKED_BROWSER_UNAVAILABLE",
+      "desktop_en": "BLOCKED_BROWSER_UNAVAILABLE",
+      "mobile_zh_tw": "BLOCKED_BROWSER_UNAVAILABLE",
+      "mobile_en": "BLOCKED_BROWSER_UNAVAILABLE",
+      "zoom_200_percent": "BLOCKED_BROWSER_UNAVAILABLE",
+      "long_provenance_overflow": "BLOCKED_BROWSER_UNAVAILABLE",
+      "state_transitions": "BLOCKED_BROWSER_UNAVAILABLE",
+      "error_states": "BLOCKED_BROWSER_UNAVAILABLE"
+    },
+    "summary": {
+      "tracks_reviewed": ["E", "I"],
+      "historical_gap_rows_retained": 70,
+      "visual_pass": 0,
+      "visual_blocked": 8,
+      "criterion_i_7": "BLOCKED_BROWSER_UNAVAILABLE",
+      "disposition": "NO_VISUAL_PASS",
+      "parent_issue_748": "OPEN",
+      "audit_issue_998": "OPEN"
+    },
+    "final_eye_disposition": "Static source and focused tests passed, but the actual-browser inventory was empty. No desktop, mobile, bilingual, 200% zoom, overflow, state-transition, or error-state visual PASS is claimed."
+  },
   "phase3_codex_review": {
     "reviewer_route": "/codex-review",
     "reviewed_commit": "b9004e86b22bbd31469d13bf618503fc028e8670",
