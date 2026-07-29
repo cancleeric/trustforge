@@ -392,6 +392,31 @@ async function runHitTestMatrix(browser, viewport, locale = 'en') {
       out.failures.push(`orbit planet is still a <button> (should be decorative): ${el.outerHTML.slice(0, 80)}`)
     })
 
+    // N83: `[data-region='galaxy']` 的畫布子層自己也吃 `top: var(--hermes-top)`。
+    // 桌機父層是 inset:0 全出血所以正確，但 ≤900px 有一條規則把父層也推到
+    // --hermes-top，同一個偏移就被套了兩次，中間憑空多出一整條死空白（390x844
+    // 實測 130px，等於 16% 螢幕什麼都不畫）。子層本來就該填滿父層，兩者 top
+    // 的差值不該是「又一個 --hermes-top」。
+    // 量的是「畫布頂端離視窗頂端多遠」，不是它離父層多遠：桌機父層 inset:0，
+    // 畫布退到 --hermes-top 是對的（差值 44 但絕對位置也是 44）。只有偏移被
+    // 套兩次時，絕對位置才會變成 2×--hermes-top。
+    const galaxyRegion = document.querySelector('[data-region="galaxy"]')
+    const canvas = galaxyRegion?.firstElementChild
+    if (galaxyRegion && canvas) {
+      // --hermes-top 是 calc()，custom property 的 computed value 就是那串
+      // calc 文字，parseFloat 會得到 NaN。塞一個量尺元素讓瀏覽器把它算成 px。
+      const frame = document.querySelector('.hermes-frame')
+      const ruler = document.createElement('div')
+      ruler.style.cssText = 'position:absolute;visibility:hidden;height:var(--hermes-top);'
+      frame.appendChild(ruler)
+      const hermesTop = ruler.getBoundingClientRect().height
+      ruler.remove()
+      const canvasTop = canvas.getBoundingClientRect().top
+      if (hermesTop > 0 && canvasTop > hermesTop + 8) {
+        out.failures.push(`galaxy canvas top=${canvasTop.toFixed(1)} exceeds --hermes-top=${hermesTop.toFixed(1)} (offset applied twice → dead vertical space)`)
+      }
+    }
+
     // language toggle: min click target. aria-label is the translated
     // t('language') string ("切換語言" / "Switch language"), not the
     // literal word "Language"/"語言" — match on the button that toggles
