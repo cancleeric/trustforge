@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -184,11 +184,13 @@ class ReleaseABRouter:
         *,
         pinned_a_fallback: ReleaseEndpoint,
         manifest_keyring: Mapping[str, bytes],
+        response_validator: Callable[[str, RoutedResponse], None] | None = None,
     ):
         self.ledger = ledger
         self.keyring = dict(keyring)
         self.pinned_a_fallback = pinned_a_fallback
         self.manifest_keyring = dict(manifest_keyring)
+        self.response_validator = response_validator
 
     def route(
         self,
@@ -196,6 +198,7 @@ class ReleaseABRouter:
         stable_subject: str | None,
         path: str = "/healthz",
         request_headers: Mapping[str, str] | None = None,
+        expected_control_head: str | None = None,
     ) -> RoutedResponse:
         snapshot: RoutingSnapshot | None = None
         reservation_id = ""
@@ -205,6 +208,11 @@ class ReleaseABRouter:
             except Exception:
                 return self._request_a_fallback(path, request_headers)
             if snapshot.active != self.pinned_a_fallback:
+                return self._request_a_fallback(path, request_headers)
+            if (
+                expected_control_head is not None
+                and snapshot.ledger_head != expected_control_head
+            ):
                 return self._request_a_fallback(path, request_headers)
             if not self._candidate_selected(snapshot, stable_subject):
                 return self._request(
@@ -244,6 +252,8 @@ class ReleaseABRouter:
                 )
             if response.status_code >= 500:
                 raise ReleaseRoutingError("candidate_http_5xx")
+            if self.response_validator is not None:
+                self.response_validator(path, response)
             self.ledger.record_candidate_result(
                 expected_head=snapshot.ledger_head,
                 reservation_id=reservation_id,

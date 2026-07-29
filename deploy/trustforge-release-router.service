@@ -33,6 +33,7 @@ InaccessiblePaths=/etc/trustforge/deployment-keys
 InaccessiblePaths=/etc/trustforge/deployment-control.json
 ReadOnlyPaths=/etc/trustforge/release-router-runtime.json
 ReadOnlyPaths=/etc/trustforge/release-router-runtime-keys.json
+ReadOnlyPaths=-/etc/trustforge/release-router-allowlist.json
 
 [Install]
 WantedBy=multi-user.target

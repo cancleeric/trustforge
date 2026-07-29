@@ -13,9 +13,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from trustforge.agent.shadow_contracts import canonical_json
 from trustforge.deployment_control import DeploymentControlLedger
+from trustforge.release_http_canary import ReleaseHTTPCanaryPolicy
 from trustforge.release_router import (
     ReleaseABRouter,
     ReleaseEndpoint,
+    ReleaseRoutingError,
     RoutingPolicy,
     RoutingSnapshot,
 )
@@ -237,6 +239,114 @@ def test_real_b_failure_fails_over_a_and_durable_stop_prevents_next_b():
         next_response = router.route(stable_subject="stable-user")
         assert next_response.release == "A"
         assert ledger.requests == 1
+    finally:
+        a_server.shutdown()
+        b_server.shutdown()
+
+
+def test_control_head_drift_routes_a_without_candidate_reservation():
+    a_server, _ = _server(b"A", "sha256:" + "a" * 64)
+    b_server, _ = _server(b"B", "sha256:" + "b" * 64)
+    try:
+        a = ReleaseEndpoint(
+            "sha256:" + "a" * 64,
+            f"http://127.0.0.1:{a_server.server_port}",
+            "manifest-1",
+        )
+        b = ReleaseEndpoint(
+            "sha256:" + "b" * 64,
+            f"http://127.0.0.1:{b_server.server_port}",
+            "manifest-1",
+        )
+        ledger = _Ledger(a, b)
+        router = ReleaseABRouter(
+            ledger,
+            {"route-2026-07": b"r" * 32},
+            pinned_a_fallback=a,
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
+        )
+        response = router.route(
+            stable_subject="eligible",
+            expected_control_head="sha256:" + "f" * 64,
+        )
+        assert response.release == "A"
+        assert response.body == b"A"
+        assert ledger.requests == 0
+    finally:
+        a_server.shutdown()
+        b_server.shutdown()
+
+
+def test_disabled_http_canary_policy_routes_a_with_zero_candidate_reservations():
+    a_server, _ = _server(b"A", "sha256:" + "a" * 64)
+    b_server, _ = _server(b"B", "sha256:" + "b" * 64)
+    try:
+        a = ReleaseEndpoint(
+            "sha256:" + "a" * 64,
+            f"http://127.0.0.1:{a_server.server_port}",
+            "manifest-1",
+        )
+        b = ReleaseEndpoint(
+            "sha256:" + "b" * 64,
+            f"http://127.0.0.1:{b_server.server_port}",
+            "manifest-1",
+        )
+        ledger = _Ledger(a, b)
+        policy = ReleaseHTTPCanaryPolicy.disabled()
+        subject, expected_head = policy.routing_subject(
+            trusted_identity="spoofed@example.test",
+            path="/api/analyze?coin=BTC",
+            snapshot=ledger.routing_snapshot(),
+        )
+        router = ReleaseABRouter(
+            ledger,
+            {"route-2026-07": b"r" * 32},
+            pinned_a_fallback=a,
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
+        )
+        response = router.route(
+            stable_subject=subject,
+            expected_control_head=expected_head,
+        )
+        assert response.release == "A"
+        assert response.body == b"A"
+        assert ledger.requests == 0
+    finally:
+        a_server.shutdown()
+        b_server.shutdown()
+
+
+def test_invalid_candidate_schema_fails_over_a_and_records_failure():
+    a_server, _ = _server(b"A", "sha256:" + "a" * 64)
+    b_server, _ = _server(b"B", "sha256:" + "b" * 64)
+    try:
+        a = ReleaseEndpoint(
+            "sha256:" + "a" * 64,
+            f"http://127.0.0.1:{a_server.server_port}",
+            "manifest-1",
+        )
+        b = ReleaseEndpoint(
+            "sha256:" + "b" * 64,
+            f"http://127.0.0.1:{b_server.server_port}",
+            "manifest-1",
+        )
+        ledger = _Ledger(a, b)
+
+        def reject(_path, _response):
+            raise ReleaseRoutingError("invalid candidate schema")
+
+        router = ReleaseABRouter(
+            ledger,
+            {"route-2026-07": b"r" * 32},
+            pinned_a_fallback=a,
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
+            response_validator=reject,
+        )
+        response = router.route(stable_subject="eligible")
+        assert response.release == "A"
+        assert response.failed_over is True
+        assert ledger.requests == 1
+        assert ledger.errors == 1
     finally:
         a_server.shutdown()
         b_server.shutdown()
