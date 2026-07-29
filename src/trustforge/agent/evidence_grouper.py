@@ -209,6 +209,7 @@ def format_value_range(values: list[float], unit: str) -> str:
 def group_evidence(
     evidence: Sequence[Evidence],
     *,
+    directions: Sequence[str | None] | None = None,
     time_window_days: int = 7,
     similarity_threshold: float = 0.70,
 ) -> list[EvidenceGroup]:
@@ -230,6 +231,8 @@ def group_evidence(
         return []
 
     n = len(evidence)
+    if directions is not None and len(directions) != n:
+        raise ValueError("directions length must match evidence length")
     time_window_sec = time_window_days * 86400
 
     # 標記哪些 evidence 應獨立（不參與聚合）
@@ -245,7 +248,8 @@ def group_evidence(
     for i, ev in enumerate(evidence):
         if i in independent:
             continue
-        key = (_normalize_source(ev.source), ev.kind, _direction_bucket(ev))
+        direction = directions[i] if directions is not None else _direction_bucket(ev)
+        key = (_normalize_source(ev.source), ev.kind, direction or "unknown")
         buckets[key].append(i)
 
     # Step 2–5: 桶內聚合
@@ -438,8 +442,9 @@ def _finalize_group(
             if ts > 0:
                 time_values.append((ts, val))
             raw_values.append(val)
-            if u:
-                units_seen.add(u.lower())
+            # 空單位也必須參與一致性判斷，避免把 unitless 數值冒充成
+            # 同組其他成員的 USD/TH/s 等單位。
+            units_seen.add(u.strip().casefold())
             if not unit and u:
                 unit = u
 

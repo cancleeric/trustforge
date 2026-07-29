@@ -1056,6 +1056,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         summary=f"supporting={len(brief.supporting)} contrarian={len(brief.contrarian)}",
     )
     evidence: list[Evidence] = []
+    evidence_directions: list[str | None] = []
     key_basis: list[BasisItem] = []
     ev_index: dict[tuple, int] = {}   # (source, content_reference) → 去重,保留最高 trust
     judgment_tag = f"{coin} 市場判斷"
@@ -1063,14 +1064,16 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     def _add_evidence(sc: ScoredClaim, related: str) -> int:
         ev = _scored_to_evidence(sc, related)
         # key 含角色(related):支撐與反方即使同來源同引用也不共用 bucket,避免 silent drop
-        key = (ev.source, ev.content_reference, related)
+        key = (ev.source, ev.content_reference, related, sc.claim.direction)
         if key in ev_index:
             idx = ev_index[key]
             if ev.trust > evidence[idx].trust:   # 同來源同引用 → 留最高信任那筆
                 evidence[idx] = ev
+                evidence_directions[idx] = sc.claim.direction
             return idx
         idx = len(evidence)
         evidence.append(ev)
+        evidence_directions.append(sc.claim.direction)
         ev_index[key] = idx
         return idx
 
@@ -1377,7 +1380,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
 
     # #862 非破壞式事實聚合：在 evidence list 完整建立後，計算聚合群組。
     # 純呈現層 post-processing，不修改 evidence list 本身。
-    ev_groups = group_evidence(evidence)
+    ev_groups = group_evidence(evidence, directions=evidence_directions)
     ev_groups_dicts = [g.to_dict() for g in ev_groups]
 
     # #862 facts 去重：同群組（≥2 筆）只留一條聚合摘要，避免重複事實。

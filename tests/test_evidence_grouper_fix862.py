@@ -328,3 +328,30 @@ class TestKeyBasisDiversity:
         assert "news" in kinds
         assert "onchain" in kinds
         assert "price" in kinds
+def test_named_and_missing_unit_do_not_produce_numeric_summary():
+    """有單位與空單位混用時不可產生誤導值域。"""
+    evidence = [
+        _ev(content_reference="price: 68000 USD",
+            fetched_at="2025-06-14T01:00:00Z"),
+        _ev(content_reference="price: 2.3",
+            fetched_at="2025-06-15T01:00:00Z"),
+    ]
+    group = next(g for g in group_evidence(evidence)
+                 if len(g.member_indices) == 2)
+    assert group.value_range is None
+    assert group.trend is None
+    assert group.latest_value is None
+
+
+def test_explicit_claim_directions_override_presentation_role():
+    """相同 related_claim 但相反 Claim.direction 不得聚合。"""
+    evidence = [
+        _ev(content_reference="算力: 828 TH/s",
+            fetched_at="2025-06-14T01:00:00Z",
+            related_claim="BTC 市場判斷"),
+        _ev(content_reference="算力: 891 TH/s",
+            fetched_at="2025-06-15T01:00:00Z",
+            related_claim="BTC 市場判斷"),
+    ]
+    groups = group_evidence(evidence, directions=["bullish", "bearish"])
+    assert sorted(len(g.member_indices) for g in groups) == [1, 1]
