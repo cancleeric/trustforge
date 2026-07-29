@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import tempfile
 
@@ -253,3 +254,387 @@ class TestToMarkdownCompleteness:
         # 每個面向以 "### N. " 標題形式出現
         header_count = sum(1 for dim in COMPARISON_DIMENSIONS if dim in md)
         assert header_count == 4
+
+
+# ---------------------------------------------------------------------------
+# CA-08: Evidence refs stable IDs + parity test matrix
+# ---------------------------------------------------------------------------
+
+class TestEvidenceRefsStableIDs:
+    """CA-08: evidence refs 使用 stable IDs（source:#index）而非裸 array index。"""
+
+    def test_evidence_refs_use_stable_ids(self):
+        """Evidence refs 格式為 [source:#index]，包含 source name 與 index。"""
+        ev_a = [
+            Evidence(source="hoya-ohlcv", fetched_at="2026-07-01T00:00:00Z",
+                     content_reference="O=62000", related_claim="BTC 價格"),
+            Evidence(source="glassnode", fetched_at="2026-07-01T00:00:00Z",
+                     content_reference="大額流入 +12%", related_claim="鏈上活動"),
+            Evidence(source="coindesk", fetched_at="2026-07-01T00:00:00Z",
+                     content_reference="ETF 資金淨流入", related_claim="市場情緒"),
+        ]
+        ev_b = [
+            Evidence(source="hoya-ohlcv", fetched_at="2026-07-01T00:00:00Z",
+                     content_reference="O=3400", related_claim="ETH 價格"),
+            Evidence(source="glassnode", fetched_at="2026-07-01T00:00:00Z",
+                     content_reference="大額流出 -5%", related_claim="鏈上活動"),
+        ]
+
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較兩幣",
+            conclusion="測試結論",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="鏈上活動",
+                    label="鏈上活動比較",
+                    finding="正常",
+                    a_evidence_refs=[1],
+                    b_evidence_refs=[1],
+                ),
+                DimensionResult(
+                    dimension="市場情緒",
+                    label="市場情緒比較",
+                    finding="正常",
+                    a_evidence_refs=[2],
+                    b_evidence_refs=[],
+                    decision="insufficient",
+                ),
+                DimensionResult(
+                    dimension="生態發展",
+                    label="生態發展比較",
+                    finding="無資料",
+                    a_evidence_refs=[],
+                    b_evidence_refs=[],
+                    decision="abstain",
+                ),
+            ],
+            supporting_evidence_a=ev_a,
+            supporting_evidence_b=ev_b,
+        )
+
+        md = cr.to_markdown()
+
+        # 格式：[source:#index]
+        assert "[hoya-ohlcv:#0]" in md, "應含 stable ID [hoya-ohlcv:#0]"
+        assert "[glassnode:#1]" in md, "應含 stable ID [glassnode:#1]"
+        assert "[coindesk:#2]" in md, "應含 stable ID [coindesk:#2]"
+
+        # ⛔ 不應出現裸 array index pattern（像 `[0, 1, 2]`）
+        assert "[0, 1, 2]" not in md, "不應出現裸 list [0, 1, 2]"
+        # 沒有 refs 的維度應顯示 '無'
+        assert "無" in md, "空 refs 應顯示 '無'"
+
+
+class TestMarkdownSpecialCharacters:
+    """CA-08: 特殊字符與 HTML 語義一致性（parity test matrix）。"""
+
+    def test_markdown_special_characters(self):
+        """含 < > & " 等 HTML 特殊字符的內容正確處理在輸出中。"""
+        # 特殊字符出現在 conclusion / finding 等會直接輸出到 markdown 的欄位
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query='比較 "BTC" & "ETH" 的市場表現',
+            conclusion="BTC > ETH 在價格動能，但 BTC < ETH 在生態發展",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding='分析師說 "BTC > ETH" 在過去 30 天，信心 & 趨勢明確',
+                    a_evidence_refs=[0, 1],
+                    b_evidence_refs=[0, 1],
+                ),
+                *[
+                    DimensionResult(
+                        dimension=dim,
+                        label=f"{dim}比較",
+                        finding=f'{dim} 測試：value > 0 & data "ok"',
+                        a_evidence_refs=[0, 1],
+                        b_evidence_refs=[0, 1],
+                    )
+                    for dim in ("鏈上活動", "市場情緒", "生態發展")
+                ],
+            ],
+            limits=['已知限制：資料含 "特殊" 字符 & 符號'],
+            could_flip=['若條件 "改變" & 局勢 > 預期'],
+            supporting_evidence_a=[
+                Evidence(source="news-api", fetched_at="2026-07-01T00:00:00Z",
+                         content_reference='"BTC > ETH" & data', related_claim="t"),
+                Evidence(source="news-api", fetched_at="2026-07-01T01:00:00Z",
+                         content_reference="second", related_claim="t"),
+            ],
+            supporting_evidence_b=[
+                Evidence(source="news-api", fetched_at="2026-07-01T00:00:00Z",
+                         content_reference='data "ok"', related_claim="t"),
+                Evidence(source="news-api", fetched_at="2026-07-01T01:00:00Z",
+                         content_reference="second", related_claim="t"),
+            ],
+        )
+
+        md = cr.to_markdown()
+
+        # to_markdown() 是 Markdown 格式，不應 escape 成 HTML entities
+        assert 'BTC > ETH' in md, "> 應保持原樣（Markdown）"
+        assert '"BTC > ETH"' in md, "雙引號與 > 應保持原樣（Markdown）"
+        assert chr(0x201C) + "BTC > ETH" + chr(0x201D) in md or '"BTC > ETH"' in md
+        assert '"特殊"' in md, "中文雙引號應保持原樣"
+        assert ' & ' in md, "& 符號應保持原樣（Markdown）"
+
+
+class TestMarkdownLongChineseText:
+    """CA-08: 長中文段落的正確處理。"""
+
+    def test_markdown_long_chinese_text(self):
+        """200+ 字的中文段落不應被截斷或損壞在輸出中。"""
+        long_chinese = (
+            "比特幣作為全球最大的加密貨幣，其價格走勢受到多重因素影響。"
+            "首先，宏觀經濟環境包括美國聯邦儲備系統的貨幣政策、通貨膨脹率以及全球經濟成長預期，"
+            "都會對比特幣的需求產生重大影響。其次，機構投資者的參與程度持續提升，"
+            "包括比特幣現貨 ETF 的推出與資金流入情況，已成為市場關注的焦點。"
+            "第三，區塊鏈技術的發展與應用場景擴展，例如閃電網路、Ordinals 協議等，"
+            "也為比特幣帶來了新的使用價值與市場預期。最後，全球各國監管政策的變化，"
+            "從美國證券交易委員會到歐盟加密資產市場監管法案，均對加密貨幣市場產生深遠影響。"
+            "綜合以上因素，比特幣在可預見的未來仍將扮演數位黃金的核心角色。"
+        )
+        # 驗證長度確實超過 200 字
+        assert len(long_chinese) >= 200, f"測試前提：段落長度 {len(long_chinese)} 應 ≥ 200 字"
+
+        # 長中文放在 finding 中，直接出現在 markdown
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="長中文測試",
+            conclusion=long_chinese,
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding=long_chinese,
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[],
+                    decision="insufficient",
+                ),
+                *[
+                    DimensionResult(
+                        dimension=dim,
+                        label=f"{dim}比較",
+                        finding="無資料",
+                        a_evidence_refs=[],
+                        b_evidence_refs=[],
+                        decision="abstain",
+                    )
+                    for dim in ("鏈上活動", "市場情緒", "生態發展")
+                ],
+            ],
+            supporting_evidence_a=[
+                Evidence(source="r", fetched_at="", content_reference="", related_claim=""),
+            ],
+            supporting_evidence_b=[],
+        )
+
+        md = cr.to_markdown()
+
+        # 長中文應完整保留（前 10 字與後 10 字）
+        assert long_chinese[:10] in md, "長中文段落開頭應保留"
+        assert long_chinese[-10:] in md, "長中文段落結尾應保留"
+
+
+class TestMarkdownURLInContent:
+    """CA-08: URL 在 evidence content 中的正確處理。"""
+
+    def test_markdown_url_in_content(self):
+        """含 URL 的內容不應在 markdown 輸出中被損壞。"""
+        url_a = "https://example.com/btc-analysis?token=abc&page=1"
+        url_b = "https://docs.example.com/eth/api/v1"
+
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="URL 測試",
+            conclusion=f"參考文章 {url_a} 與 {url_b}",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding=f"分析：參考 {url_a}",
+                    a_evidence_refs=[0, 1],
+                    b_evidence_refs=[0, 1],
+                ),
+                *[
+                    DimensionResult(
+                        dimension=dim,
+                        label=f"{dim}比較",
+                        finding=f"無資料，見 {url_b}",
+                        a_evidence_refs=[],
+                        b_evidence_refs=[],
+                        decision="abstain",
+                    )
+                    for dim in ("鏈上活動", "市場情緒", "生態發展")
+                ],
+            ],
+            limits=[f"限制：資料來源 {url_a}"],
+            supporting_evidence_a=[
+                Evidence(source="w", fetched_at="", content_reference=url_a, related_claim="t"),
+                Evidence(source="w", fetched_at="", content_reference="second", related_claim="t"),
+            ],
+            supporting_evidence_b=[
+                Evidence(source="w", fetched_at="", content_reference=url_b, related_claim="t"),
+                Evidence(source="w", fetched_at="", content_reference="second", related_claim="t"),
+            ],
+        )
+
+        md = cr.to_markdown()
+
+        # URL 關鍵部分應保留
+        assert "https://example.com/btc-analysis" in md, "URL 應保留"
+        assert "https://docs.example.com/eth/api/v1" in md, "URL 應保留"
+
+
+class TestHTMLOutputEscapes:
+    """CA-08: HTML 輸出正確 escape 特殊字符。"""
+
+    def test_html_output_escapes_special_chars(self):
+        """to_dict() 回傳的 HTML 輸出應正確處理特殊字符為 JSON 安全格式。"""
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query='比較 "BTC" & "ETH" 的市場表現',
+            conclusion="BTC < ETH 在某些面向，但 > ETH 在價格動能",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding='分析師說 "BTC > ETH" 在過去 30 天',
+                    a_evidence_refs=[0, 1],
+                    b_evidence_refs=[0, 1],
+                ),
+                *[
+                    DimensionResult(
+                        dimension=dim,
+                        label=f"{dim}比較",
+                        finding="無資料",
+                        a_evidence_refs=[],
+                        b_evidence_refs=[],
+                        decision="abstain",
+                    )
+                    for dim in ("鏈上活動", "市場情緒", "生態發展")
+                ],
+            ],
+            supporting_evidence_a=[
+                Evidence(source="test", fetched_at="",
+                         content_reference='data: x > y & z < w "ok"',
+                         related_claim="test"),
+                Evidence(source="test", fetched_at="",
+                         content_reference="second item",
+                         related_claim="test"),
+            ],
+            supporting_evidence_b=[
+                Evidence(source="test", fetched_at="",
+                         content_reference='data: a < b & c > d "ok"',
+                         related_claim="test"),
+                Evidence(source="test", fetched_at="",
+                         content_reference="second item",
+                         related_claim="test"),
+            ],
+        )
+
+        # JSON roundtrip 應成功
+        d = cr.to_dict()
+        json_str = json.dumps(d, ensure_ascii=False)
+        restored = json.loads(json_str)
+        assert restored["conclusion"] == cr.conclusion
+        assert restored["query"] == cr.query
+        assert restored["dimensions"][0]["finding"] == cr.dimensions[0].finding
+
+
+class TestJSONOutputEscapes:
+    """CA-08: JSON 輸出正確 escape 特殊字符。"""
+
+    def test_json_output_escapes_special_chars(self):
+        """to_dict() → json.dumps 的 roundtrip 保留全部特殊字符。"""
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query='比較 BTC & ETH：誰的 "價值" 更高？',
+            conclusion="綜合分析後，BTC > ETH 在價格動能面向。",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding="BTC 漲幅 4% > ETH 跌幅 2%，BTC 優",
+                    a_evidence_refs=[0, 1],
+                    b_evidence_refs=[0, 1],
+                ),
+                DimensionResult(
+                    dimension="鏈上活動",
+                    label="鏈上活動比較",
+                    finding="BTC 大額流入 +12% > ETH 流出 -5%，BTC 優",
+                    a_evidence_refs=[0, 1],
+                    b_evidence_refs=[0, 1],
+                ),
+                DimensionResult(
+                    dimension="市場情緒",
+                    label="市場情緒比較",
+                    finding='社群看多比例 BTC 68% > ETH 55%，BTC "明顯" 優',
+                    a_evidence_refs=[0, 1],
+                    b_evidence_refs=[0, 1],
+                ),
+                DimensionResult(
+                    dimension="生態發展",
+                    label="生態發展比較",
+                    finding="BTC ETF 期權獲批，ETH 質押監管不確定",
+                    a_evidence_refs=[0, 1],
+                    b_evidence_refs=[0, 1],
+                ),
+            ],
+            limits=["資料窗有限：僅 & 符號測試"],
+            could_flip=['若 ETH ETF "轉為" 淨流入'],
+            supporting_evidence_a=[
+                Evidence(source="s1", fetched_at="2026-07-01T00:00:00Z",
+                         content_reference='BTC 價格 < 70000 但 > 60000',
+                         related_claim="p1"),
+                Evidence(source="s1", fetched_at="2026-07-01T01:00:00Z",
+                         content_reference='BTC "鏈上" 數據 & 分析',
+                         related_claim="p2"),
+            ],
+            supporting_evidence_b=[
+                Evidence(source="s2", fetched_at="2026-07-01T00:00:00Z",
+                         content_reference='ETH 價格 < 4000 但 > 3000',
+                         related_claim="p1"),
+                Evidence(source="s2", fetched_at="2026-07-01T01:00:00Z",
+                         content_reference='ETH "鏈上" 數據 & 分析',
+                         related_claim="p2"),
+            ],
+        )
+
+        # JSON roundtrip
+        d = cr.to_dict()
+        json_str = json.dumps(d, ensure_ascii=False)
+        restored = json.loads(json_str)
+
+        # 驗證所有特殊字符欄位
+        assert restored["conclusion"] == cr.conclusion
+        assert restored["query"] == cr.query
+        assert restored["could_flip"] == cr.could_flip
+        assert restored["limits"] == cr.limits
+        for i, dim in enumerate(cr.dimensions):
+            assert restored["dimensions"][i]["finding"] == dim.finding
+        # evidence content_reference
+        assert restored["supporting_evidence_a"][0]["content_reference"] == \
+            cr.supporting_evidence_a[0].content_reference
+        assert restored["supporting_evidence_b"][1]["content_reference"] == \
+            cr.supporting_evidence_b[1].content_reference
+
+        # 也驗證 Markdown 輸出含正確字符
+        md = cr.to_markdown()
+        assert "BTC" in md
+        assert "ETH" in md

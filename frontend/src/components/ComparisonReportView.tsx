@@ -1,11 +1,13 @@
 import type { ComparisonReportData } from '../lib/types'
 import { formatTimestamp } from '../lib/format'
+import { ErrorState } from './StatusStates'
 
 /** 單一比較面向的決策邊框顏色。 */
 function decisionBorderColor(decision: string): string {
   switch (decision) {
     case 'normal': return 'var(--color-tf-good)'
     case 'insufficient': return 'var(--color-tf-warn)'
+    case 'abstain': return 'var(--color-tf-muted)'
     default: return 'var(--color-tf-border)'
   }
 }
@@ -15,13 +17,82 @@ function decisionLabel(decision: string): string {
   switch (decision) {
     case 'normal': return '✅ 可判定'
     case 'insufficient': return '⚠️ 資訊不足'
+    case 'abstain': return '— 棄權'
     default: return '—'
   }
 }
 
-export default function ComparisonReportView({ data }: { data: ComparisonReportData }) {
+export default function ComparisonReportView({
+  data,
+  isLoading,
+  error,
+}: {
+  data?: ComparisonReportData | null
+  isLoading?: boolean
+  error?: { code: string; message: string } | null
+}) {
+  if (isLoading) {
+    return (
+      <div data-testid="comparison-report-view" className="flex flex-col gap-5">
+        {/* skeleton hero */}
+        <div className="hermes-clip rounded-lg border-2 bg-tf-card p-5 animate-pulse" style={{ borderColor: 'var(--color-tf-border)' }}>
+          <div className="mb-2 h-4 w-24 rounded bg-tf-border" />
+          <div className="mb-2 h-6 w-3/4 rounded bg-tf-border" />
+          <div className="h-4 w-1/3 rounded bg-tf-border" />
+        </div>
+        {/* skeleton dimension cards */}
+        <section>
+          <div className="mb-3 h-4 w-20 rounded bg-tf-border animate-pulse" />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4 animate-pulse">
+                <div className="mb-2 h-4 w-24 rounded bg-tf-border" />
+                <div className="h-16 w-full rounded bg-tf-border" />
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div data-testid="comparison-report-view">
+        <ErrorState code={error.code} message={error.message} />
+      </div>
+    )
+  }
+
+  if (!data) return null
+
+  const allAbstain = data.dimensions.length > 0 && data.dimensions.every((d) => d.decision === 'abstain')
+
+  if (allAbstain) {
+    return (
+      <div data-testid="comparison-report-view" className="flex flex-col gap-5">
+        <section
+          className="hermes-clip rounded-lg border-2 bg-tf-card p-5"
+          style={{ borderColor: 'var(--color-tf-border)' }}
+        >
+          <p className="mb-1 font-mono text-xs font-semibold uppercase text-tf-muted">
+            綜合比較結論
+          </p>
+          <p className="text-lg font-bold text-tf-muted">{data.conclusion}</p>
+          <p className="mt-2 text-xs text-tf-muted">
+            {data.coin_a} vs {data.coin_b} · {formatTimestamp(data.generated_at)}
+          </p>
+        </section>
+        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-5 text-center">
+          <p className="text-sm font-semibold text-tf-muted">所有面向均棄權</p>
+          <p className="mt-1 text-xs text-tf-muted">無法進行有效比較</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="flex flex-col gap-5">
+    <div data-testid="comparison-report-view" className="flex flex-col gap-5">
       {/* Hero 卡：共同結論 */}
       <section
         className="hermes-clip rounded-lg border-2 bg-tf-card p-5"
