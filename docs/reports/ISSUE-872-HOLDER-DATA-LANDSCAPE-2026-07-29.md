@@ -1,5 +1,11 @@
 # D1: Holder Concentration Data Source Landscape
 
+> **Superseded for vendor, price, license and SLA decisions.** This was an
+> initial landscape working paper and contains unverified estimates. Use
+> `ISSUE-994-HOLDER-ENTITY-RESOLUTION-VENDOR-COST-FEASIBILITY-2026-07-29.md`
+> as the authoritative primary-source review. No estimate below authorizes a
+> purchase, trial, provider contact or production integration.
+
 - 日期：2026-07-29
 - Issue：[#872](https://github.com/cancleeric/trustforge/issues/872)
 - 前置：`docs/reports/ISSUE-748-ASSET-INTRINSIC-SCORE-DIFFERENTIATION-FEASIBILITY-2026-07-29.md`
@@ -32,16 +38,16 @@ PIT pinning 與 redistribution 條款。
   matching、人工標註 + ML-assisted entity labeling
 - **覆蓋**：BTC (UTXO)、ETH (account)、BSC、Polygon、Avalanche、Arbitrum、Optimism、
   Base、Solana、Tron（multi-chain，含 BTC + BSC）
-- **授權**：Proprietary。Free tier：limited dashboard access（~10 entities/day）；
-  API access：enterprise plan only ($15K+/yr estimated)。Redistribution clause：
-  TOS §4.2 禁止未經授權重散布 raw entity data；需合約審查確認是否允許
+- **授權**：Proprietary。公開 API agreement 的限制與允許用途需逐條審查。
+  公開資料沒有足以做採購決策的完整價格。Redistribution clause：
+  API agreement 禁止未經授權重散布 raw entity data；需合約審查確認是否允許
   aggregated Gini/HHI/top-N output
 - **PIT snapshot**：API 文件未明確記載 `as_of` 參數；history replay 需確認。採用
   "current + archival snapshots" model，但 revision pinning 語意不明
 - **Content hash**：無文件承諾 byte-stable response；closed-source backend
 - **Freshness**：Real-time balance updates；historical ledger data claimed full chain
   history；無 stale SLA
-- **成本**：Free tier ≤ 10 entity lookups/day；Enterprise API $15K–$50K/yr（est.）
+- **成本**：**quote required / unknown**；不得使用非官方估值
 - **合規**：TOS 禁止未經書面授權的 automated scraping；attribution required；
   aggregated derivative works clause ambiguous
 - **Final disposition**：**eligible_with_gaps**（付費 only；PIT pinning / redistribution 需 contract clarification）
@@ -54,8 +60,9 @@ PIT pinning 與 redistribution 條款。
   real-world entity attribution（KYC-linked exchange data partnerships）；業界
   gold standard for AML/KYT 標註
 - **覆蓋**：BTC、ETH、ERC-20、BSC、Polygon、Solana（含 BTC + BSC）
-- **授權**：Proprietary。No free tier。API via Chainalysis KYT / Reactor API
-  enterprise license（estimated $25K–$100K+/yr）。Redistribution strictly
+- **授權**：Proprietary。API via Chainalysis KYT / Reactor API；
+  公開 MSA 對 export、sharing、publication、dataset combination 與 benchmarking
+  有嚴格限制。Redistribution
   prohibited in standard terms — 需合約 negotiation for derivative analytics
 - **PIT snapshot**：Reactor 支援 historical investigation view；API 未明確支援
   `as_of` PIT query；block-height-based state replay 可行但非官方 API feature
@@ -63,7 +70,7 @@ PIT pinning 與 redistribution 條款。
   internal case management only
 - **Freshness**：Real-time cluster updates；historical full chain coverage；
   無明定 stale SLA（depends on licensing tier）
-- **成本**：$25K+/yr minimum；需合約審查與 compliance onboarding
+- **成本**：**quote required / unknown**；需合約審查與 compliance onboarding
 - **合規**：Extremely restrictive redistribution terms；attribution required；
   end-user licensing 可能不允許 embedding in public-facing products
 - **Final disposition**：**eligible_with_gaps**（付費 only；redistribution terms 是主要 blocker）
@@ -77,13 +84,14 @@ PIT pinning 與 redistribution 條款。
   不揭露底層 clustering algorithm
 - **覆蓋**：ETH、Polygon、BSC、Arbitrum、Optimism、Fantom、Avalanche、Solana
   （BSC covered；**BTC NOT covered**）
-- **授權**：Proprietary。Free tier：limited dashboard。API via Nansen Query
-  （enterprise plan, ~$3K–$10K+/yr）。TOS 禁止 raw data redistribution
+- **授權**：Proprietary。API 的公開定價與資料使用權應以 #994 所列官方頁面及
+  簽約時條款為準
 - **PIT snapshot**：API 不支援 `as_of` historical replay；current-state only
 - **Content hash**：無 byte-stable 保證
 - **Freshness**：Daily label updates；historical data available via Query but no
   revision pinning
-- **成本**：$3K–$10K+/yr（Query API）
+- **成本**：Pro USD 49/月（年繳）或 USD 69/月（月繳），另購 credits；
+  詳見 #994 權威報告，不能由訂閱價推論完整 TCO
 - **合規**：Redistribution prohibited；attribution required
 - **Final disposition**：**ineligible**（無 BTC coverage；無 PIT pinning）
 
@@ -95,14 +103,13 @@ PIT pinning 與 redistribution 條款。
   SOPR、exchange balances、miner balances）。Entity clustering via proprietary
   heuristics（co-spend for BTC；deposit-address labeling for account-model chains）
 - **覆蓋**：BTC、ETH、ERC-20（limited alt-L1）。**BSC not covered**
-- **授權**：Proprietary。Free tier：dashboard metrics only。API via
-  Glassnode Studio API（Advanced/Professional tier, ~$800–$2K+/mo）。TOS §3
-  prohibits redistribution of raw data；aggregated metrics use allowed
+- **授權**：Proprietary。實際 API tier、價格與 redistribution/derived-output
+  權利需以當期官方報價及合約確認
 - **PIT snapshot**：API 不直接支援 `as_of` historical query；time-series endpoints
   回傳 pre-computed historical metrics（但無 revision pinning）
 - **Content hash**：無 byte-stable guarantee
 - **Freshness**：Daily metric updates；historical depth varies by metric
-- **成本**：$800–$2K/mo（Advanced/Professional tier）
+- **成本**：本次 primary-source review 未建立 decision-grade 公開價格，視為未知
 - **合規**：Attribution required；no raw redistribution
 - **Final disposition**：**ineligible**（無 BSC coverage；無 PIT pinning；無 explicit entity-label API）
 
@@ -257,7 +264,8 @@ deposit-address reuse），且均為業界公認的 entity-labeling authority。
 - PIT pinning 語意需合約確認（API 文件未明載 `as_of` 參數）
 - Redistribution 條款需合約 negotiation（現行 TOS 均禁止或嚴格限制）
 - Content-hash reproducibility 無文件承諾（closed-source backend）
-- 成本均為 enterprise tier（$15K–$100K+/yr estimated）
+- 成本不透明；除 #994 所列 Nansen 公開 self-service 價格外均視為
+  **quote required / unknown**
 
 ### 4.3 BSC Entity Coverage Is the Bottleneck
 

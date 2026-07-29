@@ -1,5 +1,10 @@
 # D3: Licensing, Freshness & Reproducibility Limits
 
+> **Superseded for vendor, price, license and SLA decisions.** Use
+> `ISSUE-994-HOLDER-ENTITY-RESOLUTION-VENDOR-COST-FEASIBILITY-2026-07-29.md`.
+> This working paper's estimated prices and categorical provider claims are not
+> procurement evidence.
+
 - 日期：2026-07-29
 - Issue：[#872](https://github.com/cancleeric/trustforge/issues/872)
 - 前置：D1 landscape、D2 entity-dedup model
@@ -226,7 +231,7 @@ Scope:
   2. Right to display aggregated Gini/HHI/top-N metrics in product UI
   3. Right to self-archive API responses for audit trail
   4. Clarification on revision pinning mechanism
-- Budget range: $15K–$50K/yr (Arkham estimate)
+- Budget: **unknown / quote required**；禁止使用未經官方或書面報價支持的估值
 - Timeline: 4–6 weeks (contract review + compliance onboarding)
 
 Outcome:

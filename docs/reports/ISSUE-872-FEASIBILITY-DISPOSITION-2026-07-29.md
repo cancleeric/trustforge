@@ -1,5 +1,10 @@
 # D4: Holder Concentration Feasibility Final Disposition
 
+> **2026-07-29 remediation:** The current authoritative disposition is the
+> explicit **NO-GO** in
+> `ISSUE-994-HOLDER-ENTITY-RESOLUTION-VENDOR-COST-FEASIBILITY-2026-07-29.md`.
+> No purchase, trial, provider contact or production integration is authorized.
+
 - 日期：2026-07-29
 - Issue：[#872](https://github.com/cancleeric/trustforge/issues/872)
 - 前置：D1 landscape、D2 entity-dedup model、D3 licensing/freshness/reproducibility limits
@@ -113,7 +118,8 @@ Entity coverage   → BTC + BSC covered by Arkham/Chainalysis (付費)
 開立 cost-sensitive issue（見 D3 §五 draft），scope：
 - Arkham Enterprise API subscription（primary）+ Chainalysis（secondary，for source_families ≥ 2）
 - Contract negotiation on PIT pinning、redistribution rights、self-archive rights
-- Estimated budget：$30K–$100K/yr（combined）
+- Budget：**unknown / quote required**；未完成上限明確的 12/24/36-month TCO
+  前不得採購
 
 ### 5.2 Post-Contract: 72h Data Build Plan Outline
 
