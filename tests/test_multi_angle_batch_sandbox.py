@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -137,3 +138,16 @@ def test_versioned_allowlist_is_disabled_by_default(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "_ALLOWLIST_PATH", allowlist)
     with pytest.raises(RuntimeError, match="disabled"):
         _load_allowlist()
+
+
+def test_runbook_lists_underlying_transaction_item_permissions():
+    runbook = (
+        Path(__file__).resolve().parents[1]
+        / "docs/runbooks/MULTI-ANGLE-ATOMIC-BATCH-MIGRATION-ROLLBACK.md"
+    ).read_text(encoding="utf-8")
+    for action in (
+        "dynamodb:TransactWriteItems",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+    ):
+        assert action in runbook

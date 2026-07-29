@@ -5,9 +5,12 @@
 1. Provision a non-production table (`pk`/`sk` string keys) through reviewed
    infrastructure code. Bootstrap the authoritative daily budget item with
    `remaining_usd`, `reserved_total=0`, and a reviewed `config_version`.
-2. Grant only `dynamodb:TransactWriteItems`, consistent `GetItem`, and
-   `BatchGetItem` on that table to the application role. The proof runner also
-   needs `sts:GetCallerIdentity`, `dynamodb:DescribeTable`,
+2. Grant `dynamodb:TransactWriteItems` plus the transaction's underlying
+   `dynamodb:PutItem` and `dynamodb:UpdateItem` actions, consistent
+   `dynamodb:GetItem`, and `dynamodb:BatchGetItem` on that table to the
+   application role. DynamoDB authorizes every item action inside a transaction;
+   `TransactWriteItems` alone is insufficient. The proof runner also needs
+   `sts:GetCallerIdentity`, `dynamodb:DescribeTable`,
    `DescribeContinuousBackups`, and `ListTagsOfResource`. Never use root
    credentials.
 3. Populate and review the version-controlled
@@ -17,9 +20,11 @@
    `Environment=sandbox`, encrypted, PITR-enabled, and bootstrapped with exactly
    one batch of remaining capacity. Run
    `scripts/run_multi_angle_batch_sandbox.py --confirm-sandbox` once and retain
-   CloudTrail/readback evidence. Re-running requires a separately reviewed
-   sandbox data reset or a fresh dedicated table; the runner never resets
-   counters or deletes records.
+   CloudTrail/readback evidence. The CloudTrail trail must be logging the exact
+   table's DynamoDB write data events before the one-shot transaction runs;
+   data events cannot be reconstructed retroactively. Re-running requires a
+   separately reviewed sandbox data reset or a fresh dedicated table; the
+   runner never resets counters or deletes records.
 4. Complete #884 worker integration and #885 reconciliation gates.
 
 ## Migration
