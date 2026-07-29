@@ -605,5 +605,210 @@
       {"issue":1037,"state_at_review":"OPEN"}
     ],
     "final_harper_disposition": "Programmatic fail-closed and shadow-isolation controls are substantial, but four engineering findings and four release-evidence P0 boundaries remain open. Keep the candidate shadow-only; do not claim 11/11 complete or production/release readiness."
+  },
+  "phase3_eye_review": {
+    "reviewer_route": "Eye CLI plus actual-browser visual inspection",
+    "reviewed_commit": "06a4c3d0840a6ea2739a47253fe8c4f3c7393a9e",
+    "reviewed_at": "2026-07-30",
+    "scope": "Tracks E and I frontend surfaces only.",
+    "record": "docs/audits/ISSUE-998-PHASE-3-EYE-REVIEW-2026-07-30.md",
+    "independence_limits": [
+      "Static Eye CLI results and focused tests do not replace actual-browser visual inspection.",
+      "Playwright was not used as a substitute for human-visible Eye inspection.",
+      "Does not replace gray CPO, Harper CISO/cost, or /codex-review.",
+      "Does not erase or backdate HISTORICAL_GAP.",
+      "Does not implement feature remediation."
+    ],
+    "static_evidence": {
+      "asset_intrinsic_shadow_panel_direct_callers": 49,
+      "analysis_report_view_direct_callers": 9,
+      "historical_breaking_change_ranges_completed": 2,
+      "focused_frontend_test_files_passed": 2,
+      "focused_frontend_tests_passed": 17
+    },
+    "visual_matrix": {
+      "desktop_zh_tw": "BLOCKED_BROWSER_UNAVAILABLE",
+      "desktop_en": "BLOCKED_BROWSER_UNAVAILABLE",
+      "mobile_zh_tw": "BLOCKED_BROWSER_UNAVAILABLE",
+      "mobile_en": "BLOCKED_BROWSER_UNAVAILABLE",
+      "zoom_200_percent": "BLOCKED_BROWSER_UNAVAILABLE",
+      "long_provenance_overflow": "BLOCKED_BROWSER_UNAVAILABLE",
+      "state_transitions": "BLOCKED_BROWSER_UNAVAILABLE",
+      "error_states": "BLOCKED_BROWSER_UNAVAILABLE"
+    },
+    "summary": {
+      "tracks_reviewed": ["E", "I"],
+      "historical_gap_rows_retained": 70,
+      "visual_pass": 0,
+      "visual_blocked": 8,
+      "criterion_i_7": "BLOCKED_BROWSER_UNAVAILABLE",
+      "disposition": "NO_VISUAL_PASS",
+      "parent_issue_748": "OPEN",
+      "audit_issue_998": "OPEN"
+    },
+    "final_eye_disposition": "Static source and focused tests passed, but the actual-browser inventory was empty. No desktop, mobile, bilingual, 200% zoom, overflow, state-transition, or error-state visual PASS is claimed."
+  },
+  "phase3_codex_review": {
+    "reviewer_route": "/codex-review",
+    "reviewed_commit": "b9004e86b22bbd31469d13bf618503fc028e8670",
+    "reviewed_at": "2026-07-30",
+    "scope": "All 70 A-K criteria and the complete cross-track dependency chain.",
+    "record": "docs/audits/ISSUE-998-PHASE-3-CODEX-REVIEW-2026-07-30.md",
+    "independence_limits": [
+      "Does not replace gray CPO review.",
+      "Does not replace Harper CISO/cost review.",
+      "Does not replace actual-branch Eye review.",
+      "Does not replace Phase 4 external or elapsed-observation reconciliation.",
+      "Does not erase or backdate HISTORICAL_GAP.",
+      "Does not implement feature remediation."
+    ],
+    "summary": {
+      "rows_total": 70,
+      "rows_reviewed": 70,
+      "codex_pass": 49,
+      "remediate": 5,
+      "defer_external": 16,
+      "historical_gap_rows_retained": 70,
+      "p0_release_blockers": 4,
+      "p1_criterion_findings": 5,
+      "additional_p1_findings": 1,
+      "disposition": "REMAIN_SHADOW_RELEASE_BLOCKED",
+      "parent_issue_748": "OPEN",
+      "audit_issue_998": "OPEN"
+    },
+    "result_sets": {
+      "CODEX_PASS": [
+        "A-1","A-2","A-3","A-4","A-5","A-6",
+        "B-1","B-2","B-3","B-4","B-5","B-6",
+        "C-2","C-3","C-4","C-6",
+        "D-1","D-2","D-4",
+        "E-1","E-2","E-3","E-4","E-5","E-6",
+        "F-1","F-2","F-3","F-4","F-5","F-6",
+        "G-2","G-3","G-4","G-6","G-7",
+        "H-2","H-3","H-4","H-5","H-6","H-7","H-8",
+        "I-1","I-2","I-4","I-5","I-6",
+        "J-3"
+      ],
+      "REMEDIATE": ["C-1","C-5","H-1","I-3","J-2"],
+      "DEFER_EXTERNAL": [
+        "D-3","D-5","F-7","G-1","G-5","I-7",
+        "J-1","J-4","J-5","J-6","J-7",
+        "K-1","K-2","K-3","K-4","K-5"
+      ]
+    },
+    "findings": [
+      {
+        "severity": "P1",
+        "criterion_ids": ["C-1","C-5"],
+        "issue": 1035,
+        "finding": "Typed independent control-plane replay and canonical source-withdrawal PIT proof are absent."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["H-1"],
+        "issue": 1036,
+        "finding": "Candidate application is not behind the sole canonical core composition boundary."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["I-3"],
+        "issue": null,
+        "finding": "The frontend accepts a structurally fabricated official receipt/capability while the backend emits no official contract and no signature, policy, release, observation-root or current-BLOCK binding is verified; a separate <=12h remediation issue is required."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["J-2"],
+        "issue": 1037,
+        "finding": "The hermetic drill bypasses the actual release-router request path."
+      }
+    ],
+    "release_blockers": [
+      {"severity":"P0","issue":1031,"criteria":["K-1","K-3","K-4","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1032,"criteria":["K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1033,"criteria":["K-1","K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1034,"criteria":["K-1","K-2","K-3","K-4","K-5"],"state_at_review":"OPEN"}
+    ],
+    "cross_dependency_disposition": {
+      "C_to_F_G_H": "BLOCKED_BY_1035",
+      "D_holder_evidence": "UNKNOWN_EXTERNAL_NO_NUMERIC_VALUE",
+      "G_to_H": "PROMOTION_BLOCK_REMAIN_SHADOW",
+      "G_H_to_I": "OFFICIAL_BLOCKED_BY_G_AND_I3_AUTHENTICITY",
+      "J_to_K": "HERMETIC_NOT_RELEASE_EVIDENCE",
+      "K_release_graph": "BLOCKED_BY_1031_1032_1033_1034"
+    },
+    "final_codex_disposition": "Five criteria require remediation, sixteen require external or elapsed evidence, and four P0 release-evidence boundaries remain open. Keep #748/#998 open and the candidate shadow-only."
+  },
+  "phase4_external": {
+    "collected_at": "2026-07-30T04:50:19+08:00",
+    "audited_commit": "06a4c3d0840a6ea2739a47253fe8c4f3c7393a9e",
+    "record": "docs/audits/ISSUE-998-PHASE-4-EXTERNAL-EVIDENCE-2026-07-30.md",
+    "scope": "Read-only reconciliation of the 16 EXTERNAL rows and the required supplemental #870 source-family check; no canonical observation, receipt, disposition or release artifact mutation.",
+    "summary": {
+      "rows_total": 16,
+      "pass": 1,
+      "remain_shadow": 4,
+      "blocked_external": 11,
+      "signed_current_promotion_disposition_available": false,
+      "mature_labels_available": false,
+      "real_rollback_evidence_available": false,
+      "real_release_topology_evidence_available": false,
+      "disposition": "REMAIN_SHADOW_RELEASE_BLOCKED"
+    },
+    "sources": [
+      {"source":"data/intrinsic_promotion/receipt-current.json","sha256":"70436e093f54ede40e278258b704469df1ddc4c802623e996c79f4a7421f8c21"},
+      {"source":"data/canary_control/canary_disposition.json","sha256":"49990fe5935ce1fd228cc0e476a0e1fa6fd27ac665f20cb986225146c8288b9e"},
+      {"source":"data/asset_intrinsic_records.json","sha256":"89a99e94647d4b8bb11f7b54ae4da153ea44201605732008c162b7fb1f875a91"},
+      {"source":"docs/reports/ISSUE-994-HOLDER-ENTITY-RESOLUTION-VENDOR-COST-FEASIBILITY-2026-07-29.md","sha256":"a986f4bd5eca03cf1f840c66a7310fc910cad90514f29acc9d3a499a2550fec1"},
+      {"source":"docs/reports/ISSUE-872-LICENSING-FRESHNESS-LIMITS-2026-07-29.md","sha256":"0c4309e170e5c54d664fabc717a793f7bc97bbd1022768685a7f251ae5780062"},
+      {"source":"github:issue/875","sha256":"0b1655377777209ee9c0ae477ac37cfe2b06dee6cd3f1ee77d2b1f13fe5bb4af"},
+      {"source":"github:issue/872","sha256":"d6a0fa90743a0d1bd5f4a5179ab1f6a76437c7aa6e8b13ede82eca201b543dba"},
+      {"source":"github:issue/877","sha256":"7038ccf3af983875d5426c33804138b1c1f6093cca4b201b88bcc5be20125f45"},
+      {"source":"github:issue/879","sha256":"fc2d9cd575e252f808af028ee0d27919d617bb933895eeea59f794452990ee70"},
+      {"source":"github:issue/994","sha256":"c9edd897593612ce6cd9d4dbf9a744ebc370df552c4fc31475f4583781463e86"},
+      {"source":"github:issue/1035","sha256":"6b12a8040067eb19503dab266660a4560f4832cd57ae65a61b525f4df35c6d82"}
+    ],
+    "current_gate": {
+      "eligible_observations": 1,
+      "observations": 3,
+      "assets": 3,
+      "days": 2,
+      "required_observations": 200,
+      "required_assets": 5,
+      "required_days": 30,
+      "decision": "block",
+      "labels_mature": false,
+      "calibration_claim": "withheld_no_mature_labels",
+      "brier": null,
+      "ece": null,
+      "receipt_signed": false,
+      "canary_disposition": "remain_shadow"
+    },
+    "supplemental_checks": [
+      {
+        "subject": "issue-870-two-family-control-governance",
+        "result": "BLOCKED_EXTERNAL",
+        "finding": "Multiple descriptive URLs are not typed independently replayable validator/miner/node/governance source families; BNB and ETH control/governance remain unknown.",
+        "remediation_issue": 1035
+      }
+    ],
+    "criteria": [
+      {"criterion_id":"D-3","result":"REMAIN_SHADOW","source_refs":["data/asset_intrinsic_records.json","docs/reports/ISSUE-994-HOLDER-ENTITY-RESOLUTION-VENDOR-COST-FEASIBILITY-2026-07-29.md"],"finding_or_blocker":"No entity-resolved holder history; holder concentration remains unknown with no numeric value.","future_evidence":"Licensed reproducible PIT history with entity resolution and cross-chain/custodian/bridge/burn/locked/lost-key treatment."},
+      {"criterion_id":"D-5","result":"PASS","source_refs":["github:issue/994","docs/reports/ISSUE-994-HOLDER-ENTITY-RESOLUTION-VENDOR-COST-FEASIBILITY-2026-07-29.md"],"finding_or_blocker":"Separate cost-sensitive research completed with NO-GO; no purchase, trial, credentials or production integration occurred.","future_evidence":"Any future procurement requires separate CEO and Harper authorization."},
+      {"criterion_id":"F-7","result":"REMAIN_SHADOW","source_refs":["data/intrinsic_promotion/receipt-current.json"],"finding_or_blocker":"Current real coverage is only 3 observations, 3 assets and 2 days with 60% missingness.","future_evidence":"Authentic canonical observations meeting the promotion policy coverage thresholds."},
+      {"criterion_id":"G-1","result":"REMAIN_SHADOW","source_refs":["data/intrinsic_promotion/receipt-current.json","github:issue/875"],"finding_or_blocker":"1 eligible observation, 3 assets and 2 days remain below 200, 5 and 30.","future_evidence":"Signed current receipt from the canonical observation store meeting all elapsed thresholds."},
+      {"criterion_id":"G-5","result":"REMAIN_SHADOW","source_refs":["data/intrinsic_promotion/receipt-current.json"],"finding_or_blocker":"labels_mature=false; Brier and ECE are absent and no calibration improvement is claimed.","future_evidence":"Canonical mature outcomes and independently recomputable Brier/ECE non-inferiority."},
+      {"criterion_id":"I-7","result":"BLOCKED_EXTERNAL","source_refs":["docs/audits/ISSUE-998-PHASE-3-CODEX-REVIEW-2026-07-30.md"],"finding_or_blocker":"No actual-branch Eye artifact for both locales, desktop/mobile, 200% zoom, long provenance, overflow and error states.","future_evidence":"Commit-bound actual-branch Eye record covering every required state and viewport."},
+      {"criterion_id":"J-1","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/877"],"finding_or_blocker":"No real immutable A/B release artifacts or authenticated artifact digests were available.","future_evidence":"Environment-bound immutable A/B release manifests and independently verified digests."},
+      {"criterion_id":"J-4","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/877"],"finding_or_blocker":"No real non-production A-to-B-to-regression-to-A elapsed drill receipt was available.","future_evidence":"Signed real non-production drill receipt with observed timestamps and rollback SLO."},
+      {"criterion_id":"J-5","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/877"],"finding_or_blocker":"No signed real actor/reason/from-to release/artifact/config/timestamp receipt was available.","future_evidence":"Independently verifiable signed receipt bound to real release artifacts and environment."},
+      {"criterion_id":"J-6","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/877"],"finding_or_blocker":"No real post-rollback A artifact availability and health evidence was available.","future_evidence":"Post-rollback A artifact presence and successful health probes from the named environment."},
+      {"criterion_id":"J-7","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/877"],"finding_or_blocker":"No real evidence proved observation history and receipts survived rollback.","future_evidence":"Before/after authenticated ledger heads and receipts from the real drill."},
+      {"criterion_id":"K-1","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/879"],"finding_or_blocker":"No authenticated nginx ingress and Linux AF_UNIX peer-identity release-host evidence was available.","future_evidence":"Independent real-host nginx-to-AF_UNIX topology transcript including direct-spoof fail-closed behavior."},
+      {"criterion_id":"K-2","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/879"],"finding_or_blocker":"No independent root-owned atomic install/rollback evidence bundle was available.","future_evidence":"Descriptor-pinned root evidence for atomic allowlist install, rollback and digest binding."},
+      {"criterion_id":"K-3","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/879"],"finding_or_blocker":"No real HTTP transcript proved unknown, duplicate and unauthorized cost-bearing modes remain A-only.","future_evidence":"Authenticated release-host request transcript covering each fail-closed mode."},
+      {"criterion_id":"K-4","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/879"],"finding_or_blocker":"No signed per-ramp request/model/monetary restart reconciliation from a release environment was available.","future_evidence":"Signed ledger heads and independent reconciliation across crash/restart on the named release host."},
+      {"criterion_id":"K-5","result":"BLOCKED_EXTERNAL","source_refs":["github:issue/879"],"finding_or_blocker":"No real two-release ingress, B success/failure and 100% A recovery evidence was available.","future_evidence":"Independent #1031-#1034 evidence over nginx, AF_UNIX, router and two real Handler releases."}
+    ],
+    "final_disposition": "Phase 4 reconciliation is complete as a read-only audit snapshot. The candidate remains shadow-only; #748 and #998 stay open while actual Eye, elapsed observations, engineering remediation and authentic release-host evidence remain outstanding."
   }
 }
