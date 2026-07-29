@@ -24,6 +24,11 @@ def test_public_http_multi_angle_runs_real_durable_pipeline(
     synthesis, and GET projection remain production implementations.
     """
     db_path = tmp_path / "public-multi-angle.sqlite3"
+    monkeypatch.setattr(
+        web.rate_limit_store,
+        "try_increment",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(analysis_flow, "_db_path", lambda path=None: db_path)
     monkeypatch.setattr(
         analysis_flow,
@@ -61,7 +66,10 @@ def test_public_http_multi_angle_runs_real_durable_pipeline(
         request = Request(
             f"{base_url}/api/multi-angle",
             data=json.dumps({"coin": "BTC", "locale": "zh-Hant"}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Idempotency-Key": "public-e2e-run",
+            },
             method="POST",
         )
         with urlopen(request, timeout=3) as response:

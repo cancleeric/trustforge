@@ -40,6 +40,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -1021,6 +1022,27 @@ def _check_status_rate_limit(ip: str, scope: str = "status") -> None:
             raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
         ts.append(now)
         _status_rate_buckets[bucket_key] = ts
+
+
+def _check_analysis_write_rate_limit(ip: str) -> None:
+    """Public analysis writes use the shared counter across server instances.
+
+    This cost-bearing public write fails closed when the shared backend is
+    unavailable; a process-local fallback would multiply the allowance by the
+    number of server instances.
+    """
+    try:
+        allowed = rate_limit_store.try_increment(
+            "analysis-write", ip, _STATUS_RATE_WINDOW, _STATUS_RATE_MAX,
+        )
+    except rate_limit_store.RateLimitBackendError as exc:
+        logging.error(
+            "TrustForge analysis-write shared rate limit unavailable; "
+            "rejecting cost-bearing write: %s", exc,
+        )
+        raise TooManyRequests("分析提交保護暫時無法確認，請稍後再試") from exc
+    if not allowed:
+        raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
 
 
 def _check_online_stance_rate_limit(ip: str) -> None:
@@ -5538,14 +5560,32 @@ def _handle_api_multi_angle_get(qs: dict | None = None) -> tuple[int, str]:
 
 def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, str]:
     """`POST /api/multi-angle`：觸發五角度綜合分析（#809）。"""
+    idempotency_key = str(headers.get("Idempotency-Key", "")).strip()
+    if not idempotency_key:
+        return 400, _json_envelope_err("missing_idempotency_key", "必須提供 Idempotency-Key")
+    if len(idempotency_key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]+", idempotency_key):
+        return 400, _json_envelope_err(
+            "invalid_idempotency_key",
+            "Idempotency-Key 須為 1–128 個英數字或 . _ : -",
+        )
     try:
         content_length = int(headers.get("Content-Length", 0))
+        if content_length < 0:
+            raise ValueError
+        if content_length > 4096:
+            return 413, _json_envelope_err("payload_too_large", "body 上限 4096 bytes")
         body = json.loads(rfile.read(content_length)) if content_length else {}
     except (json.JSONDecodeError, ValueError):
         return 400, _json_envelope_err("invalid_json", "請求 body 須為有效 JSON")
+    if not isinstance(body, dict):
+        return 400, _json_envelope_err("invalid_json", "請求 body 須為 JSON object")
     coin = str(body.get("coin", "")).strip().upper()
     question = str(body.get("question", "")).strip()
     locale = str(body.get("locale", "zh-Hant"))
+    if len(coin) > 16 or len(question) > 500 or len(locale) > 32:
+        return 400, _json_envelope_err(
+            "validation_error", "coin、question 或 locale 超過長度上限"
+        )
     if not coin:
         return 400, _json_envelope_err("missing_param", "必須提供 coin")
     from .schema import COIN_POOL
@@ -5558,10 +5598,24 @@ def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, s
             AnalysisFlow,
             MultiAngleBudgetError,
             MultiAngleCapacityError,
+            MultiAngleIdempotencyConflictError,
+            MultiAngleRequestInProgressError,
         )
         with AnalysisFlow() as flow:
-            result = flow.submit_multi_angle(coin, question, locale=locale)
+            result = flow.submit_multi_angle(
+                coin, question, locale=locale,
+                caller_id=client_ip, idempotency_key=idempotency_key,
+                admission_check=lambda: _check_analysis_write_rate_limit(client_ip),
+            )
         return 200, _json_envelope_ok(result)
+    except MultiAngleIdempotencyConflictError as exc:
+        return 409, _json_envelope_err("idempotency_key_conflict", str(exc))
+    except MultiAngleRequestInProgressError as exc:
+        return 202, _json_envelope_ok(
+            {"request_id": exc.request_id, "state": "processing"}
+        )
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
     except MultiAngleBudgetError as exc:
         return 409, _json_envelope_err("multi_angle_budget_unavailable", str(exc))
     except MultiAngleCapacityError as exc:

@@ -24,7 +24,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import budget_guard
 from .agent.narrative_locale import DEFAULT_LOCALE as DEFAULT_NARRATIVE_LOCALE
@@ -69,6 +69,20 @@ class MultiAngleCapacityError(RuntimeError):
 
 class MultiAngleBudgetError(RuntimeError):
     """五角度執行的保守成本預檢未通過。"""
+
+
+class MultiAngleIdempotencyConflictError(RuntimeError):
+    """同一冪等鍵被用於不同的正規化請求。"""
+
+
+class MultiAngleRequestInProgressError(RuntimeError):
+    """原始冪等請求仍持有 claim，尚未完成。"""
+
+    def __init__(self, request_id: str):
+        super().__init__("原請求仍在處理中，請稍後以相同 Idempotency-Key 重試")
+        self.request_id = request_id
+
+
 MANUAL_PRIORITY = 0
 SCHEDULED_PRIORITY = 100
 MANUAL_DEDUP_WINDOW_SEC = 300
@@ -351,6 +365,13 @@ class AnalysisFlow:
           snapshot_id TEXT NOT NULL, coin TEXT NOT NULL, submitted_at REAL NOT NULL,
           PRIMARY KEY(snapshot_id, coin)
         );
+        CREATE TABLE IF NOT EXISTS analysis_multi_angle_requests (
+          caller_hash TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL,
+          payload_fingerprint TEXT NOT NULL, request_id TEXT NOT NULL,
+          state TEXT NOT NULL, result_json TEXT, error_code TEXT,
+          created_at REAL NOT NULL, updated_at REAL NOT NULL, expires_at REAL NOT NULL,
+          PRIMARY KEY(caller_hash, idempotency_key_hash)
+        );
         CREATE INDEX IF NOT EXISTS idx_analysis_results_lookup
           ON analysis_results(coin, mode, question, published_at DESC);
         CREATE TABLE IF NOT EXISTS analysis_questions (
@@ -411,6 +432,38 @@ class AnalysisFlow:
         if "priority" not in columns:
             conn.execute(f"ALTER TABLE analysis_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT {SCHEDULED_PRIORITY}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_priority ON analysis_jobs(state,priority,created_at)")
+        request_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(analysis_multi_angle_requests)"
+            ).fetchall()
+        }
+        if "idempotency_key" in request_columns and "idempotency_key_hash" not in request_columns:
+            conn.execute(
+                """ALTER TABLE analysis_multi_angle_requests
+                   RENAME COLUMN idempotency_key TO idempotency_key_hash"""
+            )
+            for row in conn.execute(
+                """SELECT caller_hash,idempotency_key_hash
+                   FROM analysis_multi_angle_requests"""
+            ).fetchall():
+                conn.execute(
+                    """UPDATE analysis_multi_angle_requests
+                       SET idempotency_key_hash=?
+                       WHERE caller_hash=? AND idempotency_key_hash=?""",
+                    (
+                        hashlib.sha256(
+                            row["idempotency_key_hash"].encode("utf-8")
+                        ).hexdigest(),
+                        row["caller_hash"],
+                        row["idempotency_key_hash"],
+                    ),
+                )
+        conn.execute("DROP INDEX IF EXISTS idx_analysis_multi_angle_request_id")
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_analysis_multi_angle_request_id
+               ON analysis_multi_angle_requests(request_id)"""
+        )
         TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
         # memory existed. Deterministic IDs make this migration restart-safe.
@@ -568,8 +621,16 @@ class AnalysisFlow:
                 job_id = existing["job_id"] if existing else None
             return question_id, job_id
 
-    def submit_multi_angle(self, coin: str, question: str, *,
-                           locale: str = DEFAULT_NARRATIVE_LOCALE) -> dict[str, Any]:
+    def submit_multi_angle(
+        self,
+        coin: str,
+        question: str,
+        *,
+        locale: str = DEFAULT_NARRATIVE_LOCALE,
+        caller_id: str | None = None,
+        idempotency_key: str | None = None,
+        admission_check: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """建立同一個 snapshot，同時跑五角度（#809）。
 
         回傳 {snapshot_id, job_ids: {mode: job_id}, coin}。
@@ -578,14 +639,132 @@ class AnalysisFlow:
         coin = coin.strip().upper()
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
+        question = question.strip()
         locale = normalize_locale(locale)
         conn = self._conn()
+        request_claim: tuple[str, str] | None = None
+        if caller_id is not None or idempotency_key is not None:
+            if not caller_id or not idempotency_key:
+                raise ValueError("caller_id and idempotency_key must be provided together")
+            caller_hash = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()
+            idempotency_key_hash = hashlib.sha256(
+                idempotency_key.encode("utf-8")
+            ).hexdigest()
+            payload_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {"coin": coin, "question": question, "locale": locale},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            now = time.time()
+            request_id = f"ma-request-{uuid.uuid4().hex[:20]}"
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    """SELECT payload_fingerprint,request_id,state,result_json,expires_at
+                       FROM analysis_multi_angle_requests
+                       WHERE caller_hash=? AND idempotency_key_hash=?""",
+                    (caller_hash, idempotency_key_hash),
+                ).fetchone()
+                if existing is not None and existing["expires_at"] > now:
+                    if existing["payload_fingerprint"] != payload_fingerprint:
+                        raise MultiAngleIdempotencyConflictError(
+                            "Idempotency-Key 已用於不同的五角度請求"
+                        )
+                    if existing["state"] == "completed" and existing["result_json"]:
+                        result = json.loads(existing["result_json"])
+                        conn.execute("COMMIT")
+                        return result
+                    if existing["state"] == "processing":
+                        raise MultiAngleRequestInProgressError(existing["request_id"])
+                active_payload = conn.execute(
+                    """SELECT request_id,state,result_json,expires_at
+                       FROM analysis_multi_angle_requests
+                       WHERE caller_hash=? AND payload_fingerprint=? AND expires_at>?
+                         AND (
+                           state='processing'
+                           OR (state='completed' AND updated_at>=?)
+                         )
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    (caller_hash, payload_fingerprint, now, now - 30),
+                ).fetchone()
+                if active_payload is not None:
+                    alias_state = active_payload["state"]
+                    alias_result = active_payload["result_json"]
+                    conn.execute(
+                        """INSERT INTO analysis_multi_angle_requests(
+                             caller_hash,idempotency_key_hash,payload_fingerprint,
+                             request_id,state,result_json,error_code,created_at,
+                             updated_at,expires_at
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(caller_hash,idempotency_key_hash) DO UPDATE SET
+                             payload_fingerprint=excluded.payload_fingerprint,
+                             request_id=excluded.request_id,state=excluded.state,
+                             result_json=excluded.result_json,error_code=NULL,
+                             created_at=excluded.created_at,updated_at=excluded.updated_at,
+                             expires_at=excluded.expires_at""",
+                        (
+                            caller_hash, idempotency_key_hash, payload_fingerprint,
+                            active_payload["request_id"], alias_state, alias_result,
+                            None, now, now, active_payload["expires_at"],
+                        ),
+                    )
+                    if active_payload["state"] == "completed" and active_payload["result_json"]:
+                        result = json.loads(active_payload["result_json"])
+                        conn.execute("COMMIT")
+                        return result
+                    conn.execute("COMMIT")
+                    raise MultiAngleRequestInProgressError(active_payload["request_id"])
+                conn.execute(
+                    "DELETE FROM analysis_multi_angle_requests WHERE expires_at<=?",
+                    (now,),
+                )
+                conn.execute(
+                    """INSERT INTO analysis_multi_angle_requests(
+                         caller_hash,idempotency_key_hash,payload_fingerprint,request_id,state,
+                         result_json,error_code,created_at,updated_at,expires_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(caller_hash,idempotency_key_hash) DO UPDATE SET
+                         payload_fingerprint=excluded.payload_fingerprint,
+                         request_id=excluded.request_id,state='processing',
+                         result_json=NULL,error_code=NULL,created_at=excluded.created_at,
+                         updated_at=excluded.updated_at,expires_at=excluded.expires_at""",
+                    (
+                        caller_hash, idempotency_key_hash, payload_fingerprint, request_id,
+                        "processing", None, None, now, now, now + 86400,
+                    ),
+                )
+                conn.execute("COMMIT")
+                request_claim = (caller_hash, idempotency_key_hash)
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            try:
+                if admission_check is not None:
+                    admission_check()
+            except Exception:
+                conn.execute(
+                    """DELETE FROM analysis_multi_angle_requests
+                       WHERE caller_hash=? AND request_id=?""",
+                    (request_claim[0], request_id),
+                )
+                raise
         # 快速容量預檢放在資料收集/建立 snapshot 之前，避免明知不可能原子
         # 入列時留下孤兒 snapshot。真正防 race 的檢查仍在下方 IMMEDIATE tx。
         pending = conn.execute(
             "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')"
         ).fetchone()[0]
         if pending + len(MODES) > QUEUE_CAPACITY:
+            if request_claim is not None:
+                conn.execute(
+                    """UPDATE analysis_multi_angle_requests
+                       SET state='failed',error_code='capacity_unavailable',updated_at=?
+                       WHERE caller_hash=? AND request_id=?""",
+                    (time.time(), request_claim[0], request_id),
+                )
             raise MultiAngleCapacityError(
                 f"佇列剩餘容量不足，五角度需同時保留 {len(MODES)} 個位置"
             )
@@ -594,6 +773,13 @@ class AnalysisFlow:
         # reservations 尚容得下五次呼叫，不在 submit 跨 process 預扣額度。
         # 每個 worker 真正呼叫時仍各自走既有原子 fail-closed guard。
         if not budget_guard.request_budget_available(len(MODES)):
+            if request_claim is not None:
+                conn.execute(
+                    """UPDATE analysis_multi_angle_requests
+                       SET state='failed',error_code='budget_unavailable',updated_at=?
+                       WHERE caller_hash=? AND request_id=?""",
+                    (time.time(), request_claim[0], request_id),
+                )
             raise MultiAngleBudgetError("目前可觀測預算不足以啟動五角度分析")
         snapshot_id: str | None = None
         try:
@@ -643,6 +829,19 @@ class AnalysisFlow:
                 entity_id=f"ma-{snapshot_id}", snapshot_id=snapshot_id,
                 metadata={"coin": coin, "job_ids": job_ids, "locale": locale},
             )
+            result = {"snapshot_id": snapshot_id, "job_ids": job_ids, "coin": coin}
+            if request_claim is not None:
+                conn.execute(
+                    """UPDATE analysis_multi_angle_requests
+                       SET state='completed',result_json=?,error_code=NULL,updated_at=?
+                       WHERE caller_hash=? AND request_id=?""",
+                    (
+                        json.dumps(result, ensure_ascii=False, sort_keys=True),
+                        time.time(),
+                        request_claim[0],
+                        request_id,
+                    ),
+                )
             conn.execute("COMMIT")
         except Exception:
             if conn.in_transaction:
@@ -652,6 +851,13 @@ class AnalysisFlow:
                     "DELETE FROM analysis_snapshots WHERE snapshot_id=? "
                     "AND NOT EXISTS(SELECT 1 FROM analysis_jobs WHERE snapshot_id=?)",
                     (snapshot_id, snapshot_id),
+                )
+            if request_claim is not None:
+                conn.execute(
+                    """UPDATE analysis_multi_angle_requests
+                       SET state='failed',error_code='submission_failed',updated_at=?
+                       WHERE caller_hash=? AND request_id=?""",
+                    (time.time(), request_claim[0], request_id),
                 )
             raise
 
@@ -679,7 +885,7 @@ class AnalysisFlow:
                     job_id,
                     exc_info=True,
                 )
-        return {"snapshot_id": snapshot_id, "job_ids": job_ids, "coin": coin}
+        return result
 
     def multi_angle_status(self, coin: str, snapshot_id: str | None = None) -> dict[str, Any] | None:
         """回傳指定幣種的最新 multi-angle synthesis 結果。

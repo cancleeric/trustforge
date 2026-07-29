@@ -1223,6 +1223,16 @@ paths:
       tags: [analysis]
       operationId: submitMultiAngleAnalysis
       summary: 原子建立同 snapshot 的五個分析工作
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          description: 同一 caller 的 logical submission 重試須沿用此鍵。
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9._:-]+$'
       requestBody:
         required: true
         content:
@@ -1260,9 +1270,13 @@ paths:
                               news: {type: string}
                               catalyst: {type: string}
                           coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        "202":
+          description: 相同冪等請求仍在建立中；回傳同一 request_id，應以相同 key 重試。
         "400": {$ref: "#/components/responses/BadRequest"}
         "409":
-          description: 唯讀預檢顯示目前可觀測額度不足以啟動五個工作（未預扣款）
+          description: 冪等鍵重用於不同 payload，或預算預檢未通過
+        "429":
+          description: caller-scoped analysis-write 限流
         "503":
           description: 佇列無法同時容納五個工作
         "502": {$ref: "#/components/responses/UpstreamError"}
