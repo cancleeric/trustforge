@@ -80,13 +80,15 @@
 - [x] 確認 lint / build 通過
 - [x] 確認 pre-push 通過
 
-## Open review gate
+## Review gate
 
-- [ ] 人工 desktop/mobile Eye scan — deferred to CPO review; automated
-  component tests and build evidence do not replace visual review
+- [x] Browser Eye：desktop `1440x1000`、mobile `390x844`；四個 rails
+  populated/empty、長內容與 scrolling、token/401、backend empty/404、
+  horizontal overflow 均驗證通過
+- [x] Eye CLI：exact PR range breaking changes `0 critical / 0 warning`
 
 ### HEAD evidence
 
 Types, rails, token bar, page route, tab/run selection, badges, states, and
-tests exist under `frontend/src/`. Recorded frontend gate results are listed in
-the security disposition. Issue remains implemented / in review pending Eye.
+tests exist under `frontend/src/`. Browser Eye、Eye CLI、Codex adversarial
+review 與 CPO exact-HEAD review 均完成。

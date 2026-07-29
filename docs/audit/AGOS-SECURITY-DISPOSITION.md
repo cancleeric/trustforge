@@ -3,7 +3,7 @@
 > Epic: [#914](https://github.com/cancleeric/trustforge/issues/914)
 > Issue: [#925](https://github.com/cancleeric/trustforge/issues/925)
 > Date: 2026-07-29
-> Status: BLOCKED — desktop/mobile Eye and commit-bound CISO/CPO review pending
+> Status: APPROVED — commit-bound CISO/CPO review and dual Eye gates complete
 > Branch: `agos/915-architecture-contracts`
 
 ## Reviewer Information
@@ -11,13 +11,14 @@
 - Implementation: Kiro (automated)
 - Security review required: harper (CISO)
 - Product review required: gray (CPO)
-- Implementation baseline: current branch HEAD; the immutable reviewed SHA is
-  recorded in the PR disposition comment
-- Closeout review binding: the commit containing this document must be reviewed
-  again after integration if production code has advanced beyond that baseline
-- CPO disposition: task/backlog reconciliation completed; desktop/mobile Eye
-  and exact-HEAD re-review remain pending
-- CISO disposition: pending; this document does not self-approve security
+- Implementation baseline: PR #969 exact HEAD
+  `b7c81679b73d4fb3a72f0bb039ad19a764a312a4`
+- Closeout metadata binding: PR #1078 current HEAD; this PR changes only spec
+  paths and review records, so production code has not advanced beyond the
+  reviewed PR #969 baseline. Codex adversarial review covers this metadata diff.
+- CPO disposition: APPROVED for exact HEAD after desktop/mobile Browser Eye,
+  Eye CLI, Codex review, and full gate verification
+- CISO disposition: APPROVED for exact HEAD; no unresolved security finding
 
 ## Security Controls Implemented
 
@@ -101,21 +102,21 @@ review disposition; this document does not embed a self-referential commit.
 | Current targeted Admin AGOS frontend run | 18 PASS |
 | Current frontend production build | PASS |
 | Authenticated real-handler HTTP E2E | PASS (included above) |
-| Full pre-push backend parallel lane | 6044 PASS, 12 skipped |
-| Full pre-push backend serial lane | 3 PASS, 1 skipped |
-| Full pre-push frontend | 596 PASS |
+| Full pre-push backend parallel lane | 6345 PASS, 12 skipped |
+| Full pre-push backend serial lane | 14 PASS, 1 skipped |
+| Full pre-push frontend | 606 PASS |
 
-The full pre-push results are the recorded HEAD gate results. Replay,
+The full pre-push results are the recorded exact-HEAD gate results. Replay,
 non-regression, lineage-consistency, security-guard, and authenticated HTTP
-tests now have concrete passing evidence. No expected-failure exception remains
-claimed. The manual Eye scan and exact-HEAD human reviews remain open.
+tests have concrete passing evidence. Browser Eye passed at desktop
+`1440x1000` and mobile `390x844`; Eye CLI reported zero critical and zero
+warning breaking changes.
 
 ## Disposition
 
-- [ ] harper (CISO): APPROVED / BLOCKED
-- [ ] gray (CPO): exact-HEAD re-review pending after docs reconciliation; Eye
-  remains a separate manual gate
-- [ ] /codex-review adversarial gate: PASS / FAIL
+- [x] harper (CISO): APPROVED for PR #969 exact HEAD
+- [x] gray (CPO): APPROVED for PR #969 exact HEAD
+- [x] /codex-review adversarial gate: PASS
 - [x] Authenticated real-handler HTTP E2E: PASS
 
 ## Activation Conditions
