@@ -241,9 +241,9 @@ assert_contains "$INSTALL_CMD" "Environment=TRUSTFORGE_CSP_MODE=legacy" "SSM 安
 # 遠端（deploy_frontend_nginx.sh 的 CMDS heredoc）展開，這裡只比對字面文字。
 assert_contains "$INSTALL_CMD" 'ln -sfn \"$CANDIDATE\" \"$LIVE_LINK\"' "SSM 安裝指令：預設 symlink 指向 candidate legacy.conf（不預設切 react）"
 # shellcheck disable=SC2016
-assert_contains "$INSTALL_CMD" 'nginx-react-http.conf \"$ETC/nginx/trustforge-sites/react-http.conf\"' "SSM 安裝指令：有把 nginx-react-http.conf 佈署到 trustforge-sites/react-http.conf（bare-IP cutover 候選）"
+assert_contains "$INSTALL_CMD" 'nginx-react-http.conf \"$CONF_STAGING_DIR/react-http.conf\"' "SSM 安裝指令：有把 nginx-react-http.conf 放入交易式 staging（bare-IP cutover 候選）"
 # shellcheck disable=SC2016
-assert_contains "$INSTALL_CMD" 'nginx-legacy-tls.conf \"$ETC/nginx/trustforge-sites/legacy-tls.conf\"' "SSM 安裝指令：有把 nginx-legacy-tls.conf 佈署到 trustforge-sites/legacy-tls.conf（codex 複審 HIGH：HSTS-safe legacy 回滾候選，cutover_switch.sh 偵測到憑證存在時才會選它）"
+assert_contains "$INSTALL_CMD" 'nginx-legacy-tls.conf \"$CONF_STAGING_DIR/legacy-tls.conf\"' "SSM 安裝指令：有把 nginx-legacy-tls.conf 放入交易式 staging（HSTS-safe legacy 回滾候選）"
 # shellcheck disable=SC2016
 assert_contains "$INSTALL_CMD" 'rm -f \"$DEFAULT_CONF\"' "SSM 安裝指令：有移除 nginx 預設 conf 避免 port 80 衝突"
 # shellcheck disable=SC2016
