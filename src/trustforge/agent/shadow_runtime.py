@@ -5,6 +5,7 @@ flags and the complete durable-store release identity are configured.  It
 never returns a value that can replace the active legacy result and exposes no
 activation or promotion operation.
 """
+
 from __future__ import annotations
 
 import multiprocessing
@@ -17,13 +18,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
-from trustforge_core import KernelOutput, run_kernel
+from trustforge_core import (
+    CANDIDATE_SCHEMA_VERSION,
+    KernelOutput,
+    compose_intrinsic_candidate,
+    run_kernel,
+)
 
 from trustforge.asset_intrinsic_shadow import build_intrinsic_shadow_observation
-from trustforge.asset_intrinsic_candidate import (
-    CANDIDATE_SCHEMA_VERSION,
-    compute_candidate_shadow,
-)
+from trustforge.asset_intrinsic_candidate import build_intrinsic_candidate_facts
 
 from .kernel_mapper import to_kernel_input
 from .shadow import ShadowParityResult, compare_outputs
@@ -76,8 +79,14 @@ def _default_intrinsic_repository():
     ``intrinsic_shadow=None`` rather than failing.
     """
     configured = os.environ.get("TRUSTFORGE_ASSET_INTRINSIC_RECORDS_PATH")
-    path = Path(configured) if configured else (
-        Path(__file__).resolve().parents[3] / "data" / "asset_intrinsic_records.json"
+    path = (
+        Path(configured)
+        if configured
+        else (
+            Path(__file__).resolve().parents[3]
+            / "data"
+            / "asset_intrinsic_records.json"
+        )
     )
     try:
         if not path.exists():
@@ -204,7 +213,9 @@ def _observation_worker(
             identity, policy, candidate_contract_version = _configured_identity()
             if use_measured_candidate:
                 verify_reviewed_loaded_candidate(
-                    kernel_fn, mapper_fn, candidate_contract_version,
+                    kernel_fn,
+                    mapper_fn,
+                    candidate_contract_version,
                 )
             if store_factory is None:
                 from .shadow_evidence_store import ShadowEvidenceStore
@@ -215,22 +226,30 @@ def _observation_worker(
                 busy_timeout_ms=min(int(hard_timeout_ms), remaining_ms),
             )
         except Exception:
-            send_connection.send(ShadowRuntimeResult(
-                status="not_observed",
-                elapsed_ms=min(
-                    max(0.0, (monotonic_fn() - started) * 1000.0),
-                    hard_timeout_ms,
-                ),
-            ))
+            send_connection.send(
+                ShadowRuntimeResult(
+                    status="not_observed",
+                    elapsed_ms=min(
+                        max(0.0, (monotonic_fn() - started) * 1000.0),
+                        hard_timeout_ms,
+                    ),
+                )
+            )
             return
         if monotonic_fn() > deadline:
             return
         canonical_input = ShadowInput(
-            request_id=request_id, coin=coin, question_type=question_type,
-            pit_epoch=pit_epoch, query=query,
+            request_id=request_id,
+            coin=coin,
+            question_type=question_type,
+            pit_epoch=pit_epoch,
+            query=query,
         )
         kernel_input = mapper_fn(
-            claims, pit_epoch=pit_epoch, coin=coin, query=query,
+            claims,
+            pit_epoch=pit_epoch,
+            coin=coin,
+            query=query,
         )
         output = kernel_fn(kernel_input)
         parity = compare_outputs(
@@ -275,9 +294,8 @@ def _observation_worker(
             and isinstance(intrinsic_shadow, dict)
             and monotonic_fn() <= deadline
         ):
-            candidate = compute_candidate_shadow(
-                output, intrinsic_view, query=query,
-            )
+            facts = build_intrinsic_candidate_facts(intrinsic_view)
+            candidate = compose_intrinsic_candidate(output, facts).shadow
             intrinsic_shadow = dict(intrinsic_shadow)
             intrinsic_shadow["intrinsic_candidate"] = {
                 "schema_version": CANDIDATE_SCHEMA_VERSION,
@@ -292,19 +310,26 @@ def _observation_worker(
                 "decision_state_changed": candidate.decision_state_changed,
                 "candidate_facts_hash": candidate.facts_hash,
             }
-        observed_at = datetime.fromtimestamp(
-            observed_epoch, tz=timezone.utc,
-        ).isoformat().replace("+00:00", "Z")
+        observed_at = (
+            datetime.fromtimestamp(
+                observed_epoch,
+                tz=timezone.utc,
+            )
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         observation = ShadowObservation(
             release_identity=identity,
             canonical_input=canonical_input,
-            input_digest=input_digest({
-                "request_id": canonical_input.request_id,
-                "coin": canonical_input.coin,
-                "question_type": canonical_input.question_type,
-                "pit_epoch": canonical_input.pit_epoch,
-                "query": canonical_input.query,
-            }),
+            input_digest=input_digest(
+                {
+                    "request_id": canonical_input.request_id,
+                    "coin": canonical_input.coin,
+                    "question_type": canonical_input.question_type,
+                    "pit_epoch": canonical_input.pit_epoch,
+                    "query": canonical_input.query,
+                }
+            ),
             observed_at=observed_at,
             status="success",
             parity_passed=parity.parity_passed,
@@ -325,7 +350,8 @@ def _observation_worker(
             commit_guard=lambda: monotonic_fn() <= deadline,
         )
         operational_elapsed_ms = max(
-            0.0, (monotonic_fn() - started) * 1000.0,
+            0.0,
+            (monotonic_fn() - started) * 1000.0,
         )
         store.record_observation_completion(
             event_id,
@@ -336,16 +362,24 @@ def _observation_worker(
             return
         store.close()
         store = None
-        send_connection.send(ShadowRuntimeResult(
-            status="success", elapsed_ms=operational_elapsed_ms, kernel_output=output,
-            parity=parity, observation_event_id=event_id,
-        ))
+        send_connection.send(
+            ShadowRuntimeResult(
+                status="success",
+                elapsed_ms=operational_elapsed_ms,
+                kernel_output=output,
+                parity=parity,
+                observation_event_id=event_id,
+            )
+        )
     except Exception:
         elapsed_ms = max(0.0, (monotonic_fn() - started) * 1000.0)
         try:
-            send_connection.send(ShadowRuntimeResult(
-                status="error", elapsed_ms=min(elapsed_ms, hard_timeout_ms),
-            ))
+            send_connection.send(
+                ShadowRuntimeResult(
+                    status="error",
+                    elapsed_ms=min(elapsed_ms, hard_timeout_ms),
+                )
+            )
         except (BrokenPipeError, EOFError, OSError):
             pass
     finally:
@@ -386,7 +420,8 @@ def observe_candidate(
     with _POISON_LOCK:
         if _SHADOW_RUNTIME_POISONED:
             return ShadowRuntimeResult(
-                status="not_observed", diagnostic="runtime_poisoned_unreaped_child",
+                status="not_observed",
+                diagnostic="runtime_poisoned_unreaped_child",
             )
     if not _SINGLE_FLIGHT.acquire(blocking=False):
         return ShadowRuntimeResult(status="not_observed")
@@ -403,10 +438,24 @@ def observe_candidate(
     try:
         receive, send = context.Pipe(duplex=False)
         worker_args = (
-            send, deadline, started, _HARD_TIMEOUT_MS, claims, scored,
-            legacy_confidence, legacy_trust_raw, coin, question_type,
-            query, request_id, pit_epoch, observed_epoch, monotonic_fn,
-            kernel_fn, mapper_fn, store_factory,
+            send,
+            deadline,
+            started,
+            _HARD_TIMEOUT_MS,
+            claims,
+            scored,
+            legacy_confidence,
+            legacy_trust_raw,
+            coin,
+            question_type,
+            query,
+            request_id,
+            pit_epoch,
+            observed_epoch,
+            monotonic_fn,
+            kernel_fn,
+            mapper_fn,
+            store_factory,
             {name: os.environ.get(name) for name in _CHILD_ENV_NAMES},
             kernel_fn is run_kernel and mapper_fn is to_kernel_input,
             intrinsic_view_fn,
@@ -415,7 +464,11 @@ def observe_candidate(
         # Do not pickle the complete arguments here: valid multiprocessing
         # synchronization primitives may only be serialized during spawn.
         for spawn_callable in (
-            monotonic_fn, kernel_fn, mapper_fn, store_factory, intrinsic_view_fn,
+            monotonic_fn,
+            kernel_fn,
+            mapper_fn,
+            store_factory,
+            intrinsic_view_fn,
         ):
             if spawn_callable is not None:
                 _reject_unresolvable_spawn_callable(spawn_callable)

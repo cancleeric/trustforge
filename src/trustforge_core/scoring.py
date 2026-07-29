@@ -258,6 +258,15 @@ def corroboration_score(independent_sources: tuple[str, ...]) -> float:
     return 1.0 - math.pow(0.5, count) if count else 0.0
 
 
+def classify_decision_state(calibrated: float, independent_sources: int) -> str:
+    """Classify with the kernel's canonical confidence/source thresholds."""
+    if calibrated < 0.35 or independent_sources < 2:
+        return "abstain"
+    if calibrated < 0.5:
+        return "low_confidence"
+    return "normal"
+
+
 def _exact_json_value(value: object, *, field: str) -> None:
     if value is None or type(value) in {bool, str}:
         return
@@ -635,9 +644,7 @@ def aggregate_scored_claims(
     low_calibrated = calibrated < 0.35
     insufficient_sources = independent_sources < 2
     abstain = low_calibrated or insufficient_sources
-    decision_state = (
-        "abstain" if abstain else "low_confidence" if calibrated < 0.5 else "normal"
-    )
+    decision_state = classify_decision_state(calibrated, independent_sources)
     return KernelOutput(
         raw_confidence,
         calibrated,
