@@ -343,6 +343,7 @@ class PromotionRequest:
 REFUSAL_MISSING_CEO_SIGNATURE = "missing_or_invalid_ceo_signature"
 REFUSAL_PROMOTION_BLOCKED_BY_INTRINSIC_GATE = "promotion_blocked_by_intrinsic_gate"
 REFUSAL_ACTIVE_STOP_REASON = "active_stop_reason_present"
+REFUSAL_RECEIPT_ID_MISMATCH = "g_receipt_id_mismatch_with_monitor"
 
 
 @dataclass(frozen=True)
@@ -401,6 +402,13 @@ class PromotionAuthorizationGate:
                 **{
                     **base.__dict__,
                     "refusal": REFUSAL_MISSING_CEO_SIGNATURE,
+                }
+            )
+        if _g_receipt_id(g_receipt) != monitor.g_receipt_id:
+            return PromotionDecision(
+                **{
+                    **base.__dict__,
+                    "refusal": REFUSAL_RECEIPT_ID_MISMATCH,
                 }
             )
         if g_receipt.decision is not IntrinsicPromotionDecision.PASS:

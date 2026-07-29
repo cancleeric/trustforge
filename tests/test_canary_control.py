@@ -46,6 +46,7 @@ from trustforge.asset_intrinsic_promotion import (  # noqa: E402
     IntrinsicPromotionPolicy,
     IntrinsicPromotionReceipt,
     load_intrinsic_promotion_policy,
+    receipt_id as _g_receipt_id,
 )
 from trustforge.canary_control import (  # noqa: E402
     CANARY_CONTROL_FLAG,
@@ -65,6 +66,7 @@ from trustforge.canary_control import (  # noqa: E402
     REFUSAL_ACTIVE_STOP_REASON,
     REFUSAL_MISSING_CEO_SIGNATURE,
     REFUSAL_PROMOTION_BLOCKED_BY_INTRINSIC_GATE,
+    REFUSAL_RECEIPT_ID_MISMATCH,
     SIGNAL_COVERAGE,
     SIGNAL_FLIP,
     SIGNAL_MISSINGNESS,
@@ -542,9 +544,10 @@ class TestPromotionThreeRefusals:
         assert decision.refusal == REFUSAL_PROMOTION_BLOCKED_BY_INTRINSIC_GATE
 
     def test_refusal_active_stop_reason_with_synthetic_pass(self, env: _CanaryEnv):
+        pass_receipt = _synthetic_pass_receipt(env.g_receipt)
         monitor = CanaryStopMonitor(
             env.policy,
-            g_receipt_id=env.g_receipt_id,
+            g_receipt_id=_g_receipt_id(pass_receipt),
             g_decision=env.g_receipt.decision,
         )
         monitor.observe(_observation(calibrated_delta=0.5))
@@ -569,10 +572,44 @@ class TestPromotionThreeRefusals:
         )
         controller = CanaryController(control, scope, monitor, signers=signers, gate=gate)
         request = env.sign_promotion_request(subject="asset:btc")
-        pass_receipt = _synthetic_pass_receipt(env.g_receipt)
         decision = controller.request_promote(request, g_receipt=pass_receipt)
         assert decision.authorized is False
         assert decision.refusal == REFUSAL_ACTIVE_STOP_REASON
+
+    def test_refusal_receipt_id_mismatch_rejects_forged_pass(self, env: _CanaryEnv):
+        """harper WARN fix: a forged PASS receipt whose receipt_id does not match
+        the monitor's bound G receipt must be refused — the three-door invariant
+        is enforced in code, not by caller discipline."""
+        monitor = CanaryStopMonitor(
+            env.policy,
+            g_receipt_id=env.g_receipt_id,
+            g_decision=env.g_receipt.decision,
+        )
+        control = env.build_ledger()
+        scope = CanaryScope(
+            allowlist=frozenset({"asset:btc"}), target=CANARY_TARGET
+        )
+        signers = CanaryTransitionSigners(
+            authorization_signer=_authorization,
+            completion_signer=_completion,
+            auth_private=env.auth_private,
+            auth_key_id=env.auth_key_id,
+            complete_private=env.complete_private,
+            complete_key_id=env.complete_key_id,
+        )
+        gate = PromotionAuthorizationGate(
+            {
+                env.ceo_key_id: env.ceo_private.public_key()
+                .public_bytes(Encoding.Raw, PublicFormat.Raw)
+            }
+        )
+        controller = CanaryController(control, scope, monitor, signers=signers, gate=gate)
+        request = env.sign_promotion_request(subject="asset:btc")
+        forged_pass = _synthetic_pass_receipt(env.g_receipt)
+        assert _g_receipt_id(forged_pass) != env.g_receipt_id
+        decision = controller.request_promote(request, g_receipt=forged_pass)
+        assert decision.authorized is False
+        assert decision.refusal == REFUSAL_RECEIPT_ID_MISMATCH
 
 
 # ===========================================================================
