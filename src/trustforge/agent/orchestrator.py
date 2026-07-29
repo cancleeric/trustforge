@@ -1438,21 +1438,17 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                 _idx_to_group[mi] = gi
         # 去重：同一群組只留第一條出現的 BasisItem，evidence_idx 擴充為全組
         _seen_groups: set[int] = set()
-        _seen_source_kind: set[tuple[str, str]] = set()
-        deduped_basis: list[BasisItem] = []
+        candidates: list[tuple[BasisItem, tuple[str, str] | None]] = []
         for bi in key_basis:
             if not bi.evidence_idx:
-                deduped_basis.append(bi)
+                candidates.append((bi, None))
                 continue
             primary_idx = bi.evidence_idx[0]
             grp_id = _idx_to_group.get(primary_idx)
             if grp_id is not None and grp_id in _seen_groups:
                 continue  # 同群組已有代表，跳過
-            # 面向多樣性：前 3 條強制不同 (source, kind) 組合；第 4 條起允許重複
             ev_rep = evidence[primary_idx]
             sk_key = (_normalize_source_key(ev_rep.source), ev_rep.kind)
-            if sk_key in _seen_source_kind and len(deduped_basis) < 3:
-                continue  # 前 3 條強制跳過重複面向
             if grp_id is not None:
                 _seen_groups.add(grp_id)
                 # 擴充 evidence_idx 為全組索引
@@ -1463,9 +1459,21 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                         explanation=bi.explanation,
                         evidence_idx=list(g.member_indices),
                     )
-            _seen_source_kind.add(sk_key)
-            deduped_basis.append(bi)
-        key_basis = deduped_basis
+            candidates.append((bi, sk_key))
+
+        # 先穩定選出最多三個不同面向，再回填其餘候選。若實際只有一至
+        # 兩個面向，回填仍會保留有效項目，不會因長度永遠小於三而全數丟棄。
+        diverse: list[tuple[BasisItem, tuple[str, str] | None]] = []
+        deferred: list[tuple[BasisItem, tuple[str, str] | None]] = []
+        seen_facets: set[tuple[str, str]] = set()
+        for candidate in candidates:
+            _, facet = candidate
+            if facet is None or facet in seen_facets or len(diverse) >= 3:
+                deferred.append(candidate)
+            else:
+                seen_facets.add(facet)
+                diverse.append(candidate)
+        key_basis = [bi for bi, _ in (*diverse, *deferred)]
 
     # 使用聚合後的 facts
     facts = aggregated_facts

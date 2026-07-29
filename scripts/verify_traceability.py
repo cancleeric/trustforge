@@ -184,10 +184,8 @@ def verify_claim_id_traceability(
 
     # 建立 evidence 中所有可追溯的 claim_id 全集
     traceable_claims: set[str] = set(traceable_claim_ids or ())
-    # cross_source_signal 的 supporting_claim_ids
-    if report.cross_source_signal and report.cross_source_signal.get("supporting_claim_ids"):
-        for cid in report.cross_source_signal["supporting_claim_ids"]:
-            traceable_claims.add(cid)
+    # cross_source_signal.supporting_claim_ids 只是另一個引用位置，不能自行成為
+    # provenance 信任來源；只有呼叫端從本次 pipeline 原始 claims 提供的 ID 才可信。
     # key_basis 的 claim 也可能引用
     for basis in (report.key_basis or []):
         if hasattr(basis, "claim") and basis.claim:
