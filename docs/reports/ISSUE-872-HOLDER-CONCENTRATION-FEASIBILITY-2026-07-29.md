@@ -6,6 +6,13 @@
 - 最終結論：**need_paid_source — 免費來源 zero eligible；付費來源 potentially eligible with contract gaps**
 - 審查：待 gray (CPO) + harper (CISO) review
 
+> **2026-07-29 remediation:** Provider classification, pricing, licensing, SLA
+> and procurement conclusions in this report are superseded by
+> `ISSUE-994-HOLDER-ENTITY-RESOLUTION-VENDOR-COST-FEASIBILITY-2026-07-29.md`.
+> The authoritative decision is **NO-GO** and the dimension remains `unknown`.
+> In particular, do not use the unsupported price estimates in the older D1/D3/D4
+> working papers.
+
 ## Contents
 
 本報告整合 D1–D4 四個 deliverables 的關鍵發現。完整細節參見：

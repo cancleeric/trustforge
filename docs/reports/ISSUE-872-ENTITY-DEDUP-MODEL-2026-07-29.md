@@ -92,7 +92,7 @@ Cluster 是 technical-level grouping，不帶有 legal identity 或 beneficial o
 | **"大戶地址" = institutional investor** | 無 KYC 或 self-attestation 資料不可假定身分 | Top-100 BTC address 包含多個 exchange cold wallet，非機構投資人 |
 | **"Satoshi-era address" = Satoshi** | 多個早期礦工同時存在；Patoshi pattern 僅標記可能的早期礦工之一，且仍有學術爭議 | 2009–2010 期間有數十個活躍礦工（Lerner 2013 Patoshi pattern）；無法區分 |
 | **"Wall Street 持有大部分 BTC"** | 需要時間點一致、去重且具名的 entity map，不可從新聞標題推論 | 2024 Q1 spot ETF 持有 ~4% of circulating supply（BitcoinTreasuries.net），遠非 "大部分" |
-| **"Top-N address 持有 X% supply → 集中度高"** | Address concentration 未做 entity dedup（exchange wallet aggregation、custodian aggregation） | Top-100 BTC addresses ~15% of supply（2024），但 entity-resolved 後 top-100 entities 可能僅 ~8%（Arkham estimate） |
+| **"Top-N address 持有 X% supply → 集中度高"** | Address concentration 未做 entity dedup（exchange wallet aggregation、custodian aggregation） | Omnibus custodians、bridges 與 contracts 都會讓 address ranking 偏離 beneficial-holder ranking；沒有合格 entity evidence 就維持 unknown |
 | **"Whale address accumulating → smart money"** | Accumulation pattern 僅說明該地址在買入，不代表 entity 的投資決策品質或身分 | 單一 exchange deposit address 的累積可能反映數萬個用戶的 collective buying |
 
 ## 四、Entity → Holder Concentration
