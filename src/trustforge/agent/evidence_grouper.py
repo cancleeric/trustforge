@@ -67,8 +67,26 @@ class EvidenceGroup:
 # ---------------------------------------------------------------------------
 
 def _normalize_source(source: str) -> str:
-    """來源正規化（strip + casefold），與 orchestrator._normalize_source_key 同口徑。"""
-    return source.strip().casefold()
+    """來源正規化：沿用 repo-wide canonical alias 規則。
+
+    委託 `trustforge_core.source_identity.canonical_source()`——與
+    orchestrator._normalize_source_key / scoring._canonical_source 同口徑，
+    不只 strip+casefold，還套 alias 收斂（如 coindesk.com → coindesk）。
+    """
+    from trustforge_core.source_identity import canonical_source
+    return canonical_source(source)
+
+
+def _direction_bucket(ev: 'Evidence') -> str:
+    """Evidence 方向分桶：正方（supporting）與反方（contrarian）不可聚合。
+
+    Evidence 沒有直接的 direction 欄位，但 related_claim 標籤能區分角色：
+    - "反方／低信任訊號" → "contrarian"
+    - 其他 → "supporting"
+    """
+    if ev.related_claim == "反方／低信任訊號":
+        return "contrarian"
+    return "supporting"
 
 
 def _parse_fetched_at(fetched_at: str) -> float:
@@ -222,12 +240,12 @@ def group_evidence(
         if isinstance(manip, (int, float)) and manip > 0:
             independent.add(i)
 
-    # Step 1: 按 (normalized_source, kind) 分桶
-    buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
+    # Step 1: 按 (normalized_source, kind, direction_bucket) 分桶
+    buckets: dict[tuple[str, str, str], list[int]] = defaultdict(list)
     for i, ev in enumerate(evidence):
         if i in independent:
             continue
-        key = (_normalize_source(ev.source), ev.kind)
+        key = (_normalize_source(ev.source), ev.kind, _direction_bucket(ev))
         buckets[key].append(i)
 
     # Step 2–5: 桶內聚合
@@ -408,6 +426,7 @@ def _finalize_group(
     # 計算趨勢與值域
     time_values: list[tuple[float, float]] = []
     raw_values: list[float] = []
+    units_seen: set[str] = set()
     unit = ""
 
     for idx in member_indices:
@@ -419,18 +438,27 @@ def _finalize_group(
             if ts > 0:
                 time_values.append((ts, val))
             raw_values.append(val)
+            if u:
+                units_seen.add(u.lower())
             if not unit and u:
                 unit = u
 
-    # 按時間排序
-    time_values.sort(key=lambda x: x[0])
+    # 單位一致性檢查：不同單位時不計算數值摘要
+    unit_consistent = len(units_seen) <= 1
 
-    trend = compute_trend(time_values)
-    value_range = format_value_range(raw_values, unit) if raw_values else None
-    latest_value: str | None = None
-    if time_values:
-        last_val = time_values[-1][1]
-        latest_value = f"{last_val:,.1f} {unit}".strip() if unit else f"{last_val:,.1f}"
+    if not unit_consistent or not raw_values:
+        trend = None
+        value_range = None
+        latest_value = None
+    else:
+        # 按時間排序
+        time_values.sort(key=lambda x: x[0])
+        trend = compute_trend(time_values)
+        value_range = format_value_range(raw_values, unit) if raw_values else None
+        latest_value = None
+        if time_values:
+            last_val = time_values[-1][1]
+            latest_value = f"{last_val:,.1f} {unit}".strip() if unit else f"{last_val:,.1f}"
 
     group = EvidenceGroup(
         representative_idx=rep_idx,

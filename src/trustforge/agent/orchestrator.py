@@ -1445,11 +1445,11 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             grp_id = _idx_to_group.get(primary_idx)
             if grp_id is not None and grp_id in _seen_groups:
                 continue  # 同群組已有代表，跳過
-            # 面向多樣性：同 (source, kind) 組合不重複佔位（最多 1 條）
+            # 面向多樣性：前 3 條強制不同 (source, kind) 組合；第 4 條起允許重複
             ev_rep = evidence[primary_idx]
             sk_key = (_normalize_source_key(ev_rep.source), ev_rep.kind)
-            if sk_key in _seen_source_kind and len(deduped_basis) >= 3:
-                continue
+            if sk_key in _seen_source_kind and len(deduped_basis) < 3:
+                continue  # 前 3 條強制跳過重複面向
             if grp_id is not None:
                 _seen_groups.add(grp_id)
                 # 擴充 evidence_idx 為全組索引
