@@ -25,6 +25,7 @@ from trustforge.asset_intrinsic_shadow import (
     assess_intrinsic_shadow,
     build_intrinsic_shadow_observation,
     normalized_source_family,
+    validate_intrinsic_shadow_observation,
 )
 from trustforge.data_contracts import contract_schemas
 
@@ -429,6 +430,46 @@ def test_build_intrinsic_shadow_observation_shape_and_sanitization():
             continue
         for url in provenance["source_urls"]:
             assert "?" not in url and "#" not in url and "@" not in url
+
+
+def test_stale_output_retains_original_known_coverage_gate_semantics():
+    stale_at = AS_OF - timedelta(days=366)
+    stale_view = view(
+        dimension(
+            IntrinsicDimensionName.ISSUANCE_PREDICTABILITY,
+            1.0,
+            "a.example",
+            valid_from=stale_at,
+        ),
+        dimension(
+            IntrinsicDimensionName.CONTROL_DISPERSION,
+            0.0,
+            "b.example",
+            valid_from=stale_at,
+        ),
+        dimension(
+            IntrinsicDimensionName.SUPPLY_VERIFIABILITY,
+            1.0,
+            "a.example",
+            valid_from=stale_at,
+        ),
+    )
+    result = build_intrinsic_shadow_observation(
+        stale_view,
+        baseline_trust=0.4,
+        candidate_trust=0.4,
+        query="stale regression",
+    )
+    assert result["gate"]["passed"] is True
+    assert result["gate"]["known_count"] == 3
+    assert result["gate"]["source_family_count"] == 2
+    assert [item["status"] for item in result["dimensions"][:3]] == [
+        "stale",
+        "stale",
+        "stale",
+    ]
+    assert result["total_delta"] == 0.0
+    assert validate_intrinsic_shadow_observation(result) is result
 
 
 def test_build_intrinsic_shadow_observation_fails_closed_on_nonfinite_trust():
