@@ -194,6 +194,9 @@ class TestRetrievalAdapter:
         refs = adapter.retrieve_by_kind("episodic", run_id="run-7")
         assert len(refs) >= 1
         assert refs[0].kind == "episodic"
+        persisted = repo.find_by_run("run-7")
+        assert [entry.memory_id for entry in persisted] == [refs[0].memory_id]
+        assert persisted[0].run_id == "run-7"
 
     def test_duplicate_retrieval_is_linked_to_each_run(
         self, adapter: MemoryRetrievalAdapter, repo: MemoryRepository

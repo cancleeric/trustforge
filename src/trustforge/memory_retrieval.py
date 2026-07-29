@@ -323,6 +323,7 @@ class MemoryRetrievalAdapter:
         refs: list[MemoryRef] = []
 
         for rank, entry in enumerate(entries, start=1):
+            self._repo.record_retrieval(entry.memory_id, run_id)
             evidence_eligible = entry.evidence_eligible
             if _is_historical_conclusion(entry):
                 evidence_eligible = False
