@@ -2867,7 +2867,13 @@ class AnalysisFlow:
         return self._agos_runtime_instance
 
     def _agos_record_tool(self, package: dict, tool_id: str, args: dict, status: str) -> None:
-        """Record a tool invocation in Agent OS audit trail (fail-soft)."""
+        """Record a tool invocation in Agent OS audit trail (fail-soft).
+
+        NOTE: tool_id must be pre-registered in the tool registry before
+        AGOS is enabled. If not registered, the record is skipped gracefully
+        (fail-soft for audit — the actual tool execution gate is in
+        tool_audited_fetch, not here).
+        """
         try:
             from .agos_runtime import agos_enabled
             if not agos_enabled():
@@ -2876,11 +2882,16 @@ class AnalysisFlow:
             if not job:
                 return
             runtime = self._get_agos_runtime()
+            if runtime._tool_registry is None:
+                return
+            # Only record if tool is registered (avoid FK violation)
+            if not runtime._tool_registry.is_known(tool_id):
+                return
             inv_id = runtime.record_tool_invocation(job["job_id"], tool_id, args)
             if inv_id:
                 runtime.complete_tool_invocation(inv_id, status=status)
         except Exception:
-            pass  # fail-soft
+            pass  # fail-soft: audit failure does not block pipeline
 
     def status(self) -> dict[str, Any]:
         if self._readonly_store_missing():

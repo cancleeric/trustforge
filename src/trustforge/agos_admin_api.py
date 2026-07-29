@@ -14,7 +14,6 @@ Issue: #923 | Epic: #914
 """
 from __future__ import annotations
 
-import os
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -22,21 +21,6 @@ from urllib.parse import parse_qs, urlparse
 
 from .agos_runtime import AgosRuntime
 from .context_builder import ContextManifest, manifest_summary
-
-
-# ─── Authorization ───────────────────────────────────────────────────────────
-
-
-def check_admin_auth(headers: dict[str, str]) -> bool:
-    """Check Admin authorization via Bearer token.
-
-    Fail-closed: no token configured = no access.
-    """
-    token = os.getenv("TRUSTFORGE_ADMIN_TOKEN", "")
-    if not token:
-        return False
-    auth = headers.get("Authorization", headers.get("authorization", ""))
-    return auth == f"Bearer {token}"
 
 
 # ─── Response Envelope ───────────────────────────────────────────────────────

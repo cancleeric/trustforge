@@ -43,8 +43,14 @@ def _token_path(purpose: str) -> Path:
 
 
 def _is_pytest() -> bool:
-    """Detect if running under pytest (test harness only)."""
-    return "_pytest" in sys.modules or "pytest" in sys.modules
+    """Detect if running under pytest harness (test environment only).
+
+    Uses _pytest.config presence (only loaded when pytest is actively running,
+    not merely installed). A bare `import pytest` in production code won't
+    trigger this — the _pytest.config module is only populated during an
+    active pytest session.
+    """
+    return "_pytest.config" in sys.modules
 
 
 def verify_db_authorization(purpose: str) -> None:

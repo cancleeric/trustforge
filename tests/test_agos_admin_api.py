@@ -13,7 +13,6 @@ import pytest
 from trustforge.agos_admin_api import (
     admin_error,
     admin_response,
-    check_admin_auth,
     dispatch_admin_agos,
     handle_admin_context,
     handle_admin_memories,

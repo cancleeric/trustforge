@@ -411,15 +411,29 @@ class ToolRegistryRepository:
         status: str,
         error: str | None = None,
     ) -> None:
-        """Update an invocation's completion status."""
+        """Update an invocation's completion status.
+
+        State-machine guard: only 'pending' invocations can be completed.
+        Already-completed invocations are rejected (no overwrite).
+        """
         if status not in VALID_STATUSES:
             raise ValueError(f"invalid status: {status!r}")
 
         conn = self._connect()
+        # State-machine guard: only transition from 'pending'
+        row = conn.execute(
+            "SELECT status FROM tool_invocations WHERE invocation_id = ?",
+            (invocation_id,),
+        ).fetchone()
+        if row is None:
+            return  # Invocation not found — graceful no-op
+        if row[0] != "pending":
+            return  # Already completed — do not overwrite
+
         conn.execute(
             """UPDATE tool_invocations
                SET output_hash = ?, status = ?, error = ?, completed_at = ?
-               WHERE invocation_id = ?""",
+               WHERE invocation_id = ? AND status = 'pending'""",
             (output_hash, status, error, _now_iso(), invocation_id),
         )
         conn.commit()
