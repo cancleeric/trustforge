@@ -1,5 +1,5 @@
 // oxlint-disable react/only-export-components
-import { useHermesI18n, type HermesLocale } from '../hermes/hermesI18n'
+import { useHermesI18n, type HermesLocale, type MessageKey } from '../hermes/hermesI18n'
 
 const DIMENSION_NAMES = [
   'issuance_predictability',
@@ -18,6 +18,7 @@ const MAX_URL_LENGTH = 2048
 const MAX_URL_COUNT = 16
 
 type DimensionName = typeof DIMENSION_NAMES[number]
+type DimensionStatus = 'known' | 'unknown' | 'stale' | 'conflicted'
 
 interface IntrinsicProvenance {
   source_urls: string[]
@@ -31,7 +32,7 @@ interface IntrinsicProvenance {
 
 interface IntrinsicDimension {
   name: DimensionName
-  status: 'known' | 'unknown'
+  status: DimensionStatus
   raw: number | null
   normalized: number | null
   weight: number
@@ -41,23 +42,42 @@ interface IntrinsicDimension {
   provenance: IntrinsicProvenance | null
 }
 
+interface IntrinsicGate {
+  passed: boolean
+  known_count: number
+  required_known: number
+  source_family_count: number
+  required_source_families: number
+  reason_code: string
+}
+
+// #878: official promotion receipt.  The backend does not yet emit this struct
+// (it is not injected into the report payload); the parser validates it strictly
+// so a future wired receipt cannot silently upgrade a shadow into official.
+// Field set is the one named in the issue: receipt_id / policy_digest / decision
+// / reasons / calibration_claim.  Internal sub-schemas (e.g. calibration_claim)
+// are pending backend wiring and are only required to be present objects here.
+interface IntrinsicPromotionReceipt {
+  receipt_id: string
+  policy_digest: string
+  decision: 'pass'
+  reasons: string[]
+  calibration_claim: Record<string, unknown>
+}
+
 interface IntrinsicAssessment {
   schema_version: '1.0.0'
-  mode: 'shadow'
-  affects_official_score: false
+  mode: 'shadow' | 'official'
+  affects_official_score: boolean
   asset_id: string
   as_of: string
   total_delta: number
   total_delta_cap: number
-  gate: {
-    passed: boolean
-    known_count: number
-    required_known: number
-    source_family_count: number
-    required_source_families: number
-    reason_code: string
-  }
+  conflict_detected: boolean
+  gate: IntrinsicGate
   dimensions: IntrinsicDimension[]
+  release_capability?: Record<string, unknown>
+  promotion_receipt?: IntrinsicPromotionReceipt
 }
 
 const copy = {
@@ -74,6 +94,8 @@ const copy = {
     unavailable: 'Shadow 資料格式不相容，已停止顯示；正式信任分不受影響。',
     knownStatus: '已驗證',
     unknownStatus: '未知',
+    staleStatus: '過時',
+    conflictedStatus: '衝突',
     provenance: '證據溯源',
     source: '來源',
     revision: '版本',
@@ -94,6 +116,8 @@ const copy = {
     unavailable: 'The shadow payload is incompatible and was not displayed. The official trust score is unaffected.',
     knownStatus: 'Verified',
     unknownStatus: 'Unknown',
+    staleStatus: 'Stale',
+    conflictedStatus: 'Conflicted',
     provenance: 'Evidence provenance',
     source: 'Source',
     revision: 'Revision',
@@ -118,6 +142,25 @@ const dimensionLabels: Record<HermesLocale, Record<DimensionName, string>> = {
     governance_capture_resistance: 'Governance capture resistance',
     holder_concentration: 'Holder concentration',
   },
+}
+
+// #878: per-dimension "what this measures" copy lives in hermesI18n so the
+// framing layer is never hardcoded in the component (AC5 / framing deliverable).
+const DIMENSION_WHAT_KEYS: Record<DimensionName, MessageKey> = {
+  issuance_predictability: 'intrinsicDimIssuanceWhat',
+  control_dispersion: 'intrinsicDimControlWhat',
+  supply_verifiability: 'intrinsicDimSupplyWhat',
+  governance_capture_resistance: 'intrinsicDimGovernanceWhat',
+  holder_concentration: 'intrinsicDimHolderWhat',
+}
+
+function stateExplanationKey(status: DimensionStatus): MessageKey {
+  switch (status) {
+    case 'known': return 'intrinsicStateKnown'
+    case 'unknown': return 'intrinsicStateUnknown'
+    case 'stale': return 'intrinsicStateStale'
+    case 'conflicted': return 'intrinsicStateConflicted'
+  }
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -191,7 +234,10 @@ function parseDimension(value: unknown): IntrinsicDimension | null {
     || !exactKeys(value, ['name', 'status', 'raw', 'normalized', 'weight', 'signed_delta', 'reason_code', 'coverage', 'provenance'])
     || !DIMENSION_NAMES.includes(value.name as DimensionName)
   ) return null
-  if (value.status !== 'known' && value.status !== 'unknown') return null
+  const status = value.status as DimensionStatus
+  // Drift B fix: backend emits known/unknown/stale/conflicted; the parser must
+  // accept all four instead of collapsing the whole panel on stale/conflicted.
+  if (status !== 'known' && status !== 'unknown' && status !== 'stale' && status !== 'conflicted') return null
   if (
     value.weight !== CANONICAL_WEIGHT
     || !finite(value.signed_delta)
@@ -199,47 +245,54 @@ function parseDimension(value: unknown): IntrinsicDimension | null {
   ) return null
   if (value.raw !== null && !finite(value.raw)) return null
   if (value.normalized !== null && !finite(value.normalized)) return null
-  if (value.status === 'unknown' && (value.raw !== null || value.normalized !== null || value.signed_delta !== 0)) return null
-  if (
-    value.status === 'known'
-    && (
-      !finite(value.raw) || value.raw < 0 || value.raw > 1
-      || !finite(value.normalized) || value.normalized < 0 || value.normalized > 1
-    )
-  ) return null
   const provenance = parseProvenance(value.provenance)
   if (provenance === undefined) return null
-  if (
-    value.status === 'known'
-    && (
-      provenance === null
+
+  if (status === 'known') {
+    if (
+      !finite(value.raw) || value.raw < 0 || value.raw > 1
+      || !finite(value.normalized) || value.normalized < 0 || value.normalized > 1
+      || provenance === null
       || provenance.source_urls.length < 1
       || provenance.evidence_kind !== 'upstream_excerpt'
       || (value.reason_code !== 'eligible' && value.reason_code !== 'coverage_gate_not_met')
       || value.raw !== value.normalized
-    )
-  ) return null
-  if (
-    value.status === 'unknown'
-    && (
-      (value.reason_code === 'fact_unavailable' && provenance !== null)
-      || (value.reason_code === 'fact_unknown' && provenance === null)
-      || (provenance?.evidence_kind === 'upstream_excerpt' && provenance.source_urls.length < 1)
-      || (value.reason_code !== 'fact_unavailable' && value.reason_code !== 'fact_unknown')
-    )
-  ) return null
-  return { ...value, provenance } as unknown as IntrinsicDimension
+    ) return null
+  } else {
+    // unknown / stale / conflicted carry no numeric value and zero delta.
+    if (value.raw !== null || value.normalized !== null || value.signed_delta !== 0) return null
+    if (status === 'unknown') {
+      if (
+        (value.reason_code === 'fact_unavailable' && provenance !== null)
+        || (value.reason_code === 'fact_unknown' && provenance === null)
+        || (provenance?.evidence_kind === 'upstream_excerpt' && provenance.source_urls.length < 1)
+        || (value.reason_code !== 'fact_unavailable' && value.reason_code !== 'fact_unknown')
+      ) return null
+    } else if (status === 'stale') {
+      // Backend emits stale only from an aged known fact, always attaching a
+      // non-null provenance (_public_provenance). reason_code is fixed.
+      if (value.reason_code !== 'stale' || provenance === null) return null
+    } else {
+      // conflicted: backend always attaches non-null provenance carrying the
+      // divergent sources; reason_code is fixed.
+      if (value.reason_code !== 'fact_conflicted' || provenance === null) return null
+    }
+  }
+  return { ...value, status, provenance } as unknown as IntrinsicDimension
 }
 
-export function parseIntrinsicAssessment(value: unknown): IntrinsicAssessment | null {
-  if (
-    !object(value)
-    || !exactKeys(value, ['schema_version', 'mode', 'affects_official_score', 'asset_id', 'as_of', 'total_delta', 'total_delta_cap', 'gate', 'dimensions'])
-    || value.schema_version !== '1.0.0'
-    || value.mode !== 'shadow'
-    || value.affects_official_score !== false
-  ) return null
+const SHARED_ASSESSMENT_KEYS = [
+  'schema_version', 'mode', 'affects_official_score', 'asset_id', 'as_of',
+  'total_delta', 'total_delta_cap', 'conflict_detected', 'gate', 'dimensions',
+] as const
+
+const RECEIPT_KEYS = ['receipt_id', 'policy_digest', 'decision', 'reasons', 'calibration_claim'] as const
+
+// Validates the structural body shared by shadow and official modes: numbers,
+// gate, dimensions, the conflict_detected cross-check, and the delta math.
+function validateAssessmentBody(value: Record<string, unknown>): { dimensions: IntrinsicDimension[]; gate: IntrinsicGate } | null {
   if (!nonBlankBounded(value.asset_id, MAX_REVISION_LENGTH) || !awareTimestamp(value.as_of) || !finite(value.total_delta) || value.total_delta_cap !== CANONICAL_TOTAL_CAP) return null
+  if (typeof value.conflict_detected !== 'boolean') return null
   if (
     !object(value.gate)
     || !exactKeys(value.gate, ['passed', 'known_count', 'required_known', 'source_family_count', 'required_source_families', 'reason_code'])
@@ -248,7 +301,7 @@ export function parseIntrinsicAssessment(value: unknown): IntrinsicAssessment | 
   if (typeof gate.passed !== 'boolean' || typeof gate.reason_code !== 'string') return null
   const counts = ['known_count', 'required_known', 'source_family_count', 'required_source_families'] as const
   if (!counts.every((key) => nonNegativeInteger(gate[key]))) return null
-  const checkedGate = gate as unknown as IntrinsicAssessment['gate']
+  const checkedGate = gate as unknown as IntrinsicGate
   if (
     checkedGate.required_known !== CANONICAL_REQUIRED_KNOWN
     || checkedGate.required_source_families !== CANONICAL_REQUIRED_FAMILIES
@@ -260,6 +313,8 @@ export function parseIntrinsicAssessment(value: unknown): IntrinsicAssessment | 
   if (dimensions.some((item) => item === null)) return null
   if (new Set(dimensions.map((item) => item?.name)).size !== DIMENSION_NAMES.length) return null
   const validDimensions = dimensions as IntrinsicDimension[]
+  // conflict_detected must equal "any dimension is conflicted" (backend invariant).
+  if (value.conflict_detected !== validDimensions.some((item) => item.status === 'conflicted')) return null
   const assessmentEpoch = Date.parse(value.as_of)
   if (validDimensions.some((item) => item.provenance && (
     Date.parse(item.provenance.as_of) > assessmentEpoch
@@ -294,7 +349,39 @@ export function parseIntrinsicAssessment(value: unknown): IntrinsicAssessment | 
     Math.min(CANONICAL_TOTAL_CAP, Number(validDimensions.reduce((sum, item) => sum + item.signed_delta, 0).toFixed(8))),
   )
   if (value.total_delta !== expectedTotal) return null
-  return { ...value, dimensions } as IntrinsicAssessment
+  return { dimensions: validDimensions, gate: checkedGate }
+}
+
+export function parseIntrinsicAssessment(value: unknown): IntrinsicAssessment | null {
+  if (!object(value)) return null
+  if (value.mode === 'shadow') {
+    // Drift A fix: backend emits 10 top-level keys including conflict_detected;
+    // exactKeys discipline is kept (an extra or missing key still fails closed).
+    if (!exactKeys(value, SHARED_ASSESSMENT_KEYS)) return null
+    if (value.schema_version !== '1.0.0' || value.affects_official_score !== false) return null
+    const body = validateAssessmentBody(value)
+    if (!body) return null
+    return { ...value, mode: 'shadow', dimensions: body.dimensions, gate: body.gate } as IntrinsicAssessment
+  }
+  if (value.mode === 'official') {
+    // #878 official skeleton: accept mode 'official' only when a complete
+    // release_capability + promotion_receipt (decision 'pass') is attached.
+    // The frontend never self-declares official; it only validates a receipt.
+    if (!exactKeys(value, [...SHARED_ASSESSMENT_KEYS, 'release_capability', 'promotion_receipt'])) return null
+    if (value.schema_version !== '1.0.0' || value.affects_official_score !== true) return null
+    if (!object(value.release_capability)) return null
+    const receipt = value.promotion_receipt
+    if (!object(receipt) || !exactKeys(receipt, RECEIPT_KEYS)) return null
+    if (!nonBlankBounded(receipt.receipt_id, MAX_REVISION_LENGTH)) return null
+    if (!nonBlankBounded(receipt.policy_digest, MAX_TEXT_LENGTH)) return null
+    if (receipt.decision !== 'pass') return null
+    if (!Array.isArray(receipt.reasons) || !receipt.reasons.every((r: unknown) => nonBlankBounded(r, MAX_TEXT_LENGTH))) return null
+    if (!object(receipt.calibration_claim)) return null
+    const body = validateAssessmentBody(value)
+    if (!body) return null
+    return { ...value, mode: 'official', dimensions: body.dimensions, gate: body.gate } as IntrinsicAssessment
+  }
+  return null
 }
 
 function signed(value: number): string {
@@ -302,22 +389,45 @@ function signed(value: number): string {
   return `${value > 0 ? '+' : ''}${value.toFixed(3)}`
 }
 
+function statusLabel(status: DimensionStatus, text: Record<string, string>): string {
+  if (status === 'known') return text.knownStatus
+  if (status === 'unknown') return text.unknownStatus
+  if (status === 'stale') return text.staleStatus
+  return text.conflictedStatus
+}
+
+function statusColor(status: DimensionStatus): string {
+  if (status === 'known') return 'text-tf-good'
+  if (status === 'conflicted') return 'text-tf-warn'
+  return 'text-tf-muted'
+}
+
 export default function AssetIntrinsicShadowPanel({ value }: { value: unknown }) {
-  const { locale } = useHermesI18n()
+  const { locale, t } = useHermesI18n()
   if (value === undefined || value === null) return null
   const assessment = parseIntrinsicAssessment(value)
   const text = copy[locale]
   if (!assessment) {
     return <p role="status" className="rounded-lg border border-tf-warn bg-tf-card p-3 text-sm text-tf-text2">{text.unavailable}</p>
   }
+  // Official actual rendering is intentionally disabled (#878): the parser
+  // accepts a valid official payload, but this shadow panel must not present
+  // official score-affecting content. Returning null hides nothing the user
+  // needs today, because official is never injected into the report payload.
+  if (assessment.mode === 'official') return null
 
   return (
     <section className="hermes-clip min-w-0 overflow-hidden border border-tf-border bg-tf-card p-4" aria-labelledby={`intrinsic-shadow-${assessment.asset_id}`}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <p className="text-[11px] font-bold uppercase tracking-wide text-tf-link">{t('intrinsicEyebrow')}</p>
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
         <h3 id={`intrinsic-shadow-${assessment.asset_id}`} className="text-sm font-semibold text-tf-text">{text.title}</h3>
         <span className="rounded-full border border-tf-warn px-2 py-1 text-[11px] font-bold text-tf-warn">{text.badge}</span>
       </div>
       <p className="mt-2 text-xs leading-5 text-tf-text2">{text.description}</p>
+      <p className="mt-2 text-xs leading-5 text-tf-text2">{t('intrinsicIntro')}</p>
+      {assessment.conflict_detected && (
+        <p className="mt-2 rounded border border-tf-warn/60 bg-tf-warn/10 p-2 text-xs leading-5 text-tf-warn">{t('intrinsicConflictNote')}</p>
+      )}
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
         <div className="rounded border border-tf-border p-2"><span className="text-tf-muted">{text.known}</span><b className="mt-1 block tf-num">{assessment.gate.known_count}/{assessment.gate.required_known}</b></div>
         <div className="rounded border border-tf-border p-2"><span className="text-tf-muted">{text.families}</span><b className="mt-1 block tf-num">{assessment.gate.source_family_count}/{assessment.gate.required_source_families}</b></div>
@@ -332,10 +442,12 @@ export default function AssetIntrinsicShadowPanel({ value }: { value: unknown })
           <li key={dimension.name} className="min-w-0 rounded border border-tf-border p-3 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <b className="text-tf-text">{dimensionLabels[locale][dimension.name]}</b>
-              <span className={dimension.status === 'known' ? 'text-tf-good' : 'text-tf-muted'}>
-                {dimension.status === 'known' ? text.knownStatus : text.unknownStatus} · {signed(dimension.signed_delta)}
+              <span className={statusColor(dimension.status)}>
+                {statusLabel(dimension.status, text)} · {signed(dimension.signed_delta)}
               </span>
             </div>
+            <p className="mt-2 break-words text-tf-text2"><span className="text-tf-muted">{t('intrinsicWhatLabel')}: </span>{t(DIMENSION_WHAT_KEYS[dimension.name])}</p>
+            <p className="mt-1 break-words text-tf-text2"><span className="text-tf-muted">{t('intrinsicStateLabel')}: </span>{t(stateExplanationKey(dimension.status))}</p>
             <p className="mt-2 break-words text-tf-text2"><span className="text-tf-muted">{text.coverage}: </span>{dimension.coverage}</p>
             <details className="mt-2 min-w-0">
               <summary className="cursor-pointer text-tf-link">{text.provenance}</summary>
