@@ -759,6 +759,16 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
     )
     snapshot = decode_terminal_responses(intent, read["Responses"])
     sealed = compile_terminal(intent, "preview-store", snapshot)
+    composed = gate.append_recovery_open_action(proof, sealed)
+    assert composed["ClientRequestToken"] == sealed.client_request_token()
+    assert (
+        gate.append_recovery_open_action(proof, sealed)["ClientRequestToken"]
+        == composed["ClientRequestToken"]
+    )
+    assert all(
+        next(iter(action.values()))["TableName"] == "preview-store"
+        for action in sealed.transact_write_items_request()["TransactItems"]
+    )
 
     with pytest.raises(ValueError):
         gate.append_recovery_open_action(proof, {})  # type: ignore[arg-type]
@@ -790,6 +800,14 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
     with pytest.raises(ValueError):
         gate.append_recovery_open_action(proof, wrong_plan)
 
+    wrong_table = compile_terminal(intent, "other-store", snapshot)
+    assert all(
+        next(iter(action.values()))["TableName"] == "other-store"
+        for action in wrong_table.transact_write_items_request()["TransactItems"]
+    )
+    with pytest.raises(ValueError):
+        gate.append_recovery_open_action(proof, wrong_table)
+
     forged_handle = replace(admission.handle, reserved_tokens=1)
     forged_intent = TerminalIntent(
         forged_handle, interval, TerminalDisposition.PRE_PROVIDER_ABORT
@@ -813,3 +831,54 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
     assert replay.replay is True
     with pytest.raises(ValueError):
         gate.append_recovery_open_action(proof, replay)
+
+
+@pytest.mark.parametrize("earliest_delta", [-0.1, 0.0])
+@mock_aws
+def test_direct_external_unexpired_terminal_plan_rejected_at_composition(
+    earliest_delta,
+):
+    client = boto3.client("dynamodb", region_name="us-east-1")
+    client.create_table(
+        TableName="preview-store",
+        KeySchema=[
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    client.put_item(TableName="preview-store", Item=_open())
+    gate = DurableAdmissionGate(client, "preview-store")
+    admission = _plan()
+    binding = gate.begin(
+        admission,
+        dispatch_lower=admission.handle.created_lower,
+        dispatch_upper=admission.handle.created_upper,
+    )
+    assert binding is not None
+    client.transact_write_items(
+        **append_quarantine_action(admission, gate, binding)
+    )
+    proof = gate.prove_present(binding, admission.handle)
+    interval = TrustedUtcInterval(
+        admission.handle.lease_until + earliest_delta,
+        admission.handle.lease_until + 0.1,
+    )
+    direct = TerminalIntent(
+        admission.handle, interval, TerminalDisposition.PRE_PROVIDER_ABORT
+    )
+    read = client.transact_get_items(
+        **build_terminal_read_request(direct, "preview-store")
+    )
+    plan = compile_terminal(
+        direct,
+        "preview-store",
+        decode_terminal_responses(direct, read["Responses"]),
+    )
+
+    with pytest.raises(ValueError):
+        gate.append_recovery_open_action(proof, plan)

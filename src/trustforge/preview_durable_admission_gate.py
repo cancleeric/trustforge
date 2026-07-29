@@ -366,14 +366,20 @@ class DurableAdmissionGate:
         from trustforge.preview_terminal_reconcile import (
             CompiledTerminalPlan,
             TerminalDisposition,
+            TerminalIntent,
         )
 
         if (
             type(terminal_plan) is not CompiledTerminalPlan
             or terminal_plan.replay
+            or terminal_plan.table_name != self._table
+            or type(terminal_plan.intent) is not TerminalIntent
             or terminal_plan.intent.disposition
             is not TerminalDisposition.PRE_PROVIDER_ABORT
             or terminal_plan.intent.handle != proof.handle
+            or type(terminal_plan.intent.interval) is not TrustedUtcInterval
+            or terminal_plan.intent.interval.earliest
+            <= proof.handle.lease_until
         ):
             raise ValueError("canonical pre-provider terminal plan required")
         assert proof.binding is not None
@@ -385,14 +391,23 @@ class DurableAdmissionGate:
         ):
             raise ValueError("stale quarantine proof")
         terminal_request = terminal_plan.transact_write_items_request()
+        if "ClientRequestToken" in terminal_request:
+            raise ValueError("terminal plan supplied client token")
         actions = terminal_request.get("TransactItems")
         if type(actions) is not list or not 1 <= len(actions) < 100:
             raise ValueError("invalid terminal request")
+        for action in actions:
+            if type(action) is not dict or len(action) != 1:
+                raise ValueError("invalid terminal action")
+            body = next(iter(action.values()))
+            if type(body) is not dict or body.get("TableName") != self._table:
+                raise ValueError("cross-table terminal action")
         following = _Control(
             GateState.OPEN, current.generation, current.version + 1, None
         )
         return {
             **terminal_request,
+            "ClientRequestToken": terminal_plan.client_request_token(),
             "TransactItems": [
                 *actions,
                 {
