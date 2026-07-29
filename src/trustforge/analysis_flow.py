@@ -2568,42 +2568,42 @@ class AnalysisFlow:
         if batch_allocation:
             log._atomic_accounting_callback = record_claim_cost
         invocation_id = None
-        with _bedrock_live_attempt(
-            log, batch_allocation=batch_allocation,
-        ) as live:
-            client = BedrockClient(offline=not live)
-            package["client"] = client
-            if live:
-                invocation_id = self._agos_begin_tool(
-                    package,
-                    "bedrock-claim-extraction",
-                    {"step": 1, "doc_count": len(package["docs"])},
-                )
-            prompt_docs = (
-                _bounded_multi_angle_documents(package["docs"])
-                if batch_allocation else package["docs"]
-            )
-            if batch_allocation:
-                doc_block = "\n".join(
-                    _multi_angle_doc_line(doc) for doc in prompt_docs
-                )
-                if (
-                    len(doc_block.encode("utf-8"))
-                    > MULTI_ANGLE_DOC_BLOCK_MAX_BYTES
-                ):
-                    raise MultiAngleAuthorityError(
-                        "claim document block exceeds authority byte cap"
+        try:
+            with _bedrock_live_attempt(
+                log, batch_allocation=batch_allocation,
+            ) as live:
+                client = BedrockClient(offline=not live)
+                package["client"] = client
+                if live:
+                    invocation_id = self._agos_begin_tool(
+                        package,
+                        "bedrock-claim-extraction",
+                        {"step": 1, "doc_count": len(package["docs"])},
                     )
-            try:
+                prompt_docs = (
+                    _bounded_multi_angle_documents(package["docs"])
+                    if batch_allocation else package["docs"]
+                )
+                if batch_allocation:
+                    doc_block = "\n".join(
+                        _multi_angle_doc_line(doc) for doc in prompt_docs
+                    )
+                    if (
+                        len(doc_block.encode("utf-8"))
+                        > MULTI_ANGLE_DOC_BLOCK_MAX_BYTES
+                    ):
+                        raise MultiAngleAuthorityError(
+                            "claim document block exceeds authority byte cap"
+                        )
                 package["claims"] = client.extract_claims_with_llm(
                     prompt_docs, log=log
                 )
-            except Exception as exc:
-                self._agos_complete_tool(
-                    invocation_id, status="failed", error=str(exc)
-                )
-                raise
-            llm_active = not client.offline and bool(client.config.model_id)
+                llm_active = not client.offline and bool(client.config.model_id)
+        except Exception as exc:
+            self._agos_complete_tool(
+                invocation_id, status="failed", error=str(exc)
+            )
+            raise
         log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
         self._agos_complete_tool(
             invocation_id,

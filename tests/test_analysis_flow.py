@@ -753,6 +753,49 @@ def test_claim_extraction_goes_live_when_gate_open_and_budget_available(tmp_path
     assert budget_guard.daily_cost_usd() == pytest.approx(0.01)
 
 
+def test_claim_extraction_finalizes_audit_when_accounting_exit_fails(
+    tmp_path, monkeypatch
+):
+    """A successful provider call followed by accounting failure must not leave
+    its persisted Agent OS invocation in the pending state."""
+
+    class AccountingFailure:
+        def __enter__(self):
+            return True
+
+        def __exit__(self, exc_type, exc, traceback):
+            raise RuntimeError("durable accounting failed")
+
+    completed = []
+    monkeypatch.setattr(
+        "trustforge.analysis_flow._bedrock_live_attempt",
+        lambda *args, **kwargs: AccountingFailure(),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient
+    )
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_agos_begin_tool", lambda *args: "inv-accounting")
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="durable accounting failed"):
+        flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert completed == [
+        {
+            "invocation_id": "inv-accounting",
+            "status": "failed",
+            "error": "durable accounting failed",
+        }
+    ]
+
+
 def test_claim_extraction_forced_offline_when_daily_cap_exceeded(tmp_path, monkeypatch):
     """gate 開，但每日 cap 已達標 → 強制離線，不得繞過 budget_guard 的 cap。"""
     monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
