@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -22,10 +21,8 @@ from trustforge.agent.shadow_evidence_store import (
     ShadowEvidenceStoreError,
 )
 from trustforge.asset_intrinsic_shadow import (
-    INTRINSIC_SHADOW_OBSERVATION_VERSION,
-    REQUIRED_KNOWN_DIMENSIONS,
-    REQUIRED_SOURCE_FAMILIES,
     normalized_source_family,
+    validate_intrinsic_shadow_observation,
 )
 from trustforge.asset_intrinsic import (
     INTRINSIC_DIMENSION_NAMES,
@@ -34,9 +31,6 @@ from trustforge.asset_intrinsic import (
 
 DATASET_SCHEMA_VERSION = "trustforge.intrinsic-promotion-dataset/v1"
 _DATASET_DOMAIN = b"trustforge.intrinsic-promotion-dataset.v1\x00"
-_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
-
-
 class IntrinsicPromotionDatasetError(RuntimeError):
     """Persisted observations cannot form trustworthy promotion evidence."""
 
@@ -123,18 +117,12 @@ def _validate_intrinsic(
             "persisted observation lacks intrinsic shadow evidence"
         )
     value = dict(payload)
-    if (
-        value.get("schema_version") != INTRINSIC_SHADOW_OBSERVATION_VERSION
-        or value.get("mode") != "shadow"
-        or value.get("affects_official_score") is not False
-        or not isinstance(value.get("asset_id"), str)
-        or not value["asset_id"]
-        or not isinstance(value.get("facts_hash"), str)
-        or _DIGEST_RE.fullmatch(value["facts_hash"]) is None
-    ):
+    try:
+        validate_intrinsic_shadow_observation(value)
+    except (TypeError, ValueError) as exc:
         raise IntrinsicPromotionDatasetError(
-            "intrinsic shadow observation contract is malformed"
-        )
+            "intrinsic shadow observation reconstruction failed"
+        ) from exc
     as_of = _timestamp(value.get("as_of"), "intrinsic as_of")
     if observed_at > cutoff or pit_time > cutoff or as_of > cutoff:
         raise IntrinsicPromotionDatasetError(
@@ -144,64 +132,7 @@ def _validate_intrinsic(
         raise IntrinsicPromotionDatasetError(
             "intrinsic observation event-time ordering is invalid"
         )
-    for name in ("baseline_trust", "candidate_trust", "trust_delta", "total_delta"):
-        number = value.get(name)
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, (int, float))
-            or not math.isfinite(float(number))
-        ):
-            raise IntrinsicPromotionDatasetError(
-                f"intrinsic observation {name} is nonfinite or malformed"
-            )
-    gate = value.get("gate")
-    dimensions = value.get("dimensions")
-    known_count = (
-        sum(item.get("status") == "known" for item in dimensions)
-        if isinstance(dimensions, list)
-        and all(isinstance(item, Mapping) for item in dimensions)
-        else -1
-    )
-    if (
-        not isinstance(gate, Mapping)
-        or set(gate)
-        != {
-            "passed",
-            "known_count",
-            "required_known",
-            "source_family_count",
-            "required_source_families",
-            "reason_code",
-        }
-        or not isinstance(gate.get("passed"), bool)
-        or not isinstance(gate.get("known_count"), int)
-        or isinstance(gate.get("known_count"), bool)
-        or not 0 <= gate["known_count"] <= len(INTRINSIC_DIMENSION_NAMES)
-        or not isinstance(gate.get("source_family_count"), int)
-        or isinstance(gate.get("source_family_count"), bool)
-        or gate["source_family_count"] < 0
-        or gate.get("required_known") != REQUIRED_KNOWN_DIMENSIONS
-        or gate.get("required_source_families") != REQUIRED_SOURCE_FAMILIES
-        or gate.get("reason_code") not in {"eligible", "insufficient_coverage"}
-    ):
-        raise IntrinsicPromotionDatasetError(
-            "intrinsic observation coverage gate is malformed"
-        )
     families = _families(value)
-    expected_passed = (
-        known_count >= REQUIRED_KNOWN_DIMENSIONS
-        and len(families) >= REQUIRED_SOURCE_FAMILIES
-    )
-    if (
-        gate["known_count"] != known_count
-        or gate["source_family_count"] != len(families)
-        or gate["passed"] is not expected_passed
-        or gate["reason_code"]
-        != ("eligible" if expected_passed else "insufficient_coverage")
-    ):
-        raise IntrinsicPromotionDatasetError(
-            "intrinsic observation source-family count conflicts with provenance"
-        )
     return value, families, as_of
 
 

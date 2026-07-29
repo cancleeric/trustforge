@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from trustforge.asset_intrinsic_promotion_dataset import (
     build_promotion_evidence_dataset,
     promotion_observations,
 )
+from trustforge.asset_intrinsic_shadow import intrinsic_facts_hash
 
 
 def _identity() -> ShadowReleaseIdentity:
@@ -43,19 +45,34 @@ def _identity() -> ShadowReleaseIdentity:
 def _intrinsic(asset: str, as_of: datetime, *, conflicted: bool = False):
     dimensions = []
     for index, name in enumerate(INTRINSIC_DIMENSION_NAMES):
+        is_conflicted = conflicted and index == 0
         dimensions.append(
             {
                 "name": name,
-                "status": "conflicted" if conflicted and index == 0 else "known",
-                "value": 0.5,
+                "status": "conflicted" if is_conflicted else "known",
+                "raw": None if is_conflicted else 0.5,
+                "normalized": None if is_conflicted else 0.5,
+                "weight": 0.032,
+                "signed_delta": 0.0,
+                "reason_code": "fact_conflicted" if is_conflicted else "eligible",
+                "coverage": "fixture",
                 "provenance": {
                     "source_urls": [
                         "https://family-a.example/evidence",
                         "https://family-b.example/evidence",
-                    ]
+                    ],
+                    "source_revision": "fixture",
+                    "content_hash": f"{index + 1:064x}",
+                    "evidence_kind": (
+                        "decision_record" if is_conflicted else "upstream_excerpt"
+                    ),
+                    "source_coordinates": f"fixture:{index}",
+                    "as_of": as_of.isoformat(),
+                    "fetched_at": as_of.isoformat(),
                 },
             }
         )
+    known_count = 4 if conflicted else 5
     return {
         "schema_version": "1.0.0",
         "assessment_schema_version": "1.0.0",
@@ -67,10 +84,12 @@ def _intrinsic(asset: str, as_of: datetime, *, conflicted: bool = False):
         "candidate_trust": 0.5,
         "trust_delta": 0.0,
         "total_delta": 0.0,
-        "facts_hash": "sha256:" + "c" * 64,
+        "total_delta_cap": 0.08,
+        "facts_hash": intrinsic_facts_hash(dimensions),
+        "query_hash": "sha256:" + "d" * 64,
         "gate": {
             "passed": True,
-            "known_count": 5,
+            "known_count": known_count,
             "required_known": 3,
             "source_family_count": 2,
             "required_source_families": 2,
@@ -197,7 +216,11 @@ def test_conflicting_semantic_retry_fails_closed(tmp_path):
     original = _observation("BTC", base, request="conflict")
     changed = replace(
         original,
-        intrinsic_shadow={**original.intrinsic_shadow, "candidate_trust": 0.6},
+        intrinsic_shadow={
+            **original.intrinsic_shadow,
+            "candidate_trust": 0.6,
+            "trust_delta": 0.1,
+        },
     )
     store = _store(
         tmp_path / "private" / "shadow.sqlite3", [original, changed]
@@ -249,16 +272,65 @@ def test_completion_not_durable_at_cutoff_is_not_pit_visible():
         _build(Store())
 
 
-def test_malformed_gate_fails_closed(tmp_path):
+@pytest.mark.parametrize(
+    "case",
+    [
+        "facts_hash",
+        "trust_delta",
+        "total_delta",
+        "total_delta_cap",
+        "dimension_value",
+        "dimension_weight",
+        "dimension_delta",
+        "dimension_reason",
+        "dimension_order",
+        "provenance_hash",
+        "assessment_schema",
+        "gate_count",
+        "gate_pass",
+    ],
+)
+def test_intrinsic_reconstruction_inconsistency_fails_closed(tmp_path, case):
     base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
-    original = _observation("BTC", base, request="bad-gate")
-    bad_gate = {**original.intrinsic_shadow["gate"], "passed": "false"}
+    original = _observation("BTC", base, request=f"bad-{case}")
+    intrinsic = copy.deepcopy(original.intrinsic_shadow)
+    if case == "facts_hash":
+        intrinsic["facts_hash"] = "sha256:" + "f" * 64
+    elif case == "trust_delta":
+        intrinsic["trust_delta"] = 0.01
+    elif case == "total_delta":
+        intrinsic["total_delta"] = 0.01
+    elif case == "total_delta_cap":
+        intrinsic["total_delta_cap"] = 0.09
+    elif case == "dimension_value":
+        intrinsic["dimensions"][0]["normalized"] = 0.6
+    elif case == "dimension_weight":
+        intrinsic["dimensions"][0]["weight"] = 0.031
+    elif case == "dimension_delta":
+        intrinsic["dimensions"][0]["signed_delta"] = 0.01
+    elif case == "dimension_reason":
+        intrinsic["dimensions"][0]["reason_code"] = "fact_unknown"
+    elif case == "dimension_order":
+        intrinsic["dimensions"][0], intrinsic["dimensions"][1] = (
+            intrinsic["dimensions"][1],
+            intrinsic["dimensions"][0],
+        )
+        intrinsic["facts_hash"] = intrinsic_facts_hash(intrinsic["dimensions"])
+    elif case == "provenance_hash":
+        intrinsic["dimensions"][0]["provenance"]["content_hash"] = "not-a-digest"
+        intrinsic["facts_hash"] = intrinsic_facts_hash(intrinsic["dimensions"])
+    elif case == "assessment_schema":
+        intrinsic["assessment_schema_version"] = "9.9.9"
+    elif case == "gate_count":
+        intrinsic["gate"]["known_count"] = 4
+    elif case == "gate_pass":
+        intrinsic["gate"]["passed"] = False
     malformed = replace(
         original,
-        intrinsic_shadow={**original.intrinsic_shadow, "gate": bad_gate},
+        intrinsic_shadow=intrinsic,
     )
     store = _store(tmp_path / "private" / "shadow.sqlite3", [malformed])
-    with pytest.raises(IntrinsicPromotionDatasetError, match="coverage gate"):
+    with pytest.raises(IntrinsicPromotionDatasetError, match="reconstruction"):
         _build(store)
 
 

@@ -28,6 +28,7 @@ DIMENSION_WEIGHT = 0.032
 TOTAL_DELTA_CAP = 0.08
 REQUIRED_KNOWN_DIMENSIONS = 3
 REQUIRED_SOURCE_FAMILIES = 2
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 _FORBIDDEN_INFERENCE_PATTERNS: list[tuple[str, str]] = [
@@ -342,6 +343,257 @@ def _finite_trust(value: float, name: str) -> float:
     return result
 
 
+def intrinsic_facts_hash(dimensions: list[dict]) -> str:
+    """Return the producer-canonical digest for sanitized dimension facts."""
+    facts_material = []
+    for dimension in dimensions:
+        provenance = dimension.get("provenance")
+        facts_material.append(
+            {
+                "name": dimension.get("name"),
+                "status": dimension.get("status"),
+                "raw": dimension.get("raw"),
+                "content_hash": (
+                    provenance.get("content_hash")
+                    if isinstance(provenance, dict)
+                    else None
+                ),
+            }
+        )
+    return "sha256:" + hashlib.sha256(
+        _FACTS_DOMAIN + json.dumps(facts_material, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def validate_intrinsic_shadow_observation(payload: dict) -> dict:
+    """Validate and reconstruct every producer-derived intrinsic field.
+
+    Persisted shadow evidence is untrusted at promotion time.  This validator
+    mirrors :func:`build_intrinsic_shadow_observation` and rejects values that
+    cannot be reconstructed from the canonical dimensions.
+    """
+    expected_keys = {
+        "schema_version",
+        "assessment_schema_version",
+        "mode",
+        "affects_official_score",
+        "asset_id",
+        "as_of",
+        "baseline_trust",
+        "candidate_trust",
+        "trust_delta",
+        "total_delta",
+        "total_delta_cap",
+        "facts_hash",
+        "query_hash",
+        "gate",
+        "dimensions",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError("intrinsic shadow observation fields are malformed")
+    if (
+        payload["schema_version"] != INTRINSIC_SHADOW_OBSERVATION_VERSION
+        or payload["assessment_schema_version"] != ASSESSMENT_SCHEMA_VERSION
+        or payload["mode"] != "shadow"
+        or payload["affects_official_score"] is not False
+        or not isinstance(payload["asset_id"], str)
+        or not payload["asset_id"]
+        or not isinstance(payload["as_of"], str)
+        or not payload["as_of"]
+        or not isinstance(payload["query_hash"], str)
+        or _DIGEST_RE.fullmatch(payload["query_hash"]) is None
+    ):
+        raise ValueError("intrinsic shadow observation contract is malformed")
+
+    baseline = _finite_trust(payload["baseline_trust"], "baseline_trust")
+    candidate = _finite_trust(payload["candidate_trust"], "candidate_trust")
+    trust_delta = _finite_trust(payload["trust_delta"], "trust_delta")
+    if trust_delta != round(candidate - baseline, 8):
+        raise ValueError("intrinsic trust_delta conflicts with candidate-baseline")
+
+    gate = payload["gate"]
+    gate_keys = {
+        "passed",
+        "known_count",
+        "required_known",
+        "source_family_count",
+        "required_source_families",
+        "reason_code",
+    }
+    if (
+        not isinstance(gate, dict)
+        or set(gate) != gate_keys
+        or not isinstance(gate["passed"], bool)
+        or isinstance(gate["known_count"], bool)
+        or not isinstance(gate["known_count"], int)
+        or isinstance(gate["source_family_count"], bool)
+        or not isinstance(gate["source_family_count"], int)
+        or gate["required_known"] != REQUIRED_KNOWN_DIMENSIONS
+        or gate["required_source_families"] != REQUIRED_SOURCE_FAMILIES
+    ):
+        raise ValueError("intrinsic coverage gate is malformed")
+
+    dimensions = payload["dimensions"]
+    if not isinstance(dimensions, list) or len(dimensions) != len(
+        INTRINSIC_DIMENSION_NAMES
+    ):
+        raise ValueError("intrinsic dimensions are malformed")
+    names: set[str] = set()
+    known_count = 0
+    families: set[str] = set()
+    dimension_keys = {
+        "name",
+        "status",
+        "raw",
+        "normalized",
+        "weight",
+        "signed_delta",
+        "reason_code",
+        "coverage",
+        "provenance",
+    }
+    provenance_keys = {
+        "source_urls",
+        "source_revision",
+        "content_hash",
+        "evidence_kind",
+        "source_coordinates",
+        "as_of",
+        "fetched_at",
+    }
+    for dimension in dimensions:
+        if not isinstance(dimension, dict) or set(dimension) != dimension_keys:
+            raise ValueError("intrinsic dimension fields are malformed")
+        name = dimension["name"]
+        status = dimension["status"]
+        if (
+            name not in INTRINSIC_DIMENSION_NAMES
+            or name in names
+            or status not in {"known", "unknown", "stale", "conflicted"}
+            or isinstance(dimension["weight"], bool)
+            or dimension["weight"] != DIMENSION_WEIGHT
+            or isinstance(dimension["signed_delta"], bool)
+            or not isinstance(dimension["signed_delta"], (int, float))
+            or not math.isfinite(float(dimension["signed_delta"]))
+            or not isinstance(dimension["coverage"], str)
+        ):
+            raise ValueError("intrinsic dimension contract is malformed")
+        names.add(name)
+        provenance = dimension["provenance"]
+        if provenance is not None and not isinstance(provenance, dict):
+            raise ValueError("intrinsic dimension provenance is malformed")
+        if provenance is not None:
+            urls = provenance.get("source_urls")
+            if (
+                set(provenance) != provenance_keys
+                or not isinstance(urls, list)
+                or any(
+                    not isinstance(url, str)
+                    or not url
+                    or _sanitized_url(url) != url
+                    for url in urls
+                )
+                or not isinstance(provenance["source_revision"], str)
+                or not provenance["source_revision"]
+                or not isinstance(provenance["content_hash"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", provenance["content_hash"]) is None
+                or provenance["evidence_kind"]
+                not in {"upstream_excerpt", "decision_record"}
+                or not isinstance(provenance["source_coordinates"], str)
+                or not provenance["source_coordinates"]
+                or not isinstance(provenance["as_of"], str)
+                or not provenance["as_of"]
+                or not isinstance(provenance["fetched_at"], str)
+                or not provenance["fetched_at"]
+            ):
+                raise ValueError("intrinsic dimension provenance is malformed")
+        if status == "known":
+            raw, normalized = dimension["raw"], dimension["normalized"]
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, (int, float))
+                or isinstance(normalized, bool)
+                or not isinstance(normalized, (int, float))
+                or not math.isfinite(float(raw))
+                or not math.isfinite(float(normalized))
+                or not 0.0 <= float(raw) <= 1.0
+                or float(raw) != float(normalized)
+                or provenance is None
+                or provenance["evidence_kind"] != "upstream_excerpt"
+            ):
+                raise ValueError("known intrinsic dimension value is malformed")
+            urls = provenance.get("source_urls")
+            if not isinstance(urls, list) or not urls:
+                raise ValueError("known intrinsic provenance is malformed")
+            families.update(normalized_source_family(url) for url in urls)
+            known_count += 1
+            expected_reason = "eligible" if gate["passed"] else "coverage_gate_not_met"
+            expected_delta = (
+                round((float(normalized) - 0.5) * DIMENSION_WEIGHT, 8)
+                if gate["passed"]
+                else 0.0
+            )
+            if (
+                dimension["reason_code"] != expected_reason
+                or float(dimension["signed_delta"]) != expected_delta
+            ):
+                raise ValueError("known intrinsic dimension delta is malformed")
+        else:
+            expected_reason = {
+                "unknown": {"fact_unknown", "fact_unavailable"},
+                "stale": {"stale"},
+                "conflicted": {"fact_conflicted"},
+            }[status]
+            if (
+                dimension["raw"] is not None
+                or dimension["normalized"] is not None
+                or float(dimension["signed_delta"]) != 0.0
+                or dimension["reason_code"] not in expected_reason
+                or (status in {"stale", "conflicted"} and provenance is None)
+                or (
+                    status == "unknown"
+                    and (
+                        (provenance is None)
+                        != (dimension["reason_code"] == "fact_unavailable")
+                    )
+                )
+                or (
+                    status == "stale"
+                    and provenance is not None
+                    and provenance["evidence_kind"] != "upstream_excerpt"
+                )
+            ):
+                raise ValueError("non-known intrinsic dimension is malformed")
+    if names != set(INTRINSIC_DIMENSION_NAMES) or [
+        item["name"] for item in dimensions
+    ] != list(INTRINSIC_DIMENSION_NAMES):
+        raise ValueError("intrinsic dimension set is malformed")
+
+    expected_passed = (
+        known_count >= REQUIRED_KNOWN_DIMENSIONS
+        and len(families) >= REQUIRED_SOURCE_FAMILIES
+    )
+    if (
+        gate["known_count"] != known_count
+        or gate["source_family_count"] != len(families)
+        or gate["passed"] is not expected_passed
+        or gate["reason_code"]
+        != ("eligible" if expected_passed else "insufficient_coverage")
+    ):
+        raise ValueError("intrinsic coverage gate conflicts with dimensions")
+
+    total_delta = _finite_trust(payload["total_delta"], "total_delta")
+    if payload["total_delta_cap"] != TOTAL_DELTA_CAP:
+        raise ValueError("intrinsic total_delta_cap is malformed")
+    expected_total = round(sum(float(item["signed_delta"]) for item in dimensions), 8)
+    expected_total = max(-TOTAL_DELTA_CAP, min(TOTAL_DELTA_CAP, expected_total))
+    if total_delta != expected_total:
+        raise ValueError("intrinsic total_delta conflicts with dimension deltas")
+    if payload["facts_hash"] != intrinsic_facts_hash(dimensions):
+        raise ValueError("intrinsic facts_hash conflicts with canonical facts")
+    return payload
+
+
 def build_intrinsic_shadow_observation(
     view: AssetIntrinsicView,
     *,
@@ -363,7 +615,6 @@ def build_intrinsic_shadow_observation(
     assessment = assess_intrinsic_shadow(view)
 
     sanitized_dimensions: list[dict] = []
-    facts_material: list[dict] = []
     for dimension in assessment["dimensions"]:
         dimension_copy = dict(dimension)
         provenance = dimension_copy.get("provenance")
@@ -381,20 +632,9 @@ def build_intrinsic_shadow_observation(
         else:
             sanitized_provenance = None
         sanitized_dimensions.append(dimension_copy)
-        facts_material.append(
-            {
-                "name": dimension_copy.get("name"),
-                "status": dimension_copy.get("status"),
-                "raw": dimension_copy.get("raw"),
-                "content_hash": (sanitized_provenance or {}).get("content_hash"),
-            }
-        )
+    facts_hash = intrinsic_facts_hash(sanitized_dimensions)
 
-    facts_hash = "sha256:" + hashlib.sha256(
-        _FACTS_DOMAIN + json.dumps(facts_material, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-    return {
+    result = {
         "schema_version": INTRINSIC_SHADOW_OBSERVATION_VERSION,
         "assessment_schema_version": assessment["schema_version"],
         "mode": "shadow",
@@ -411,3 +651,5 @@ def build_intrinsic_shadow_observation(
         "gate": assessment["gate"],
         "dimensions": sanitized_dimensions,
     }
+    validate_intrinsic_shadow_observation(result)
+    return result
