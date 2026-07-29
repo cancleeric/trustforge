@@ -132,6 +132,49 @@ def _number(item, field):
     return int(item[field]["N"])
 
 
+class _CountingClient:
+    def __init__(self, client):
+        self.client = client
+        self.reads = 0
+        self.writes = 0
+
+    def transact_get_items(self, **kwargs):
+        self.reads += 1
+        return self.client.transact_get_items(**kwargs)
+
+    def transact_write_items(self, **kwargs):
+        self.writes += 1
+        return self.client.transact_write_items(**kwargs)
+
+
+@pytest.mark.parametrize("half_open", [False, True])
+@pytest.mark.parametrize("disposition", list(TerminalDisposition))
+def test_terminal_interval_must_be_provably_after_admission(
+    half_open, disposition
+):
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        if half_open:
+            _seed_open_circuit(client)
+        handle = _admit(client, _request())
+        known = disposition in {
+            TerminalDisposition.KNOWN_SUCCESS,
+            TerminalDisposition.KNOWN_FAILURE,
+        }
+
+        with pytest.raises(ValueError, match="invalid terminal intent"):
+            TerminalIntent(
+                handle,
+                TrustedUtcInterval(
+                    handle.created_upper - 0.1, handle.created_upper
+                ),
+                disposition,
+                actual_tokens=0 if known else None,
+                actual_micro_usd=0 if known else None,
+            )
+
+
 @pytest.mark.parametrize("previous", [None, PREVIOUS])
 def test_pre_provider_abort_refunds_requests_usage_and_all_concurrency(previous):
     with mock_aws():
@@ -510,6 +553,136 @@ def test_strict_decoder_rejects_missing_reordered_and_extra_sensitive_field():
         responses[0]["Item"]["raw_identity"] = {"S": "secret"}
         with pytest.raises(ValueError):
             decode_terminal_responses(intent, responses)
+
+
+def test_reservation_ttl_must_match_handle_canonical_retention():
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        handle = _admit(client, _request())
+        key = reservation_key(1, handle.expiry_shard, handle.reservation_id)
+        item = _native(client, key)
+        item["ttl"] = {"N": str(handle.created_upper + 7 * 86_400 + 1)}
+        client.put_item(TableName="preview-store", Item=item)
+        counted = _CountingClient(client)
+        intent = TerminalIntent(
+            handle,
+            TrustedUtcInterval(handle.created_upper, handle.created_upper + 1),
+            TerminalDisposition.UNCERTAIN,
+        )
+
+        result = PreviewTerminalReconciler(
+            counted, "preview-store"
+        ).reconcile(intent)
+
+        assert result.outcome is TerminalOutcome.UNAVAILABLE
+        assert counted.writes == 0
+
+
+@pytest.mark.parametrize("disposition", list(TerminalDisposition))
+@pytest.mark.parametrize(
+    "kind,ttl_value",
+    [
+        ("preview_identity_minute", 1),
+        ("preview_global_token_day", 253_402_300_799),
+        ("preview_global_usd_minute", 1_700_000_060 + 7 * 86_400),
+        ("preview_identity_concurrency", 1),
+        ("preview_global_concurrency", 253_402_300_799),
+    ],
+)
+def test_reserved_counter_ttl_tamper_is_unavailable_without_write(
+    disposition, kind, ttl_value
+):
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        request = _request()
+        handle = _admit(client, request)
+        target = next(
+            spec for spec in build_counter_specs(request) if spec.kind == kind
+        )
+        item = _native(client, target.key)
+        item["ttl"] = {"N": str(ttl_value)}
+        client.put_item(TableName="preview-store", Item=item)
+        known = disposition in {
+            TerminalDisposition.KNOWN_SUCCESS,
+            TerminalDisposition.KNOWN_FAILURE,
+        }
+        intent = TerminalIntent(
+            handle,
+            TrustedUtcInterval(handle.created_upper, handle.created_upper + 1),
+            disposition,
+            actual_tokens=handle.reserved_tokens if known else None,
+            actual_micro_usd=handle.reserved_micro_usd if known else None,
+        )
+        counted = _CountingClient(client)
+
+        result = PreviewTerminalReconciler(
+            counted, "preview-store"
+        ).reconcile(intent)
+
+        assert result.outcome is TerminalOutcome.UNAVAILABLE
+        assert counted.writes == 0
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    [TerminalDisposition.KNOWN_FAILURE, TerminalDisposition.UNCERTAIN],
+)
+def test_circuit_time_regression_is_unavailable_without_write(disposition):
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        handle = _admit(client, _request())
+        key = circuit_key(1, POLICY)
+        item = _native(client, key)
+        item["version"] = {"N": "1"}
+        item["failures"] = {"L": [{"N": "1700000010"}]}
+        client.put_item(TableName="preview-store", Item=item)
+        known = disposition is TerminalDisposition.KNOWN_FAILURE
+        intent = TerminalIntent(
+            handle,
+            TrustedUtcInterval(handle.created_upper, handle.created_upper + 1),
+            disposition,
+            actual_tokens=0 if known else None,
+            actual_micro_usd=0 if known else None,
+        )
+        counted = _CountingClient(client)
+
+        result = PreviewTerminalReconciler(
+            counted, "preview-store"
+        ).reconcile(intent)
+
+        assert result.outcome is TerminalOutcome.UNAVAILABLE
+        assert counted.writes == 0
+
+
+def test_exact_replay_accepts_legitimate_later_rolling_counter_ttl():
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        request = _request()
+        handle = _admit(client, request)
+        intent = TerminalIntent(
+            handle,
+            TrustedUtcInterval(handle.created_upper, handle.created_upper + 1),
+            TerminalDisposition.KNOWN_SUCCESS,
+            actual_tokens=20,
+            actual_micro_usd=40,
+        )
+        reconciler = PreviewTerminalReconciler(client, "preview-store")
+        assert reconciler.reconcile(intent).outcome is TerminalOutcome.RECONCILED
+        for spec in build_counter_specs(request):
+            if spec.kind.endswith("concurrency"):
+                item = _native(client, spec.key)
+                item["version"] = {"N": str(_number(item, "version") + 1)}
+                item["value"] = {"N": "1"}
+                item["ttl"] = {"N": str(_number(item, "ttl") + 5)}
+                client.put_item(TableName="preview-store", Item=item)
+
+        replay = reconciler.reconcile(intent)
+
+        assert replay == type(replay)(TerminalOutcome.RECONCILED, replay=True)
 
 
 def test_concurrent_exact_reconcile_converges_without_double_release():

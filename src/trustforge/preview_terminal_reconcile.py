@@ -8,6 +8,7 @@ and executes that transaction once.
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
+from datetime import UTC, datetime
 from enum import StrEnum
 import hashlib
 import math
@@ -79,6 +80,9 @@ class TerminalIntent:
         if (
             type(self.handle) is not AdmissionHandle
             or type(self.disposition) is not TerminalDisposition
+            # The whole terminal clock interval must be provably after the
+            # admission interval's conservative upper whole-second bound.
+            or self.interval.earliest < self.handle.created_upper
             or known
             != (
                 type(self.actual_tokens) is int
@@ -127,6 +131,9 @@ class _Counter:
     version: int
     value: int
     ttl: int
+    expected_ttl: int
+    rolling_ttl: bool
+    terminal_replay: bool
 
     def __post_init__(self) -> None:
         copied = dict(self.key)
@@ -140,9 +147,21 @@ class _Counter:
             or type(self.version) is not int
             or type(self.value) is not int
             or type(self.ttl) is not int
+            or type(self.expected_ttl) is not int
+            or type(self.rolling_ttl) is not bool
+            or type(self.terminal_replay) is not bool
             or not 0 <= self.decrement <= self.value <= self.cap
             or not 0 <= self.version < MAX_DDB_INTEGER
             or not 1 <= self.ttl <= MAX_EPOCH_SECOND
+            or not 1 <= self.expected_ttl <= MAX_EPOCH_SECOND
+            or (
+                self.ttl != self.expected_ttl
+                and not (
+                    self.terminal_replay
+                    and self.rolling_ttl
+                    and self.ttl > self.expected_ttl
+                )
+            )
         ):
             raise ValueError("malformed terminal counter")
         object.__setattr__(self, "key", MappingProxyType(copied))
@@ -302,7 +321,7 @@ def decode_terminal_responses(
     reservation = _decode_ddb_map(reservation_response["Item"])
     replay = _decode_reservation(intent, reservation)
     counters: list[_Counter] = []
-    for response, (key, kind, cap, decrement) in zip(
+    for response, (key, kind, cap, decrement, expected_ttl, rolling_ttl) in zip(
         responses[1:-1], layout, strict=True
     ):
         if (
@@ -330,6 +349,9 @@ def decode_terminal_responses(
                 _integer(item["version"], 0, MAX_DDB_INTEGER - 1),
                 _integer(item["value"], 0, cap),
                 _integer(item["ttl"], 1, MAX_EPOCH_SECOND),
+                expected_ttl,
+                rolling_ttl,
+                replay,
             )
         )
     circuit_response = responses[-1]
@@ -409,7 +431,7 @@ def compile_terminal(
 
 def _counter_layout(
     intent: TerminalIntent,
-) -> tuple[tuple[dict[str, str], str, int, int], ...]:
+) -> tuple[tuple[dict[str, str], str, int, int, int, bool], ...]:
     handle = intent.handle
     abort = intent.disposition is TerminalDisposition.PRE_PROVIDER_ABORT
     known = intent.disposition in {
@@ -430,7 +452,14 @@ def _counter_layout(
         if known
         else 0
     )
-    rows: list[tuple[dict[str, str], str, int, int]] = []
+    minute_ttl = handle.epoch_minute * 60 + RETENTION_SECONDS
+    day_ttl = int(
+        datetime.strptime(handle.utc_day, "%Y%m%d")
+        .replace(tzinfo=UTC)
+        .timestamp()
+    ) + RETENTION_SECONDS
+    concurrency_ttl = handle.created_upper + RETENTION_SECONDS
+    rows: list[tuple[dict[str, str], str, int, int, int, bool]] = []
     for digest in (handle.identity_digest, handle.previous_identity_digest):
         if digest is None:
             continue
@@ -441,18 +470,24 @@ def _counter_layout(
                     "preview_identity_minute",
                     IDENTITY_MINUTE_CAP,
                     1 if abort else 0,
+                    minute_ttl,
+                    False,
                 ),
                 (
                     identity_day_key(handle.key_version, digest, handle.utc_day),
                     "preview_identity_day",
                     IDENTITY_DAY_CAP,
                     1 if abort else 0,
+                    day_ttl,
+                    False,
                 ),
                 (
                     identity_concurrency_key(handle.key_version, digest),
                     "preview_identity_concurrency",
                     1,
                     1,
+                    concurrency_ttl,
+                    True,
                 ),
             )
         )
@@ -463,30 +498,40 @@ def _counter_layout(
                 "preview_global_concurrency",
                 4,
                 1,
+                concurrency_ttl,
+                True,
             ),
             (
                 global_token_minute_key(handle.key_version, handle.epoch_minute),
                 "preview_global_token_minute",
                 MAX_MINUTE_TOKENS,
                 token_refund,
+                minute_ttl,
+                False,
             ),
             (
                 global_token_day_key(handle.key_version, handle.utc_day),
                 "preview_global_token_day",
                 MAX_DAY_TOKENS,
                 token_refund,
+                day_ttl,
+                False,
             ),
             (
                 global_usd_minute_key(handle.key_version, handle.epoch_minute),
                 "preview_global_usd_minute",
                 MAX_MINUTE_MICRO_USD,
                 usd_refund,
+                minute_ttl,
+                False,
             ),
             (
                 global_usd_day_key(handle.key_version, handle.utc_day),
                 "preview_global_usd_day",
                 MAX_DAY_MICRO_USD,
                 usd_refund,
+                day_ttl,
+                False,
             ),
         )
     )
