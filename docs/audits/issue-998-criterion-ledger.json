@@ -253,5 +253,357 @@
         {"criterion_id":"K-5","acceptance_criterion":"Real two-release ingress proves B success/failure and 100% A recovery; synthetic artifacts never satisfy release evidence.","evidence_class":"EXTERNAL","evidence_uri_or_command":"PR #984 explicitly reports hermetic/synthetic behavior and G=BLOCK; current issue #879 requires real two-release ingress.","evidence_commit":"ff8db7bb521c89e32da5725b7aea82fd66ce509e","observed_at":"2026-07-30","result":"HISTORICAL_GAP","review_route":"gray+Harper+Eye-if-UI+/codex-review","finding_or_blocker":"Historical PR cannot satisfy real release criterion; #879 remains open.","remediation_issue":998}
       ]
     }
-  ]
+  ],
+  "phase2_programmatic_replay": {
+    "baseline_commit": "e1bbd6708f81437148b24b18c4035c1be8f0b8bc",
+    "baseline_tree_digest": "32cc83184d855f54f41202b413942fbadc1ea76b",
+    "executed_at": "2026-07-30",
+    "scope": "54 PROGRAMMATIC rows only; EXTERNAL rows not evaluated",
+    "summary": {
+      "programmatic_rows": 54,
+      "pass": 50,
+      "fail": 4,
+      "block": 0,
+      "external_rows_not_evaluated": 16,
+      "focused_backend": "355 passed",
+      "focused_frontend": "17 passed",
+      "full_backend_parallel": "6093 passed, 13 skipped",
+      "full_backend_serial": "14 passed, 1 skipped, 6105 deselected",
+      "full_frontend": "588 passed",
+      "coverage_percent": 84,
+      "competition_qa": "24/24 passed",
+      "pre_push": "PASS"
+    },
+    "commands": [
+      {
+        "id": "F0",
+        "command": "PYTHONPATH=src pytest -q <15 focused backend files>",
+        "exit": 2,
+        "result": "COLLECTION_FAILED",
+        "note": "System Python lacked jsonschema and cryptography. This run proves nothing and is retained as failed setup evidence."
+      },
+      {
+        "id": "F1",
+        "command": "PYTHONPATH=src /Users/apple/HurricaneSoft/trustforge/.venv/bin/python -m pytest -q tests/test_asset_intrinsic.py tests/test_asset_intrinsic_metamorphic.py tests/test_asset_intrinsic_forbidden_inference.py tests/test_asset_intrinsic_migration.py tests/test_asset_intrinsic_shadow.py tests/test_shadow_runtime.py tests/test_shadow_dashboard.py tests/test_analyze_intrinsic_shadow_api.py tests/test_asset_intrinsic_benchmark.py tests/test_asset_intrinsic_promotion.py tests/test_asset_intrinsic_promotion_receipt.py tests/test_asset_intrinsic_promotion_dataset.py tests/test_asset_intrinsic_candidate.py tests/test_rollback_drill.py tests/test_canary_control.py",
+        "exit": 0,
+        "result": "355 passed"
+      },
+      {
+        "id": "F2",
+        "command": "npm --prefix frontend test -- --run src/components/AssetIntrinsicShadowPanel.test.tsx src/components/AnalysisReportView.intrinsic.test.tsx --reporter=verbose",
+        "exit": 0,
+        "result": "2 files, 17 tests passed"
+      },
+      {
+        "id": "G1",
+        "command": "TRUSTFORGE_NO_CD=1 TRUSTFORGE_PYTEST_WORKERS=4 .githooks/pre-push",
+        "exit": 0,
+        "result": "PASS: backend parallel 6093 passed/13 skipped; serial 14 passed/1 skipped; coverage 84%; data/YAML/stub/QA green; frontend 588 passed; lint/build/diff-check green",
+        "skip_policy": "No skipped test is used as proof of a real topology, release, or external-observation criterion."
+      }
+    ],
+    "artifact_digests": [
+      {"path":"docs/methodology/ASSET-INTRINSIC-METHODOLOGY.md","sha256":"e23f409bc64210b5a620b859548cce05a97ac50f94c82c6cca5548e3db1c3307"},
+      {"path":"docs/reports/ISSUE-872-HOLDER-CONCENTRATION-FEASIBILITY-2026-07-29.md","sha256":"51a6a9cbfe28ccf0637f3bd603f1bd8ed6d8338c20ab6a63742f3faa3b774f7a"},
+      {"path":"data/asset_intrinsic_evidence/pep/asset:eth/manifest.json","sha256":"1450239f10089870d051462b01e448acf1ca7b0fb9f49848a51594e89699a6c2"},
+      {"path":"data/asset_intrinsic_benchmark/manifest.json","sha256":"84fccd76c4a6839f6bfd425b925225c258e3c3c0a6913c202cc76b616b3762c9"},
+      {"path":"data/asset_intrinsic_benchmark/profiles.json","sha256":"cc76da3722102228eaee84dba87a76778808ab8987ecb21eed028180d1460986"},
+      {"path":"data/contracts/intrinsic-promotion-policy.v1.json","sha256":"ef7693b2484ac133b9eb7d92b747aef5e57e92df450a28881b46b6cac3b61294"},
+      {"path":"data/intrinsic_promotion/receipt-current.json","sha256":"70436e093f54ede40e278258b704469df1ddc4c802623e996c79f4a7421f8c21"},
+      {"path":"out/pre-push/stub-scan.json","sha256":"e99ac72fb2ece0a38ef854c16c01b301b74040205ad746863a5d998918e49942"},
+      {"path":"out/pre-push/question-bank-results.json","sha256":"575f51bd06945d104d934d2eff2ec4fa08e22014d3c1259e7d63cd7fc7c6187d"}
+    ],
+    "proof_catalog": {
+      "A":"docs/methodology/ASSET-INTRINSIC-METHODOLOGY.md; tests/test_asset_intrinsic.py; tests/test_asset_intrinsic_metamorphic.py; tests/test_asset_intrinsic_forbidden_inference.py; tests/test_asset_intrinsic_migration.py",
+      "B":"scripts/build_issuance_supply_records.py; data/asset_intrinsic_evidence/pep/asset:eth/manifest.json; tests/test_asset_intrinsic.py; tests/test_asset_intrinsic_shadow.py",
+      "C":"data/asset_intrinsic_records.json; tests/test_asset_intrinsic.py; tests/test_asset_intrinsic_shadow.py",
+      "D":"docs/reports/ISSUE-872-*.md",
+      "E":"src/trustforge/asset_intrinsic_shadow.py; src/trustforge/agent/shadow_runtime.py; tests/test_asset_intrinsic_shadow.py; tests/test_shadow_runtime.py; tests/test_shadow_dashboard.py; tests/test_analyze_intrinsic_shadow_api.py",
+      "F":"data/asset_intrinsic_benchmark/manifest.json; data/asset_intrinsic_benchmark/profiles.json; tests/test_asset_intrinsic_benchmark.py; tests/test_asset_intrinsic_metamorphic.py",
+      "G":"data/contracts/intrinsic-promotion-policy.v1.json; data/intrinsic_promotion/receipt-current.json; tests/test_asset_intrinsic_promotion.py; tests/test_asset_intrinsic_promotion_dataset.py; tests/test_asset_intrinsic_promotion_receipt.py",
+      "H":"src/trustforge/asset_intrinsic_candidate.py; src/trustforge/agent/shadow_runtime.py; tests/test_asset_intrinsic_candidate.py",
+      "I":"frontend/src/components/AssetIntrinsicShadowPanel.tsx; frontend/src/components/AssetIntrinsicShadowPanel.test.tsx; frontend/src/components/AnalysisReportView.intrinsic.test.tsx",
+      "J":"scripts/run_rollback_drill.py; tests/test_rollback_drill.py"
+    },
+    "row_results": [
+      {"criterion_id":"A-1","result":"PASS","proof_refs":["A","F1","G1"],"note":"Methodology defines five measurements, normalization and deterministic weighting."},
+      {"criterion_id":"A-2","result":"PASS","proof_refs":["A","F1","G1"],"note":"Versioned contracts and tests cover stale, conflicted, source-family, PIT and unknown rules."},
+      {"criterion_id":"A-3","result":"PASS","proof_refs":["A","F1","G1"],"note":"Metamorphic/import-boundary tests prove facts-only identity-blind contribution."},
+      {"criterion_id":"A-4","result":"PASS","proof_refs":["A","F1","G1"],"note":"Forbidden-inference validator and adversarial tests cover all named classes."},
+      {"criterion_id":"A-5","result":"PASS","proof_refs":["A","F1","G1"],"note":"Identity rename and permutation tests pass."},
+      {"criterion_id":"A-6","result":"PASS","proof_refs":["A","F1","G1"],"note":"Migration contract and backward-compatibility tests pass."},
+      {"criterion_id":"B-1","result":"PASS","proof_refs":["B","F1","G1"],"note":"PEP manifest/builder tests bind revisions, hashes, coordinates, PIT time, validity and coverage."},
+      {"criterion_id":"B-2","result":"PASS","proof_refs":["B","F1","G1"],"note":"BTC PoW and ETH PoS fixtures rebuild through the common loader/builder."},
+      {"criterion_id":"B-3","result":"PASS","proof_refs":["B","F1","G1"],"note":"Offline, no-network and byte-stability tests pass."},
+      {"criterion_id":"B-4","result":"PASS","proof_refs":["B","F1","G1"],"note":"Future/stale/conflicted facts are neutralized in focused replay."},
+      {"criterion_id":"B-5","result":"PASS","proof_refs":["B","F1","G1"],"note":"Cross-asset-ID identical PEP metamorphic test passes."},
+      {"criterion_id":"B-6","result":"PASS","proof_refs":["A","B","F1","G1"],"note":"No conclusion-first rank assertion exists in builder/methodology proof surface."},
+      {"criterion_id":"C-1","result":"FAIL","proof_refs":["C","F1","G1"],"note":"Current record collapses miner/pool/node/client evidence into one curated control_dispersion score; no typed, independently replayable validator/miner/node/governance plane contract proves separation."},
+      {"criterion_id":"C-2","result":"PASS","proof_refs":["C","F1","G1"],"note":"Documentation-only BNB control/governance evidence remains UNKNOWN and zero."},
+      {"criterion_id":"C-3","result":"PASS","proof_refs":["C","F1","G1"],"note":"Two-source-family gate and missing-evidence UNKNOWN behavior are tested."},
+      {"criterion_id":"C-4","result":"PASS","proof_refs":["C","F1","G1"],"note":"Canonical PIT conflict path produces conflicted and exact zero."},
+      {"criterion_id":"C-5","result":"FAIL","proof_refs":["C","F1","G1"],"note":"PIT/conflict/freshness tests exist, but repository-wide search found no source-withdrawal replay test required by the criterion."},
+      {"criterion_id":"C-6","result":"PASS","proof_refs":["A","C","F1","G1"],"note":"Metamorphic and forbidden-branch tests pass."},
+      {"criterion_id":"D-1","result":"PASS","proof_refs":["D","G1"],"note":"Feasibility documents enumerate cross-chain/custodian/bridge/burn/locked/lost-key deduplication requirements."},
+      {"criterion_id":"D-2","result":"PASS","proof_refs":["D","G1"],"note":"Documents explicitly prohibit treating top-address concentration as holder concentration."},
+      {"criterion_id":"D-4","result":"PASS","proof_refs":["D","G1"],"note":"Licensing, freshness and reproducibility limitations are documented."},
+      {"criterion_id":"E-1","result":"PASS","proof_refs":["E","F1","G1"],"note":"Intrinsic payload plus outer shadow observation tests cover values, hashes/schema/as-of, gate reason/counts and measured release identity."},
+      {"criterion_id":"E-2","result":"PASS","proof_refs":["E","F1","G1"],"note":"Flag/candidate isolation tests preserve active report, evidence, direction and decision state."},
+      {"criterion_id":"E-3","result":"PASS","proof_refs":["E","F1","G1"],"note":"Idempotency, malformed/nonfinite and storage-failure paths fail closed."},
+      {"criterion_id":"E-4","result":"PASS","proof_refs":["E","F1","G1"],"note":"URL/query/userinfo/credential sanitization tests pass."},
+      {"criterion_id":"E-5","result":"PASS","proof_refs":["E","F1","G1"],"note":"Dashboard contract tests expose coverage, missing, stale, conflict and delta distributions; visual truth remains Phase 3 Eye scope."},
+      {"criterion_id":"E-6","result":"PASS","proof_refs":["E","F1","G1"],"note":"Default/incomplete flag combinations produce no intrinsic writes or official behavior difference."},
+      {"criterion_id":"F-1","result":"PASS","proof_refs":["F","F1","G1"],"note":"Seven anonymous profiles are loaded and round-trip."},
+      {"criterion_id":"F-2","result":"PASS","proof_refs":["F","F1","G1"],"note":"Current tests cover all statuses/reason codes and canonical conflicted PIT replay; this supersedes the historical direct-probe gap."},
+      {"criterion_id":"F-3","result":"PASS","proof_refs":["F","F1","G1"],"note":"Identity rename and input permutation replay passes."},
+      {"criterion_id":"F-4","result":"PASS","proof_refs":["F","F1","G1"],"note":"All four required measurement structures and sensitivity behavior are tested."},
+      {"criterion_id":"F-5","result":"PASS","proof_refs":["F","F1","G1"],"note":"Manifest byte replay binds baseline/candidate data version, PIT cutoff and deterministic seed."},
+      {"criterion_id":"F-6","result":"PASS","proof_refs":["F","F1","G1"],"note":"Manifest ranking is null and corpus/no-leak guards reject conclusion-first identifiers."},
+      {"criterion_id":"G-2","result":"PASS","proof_refs":["G","F1","G1"],"note":"3/5-known and two-family eligibility with fail-closed BLOCK is tested."},
+      {"criterion_id":"G-3","result":"PASS","proof_refs":["G","F1","G1"],"note":"Delta cap, nonfinite BLOCK and identity invariance tests pass."},
+      {"criterion_id":"G-4","result":"PASS","proof_refs":["G","F1","G1"],"note":"Each required stop condition is independently exercised."},
+      {"criterion_id":"G-6","result":"PASS","proof_refs":["G","F1","G1"],"note":"Policy digest/version ordering and tamper rejection tests pass."},
+      {"criterion_id":"G-7","result":"PASS","proof_refs":["G","F1","G1"],"note":"Commit-bound signed receipt and BLOCK-to-PASS policy-digest guard tests pass."},
+      {"criterion_id":"H-1","result":"FAIL","proof_refs":["H","F1","G1"],"note":"Candidate lives in trustforge app layer and is called by agent/shadow_runtime; trustforge_core has zero candidate integration. This does not prove canonical-core-only application."},
+      {"criterion_id":"H-2","result":"PASS","proof_refs":["H","F1","G1"],"note":"Eligible PIT facts, clamping and delta projection tests pass."},
+      {"criterion_id":"H-3","result":"PASS","proof_refs":["H","F1","G1"],"note":"CandidateShadow has no direction field and direction invariance tests pass."},
+      {"criterion_id":"H-4","result":"PASS","proof_refs":["H","F1","G1"],"note":"Candidate calibration/threshold calculation reuses canonical scoring functions and remains recorded as shadow output."},
+      {"criterion_id":"H-5","result":"PASS","proof_refs":["H","F1","G1"],"note":"Eight-case Report/kernel byte-parity suite passes with flag OFF."},
+      {"criterion_id":"H-6","result":"PASS","proof_refs":["H","F1","G1"],"note":"Missing/stale/future/conflicted facts yield exact zero delta."},
+      {"criterion_id":"H-7","result":"PASS","proof_refs":["H","F1","G1"],"note":"Programmatic path remains shadow-only while release promotion is separately gated."},
+      {"criterion_id":"H-8","result":"PASS","proof_refs":["H","F1","G1"],"note":"Contract, regression, metamorphic and byte-parity focused suites pass."},
+      {"criterion_id":"I-1","result":"PASS","proof_refs":["I","F2","G1"],"note":"Component tests verify three-layer framing."},
+      {"criterion_id":"I-2","result":"PASS","proof_refs":["I","F2","G1"],"note":"Shadow badge/copy explicitly states no official-score effect."},
+      {"criterion_id":"I-3","result":"PASS","proof_refs":["I","F2","G1"],"note":"Official parser requires complete release capability and PASS receipt and otherwise fails closed."},
+      {"criterion_id":"I-4","result":"PASS","proof_refs":["I","F2","G1"],"note":"Five dimensions, unknown/stale/conflicted and provenance/limitations render in focused tests."},
+      {"criterion_id":"I-5","result":"PASS","proof_refs":["I","F2","G1"],"note":"zh/en banned conclusion-first wording test passes."},
+      {"criterion_id":"I-6","result":"PASS","proof_refs":["I","F2","G1"],"note":"Legacy absent payload and malformed/duplicate/nonfinite payload behavior pass."},
+      {"criterion_id":"J-2","result":"FAIL","proof_refs":["J","F1","G1"],"note":"The drill imports RoutingPolicy but probes release services directly and uses a separate hermetic in-memory control setup; it does not exercise the actual release-router request path."},
+      {"criterion_id":"J-3","result":"PASS","proof_refs":["J","F1","G1"],"note":"Hermetic programmatic replay sends identical PIT inputs to A and B; this does not prove a real release drill."}
+    ],
+    "remediation_issue_drafts": [
+      {
+        "draft_id": "R-CONTROL-PLANES",
+        "title": "test(asset): typed control-plane separation and source-withdrawal PIT replay",
+        "estimate_hours": 10,
+        "depends_on": [870, 998],
+        "addresses": ["C-1", "C-5"],
+        "acceptance": [
+          "Represent validator, miner/pool, node/client and governance planes as typed independently sourced observations without adding scoring dimensions.",
+          "A common aggregation contract consumes plane observations and remains symbol/name/issuer blind.",
+          "Canonical PIT replay covers source withdrawal before/at/after cutoff and freshness expiry.",
+          "Missing, withdrawn, stale and conflicting plane evidence remains UNKNOWN/CONFLICTED with exact zero contribution.",
+          "Regression and metamorphic tests pass."
+        ]
+      },
+      {
+        "draft_id": "R-CANONICAL-CANDIDATE",
+        "title": "refactor(core): canonical intrinsic candidate composition boundary",
+        "estimate_hours": 12,
+        "depends_on": [875, 876, 998],
+        "addresses": ["H-1"],
+        "acceptance": [
+          "Define one canonical core composition entry point for baseline and intrinsic candidate evaluation.",
+          "Web, agent and orchestrator layers cannot apply or reapply candidate deltas.",
+          "Flag OFF remains byte-identical and direction remains unchanged.",
+          "Import-boundary and duplicate-application adversarial tests pass.",
+          "No promotion occurs while the signed promotion gate is BLOCK."
+        ]
+      },
+      {
+        "draft_id": "R-ROLLBACK-ROUTER",
+        "title": "test(release): rollback drill through the actual release-router request path",
+        "estimate_hours": 10,
+        "depends_on": [877, 998],
+        "addresses": ["J-2"],
+        "acceptance": [
+          "The non-production drill invokes the production release-router composition/request path rather than direct A/B probes.",
+          "No second routing/control authority is introduced.",
+          "Identical PIT requests traverse A and B under digest-bound policy.",
+          "Synthetic/hermetic evidence remains explicitly non-release evidence.",
+          "Focused and full pre-push gates pass."
+        ]
+      }
+    ]
+  },
+  "phase3_gray_review": {
+    "reviewer_role": "gray (CPO)",
+    "reviewed_commit": "30f2ee8511b32dc51ecb2a326c49f812fe975f0f",
+    "reviewed_at": "2026-07-30",
+    "scope": "methodology and product truthfulness only",
+    "independence_limits": [
+      "Does not replace Harper CISO/cost review.",
+      "Does not replace actual-branch Eye review.",
+      "Does not replace /codex-review adversarial review.",
+      "Does not erase or backdate HISTORICAL_GAP."
+    ],
+    "summary": {
+      "rows_reviewed": 70,
+      "gray_pass": 50,
+      "remediate": 4,
+      "defer_external": 16,
+      "historical_gap_rows_retained": 70,
+      "product_disposition": "REMAIN_SHADOW",
+      "parent_issue_748": "OPEN"
+    },
+    "row_results": [
+      {"criterion_id":"A-1","result":"GRAY_PASS","note":"Five dimensions and normalized measurement are conclusion-neutral and reproducible in the Phase 2 evidence."},
+      {"criterion_id":"A-2","result":"GRAY_PASS","note":"Stale/conflict/source-family/PIT/unknown rules preserve honest uncertainty."},
+      {"criterion_id":"A-3","result":"GRAY_PASS","note":"Facts-only identity-blind formula is product-truthful."},
+      {"criterion_id":"A-4","result":"GRAY_PASS","note":"Forbidden inference list correctly excludes popularity, price and unsupported ownership claims."},
+      {"criterion_id":"A-5","result":"GRAY_PASS","note":"Identity metamorphism supports neutral methodology."},
+      {"criterion_id":"A-6","result":"GRAY_PASS","note":"Migration/backward compatibility is explicit and does not relabel old evidence."},
+      {"criterion_id":"B-1","result":"GRAY_PASS","note":"Pinned provenance fields are sufficient for programmatic replay, not external truth by themselves."},
+      {"criterion_id":"B-2","result":"GRAY_PASS","note":"Two protocol fixtures demonstrate method portability without proving real-world ranking."},
+      {"criterion_id":"B-3","result":"GRAY_PASS","note":"Offline byte stability is an appropriate reproducibility claim."},
+      {"criterion_id":"B-4","result":"GRAY_PASS","note":"Invalid temporal/conflict states fail closed to zero."},
+      {"criterion_id":"B-5","result":"GRAY_PASS","note":"Asset-ID invariance supports symbol blindness."},
+      {"criterion_id":"B-6","result":"GRAY_PASS","note":"BTC-above-BNB remains explicitly outside acceptance."},
+      {"criterion_id":"C-1","result":"REMEDIATE","note":"Provenance prose and multiple hosts do not prove typed independent control-plane separation.","remediation_issue":1035},
+      {"criterion_id":"C-2","result":"GRAY_PASS","note":"Documentation-only statements remain UNKNOWN and are not entity-control proof."},
+      {"criterion_id":"C-3","result":"GRAY_PASS","note":"Two-family eligibility and UNKNOWN fallback are methodologically honest."},
+      {"criterion_id":"C-4","result":"GRAY_PASS","note":"Conflicted evidence yields exact zero and avoids false precision."},
+      {"criterion_id":"C-5","result":"REMEDIATE","note":"No canonical source-withdrawal PIT replay proof exists.","remediation_issue":1035},
+      {"criterion_id":"C-6","result":"GRAY_PASS","note":"No symbol/name/issuer scoring branch is evidenced."},
+      {"criterion_id":"D-1","result":"GRAY_PASS","note":"Entity-resolution requirements enumerate necessary deduplication limits."},
+      {"criterion_id":"D-2","result":"GRAY_PASS","note":"Top-address concentration is correctly separated from holder concentration."},
+      {"criterion_id":"D-3","result":"DEFER_EXTERNAL","note":"Real entity-resolved history availability and honest UNKNOWN require Phase 4 external reconciliation."},
+      {"criterion_id":"D-4","result":"GRAY_PASS","note":"Licensing/freshness/reproducibility limitations are disclosed."},
+      {"criterion_id":"D-5","result":"DEFER_EXTERNAL","note":"Paid-data follow-up and no-purchase state require external/cost evidence; gray does not substitute Harper."},
+      {"criterion_id":"E-1","result":"GRAY_PASS","note":"Shadow observation fields support traceable product claims without implying outcome truth."},
+      {"criterion_id":"E-2","result":"GRAY_PASS","note":"Official-output isolation preserves truthful shadow labeling."},
+      {"criterion_id":"E-3","result":"GRAY_PASS","note":"Idempotent fail-closed handling is appropriate."},
+      {"criterion_id":"E-4","result":"GRAY_PASS","note":"Redacted provenance retains auditability without exposing sensitive values."},
+      {"criterion_id":"E-5","result":"GRAY_PASS","note":"Dashboard data contract exposes uncertainty; visual truthfulness remains Eye scope."},
+      {"criterion_id":"E-6","result":"GRAY_PASS","note":"Flag OFF no-write/no-behavior contract is truthful."},
+      {"criterion_id":"F-1","result":"GRAY_PASS","note":"Anonymous profile count meets the programmatic benchmark requirement."},
+      {"criterion_id":"F-2","result":"GRAY_PASS","note":"Current canonical state coverage supersedes the historical direct-probe limitation programmatically."},
+      {"criterion_id":"F-3","result":"GRAY_PASS","note":"Rename/permutation invariance supports neutral comparison."},
+      {"criterion_id":"F-4","result":"GRAY_PASS","note":"Required sensitivity measures are reported without fairness/ranking overclaim."},
+      {"criterion_id":"F-5","result":"GRAY_PASS","note":"Version/PIT/seed binding makes the benchmark reproducible."},
+      {"criterion_id":"F-6","result":"GRAY_PASS","note":"No predetermined BTC/BNB ranking is asserted."},
+      {"criterion_id":"F-7","result":"DEFER_EXTERNAL","note":"Current real coverage and remain-shadow disposition require Phase 4 observation reconciliation."},
+      {"criterion_id":"G-1","result":"DEFER_EXTERNAL","note":"200 observations, 5 assets and 30 elapsed days cannot be established by gray review."},
+      {"criterion_id":"G-2","result":"GRAY_PASS","note":"Eligibility minimums and BLOCK behavior are truth-preserving."},
+      {"criterion_id":"G-3","result":"GRAY_PASS","note":"Delta/nonfinite/invariance limits bound product risk."},
+      {"criterion_id":"G-4","result":"GRAY_PASS","note":"Stop thresholds cover stated quality and concentration risks."},
+      {"criterion_id":"G-5","result":"DEFER_EXTERNAL","note":"Mature labels and Brier/ECE require external elapsed outcomes; no improvement claim is allowed now."},
+      {"criterion_id":"G-6","result":"GRAY_PASS","note":"Pre-versioned thresholds prevent outcome-driven policy rewriting."},
+      {"criterion_id":"G-7","result":"GRAY_PASS","note":"Receipt and no-manual-BLOCK-to-PASS rule preserve decision integrity."},
+      {"criterion_id":"H-1","result":"REMEDIATE","note":"Current application-layer candidate path does not satisfy canonical-core-only composition.","remediation_issue":1036},
+      {"criterion_id":"H-2","result":"GRAY_PASS","note":"Eligible PIT facts and clamped delta are appropriately bounded."},
+      {"criterion_id":"H-3","result":"GRAY_PASS","note":"Candidate does not directly change market direction."},
+      {"criterion_id":"H-4","result":"GRAY_PASS","note":"Existing calibration/threshold semantics remain the stated path; shadow output is not official."},
+      {"criterion_id":"H-5","result":"GRAY_PASS","note":"Flag-off byte parity supports unchanged official behavior."},
+      {"criterion_id":"H-6","result":"GRAY_PASS","note":"Invalid facts yield exact zero."},
+      {"criterion_id":"H-7","result":"GRAY_PASS","note":"Shadow-only disposition is truthful while promotion remains separately blocked."},
+      {"criterion_id":"H-8","result":"GRAY_PASS","note":"Programmatic suites pass, subject to unresolved H-1 architecture remediation."},
+      {"criterion_id":"I-1","result":"GRAY_PASS","note":"Three-layer framing avoids conflating asset structure, evidence trust and market direction."},
+      {"criterion_id":"I-2","result":"GRAY_PASS","note":"Shadow copy explicitly disclaims official-score effect."},
+      {"criterion_id":"I-3","result":"GRAY_PASS","note":"Receipt/capability parsing fails closed; frontend cannot self-declare official state."},
+      {"criterion_id":"I-4","result":"GRAY_PASS","note":"Plain-language states preserve unknown and limitation semantics."},
+      {"criterion_id":"I-5","result":"GRAY_PASS","note":"Conclusion-first ranking language is excluded."},
+      {"criterion_id":"I-6","result":"GRAY_PASS","note":"Legacy compatibility and malformed fail-closed behavior are appropriate."},
+      {"criterion_id":"I-7","result":"DEFER_EXTERNAL","note":"Actual-branch locale/viewport/zoom/error verification belongs to Eye and remains unperformed by gray."},
+      {"criterion_id":"J-1","result":"DEFER_EXTERNAL","note":"Real immutable A/B release artifacts require Phase 4 release evidence."},
+      {"criterion_id":"J-2","result":"REMEDIATE","note":"Hermetic direct probes do not exercise the actual release-router request path.","remediation_issue":1037},
+      {"criterion_id":"J-3","result":"GRAY_PASS","note":"Identical PIT input replay passes only as a hermetic programmatic property."},
+      {"criterion_id":"J-4","result":"DEFER_EXTERNAL","note":"Real non-production A-to-B-to-regression-to-A SLO drill requires external release execution."},
+      {"criterion_id":"J-5","result":"DEFER_EXTERNAL","note":"Authentic release receipt fields/digests/timestamps require Phase 4 validation."},
+      {"criterion_id":"J-6","result":"DEFER_EXTERNAL","note":"Real retained A artifact and post-rollback health require external evidence."},
+      {"criterion_id":"J-7","result":"DEFER_EXTERNAL","note":"Real observation/receipt persistence across rollback requires external evidence."},
+      {"criterion_id":"K-1","result":"DEFER_EXTERNAL","note":"Exact authenticated nginx and Linux SO_PEERCRED topology require external Linux evidence."},
+      {"criterion_id":"K-2","result":"DEFER_EXTERNAL","note":"Root-owned atomic allowlist evidence requires verified release-host execution."},
+      {"criterion_id":"K-3","result":"DEFER_EXTERNAL","note":"A-only unauthorized/duplicate cost-bearing behavior requires real HTTP/topology evidence."},
+      {"criterion_id":"K-4","result":"DEFER_EXTERNAL","note":"Signed ramp budgets and restart reconciliation require external durable execution."},
+      {"criterion_id":"K-5","result":"DEFER_EXTERNAL","note":"Real two-release ingress and 100% A recovery remain BLOCKED until #1019 evidence passes."}
+    ],
+    "remediation_links": [
+      {"issue":1035,"addresses":["C-1","C-5"],"state_at_review":"OPEN"},
+      {"issue":1036,"addresses":["H-1"],"state_at_review":"OPEN"},
+      {"issue":1037,"addresses":["J-2"],"state_at_review":"OPEN"}
+    ],
+    "final_gray_disposition": "Methodology remains asset-identity-blind and shadow labeling is honest, but four engineering criteria require remediation and sixteen criteria require external/elapsed evidence. Do not claim 11/11 complete. Keep #748 and #998 open."
+  },
+  "phase3_harper_review": {
+    "reviewer_role": "Harper (CISO)",
+    "reviewed_commit": "30f2ee8511b32dc51ecb2a326c49f812fe975f0f",
+    "reviewed_at": "2026-07-30",
+    "scope": "Security, cost, authorization, key custody, fail-closed behavior, rollback and evidence authenticity for A/B/C/E/F/G/H/I/J/K; D licensing/cost only.",
+    "independence_limits": [
+      "Does not replace gray CPO review.",
+      "Does not replace actual-branch Eye review.",
+      "Does not replace /codex-review adversarial review.",
+      "Does not erase or backdate HISTORICAL_GAP.",
+      "Does not treat fixture, synthetic, hermetic or skipped evidence as external release evidence."
+    ],
+    "summary": {
+      "rows_total": 70,
+      "rows_reviewed": 67,
+      "harper_pass": 48,
+      "remediate": 4,
+      "defer_external": 15,
+      "not_in_harper_scope": 3,
+      "historical_gap_rows_retained": 70,
+      "p0_release_blockers": 4,
+      "p1_engineering_findings": 4,
+      "security_disposition": "REMAIN_SHADOW_RELEASE_BLOCKED",
+      "parent_issue_748": "OPEN",
+      "audit_issue_998": "OPEN"
+    },
+    "result_sets": {
+      "HARPER_PASS": [
+        "A-1","A-2","A-3","A-4","A-5","A-6",
+        "B-1","B-2","B-3","B-4","B-5","B-6",
+        "C-2","C-3","C-4","C-6",
+        "D-4",
+        "E-1","E-2","E-3","E-4","E-5","E-6",
+        "F-1","F-2","F-3","F-4","F-5","F-6",
+        "G-2","G-3","G-4","G-6","G-7",
+        "H-2","H-3","H-4","H-5","H-6","H-7","H-8",
+        "I-1","I-2","I-3","I-4","I-5","I-6",
+        "J-3"
+      ],
+      "REMEDIATE": ["C-1","C-5","H-1","J-2"],
+      "DEFER_EXTERNAL": [
+        "D-5","F-7","G-1","G-5","I-7",
+        "J-1","J-4","J-5","J-6","J-7",
+        "K-1","K-2","K-3","K-4","K-5"
+      ],
+      "NOT_IN_HARPER_SCOPE": ["D-1","D-2","D-3"]
+    },
+    "findings": [
+      {
+        "severity": "P1",
+        "criterion_ids": ["C-1","C-5"],
+        "issue": 1035,
+        "finding": "Typed independent control-plane replay and canonical source-withdrawal PIT proof are absent."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["H-1"],
+        "issue": 1036,
+        "finding": "Candidate application is not behind the sole canonical core composition boundary."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["J-2"],
+        "issue": 1037,
+        "finding": "The hermetic drill bypasses the actual release-router request path."
+      }
+    ],
+    "release_blockers": [
+      {"severity":"P0","issue":1031,"criteria":["K-1","K-3","K-4","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1032,"criteria":["K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1033,"criteria":["K-1","K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1034,"criteria":["K-1","K-2","K-3","K-4","K-5"],"state_at_review":"OPEN"}
+    ],
+    "dependency_state": [
+      {"issue":1019,"state_at_review":"OPEN","disposition":"BLOCKED_EXTERNAL"},
+      {"issue":1035,"state_at_review":"OPEN"},
+      {"issue":1036,"state_at_review":"OPEN"},
+      {"issue":1037,"state_at_review":"OPEN"}
+    ],
+    "final_harper_disposition": "Programmatic fail-closed and shadow-isolation controls are substantial, but four engineering findings and four release-evidence P0 boundaries remain open. Keep the candidate shadow-only; do not claim 11/11 complete or production/release readiness."
+  }
 }
