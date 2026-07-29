@@ -156,6 +156,9 @@ class AdmissionHandle:
     policy_version: int
     key_version: int
     schema_version: int
+    lifecycle_generation: int
+    current_quota_key_version: int
+    previous_quota_key_version: int | None
 
     def __post_init__(self) -> None:
         if (
@@ -206,6 +209,20 @@ class AdmissionHandle:
             or self.key_version != 1
             or type(self.schema_version) is not int
             or self.schema_version != 1
+            or type(self.lifecycle_generation) is not int
+            or self.lifecycle_generation < 1
+            or type(self.current_quota_key_version) is not int
+            or self.current_quota_key_version < 1
+            or (self.previous_identity_digest is None)
+            != (self.previous_quota_key_version is None)
+            or (
+                self.previous_quota_key_version is not None
+                and (
+                    type(self.previous_quota_key_version) is not int
+                    or self.previous_quota_key_version + 1
+                    != self.current_quota_key_version
+                )
+            )
         ):
             raise ValueError("invalid admission handle")
         try:
@@ -225,6 +242,9 @@ class AdmissionCompileRequest:
     reservation_id: str
     reserved_tokens: int
     reserved_micro_usd: int
+    lifecycle_generation: int
+    current_quota_key_version: int
+    previous_quota_key_version: int | None
     policy_version: int = 1
     key_version: int = KEY_VERSION
     schema_version: int = SCHEMA_VERSION
@@ -258,6 +278,20 @@ class AdmissionCompileRequest:
             or type(self.reserved_micro_usd) is not int
             or not 1 <= self.reserved_micro_usd <= min(
                 MAX_MINUTE_MICRO_USD, MAX_DAY_MICRO_USD
+            )
+            or type(self.lifecycle_generation) is not int
+            or self.lifecycle_generation < 1
+            or type(self.current_quota_key_version) is not int
+            or self.current_quota_key_version < 1
+            or (self.previous_identity_digest is None)
+            != (self.previous_quota_key_version is None)
+            or (
+                self.previous_quota_key_version is not None
+                and (
+                    type(self.previous_quota_key_version) is not int
+                    or self.previous_quota_key_version + 1
+                    != self.current_quota_key_version
+                )
             )
             or type(self.policy_version) is not int
             or self.policy_version != 1
@@ -647,6 +681,8 @@ def _build_handle(
         request.reserved_micro_usd, created_lower, created_upper, lease_until,
         lease_until // 60, request.policy_digest, half_open_owner, request.policy_version,
         request.key_version, request.schema_version,
+        request.lifecycle_generation, request.current_quota_key_version,
+        request.previous_quota_key_version,
     )
 
 
@@ -666,9 +702,12 @@ def _reservation_put(handle: AdmissionHandle, table: str) -> dict[str, object]:
         "policy_digest": handle.policy_digest,
         "policy_version": handle.policy_version, "key_version": handle.key_version,
         "schema_version": handle.schema_version,
+        "lifecycle_generation": handle.lifecycle_generation,
+        "current_quota_key_version": handle.current_quota_key_version,
     }
     if handle.previous_identity_digest is not None:
         item["previous_identity_digest"] = handle.previous_identity_digest
+        item["previous_quota_key_version"] = handle.previous_quota_key_version
     if handle.circuit_half_open_owner is not None:
         item["circuit_half_open_owner"] = handle.circuit_half_open_owner
     return {"Put": {

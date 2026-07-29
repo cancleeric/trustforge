@@ -281,6 +281,9 @@ class QuotaKeyLifecycleAuthority:
             request,
             identity_digest=digests.current,
             previous_identity_digest=digests.previous,
+            lifecycle_generation=digests.generation,
+            current_quota_key_version=digests.current_version,
+            previous_quota_key_version=digests.previous_version,
         )
 
     def _snapshot(self, now: TrustedUtcInterval) -> QuotaLifecycleSnapshot:

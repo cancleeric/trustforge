@@ -45,6 +45,9 @@ def _request(reservation_id: str = "12345678-1234-4234-9234-123456789abc"):
         reservation_id=reservation_id,
         reserved_tokens=100,
         reserved_micro_usd=200,
+        lifecycle_generation=1,
+        current_quota_key_version=1,
+        previous_quota_key_version=None,
     )
 
 

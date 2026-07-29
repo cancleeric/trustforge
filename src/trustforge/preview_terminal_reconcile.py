@@ -589,10 +589,13 @@ def _decode_reservation(intent: TerminalIntent, item: Mapping[str, object]) -> b
         "policy_version": handle.policy_version,
         "key_version": handle.key_version,
         "schema_version": handle.schema_version,
+        "lifecycle_generation": handle.lifecycle_generation,
+        "current_quota_key_version": handle.current_quota_key_version,
         "ttl": handle.created_upper + RETENTION_SECONDS,
     }
     if handle.previous_identity_digest is not None:
         base["previous_identity_digest"] = handle.previous_identity_digest
+        base["previous_quota_key_version"] = handle.previous_quota_key_version
     if handle.circuit_half_open_owner is not None:
         base["circuit_half_open_owner"] = handle.circuit_half_open_owner
     reserved = {**base, "status": "reserved", "version": 0}
