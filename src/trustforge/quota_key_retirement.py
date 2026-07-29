@@ -7,11 +7,17 @@ admission control, and trusted time in one strongly consistent transaction.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+import threading
 from typing import Protocol
 
 from trustforge.preview_trusted_clock import PreviewTrustedClock
+from trustforge.quota_key_lifecycle import (
+    DurableQuotaKeyLifecycleAuthority,
+    RetirementCapability,
+    _RETIREMENT_TOKEN,
+)
 
 
 WATERLINE_KEY = {
@@ -26,6 +32,12 @@ CONTROL_KEY = {
     "pk": {"S": "PAP#1#CONTROL"},
     "sk": {"S": "ADMISSION#QUARANTINE"},
 }
+LIFECYCLE_KEY = {
+    "pk": {"S": "PAP#1#QUOTA-KEY"},
+    "sk": {"S": "LIFECYCLE#CONTROL"},
+}
+_DECISION_TOKEN = object()
+_PROPOSAL_TOKEN = object()
 
 
 class RetirementDisposition(StrEnum):
@@ -33,20 +45,42 @@ class RetirementDisposition(StrEnum):
     NOT_RETIRABLE = "not_retirable"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class QuotaKeyRetirementDecision:
     disposition: RetirementDisposition
     lifecycle_generation: int | None = None
     previous_quota_key_version: int | None = None
+    _authority: object | None = field(default=None, repr=False)
+    _serial: object | None = field(default=None, repr=False)
+
+    @classmethod
+    def _mint(
+        cls,
+        token: object,
+        disposition: RetirementDisposition,
+        generation: int | None = None,
+        version: int | None = None,
+        authority: object | None = None,
+        serial: object | None = None,
+    ) -> QuotaKeyRetirementDecision:
+        if token is not _DECISION_TOKEN:
+            raise ValueError("invalid retirement decision")
+        result = object.__new__(cls)
+        object.__setattr__(result, "disposition", disposition)
+        object.__setattr__(result, "lifecycle_generation", generation)
+        object.__setattr__(result, "previous_quota_key_version", version)
+        object.__setattr__(result, "_authority", authority)
+        object.__setattr__(result, "_serial", serial)
+        return result
 
 
 class RetirementClient(Protocol):
     def transact_get_items(self, **kwargs: object) -> object: ...
 
-    def put_item(self, **kwargs: object) -> object: ...
+    def transact_write_items(self, **kwargs: object) -> object: ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class QuotaKeyRetirementWaterline:
     lifecycle_generation: int
     previous_quota_key_version: int
@@ -56,6 +90,40 @@ class QuotaKeyRetirementWaterline:
     required_recovery_version: int
     retire_not_before: float
     retention_until: float
+    _authority: object = field(repr=False)
+    _proof: _WriteProof = field(repr=False)
+
+    @classmethod
+    def _mint(
+        cls,
+        token: object,
+        authority: object,
+        proof: _WriteProof,
+        *,
+        last_old_admission_upper: int,
+        last_old_expiry_shard: int,
+        retire_not_before: float,
+        retention_until: float,
+    ) -> QuotaKeyRetirementWaterline:
+        if token is not _PROPOSAL_TOKEN:
+            raise ValueError("invalid retirement proposal")
+        result = object.__new__(cls)
+        lifecycle = proof.lifecycle
+        values = {
+            "lifecycle_generation": lifecycle.generation,
+            "previous_quota_key_version": lifecycle.previous_version,
+            "current_quota_key_version": lifecycle.current_version,
+            "last_old_admission_upper": last_old_admission_upper,
+            "last_old_expiry_shard": last_old_expiry_shard,
+            "required_recovery_version": proof.recovery.version,
+            "retire_not_before": retire_not_before,
+            "retention_until": retention_until,
+            "_authority": authority,
+            "_proof": proof,
+        }
+        for name, value in values.items():
+            object.__setattr__(result, name, value)
+        return result
 
 
 class WaterlineWriteDisposition(StrEnum):
@@ -78,6 +146,29 @@ class QuotaKeyRetirementWaterlineWriter:
         self._client = dynamodb_client
         self._table = table_name
         self._clock = trusted_clock
+        self._nonce = object()
+
+    def propose(
+        self,
+        *,
+        last_old_admission_upper: int,
+        last_old_expiry_shard: int,
+        retire_not_before: float,
+        retention_until: float,
+    ) -> QuotaKeyRetirementWaterline:
+        """Bind caller facts to one exact durable lifecycle/D2/OPEN snapshot."""
+
+        responses = _strong_read(self._client, self._table)
+        proof = _decode_write_proof(responses)
+        return QuotaKeyRetirementWaterline._mint(
+            _PROPOSAL_TOKEN,
+            self._nonce,
+            proof,
+            last_old_admission_upper=last_old_admission_upper,
+            last_old_expiry_shard=last_old_expiry_shard,
+            retire_not_before=retire_not_before,
+            retention_until=retention_until,
+        )
 
     def write(
         self, proposal: QuotaKeyRetirementWaterline
@@ -86,6 +177,11 @@ class QuotaKeyRetirementWaterlineWriter:
             if self._clock.needs_refresh():
                 self._clock.refresh()
             now = self._clock.trusted_interval()
+            if (
+                type(proposal) is not QuotaKeyRetirementWaterline
+                or proposal._authority is not self._nonce
+            ):
+                return WaterlineWriteDisposition.REJECTED
             desired = _waterline_from_proposal(proposal, version=0)
             if desired.retire_not_before <= now.latest:
                 return WaterlineWriteDisposition.REJECTED
@@ -95,9 +191,8 @@ class QuotaKeyRetirementWaterlineWriter:
                 if responses[0].get("Item") is None
                 else _decode_waterline(_decode_item(responses[0]))
             )
-            recovery = _decode_recovery(_decode_item(responses[1]))
-            _require_open(_decode_item(responses[2]))
-            if recovery.version != desired.required_recovery_version:
+            proof = _decode_write_proof(responses)
+            if proof != proposal._proof:
                 return WaterlineWriteDisposition.REJECTED
             if current is not None:
                 if not _strict_advance(current, desired):
@@ -107,17 +202,13 @@ class QuotaKeyRetirementWaterlineWriter:
                     *desired.__dict_values_without_version__(),
                 )
             item = _encode_waterline(desired)
-            request: dict[str, object] = {
-                "TableName": self._table,
-                "Item": item,
-                "ReturnValues": "NONE",
-            }
+            put: dict[str, object] = {"TableName": self._table, "Item": item}
             if current is None:
-                request["ConditionExpression"] = (
+                put["ConditionExpression"] = (
                     "attribute_not_exists(pk) AND attribute_not_exists(sk)"
                 )
             else:
-                request.update(
+                put.update(
                     {
                         "ConditionExpression": "#version=:expected",
                         "ExpressionAttributeNames": {
@@ -129,27 +220,29 @@ class QuotaKeyRetirementWaterlineWriter:
                     }
                 )
             try:
-                self._client.put_item(**request)
+                self._client.transact_write_items(
+                    TransactItems=[
+                        {"Put": put},
+                        {"ConditionCheck": _recovery_condition(self._table, proof)},
+                        {"ConditionCheck": _control_condition(self._table, proof)},
+                        {"ConditionCheck": _lifecycle_condition(self._table, proof)},
+                    ]
+                )
                 return WaterlineWriteDisposition.COMMITTED
             except Exception:
                 return (
                     WaterlineWriteDisposition.COMMITTED
-                    if self._prove_exact(desired)
+                    if self._prove_exact(desired, proof)
                     else WaterlineWriteDisposition.UNRESOLVED
                 )
         except Exception:
             return WaterlineWriteDisposition.REJECTED
 
-    def _prove_exact(self, desired: _Waterline) -> bool:
+    def _prove_exact(self, desired: _Waterline, desired_proof: _WriteProof) -> bool:
         try:
             responses = _strong_read(self._client, self._table)
             actual = _decode_waterline(_decode_item(responses[0]))
-            recovery = _decode_recovery(_decode_item(responses[1]))
-            _require_open(_decode_item(responses[2]))
-            return (
-                actual == desired
-                and recovery.version == desired.required_recovery_version
-            )
+            return actual == desired and _decode_write_proof(responses) == desired_proof
         except Exception:
             return False
 
@@ -163,11 +256,16 @@ class QuotaKeyRetirementAuthority:
         dynamodb_client: RetirementClient,
         table_name: str,
         trusted_clock: PreviewTrustedClock,
+        lifecycle_authority: DurableQuotaKeyLifecycleAuthority | None = None,
     ) -> None:
         _require_bound_storage(dynamodb_client, table_name, trusted_clock)
         self._client = dynamodb_client
         self._table = table_name
         self._clock = trusted_clock
+        self._lifecycle_authority = lifecycle_authority
+        self._nonce = object()
+        self._consumed: set[object] = set()
+        self._consume_lock = threading.Lock()
 
     def evaluate(self) -> QuotaKeyRetirementDecision:
         """Return RETIRABLE only when every strict durable proof agrees."""
@@ -181,28 +279,64 @@ class QuotaKeyRetirementAuthority:
                     {"Get": {"TableName": self._table, "Key": WATERLINE_KEY}},
                     {"Get": {"TableName": self._table, "Key": RECOVERY_KEY}},
                     {"Get": {"TableName": self._table, "Key": CONTROL_KEY}},
+                    {"Get": {"TableName": self._table, "Key": LIFECYCLE_KEY}},
                 ]
             )
             responses = response["Responses"]
-            if type(responses) is not list or len(responses) != 3:
+            if type(responses) is not list or len(responses) != 4:
                 raise ValueError
             waterline = _decode_waterline(_decode_item(responses[0]))
             recovery = _decode_recovery(_decode_item(responses[1]))
             _require_open(_decode_item(responses[2]))
+            lifecycle = _decode_lifecycle(_decode_item(responses[3]))
             if (
                 now.earliest <= waterline.retire_not_before
                 or now.earliest > waterline.retention_until
                 or recovery.version < waterline.required_recovery_version
                 or recovery.shard <= waterline.last_old_expiry_shard
+                or lifecycle.generation != waterline.lifecycle_generation
+                or lifecycle.current_version != waterline.current_quota_key_version
+                or lifecycle.previous_version
+                != waterline.previous_quota_key_version
             ):
                 raise ValueError
-            return QuotaKeyRetirementDecision(
+            serial = object()
+            return QuotaKeyRetirementDecision._mint(
+                _DECISION_TOKEN,
                 RetirementDisposition.RETIRABLE,
                 waterline.lifecycle_generation,
                 waterline.previous_quota_key_version,
+                self._nonce,
+                serial,
             )
         except Exception:
-            return QuotaKeyRetirementDecision(RetirementDisposition.NOT_RETIRABLE)
+            return QuotaKeyRetirementDecision._mint(
+                _DECISION_TOKEN, RetirementDisposition.NOT_RETIRABLE
+            )
+
+    def consume(
+        self, decision: QuotaKeyRetirementDecision
+    ) -> RetirementCapability:
+        """Consume one authority-minted RETIRABLE result exactly once."""
+
+        with self._consume_lock:
+            if (
+                type(decision) is not QuotaKeyRetirementDecision
+                or getattr(decision, "disposition", None)
+                is not RetirementDisposition.RETIRABLE
+                or getattr(decision, "_authority", None) is not self._nonce
+                or getattr(decision, "_serial", None) is None
+                or getattr(decision, "_serial", None) in self._consumed
+                or self._lifecycle_authority is None
+            ):
+                raise ValueError("invalid retirement decision")
+            self._consumed.add(decision._serial)
+        return RetirementCapability._mint(
+            _RETIREMENT_TOKEN,
+            decision.lifecycle_generation,
+            decision.previous_quota_key_version,
+            self._lifecycle_authority._nonce,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +368,27 @@ class _Waterline:
 class _Recovery:
     version: int
     shard: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Control:
+    generation: int
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Lifecycle:
+    generation: int
+    current_version: int
+    previous_version: int
+    config_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class _WriteProof:
+    recovery: _Recovery
+    control: _Control
+    lifecycle: _Lifecycle
 
 
 def _decode_item(response: object) -> dict[str, object]:
@@ -373,12 +528,13 @@ def _strong_read(client: RetirementClient, table: str) -> list[dict[str, object]
             {"Get": {"TableName": table, "Key": WATERLINE_KEY}},
             {"Get": {"TableName": table, "Key": RECOVERY_KEY}},
             {"Get": {"TableName": table, "Key": CONTROL_KEY}},
+            {"Get": {"TableName": table, "Key": LIFECYCLE_KEY}},
         ]
     )
     responses = response["Responses"]
     if (
         type(responses) is not list
-        or len(responses) != 3
+        or len(responses) != 4
         or any(type(item) is not dict for item in responses)
     ):
         raise ValueError
@@ -417,7 +573,7 @@ def _decode_recovery(item: dict[str, object]) -> _Recovery:
     return _Recovery(item["version"], item["shard"])
 
 
-def _require_open(item: dict[str, object]) -> None:
+def _require_open(item: dict[str, object]) -> _Control:
     if (
         set(item)
         != {"pk", "sk", "kind", "schema_version", "state", "generation", "version"}
@@ -430,3 +586,97 @@ def _require_open(item: dict[str, object]) -> None:
         or type(item.get("version")) is not int
     ):
         raise ValueError
+    return _Control(item["generation"], item["version"])
+
+
+def _decode_lifecycle(item: dict[str, object]) -> _Lifecycle:
+    if (
+        item.get("pk") != "PAP#1#QUOTA-KEY"
+        or item.get("sk") != "LIFECYCLE#CONTROL"
+        or item.get("kind") != "quota_key_lifecycle_control"
+        or item.get("schema_version") != 1
+        or item.get("mode") != "overlap"
+        or type(item.get("generation")) is not int
+        or type(item.get("current_version")) is not int
+        or type(item.get("previous_version")) is not int
+        or item["generation"] < 1
+        or item["previous_version"] < 1
+        or item["current_version"] != item["previous_version"] + 1
+        or type(item.get("config_fingerprint")) is not str
+        or not item["config_fingerprint"]
+    ):
+        raise ValueError
+    return _Lifecycle(
+        item["generation"],
+        item["current_version"],
+        item["previous_version"],
+        item["config_fingerprint"],
+    )
+
+
+def _decode_write_proof(responses: list[dict[str, object]]) -> _WriteProof:
+    return _WriteProof(
+        _decode_recovery(_decode_item(responses[1])),
+        _require_open(_decode_item(responses[2])),
+        _decode_lifecycle(_decode_item(responses[3])),
+    )
+
+
+def _recovery_condition(table: str, proof: _WriteProof) -> dict[str, object]:
+    return {
+        "TableName": table,
+        "Key": RECOVERY_KEY,
+        "ConditionExpression": "#version=:version AND #shard=:shard",
+        "ExpressionAttributeNames": {"#version": "version", "#shard": "shard"},
+        "ExpressionAttributeValues": {
+            ":version": {"N": str(proof.recovery.version)},
+            ":shard": {"N": str(proof.recovery.shard)},
+        },
+    }
+
+
+def _control_condition(table: str, proof: _WriteProof) -> dict[str, object]:
+    return {
+        "TableName": table,
+        "Key": CONTROL_KEY,
+        "ConditionExpression": (
+            "#state=:open AND #generation=:generation AND #version=:version"
+        ),
+        "ExpressionAttributeNames": {
+            "#state": "state",
+            "#generation": "generation",
+            "#version": "version",
+        },
+        "ExpressionAttributeValues": {
+            ":open": {"S": "open"},
+            ":generation": {"N": str(proof.control.generation)},
+            ":version": {"N": str(proof.control.version)},
+        },
+    }
+
+
+def _lifecycle_condition(table: str, proof: _WriteProof) -> dict[str, object]:
+    lifecycle = proof.lifecycle
+    return {
+        "TableName": table,
+        "Key": LIFECYCLE_KEY,
+        "ConditionExpression": (
+            "#mode=:overlap AND #generation=:generation "
+            "AND #current=:current AND #previous=:previous "
+            "AND #fingerprint=:fingerprint"
+        ),
+        "ExpressionAttributeNames": {
+            "#mode": "mode",
+            "#generation": "generation",
+            "#current": "current_version",
+            "#previous": "previous_version",
+            "#fingerprint": "config_fingerprint",
+        },
+        "ExpressionAttributeValues": {
+            ":overlap": {"S": "overlap"},
+            ":generation": {"N": str(lifecycle.generation)},
+            ":current": {"N": str(lifecycle.current_version)},
+            ":previous": {"N": str(lifecycle.previous_version)},
+            ":fingerprint": {"S": lifecycle.config_fingerprint},
+        },
+    }

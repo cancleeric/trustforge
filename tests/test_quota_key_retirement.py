@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from email.utils import formatdate
 
+import pytest
+
 from trustforge.preview_trusted_clock import PreviewTrustedClock
 from trustforge.quota_key_retirement import (
     QuotaKeyRetirementAuthority,
@@ -66,6 +68,17 @@ class Client:
             "generation": 1,
             "version": 1,
         }
+        lifecycle = {
+            "pk": "PAP#1#QUOTA-KEY",
+            "sk": "LIFECYCLE#CONTROL",
+            "kind": "quota_key_lifecycle_control",
+            "schema_version": 1,
+            "generation": 2,
+            "mode": "overlap",
+            "current_version": 2,
+            "previous_version": 1,
+            "config_fingerprint": "exact-transition",
+        }
         if self.mutate == "equal_time":
             waterline["retire_not_before"] = 200
         elif self.mutate == "equal_shard":
@@ -77,21 +90,31 @@ class Client:
         elif self.mutate == "secret":
             waterline["key_material"] = "must-not-be-stored"
         elif self.mutate == "missing":
-            return {"Responses": [{}, {"Item": _ddb(recovery)}, {"Item": _ddb(control)}]}
+            return {
+                "Responses": [
+                    {},
+                    {"Item": _ddb(recovery)},
+                    {"Item": _ddb(control)},
+                    {"Item": _ddb(lifecycle)},
+                ]
+            }
         return {
             "Responses": [
                 {"Item": _ddb(waterline)},
                 {"Item": _ddb(recovery)},
                 {"Item": _ddb(control)},
+                {"Item": _ddb(lifecycle)},
             ]
         }
 
-    def put_item(self, **kwargs: object) -> dict[str, object]:
+    def transact_write_items(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
         return {}
 
 
-def _authority(client: Client) -> QuotaKeyRetirementAuthority:
+def _authority(
+    client: Client, lifecycle_authority: object | None = None
+) -> QuotaKeyRetirementAuthority:
     clock = PreviewTrustedClock(
         dynamodb_client=client,
         table_name="table",
@@ -102,6 +125,7 @@ def _authority(client: Client) -> QuotaKeyRetirementAuthority:
         dynamodb_client=client,
         table_name="table",
         trusted_clock=clock,
+        lifecycle_authority=lifecycle_authority,
     )
 
 
@@ -113,7 +137,7 @@ def test_strong_three_record_proof_can_mark_previous_version_retirable() -> None
     assert decision.lifecycle_generation == 2
     assert decision.previous_quota_key_version == 1
     request = client.calls[0]
-    assert len(request["TransactItems"]) == 3
+    assert len(request["TransactItems"]) == 4
     assert "Delete" not in repr(request)
 
 
@@ -158,19 +182,17 @@ def test_clock_and_authority_must_share_exact_storage() -> None:
         raise AssertionError("unbound retirement authority")
 
 
-def _proposal(**changes: object) -> QuotaKeyRetirementWaterline:
+def _proposal(
+    writer: QuotaKeyRetirementWaterlineWriter, **changes: object
+) -> QuotaKeyRetirementWaterline:
     values = {
-        "lifecycle_generation": 2,
-        "previous_quota_key_version": 1,
-        "current_quota_key_version": 2,
         "last_old_admission_upper": 120,
         "last_old_expiry_shard": 150,
-        "required_recovery_version": 4,
         "retire_not_before": 290,
         "retention_until": 400,
     }
     values.update(changes)
-    return QuotaKeyRetirementWaterline(**values)
+    return writer.propose(**values)
 
 
 class StatefulClient(Client):
@@ -180,6 +202,7 @@ class StatefulClient(Client):
         self.stored: dict[str, object] | None = None
         self.read_count = 0
         self.put_count = 0
+        self.lifecycle_generation = 2
 
     def transact_get_items(self, **kwargs: object) -> dict[str, object]:
         response = super().transact_get_items(**kwargs)
@@ -187,14 +210,20 @@ class StatefulClient(Client):
         response["Responses"][0] = (
             {} if self.stored is None else {"Item": self.stored}
         )
+        lifecycle = response["Responses"][3]["Item"]
+        lifecycle["generation"] = {"N": str(self.lifecycle_generation)}
+        lifecycle["current_version"] = {"N": str(self.lifecycle_generation)}
+        lifecycle["previous_version"] = {
+            "N": str(self.lifecycle_generation - 1)
+        }
         return response
 
-    def put_item(self, **kwargs: object) -> dict[str, object]:
+    def transact_write_items(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
         self.put_count += 1
         if self.response_loss == "uncommitted":
             raise RuntimeError("lost")
-        self.stored = kwargs["Item"]
+        self.stored = kwargs["TransactItems"][0]["Put"]["Item"]
         if self.response_loss == "committed":
             raise RuntimeError("lost")
         return {}
@@ -217,32 +246,69 @@ def _writer(client: StatefulClient) -> QuotaKeyRetirementWaterlineWriter:
 def test_writer_creates_metadata_once_without_secret_or_digest() -> None:
     client = StatefulClient()
 
-    assert _writer(client).write(_proposal()) is WaterlineWriteDisposition.COMMITTED
-    writes = [call for call in client.calls if "Item" in call]
+    writer = _writer(client)
+    assert writer.write(_proposal(writer)) is WaterlineWriteDisposition.COMMITTED
+    writes = [call for call in client.calls if "TransactItems" in call and "Put" in call["TransactItems"][0]]
     assert len(writes) == 1
-    assert writes[0]["ConditionExpression"].startswith("attribute_not_exists")
+    assert writes[0]["TransactItems"][0]["Put"]["ConditionExpression"].startswith(
+        "attribute_not_exists"
+    )
+    assert len(writes[0]["TransactItems"]) == 4
+    checks = writes[0]["TransactItems"][1:]
+    assert all(set(check) == {"ConditionCheck"} for check in checks)
+    assert "config_fingerprint" in repr(checks)
+    assert "state" in repr(checks)
+    assert "shard" in repr(checks)
     assert "key_material" not in repr(writes[0])
     assert "digest" not in repr(writes[0])
 
 
 def test_response_loss_accepts_only_exact_committed_strong_proof() -> None:
     committed = StatefulClient(response_loss="committed")
-    assert _writer(committed).write(_proposal()) is WaterlineWriteDisposition.COMMITTED
-    assert (committed.put_count, committed.read_count) == (1, 2)
+    committed_writer = _writer(committed)
+    proposal = _proposal(committed_writer)
+    assert committed_writer.write(proposal) is WaterlineWriteDisposition.COMMITTED
+    assert (committed.put_count, committed.read_count) == (1, 3)
 
     uncommitted = StatefulClient(response_loss="uncommitted")
+    uncommitted_writer = _writer(uncommitted)
     assert (
-        _writer(uncommitted).write(_proposal())
+        uncommitted_writer.write(_proposal(uncommitted_writer))
         is WaterlineWriteDisposition.UNRESOLVED
     )
-    assert (uncommitted.put_count, uncommitted.read_count) == (1, 2)
+    assert (uncommitted.put_count, uncommitted.read_count) == (1, 3)
+
+
+def test_proposal_and_retirable_result_are_nominal_and_consumed_once() -> None:
+    client = StatefulClient()
+    first = _writer(client)
+    proposal = _proposal(first)
+    assert (
+        _writer(client).write(proposal) is WaterlineWriteDisposition.REJECTED
+    )
+    forged = QuotaKeyRetirementWaterline()
+    assert first.write(forged) is WaterlineWriteDisposition.REJECTED
+
+    class Lifecycle:
+        _nonce = object()
+
+    lifecycle = Lifecycle()
+    authority = _authority(Client(), lifecycle)
+    decision = authority.evaluate()
+    capability = authority.consume(decision)
+    assert capability.lifecycle_generation == 2
+    with pytest.raises(ValueError):
+        authority.consume(decision)
+    with pytest.raises(ValueError):
+        authority.consume(type(decision)())
 
 
 def test_writer_rejects_trusted_time_equality_and_straddle_without_write() -> None:
     for boundary in (200, 200.5, 201):
         client = StatefulClient()
+        writer = _writer(client)
         assert (
-            _writer(client).write(_proposal(retire_not_before=boundary))
+            writer.write(_proposal(writer, retire_not_before=boundary))
             is WaterlineWriteDisposition.REJECTED
         )
         assert client.put_count == 0
@@ -268,40 +334,42 @@ def _stored_waterline(*, recovery_version: int = 4) -> dict[str, object]:
     )
 
 
-def _advance(**changes: object) -> QuotaKeyRetirementWaterline:
+def _advance(
+    writer: QuotaKeyRetirementWaterlineWriter, **changes: object
+) -> QuotaKeyRetirementWaterline:
     values = {
-        "lifecycle_generation": 3,
-        "previous_quota_key_version": 2,
-        "current_quota_key_version": 3,
         "last_old_admission_upper": 121,
         "last_old_expiry_shard": 151,
-        "required_recovery_version": 4,
         "retire_not_before": 291,
         "retention_until": 401,
     }
     values.update(changes)
-    return _proposal(**values)
+    return _proposal(writer, **values)
 
 
 def test_advance_uses_exact_version_cas_and_rejects_equality() -> None:
     client = StatefulClient()
     client.stored = _stored_waterline(recovery_version=3)
-    assert _writer(client).write(_advance()) is WaterlineWriteDisposition.COMMITTED
+    client.lifecycle_generation = 3
+    writer = _writer(client)
+    assert writer.write(_advance(writer)) is WaterlineWriteDisposition.COMMITTED
     assert client.put_count == 1
-    assert client.calls[-1]["ExpressionAttributeValues"][":expected"] == {"N": "7"}
+    put = client.calls[-1]["TransactItems"][0]["Put"]
+    assert put["ExpressionAttributeValues"][":expected"] == {"N": "7"}
 
     equality_values = {
         "last_old_admission_upper": 120,
         "last_old_expiry_shard": 150,
-        "required_recovery_version": 4,
         "retire_not_before": 290,
         "retention_until": 400,
     }
     for field, equality in equality_values.items():
         hostile = StatefulClient()
         hostile.stored = _stored_waterline()
+        hostile.lifecycle_generation = 3
+        writer = _writer(hostile)
         assert (
-            _writer(hostile).write(_advance(**{field: equality}))
+            writer.write(_advance(writer, **{field: equality}))
             is WaterlineWriteDisposition.REJECTED
         )
         assert hostile.put_count == 0
