@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import sqlite3
 import sys
@@ -22,11 +22,11 @@ from trustforge import context_builder, memory_os, skill_registry, tool_registry
 
 
 def _today_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
 
 
 def test_token_path_is_date_and_purpose_specific() -> None:
-    compact = datetime.now(timezone.utc).strftime("%Y%m%d")
+    compact = datetime.now().astimezone().strftime("%Y%m%d")
     assert str(_token_path("memory_os")) == (
         f"/tmp/eric-auth-{compact}-trustforge-memory_os.token"
     )
@@ -229,7 +229,7 @@ def test_all_schema_paths_accept_real_umbrella_receipt(
 ) -> None:
     """Exercise the real verifier with one umbrella receipt for every schema."""
     receipt = tmp_path / (
-        f"eric-auth-{datetime.now(timezone.utc).strftime('%Y%m%d')}-"
+        f"eric-auth-{datetime.now().astimezone().strftime('%Y%m%d')}-"
         "trustforge-agos-schema-closeout.token"
     )
     receipt.touch()
@@ -265,7 +265,7 @@ def test_fresh_repository_connect_accepts_real_umbrella_receipt(
 ) -> None:
     """Fresh repository files use the same real umbrella authorization."""
     receipt = tmp_path / (
-        f"eric-auth-{datetime.now(timezone.utc).strftime('%Y%m%d')}-"
+        f"eric-auth-{datetime.now().astimezone().strftime('%Y%m%d')}-"
         "trustforge-agos-schema-closeout.token"
     )
     receipt.touch()

@@ -286,12 +286,14 @@ class TestPersistence:
         assert loaded.included_refs.snapshot_ref == "snap"
 
     def test_cannot_overwrite_manifest(self, builder: ContextBuilder):
-        builder.build(run_id="run-once")
-        # Second build with same run_id silently fails (no overwrite)
-        builder.build(run_id="run-once", snapshot_ref="different")
+        first = builder.build(run_id="run-once")
+        second = builder.build(run_id="run-once", snapshot_ref="different")
 
         loaded = builder.get_manifest("run-once")
-        # First manifest persists (snapshot_ref was None)
+        # Both caller and repository observe the first immutable manifest.
+        assert second == first
+        assert second.manifest_id == loaded.manifest_id
+        assert second.content_hash == loaded.content_hash
         assert loaded.included_refs.snapshot_ref is None
 
     def test_get_nonexistent_returns_none(self, builder: ContextBuilder):

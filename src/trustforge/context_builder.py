@@ -378,8 +378,7 @@ class ContextBuilder:
         )
 
         # 7. Persist
-        self._persist(manifest)
-        return manifest
+        return self._persist(manifest)
 
     def get_manifest(self, run_id: str) -> ContextManifest | None:
         """Retrieve a manifest by run_id."""
@@ -403,7 +402,7 @@ class ContextBuilder:
             excluded_refs=[ExcludedRef(**e) for e in json.loads(row[6])],
         )
 
-    def _persist(self, manifest: ContextManifest) -> None:
+    def _persist(self, manifest: ContextManifest) -> ContextManifest:
         conn = self._connect()
         try:
             conn.execute(
@@ -423,10 +422,16 @@ class ContextBuilder:
                 ),
             )
             conn.commit()
+            return manifest
         except sqlite3.IntegrityError:
             conn.rollback()
-            # run_id UNIQUE constraint: manifest already exists for this run
-            pass
+            # The run_id is an immutable lineage identity. Return the object
+            # that actually persists rather than exposing a divergent
+            # transient manifest to the caller.
+            existing = self.get_manifest(manifest.run_id)
+            if existing is None:
+                raise
+            return existing
 
     def close(self) -> None:
         if self._conn:

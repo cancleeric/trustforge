@@ -10,7 +10,7 @@ Issue: #916, #917, #918 | Epic: #914
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import os
 from pathlib import Path
 import stat
@@ -23,18 +23,19 @@ class DBAuthorizationError(PermissionError):
     """Raised when a DB migration lacks valid file-based authorization."""
 
 
-def _today_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d")
+def _today_local() -> datetime:
+    """Return the operator-local date used by the documented shell receipt."""
+    return datetime.now().astimezone()
 
 
 def _today_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return _today_local().strftime("%Y-%m-%d")
 
 
 def _token_path(purpose: str) -> Path:
     """Return the canonical, immutable authorization receipt path."""
     return Path(
-        f"/tmp/eric-auth-{_today_utc()}-trustforge-{purpose}.token"
+        f"/tmp/eric-auth-{_today_local():%Y%m%d}-trustforge-{purpose}.token"
     )
 
 
