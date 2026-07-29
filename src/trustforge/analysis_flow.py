@@ -2912,6 +2912,7 @@ class AnalysisFlow:
                         source_provider="question_context_history",
                         kind="episodic",
                         reason="question_context_retrieval",
+                        promote_to_evidence=False,
                     )
 
             # 2. Skill selection: discover active analysis skills

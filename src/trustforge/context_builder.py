@@ -280,9 +280,21 @@ class ContextBuilder:
 
         Processes references, applies exclusion logic, computes deterministic hash.
         """
-        included = IncludedRefs(snapshot_ref=snapshot_ref)
+        included = IncludedRefs()
         excluded: list[ExcludedRef] = []
         token_used = 0
+
+        if snapshot_ref is not None:
+            snapshot_cost = estimate_tokens(snapshot_ref)
+            if snapshot_cost > token_budget:
+                excluded.append(
+                    ExcludedRef(
+                        snapshot_ref, "snapshot", EXCLUSION_OVER_BUDGET
+                    )
+                )
+            else:
+                included.snapshot_ref = snapshot_ref
+                token_used += snapshot_cost
 
         if question_ref is not None:
             question_cost = estimate_tokens(question_ref)
@@ -348,11 +360,28 @@ class ContextBuilder:
                     excluded.append(ExcludedRef(entry.skill_id, "skill", EXCLUSION_STALE))
                     continue
 
-                included.skill_refs.append({
+                skill_ref = {
                     "skill_id": entry.skill_id,
                     "revision_hash": entry.revision_hash,
                     "reason": entry.reason,
-                })
+                }
+                skill_cost = estimate_tokens(
+                    json.dumps(
+                        skill_ref,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                if token_used + skill_cost > token_budget:
+                    excluded.append(
+                        ExcludedRef(
+                            entry.skill_id, "skill", EXCLUSION_OVER_BUDGET
+                        )
+                    )
+                    continue
+                included.skill_refs.append(skill_ref)
+                token_used += skill_cost
 
         # 3. Process tool refs
         for tool_id in (tool_refs or []):
@@ -364,11 +393,43 @@ class ContextBuilder:
                     excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_APPROVAL_REQUIRED))
                     continue
 
-            included.tool_refs.append({"tool_id": tool_id})
+            tool_ref = {"tool_id": tool_id}
+            tool_cost = estimate_tokens(
+                json.dumps(tool_ref, sort_keys=True, separators=(",", ":"))
+            )
+            if token_used + tool_cost > token_budget:
+                excluded.append(
+                    ExcludedRef(tool_id, "tool", EXCLUSION_OVER_BUDGET)
+                )
+                continue
+            included.tool_refs.append(tool_ref)
+            token_used += tool_cost
 
         # 4. Process policy refs (pass-through)
         for pref in (policy_refs or []):
+            policy_cost = estimate_tokens(
+                json.dumps(
+                    pref,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            policy_id = str(
+                pref.get("policy_id")
+                or pref.get("family")
+                or pref.get("revision")
+                or "policy"
+            )
+            if token_used + policy_cost > token_budget:
+                excluded.append(
+                    ExcludedRef(
+                        policy_id, "policy", EXCLUSION_OVER_BUDGET
+                    )
+                )
+                continue
             included.policy_refs.append(pref)
+            token_used += policy_cost
 
         # 5. Compute deterministic hash
         content_hash = compute_manifest_hash(

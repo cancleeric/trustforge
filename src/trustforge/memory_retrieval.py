@@ -180,6 +180,7 @@ class MemoryRetrievalAdapter:
         source_provider: str,
         kind: str = "semantic",
         reason: str = "source_retrieval",
+        promote_to_evidence: bool = True,
     ) -> list[MemoryRef]:
         """Generic retrieval: convert source items to memory refs.
 
@@ -204,10 +205,13 @@ class MemoryRetrievalAdapter:
                 content_hash=content_hash,
                 published_at=published_at,
                 run_id=run_id,
+                promote_to_evidence=promote_to_evidence,
             )
 
             # Apply historical conclusion guard
-            evidence_eligible = entry.evidence_eligible
+            evidence_eligible = (
+                entry.evidence_eligible if promote_to_evidence else False
+            )
             if _is_historical_conclusion(entry):
                 evidence_eligible = False
 
@@ -356,6 +360,7 @@ class MemoryRetrievalAdapter:
         content_hash: str,
         published_at: str | None,
         run_id: str,
+        promote_to_evidence: bool = True,
     ) -> MemoryEntry:
         """Get existing entry by hash or create new one.
 
@@ -383,13 +388,14 @@ class MemoryRetrievalAdapter:
         )
 
         # Attempt to promote to evidence-eligible via canonical validation
-        try:
-            validate_evidence_eligible(entry)
-            # Validation passed — safe to mark eligible
-            entry.evidence_eligible = True
-        except ValueError:
-            # Validation failed — stays non-evidentiary (fail-closed)
-            entry.evidence_eligible = False
+        if promote_to_evidence:
+            try:
+                validate_evidence_eligible(entry)
+                # Validation passed — safe to mark eligible
+                entry.evidence_eligible = True
+            except ValueError:
+                # Validation failed — stays non-evidentiary (fail-closed)
+                entry.evidence_eligible = False
 
         # Persist (or discover existing)
         try:

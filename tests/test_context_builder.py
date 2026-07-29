@@ -215,6 +215,38 @@ class TestExclusion:
         assert len(manifest.excluded_refs) == 1
         assert manifest.excluded_refs[0].reason == EXCLUSION_OVER_BUDGET
 
+    def test_budget_applies_to_non_memory_reference_classes(
+        self, builder: ContextBuilder, tool_registry: ToolRegistryRepository
+    ):
+        tool_registry.register_tool(
+            ToolCapability(
+                tool_id="budget-tool",
+                name="Budget Tool",
+                side_effect_class="read_only",
+            )
+        )
+        manifest = builder.build(
+            run_id="run-all-ref-budget",
+            snapshot_ref="snapshot-reference-too-large",
+            tool_refs=["budget-tool"],
+            policy_refs=[
+                {"family": "outer-policy", "revision": "r" * 100}
+            ],
+            token_budget=1,
+        )
+
+        assert manifest.token_used <= manifest.token_budget
+        assert manifest.included_refs.snapshot_ref is None
+        assert manifest.included_refs.tool_refs == []
+        assert manifest.included_refs.policy_refs == []
+        assert {
+            (ref.ref_type, ref.reason) for ref in manifest.excluded_refs
+        } == {
+            ("snapshot", EXCLUSION_OVER_BUDGET),
+            ("tool", EXCLUSION_OVER_BUDGET),
+            ("policy", EXCLUSION_OVER_BUDGET),
+        }
+
     def test_stale_memory_excluded(
         self, builder: ContextBuilder, memory_repo: MemoryRepository
     ):

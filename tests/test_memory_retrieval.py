@@ -128,6 +128,25 @@ class TestRetrievalAdapter:
         )
 
         assert len(refs) == 1
+
+    def test_source_can_be_explicitly_persisted_non_evidentiary(
+        self, adapter: MemoryRetrievalAdapter, repo: MemoryRepository
+    ):
+        refs = adapter.retrieve_from_source(
+            [
+                {
+                    "content": "A prior user question",
+                    "published_at": "2026-07-01T00:00:00Z",
+                }
+            ],
+            run_id="run-history",
+            source_provider="question_context_history",
+            kind="episodic",
+            promote_to_evidence=False,
+        )
+
+        assert refs[0].evidence_eligible is False
+        assert repo.get(refs[0].memory_id).evidence_eligible is False
         assert refs[0].evidence_eligible is False
 
     def test_retrieve_from_source_eligible(self, adapter: MemoryRetrievalAdapter):
