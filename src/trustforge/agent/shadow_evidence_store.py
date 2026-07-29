@@ -100,6 +100,16 @@ class ReadOnlyShadowEvaluation:
     decision: ShadowDecision
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalShadowObservation:
+    """One fully authenticated persisted observation and its stable event id."""
+
+    event_id: str
+    recorded_at: str
+    completion_recorded_at: str
+    observation: ShadowObservation
+
+
 def _sha256(domain: bytes, value: Any) -> str:
     return "sha256:" + hashlib.sha256(domain + canonical_json(value)).hexdigest()
 
@@ -1393,6 +1403,102 @@ class ShadowEvidenceStore:
                 observations=tuple(observations),
                 decision=decision,
             )
+
+        return self._read_transaction(read)
+
+    def read_canonical_observations(
+        self,
+        identity: ShadowReleaseIdentity,
+        policy: ShadowPolicy,
+        *,
+        pit_cutoff: str,
+        limit: int = DEFAULT_MAX_QUERY_ROWS,
+    ) -> tuple[CanonicalShadowObservation, ...]:
+        """Read an exact persisted release window without fixture synthesis.
+
+        Every observation and completion row is authenticated against the
+        append-only schema. Missing or orphaned completion evidence fails
+        closed because promotion datasets may contain only durable terminal
+        observations.
+        """
+        if not self.read_only:
+            raise ShadowEvidenceStoreError(
+                "canonical observation export requires read_only=True"
+            )
+        if not 0 < limit <= self.max_query_rows:
+            raise ShadowEvidenceStoreError(
+                "canonical observation export exceeds configured bound"
+            )
+        if identity.policy_digest != policy_digest(policy):
+            raise ShadowEvidenceStoreError(
+                "release identity and policy digest differ"
+            )
+        cutoff = _utc_timestamp(pit_cutoff).isoformat().replace("+00:00", "Z")
+
+        def read(connection: sqlite3.Connection) -> tuple[CanonicalShadowObservation, ...]:
+            policy_row = connection.execute(
+                "SELECT * FROM policies WHERE policy_digest=?",
+                (identity.policy_digest,),
+            ).fetchone()
+            if policy_row is None:
+                raise ShadowEvidenceStoreError(
+                    "export policy is not durably recorded"
+                )
+            self._validated_policy_row(policy_row, policy)
+            rows = connection.execute(
+                "SELECT observations.*, "
+                "observation_completions.event_id AS completion_event_id, "
+                "observation_completions.elapsed_ms AS completion_elapsed_ms, "
+                "observation_completions.payload AS completion_payload, "
+                "observation_completions.payload_digest AS completion_payload_digest, "
+                "observation_completions.recorded_at AS completion_recorded_at "
+                "FROM observations JOIN observation_completions ON "
+                "observation_completions.observation_event_id=observations.event_id "
+                "WHERE "
+                "active_release=? AND candidate_release=? AND "
+                "active_artifact_digest=? AND candidate_artifact_digest=? AND "
+                "policy_digest=? AND contract_version=? AND "
+                "observations.recorded_at<=? AND "
+                "observation_completions.recorded_at<=? "
+                "ORDER BY observed_at ASC, event_id ASC LIMIT ?",
+                (*_identity_tuple(identity), cutoff, cutoff, limit + 1),
+            ).fetchall()
+            if len(rows) > limit:
+                raise ShadowEvidenceStoreError(
+                    "canonical observation export exceeds query bound"
+                )
+            exported: list[CanonicalShadowObservation] = []
+            for row in rows:
+                observation = self._validated_observation_row(row, identity)
+                payload = json.loads(bytes(row["completion_payload"]))
+                if (
+                    canonical_json(payload) != bytes(row["completion_payload"])
+                    or payload.get("observation_event_id") != row["event_id"]
+                    or payload.get("elapsed_ms") != row["completion_elapsed_ms"]
+                    or payload.get("terminal_status") != "completed"
+                    or _sha256(_EVENT_DOMAIN, payload)
+                    != row["completion_payload_digest"]
+                    or row["completion_event_id"]
+                    != _event_id(
+                        "observation_completion",
+                        row["completion_payload_digest"],
+                    )
+                ):
+                    raise ShadowEvidenceStoreError(
+                        "promotion observation completion is invalid"
+                    )
+                exported.append(
+                    CanonicalShadowObservation(
+                        event_id=row["event_id"],
+                        recorded_at=row["recorded_at"],
+                        completion_recorded_at=row["completion_recorded_at"],
+                        observation=replace(
+                            observation,
+                            elapsed_ms=float(row["completion_elapsed_ms"]),
+                        ),
+                    )
+                )
+            return tuple(exported)
 
         return self._read_transaction(read)
 
