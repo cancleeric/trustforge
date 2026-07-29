@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from trustforge.agos_runtime import AgosRuntime, agos_enabled
+from trustforge.analysis_flow import AnalysisFlow
 from trustforge.memory_retrieval import MemoryRef
 from trustforge.skill_registry import (
     SkillRegistryRepository,
@@ -108,6 +109,16 @@ class TestContextBuild:
             assert manifest is not None
             assert len(manifest.included_refs.memory_refs) == 1
 
+    def test_build_context_forwards_policy_refs(self, runtime: AgosRuntime):
+        with _enable_agos():
+            policy_refs = [{"policy_id": "outer-analysis", "revision_hash": "rev-1"}]
+            manifest = runtime.build_context(
+                "run-policy",
+                policy_refs=policy_refs,
+            )
+            assert manifest is not None
+            assert manifest.included_refs.policy_refs == policy_refs
+
     def test_build_context_graceful_degradation(self, runtime: AgosRuntime):
         """Even if internal error occurs, should not crash."""
         with _enable_agos():
@@ -124,6 +135,24 @@ class TestContextBuild:
 
 
 class TestToolAudit:
+    def test_builtin_runtime_tools_are_bootstrapped_idempotently(
+        self, runtime: AgosRuntime
+    ):
+        with _enable_agos():
+            runtime._ensure_init()
+            runtime._ensure_init()
+            expected = {
+                "ingestion-collect",
+                "bedrock-claim-extraction",
+                "bedrock-narrative-generation",
+            }
+            tools = {
+                tool.tool_id: tool for tool in runtime._tool_registry.list_tools()
+            }
+            assert expected <= tools.keys()
+            assert all(tools[tool_id].side_effect_class == "read_only"
+                       for tool_id in expected)
+
     def test_record_invocation_disabled(self, runtime: AgosRuntime):
         with _disable_agos():
             result = runtime.record_tool_invocation("run-1", "tool-x", {"q": "BTC"})
@@ -233,6 +262,41 @@ class TestToolAudit:
                     "deploy-blocked", should_not_run, {},
                     run_id="run-deploy-block",
                 )
+
+    def test_analysis_flow_gate_exception_is_fail_closed(self):
+        flow = object.__new__(AnalysisFlow)
+        flow._get_agos_runtime = lambda: (_ for _ in ()).throw(
+            RuntimeError("registry unavailable")
+        )
+        with _enable_agos():
+            assert flow._agos_assert_tool_allowed({}, "ingestion-collect") is False
+
+
+class TestMemoryCountDisclosure:
+    def test_counts_reflect_persisted_lineage(self, runtime: AgosRuntime):
+        from trustforge.memory_os import MemoryEntry
+
+        with _enable_agos():
+            runtime._ensure_init()
+            for memory_id, eligible in (("historical-1", False), ("evidence-1", True)):
+                runtime._memory_repo.save(MemoryEntry(
+                    memory_id=memory_id,
+                    kind="episodic",
+                    provider="test",
+                    content_hash=(memory_id[0] * 64),
+                    content_ref=memory_id,
+                    published_at="2026-07-01T00:00:00Z",
+                    retrieved_at="2026-07-01T00:00:00Z",
+                    evidence_eligible=eligible,
+                    run_id="run-counts",
+                ))
+            runtime._memory_repo.mark_used_as_evidence("evidence-1", "run-counts")
+
+            assert runtime.memory_counts("run-counts") == {
+                "historical": 1,
+                "evidence": 1,
+                "used_as_evidence": 1,
+            }
 
 
 # ─── Lineage Query Tests ────────────────────────────────────────────────────

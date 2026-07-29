@@ -39,6 +39,30 @@ from .tool_registry import (
 
 logger = logging.getLogger(__name__)
 
+_BUILTIN_TOOL_CAPABILITIES = (
+    ToolCapability(
+        tool_id="ingestion-collect",
+        name="Source ingestion collector",
+        side_effect_class="read_only",
+        evidence_class="candidate_evidence",
+        owner="trustforge",
+    ),
+    ToolCapability(
+        tool_id="bedrock-claim-extraction",
+        name="Bedrock claim extraction",
+        side_effect_class="read_only",
+        evidence_class="candidate_evidence",
+        owner="trustforge",
+    ),
+    ToolCapability(
+        tool_id="bedrock-narrative-generation",
+        name="Bedrock narrative generation",
+        side_effect_class="read_only",
+        evidence_class="context_only",
+        owner="trustforge",
+    ),
+)
+
 # ─── Feature Flag ────────────────────────────────────────────────────────────
 
 
@@ -119,6 +143,10 @@ class AgosLineageQuery:
             for inv in invocations
         ]
 
+    def get_run_memory_counts(self, run_id: str) -> dict[str, int]:
+        """Get persisted historical/evidence usage counts for a run."""
+        return self._runtime.memory_counts(run_id)
+
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
 
@@ -161,6 +189,13 @@ class AgosRuntime:
                 db_path=self._data_dir / "tool_registry.db"
             )
             self._tool_registry.ensure_schema()
+            # Product-owned runtime capabilities are bootstrapped explicitly so
+            # enabling AGOS does not turn every normal pipeline call into an
+            # unknown-tool denial. The existence check makes repeated startup
+            # idempotent while preserving registry append-only semantics.
+            for capability in _BUILTIN_TOOL_CAPABILITIES:
+                if not self._tool_registry.is_known(capability.tool_id):
+                    self._tool_registry.register_tool(capability)
 
             self._context_builder = ContextBuilder(
                 memory_repo=self._memory_repo,
@@ -190,6 +225,7 @@ class AgosRuntime:
         memory_refs: list[MemoryRef] | None = None,
         skill_ids: list[str] | None = None,
         tool_ids: list[str] | None = None,
+        policy_refs: list[dict[str, Any]] | None = None,
         token_budget: int = 4096,
     ) -> ContextManifest | None:
         """Build context manifest for a run. Returns None on failure.
@@ -221,6 +257,7 @@ class AgosRuntime:
                     memory_refs=memory_refs,
                     skill_manifest=skill_manifest,
                     tool_refs=tool_ids,
+                    policy_refs=policy_refs,
                     token_budget=token_budget,
                 )
                 self._emit_skill_selection_event(run_id, skill_manifest)
@@ -345,6 +382,17 @@ class AgosRuntime:
             return
         # Currently a no-op placeholder for future finalization logic
         logger.debug(f"Agent OS run finalized: {run_id}")
+
+    def memory_counts(self, run_id: str) -> dict[str, int]:
+        """Return persisted retrieval/evidence lineage counts for a run."""
+        if not agos_enabled():
+            return {"historical": 0, "evidence": 0, "used_as_evidence": 0}
+        self._ensure_init()
+        if self._memory_repo is None:
+            return {"historical": 0, "evidence": 0, "used_as_evidence": 0}
+        from .memory_retrieval import count_by_category
+
+        return count_by_category(self._memory_repo, run_id)
 
     # ─── Internal ────────────────────────────────────────────────────────
 

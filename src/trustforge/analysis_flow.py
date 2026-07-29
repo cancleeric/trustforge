@@ -2644,8 +2644,12 @@ class AnalysisFlow:
                 locale=package.get("locale", DEFAULT_NARRATIVE_LOCALE),
             )
 
+        narrative_tool_id = "bedrock-narrative-generation"
+        narrative_allowed = self._agos_assert_tool_allowed(
+            package, narrative_tool_id
+        )
         batch_allocation = bool(package.get("batch_allocation"))
-        if batch_allocation:
+        if narrative_allowed and batch_allocation:
             config_version = os.getenv(
                 "TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION", ""
             ).strip() or "local-v1"
@@ -2680,7 +2684,15 @@ class AnalysisFlow:
                 },
             )
 
-        if client.offline and not batch_allocation:
+        if not narrative_allowed:
+            log.record(
+                "agos.tool_blocked",
+                params={"tool_id": narrative_tool_id},
+                summary="Narrative Bedrock blocked by Agent OS tool gate; forcing offline",
+            )
+            client.offline = True
+            package["report"], package["evidence"] = _build_report()
+        elif client.offline and not batch_allocation:
             # Step1 已判離線（未 live 資格 / 預留失敗）：Step3 narrative 不會
             # 憑空變成 live，維持離線、不需要再走一次閘。
             package["report"], package["evidence"] = _build_report()
@@ -2696,7 +2708,25 @@ class AnalysisFlow:
                 log, batch_allocation=batch_allocation,
             ) as live:
                 client.offline = not live
-                package["report"], package["evidence"] = _build_report()
+                try:
+                    package["report"], package["evidence"] = _build_report()
+                except Exception:
+                    if live:
+                        self._agos_record_tool(
+                            package,
+                            narrative_tool_id,
+                            {"step": 3, "question_type": job["question_type"]},
+                            "failed",
+                        )
+                    raise
+                else:
+                    if live:
+                        self._agos_record_tool(
+                            package,
+                            narrative_tool_id,
+                            {"step": 3, "question_type": job["question_type"]},
+                            "success",
+                        )
         # ── Agent OS: mark evidence-eligible memories as actually used ──
         self._agos_mark_evidence_used(package)
         return package
@@ -2708,13 +2738,16 @@ class AnalysisFlow:
         from .agent.orchestrator import aggregate_trust_by_kind
         from .web import VERSION, _aggregate_trust_components, _price_provenance_data, _public_evidence_dict
         evidence = package["evidence"]
+        memory_counts = self._agos_memory_counts(job["job_id"])
         payload = {"version": VERSION, "report": dataclasses.asdict(package["report"]),
                    "evidence": [_public_evidence_dict(e) for e in evidence],
                    "trust_radar": aggregate_trust_by_kind(evidence),
                    "trust_components_aggregate": _aggregate_trust_components(evidence),
                    "price_provenance": _price_provenance_data(evidence),
+                   "agent_os_memory_counts": memory_counts,
                    "retrieval_context": package.get("retrieval_context", []),
                    "execution": log.manifest(), "execution_log": log.events, "snapshot_id": job["snapshot_id"], "mode": job["mode"]}
+        payload["report"]["memory_lineage"] = memory_counts
         now = time.time()
         self._conn().execute("BEGIN IMMEDIATE")
         try:
@@ -2943,7 +2976,7 @@ class AnalysisFlow:
         Returns True if tool may execute, False if blocked.
         When AGOS is disabled, always returns True (backward-compatible).
         When AGOS is enabled but tool is unknown/high-risk → blocks.
-        Fail-soft on internal errors (returns True to not break pipeline).
+        Any internal error blocks execution (fail-closed).
         """
         try:
             from .agos_runtime import agos_enabled
@@ -2972,11 +3005,24 @@ class AnalysisFlow:
                 return False
             return True
         except Exception as e:
-            # Internal error → fail-soft (allow execution, log warning)
             logging.getLogger(__name__).warning(
-                "Agent OS tool gate error (fail-soft, allowing): %s", e
+                "Agent OS tool gate error (fail-closed, blocking): %s", e
             )
-            return True
+            return False
+
+    def _agos_memory_counts(self, run_id: str) -> dict[str, int]:
+        """Disclose persisted memory lineage without inferring usage."""
+        empty = {"historical": 0, "evidence": 0, "used_as_evidence": 0}
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return empty
+            return self._get_agos_runtime().memory_counts(run_id)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Agent OS memory count disclosure failed: %s", e
+            )
+            return empty
 
     def _agos_mark_evidence_used(self, package: dict) -> None:
         """Mark memory entries that were actually consumed by Trust scoring.
