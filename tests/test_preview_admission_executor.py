@@ -476,3 +476,108 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
     assert result.outcome is AdmissionOutcome.UNAVAILABLE
     assert race_client.before_rejected_transaction is not None
     assert after_rejected_transaction == race_client.before_rejected_transaction
+
+
+@mock_aws
+def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
+    first_request = _request("12345678-1234-4234-9234-123456789abc")
+    second_request = _request("22345678-1234-4234-9234-123456789abc")
+    client = boto3.client("dynamodb", region_name="us-east-1")
+    client.create_table(
+        TableName="preview-store",
+        KeySchema=[
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    reads_complete = threading.Barrier(2, timeout=3)
+
+    class SameSnapshotClient:
+        def __init__(self):
+            self.write_attempts = 0
+            self.lock = threading.Lock()
+
+        def transact_get_items(self, **kwargs):
+            response = client.transact_get_items(**kwargs)
+            reads_complete.wait()
+            return response
+
+        def transact_write_items(self, **kwargs):
+            with self.lock:
+                self.write_attempts += 1
+            return client.transact_write_items(**kwargs)
+
+    shared_client = SameSnapshotClient()
+    executor = PreviewAdmissionExecutor(shared_client, "preview-store")
+    results = []
+    results_lock = threading.Lock()
+
+    def execute(request):
+        result = executor.execute(request)
+        with results_lock:
+            results.append(result)
+
+    threads = [
+        threading.Thread(target=execute, args=(first_request,)),
+        threading.Thread(target=execute, args=(second_request,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 2
+    admitted = [
+        result
+        for result in results
+        if result.outcome is AdmissionOutcome.ADMITTED
+    ]
+    unavailable = [
+        result
+        for result in results
+        if result.outcome is AdmissionOutcome.UNAVAILABLE
+    ]
+    assert len(admitted) == len(unavailable) == 1
+    assert admitted[0].handle is not None
+    assert unavailable[0].handle is unavailable[0].denied_reason is None
+    assert all(result.outcome is not AdmissionOutcome.DENIED for result in results)
+    assert shared_client.write_attempts == 2
+
+    items = client.scan(TableName="preview-store")["Items"]
+    assert len(items) == 10
+    reservation_items = [
+        item for item in items if item["kind"]["S"] == "preview_reservation"
+    ]
+    assert len(reservation_items) == 1
+    assert reservation_items[0]["reservation_id"]["S"] == (
+        admitted[0].handle.reservation_id
+    )
+    assert reservation_items[0]["reservation_id"]["S"] in {
+        first_request.reservation_id,
+        second_request.reservation_id,
+    }
+
+    expected_counters = {
+        (spec.key["pk"], spec.key["sk"]): spec.increment
+        for spec in build_counter_specs(first_request)
+    }
+    counter_items = [
+        item for item in items if item["kind"]["S"].startswith("preview_")
+        and item["kind"]["S"] not in {"preview_reservation", "preview_circuit"}
+    ]
+    assert len(counter_items) == len(expected_counters) == 8
+    assert {
+        (item["pk"]["S"], item["sk"]["S"]): int(item["value"]["N"])
+        for item in counter_items
+    } == expected_counters
+    circuit_items = [
+        item for item in items if item["kind"]["S"] == "preview_circuit"
+    ]
+    assert len(circuit_items) == 1
+    assert circuit_items[0]["state"]["S"] == "closed"
