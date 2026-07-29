@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import pwd
 from pathlib import Path
+from typing import Callable
 
 from trustforge.deployment_control import DeploymentControlLedger
-from trustforge.release_router import ReleaseABRouter, ReleaseEndpoint, RoutingPolicy
+from trustforge.release_router import (
+    ReleaseABRouter,
+    ReleaseEndpoint,
+    RoutedResponse,
+    RoutingPolicy,
+)
 from trustforge.safe_fs import read_regular_file
 from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedger
 
@@ -46,7 +52,9 @@ def _keys(payload: dict, role: str) -> dict[str, bytes]:
     return decoded
 
 
-def build_runtime_router() -> ReleaseABRouter:
+def build_runtime_router(
+    response_validator: Callable[[str, RoutedResponse], None] | None = None,
+) -> ReleaseABRouter:
     """Load only ledger append, routing, and manifest verification material."""
     runtime_config = _protected(RUNTIME_CONFIG_PATH)
     key_file = _protected(RUNTIME_KEYS_PATH)
@@ -175,4 +183,5 @@ def build_runtime_router() -> ReleaseABRouter:
         routing_keys,
         pinned_a_fallback=active,
         manifest_keyring=public_keys,
+        response_validator=response_validator,
     )

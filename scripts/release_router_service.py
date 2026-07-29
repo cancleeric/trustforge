@@ -14,10 +14,13 @@ import stat
 from http.server import BaseHTTPRequestHandler
 
 from trustforge.release_router import ReleaseABRouter
+from trustforge.release_http_canary import (
+    ReleaseHTTPCanaryPolicy,
+    validate_analyze_compare_response,
+)
 from trustforge.release_router_runtime import build_runtime_router
 
 SOCKET_PATH = "/run/trustforge/release-router.sock"
-MAX_SUBJECT_BYTES = 256
 MAX_HEADER_BYTES = 16 * 1024
 FORWARDED_REQUEST_HEADERS = frozenset(
     {"accept", "accept-encoding", "authorization", "cookie", "if-none-match"}
@@ -25,33 +28,64 @@ FORWARDED_REQUEST_HEADERS = frozenset(
 
 
 def build_router() -> ReleaseABRouter:
+    """Backward-compatible router-only construction API."""
     return build_runtime_router()
+
+
+def build_router_with_canary_policy() -> tuple[
+    ReleaseABRouter, ReleaseHTTPCanaryPolicy
+]:
+    """Compose the service router and its fail-closed HTTP canary policy."""
+    router = build_runtime_router(response_validator=validate_analyze_compare_response)
+    try:
+        canary_policy = ReleaseHTTPCanaryPolicy.load()
+    except FileNotFoundError:
+        # K2a's no-provision state must keep the ingress available but make B
+        # impossible. K2b owns authenticated, atomic activation provisioning.
+        canary_policy = ReleaseHTTPCanaryPolicy.disabled()
+    return (
+        router,
+        canary_policy,
+    )
 
 
 class ReleaseRouterHandler(BaseHTTPRequestHandler):
     router: ReleaseABRouter
+    canary_policy: ReleaseHTTPCanaryPolicy
 
     def do_GET(self) -> None:
-        if self.headers.get("X-TrustForge-Stable-Subject") is not None:
-            self.send_error(400, "untrusted identity header is forbidden")
-            return
         if sum(len(k) + len(v) for k, v in self.headers.items()) > MAX_HEADER_BYTES:
             self.send_error(431, "request headers are too large")
             return
-        subject = self.headers.get("X-TrustForge-Trusted-Subject")
-        if subject is not None and len(subject.encode("utf-8")) > MAX_SUBJECT_BYTES:
-            self.send_error(400, "stable subject is too large")
-            return
+        # The front proxy owns this header: it must strip the client value and
+        # inject the authenticated principal. Any legacy/spoofable stable
+        # subject is ignored and therefore can only reach A.
+        identity = self.canary_policy.authenticated_identity(
+            self.connection,
+            self.headers.get("X-TrustForge-Trusted-Identity"),
+        )
         forwarded = {
             name: value
             for name, value in self.headers.items()
             if name.lower() in FORWARDED_REQUEST_HEADERS
         }
         try:
+            try:
+                snapshot = self.router.ledger.routing_snapshot()
+                subject, expected_head = self.canary_policy.routing_subject(
+                    trusted_identity=identity,
+                    path=self.path,
+                    snapshot=snapshot,
+                )
+            except Exception:
+                # An unauthenticated/unreadable snapshot can never authorize B.
+                # Let the router independently reach its pinned-A fallback.
+                subject, expected_head = None, None
             response = self.router.route(
                 stable_subject=subject,
                 path=self.path,
                 request_headers=forwarded,
+                expected_control_head=expected_head,
             )
         except Exception:
             self.send_error(503, "release router unavailable")
@@ -82,7 +116,10 @@ class ReleaseRouterHandler(BaseHTTPRequestHandler):
 
 def main() -> int:
     try:
-        ReleaseRouterHandler.router = build_router()
+        (
+            ReleaseRouterHandler.router,
+            ReleaseRouterHandler.canary_policy,
+        ) = build_router_with_canary_policy()
         if os.path.lexists(SOCKET_PATH):
             if not stat.S_ISSOCK(os.lstat(SOCKET_PATH).st_mode):
                 raise RuntimeError("refusing to replace non-socket ingress path")
