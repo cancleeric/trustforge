@@ -217,6 +217,57 @@ class TestToolAudit:
             assert invocations[0]["status"] == "failed"
             assert "timeout" in invocations[0]["error"]
 
+    def test_tool_audited_fetch_requires_receipt_before_execution(
+        self, runtime: AgosRuntime, monkeypatch
+    ):
+        with _enable_agos():
+            runtime._ensure_init()
+            runtime._tool_registry.register_tool(
+                ToolCapability(
+                    tool_id="receipt-tool",
+                    name="Receipt",
+                    side_effect_class="read_only",
+                )
+            )
+            called = False
+
+            def fetch(**kwargs):
+                nonlocal called
+                called = True
+                return "must not run"
+
+            monkeypatch.setattr(runtime, "record_tool_invocation", lambda *a, **k: None)
+            with pytest.raises(PermissionError, match="receipt"):
+                runtime.tool_audited_fetch(
+                    "receipt-tool", fetch, {}, run_id="run-receipt"
+                )
+            assert called is False
+
+    def test_tool_audited_fetch_surfaces_completion_audit_failure(
+        self, runtime: AgosRuntime, monkeypatch
+    ):
+        with _enable_agos():
+            runtime._ensure_init()
+            runtime._tool_registry.register_tool(
+                ToolCapability(
+                    tool_id="completion-tool",
+                    name="Completion",
+                    side_effect_class="read_only",
+                )
+            )
+
+            def fail_completion(*args, **kwargs):
+                raise RuntimeError("audit completion unavailable")
+
+            monkeypatch.setattr(runtime, "complete_tool_invocation", fail_completion)
+            with pytest.raises(RuntimeError, match="audit completion unavailable"):
+                runtime.tool_audited_fetch(
+                    "completion-tool",
+                    lambda **kwargs: {"actual": "output"},
+                    {},
+                    run_id="run-completion",
+                )
+
     def test_tool_audited_fetch_disabled_still_executes(self, runtime: AgosRuntime):
         """When AGOS disabled, fetch still executes without audit."""
         with _disable_agos():

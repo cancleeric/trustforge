@@ -1795,15 +1795,22 @@ class AnalysisFlow:
                 f"Agent OS blocked ingestion-collect for {coin}: "
                 f"tool not registered or requires approval"
             )
-        docs = collect(query, coin=coin, offline=False)
-        # ── Agent OS post-execution audit ──
-        self._agos_record_tool(
-            _gate_package,
-            "ingestion-collect",
-            {"coin": coin, "query": query},
-            "success" if docs else "failed",
+        invocation_id = self._agos_begin_tool(
+            _gate_package, "ingestion-collect", {"coin": coin, "query": query}
         )
+        try:
+            docs = collect(query, coin=coin, offline=False)
+        except Exception as exc:
+            self._agos_complete_tool(
+                invocation_id, status="failed", error=str(exc)
+            )
+            raise
         raw = [doc_to_dict(doc) for doc in docs]
+        self._agos_complete_tool(
+            invocation_id,
+            output=raw,
+            status="success" if docs else "failed",
+        )
         encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         revision = hashlib.sha256(encoded.encode()).hexdigest()
         snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
@@ -2560,11 +2567,18 @@ class AnalysisFlow:
 
         if batch_allocation:
             log._atomic_accounting_callback = record_claim_cost
+        invocation_id = None
         with _bedrock_live_attempt(
             log, batch_allocation=batch_allocation,
         ) as live:
             client = BedrockClient(offline=not live)
             package["client"] = client
+            if live:
+                invocation_id = self._agos_begin_tool(
+                    package,
+                    "bedrock-claim-extraction",
+                    {"step": 1, "doc_count": len(package["docs"])},
+                )
             prompt_docs = (
                 _bounded_multi_angle_documents(package["docs"])
                 if batch_allocation else package["docs"]
@@ -2580,14 +2594,27 @@ class AnalysisFlow:
                     raise MultiAngleAuthorityError(
                         "claim document block exceeds authority byte cap"
                     )
-            package["claims"] = client.extract_claims_with_llm(
-                prompt_docs,
-                log=log,
-            )
+            try:
+                package["claims"] = client.extract_claims_with_llm(
+                    prompt_docs, log=log
+                )
+            except Exception as exc:
+                self._agos_complete_tool(
+                    invocation_id, status="failed", error=str(exc)
+                )
+                raise
             llm_active = not client.offline and bool(client.config.model_id)
         log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
-        # Post-execution audit record
-        self._agos_record_tool(package, "bedrock-claim-extraction", {"step": 1, "doc_count": len(package["docs"])}, "success" if package["claims"] else "failed")
+        self._agos_complete_tool(
+            invocation_id,
+            output=[
+                dataclasses.asdict(claim)
+                if dataclasses.is_dataclass(claim)
+                else claim
+                for claim in package["claims"]
+            ],
+            status="success" if package["claims"] else "failed",
+        )
         return package
 
     def _stage_trust_reasoning(self, package: dict) -> dict:
@@ -2708,25 +2735,42 @@ class AnalysisFlow:
                 log, batch_allocation=batch_allocation,
             ) as live:
                 client.offline = not live
+                invocation_id = (
+                    self._agos_begin_tool(
+                        package,
+                        narrative_tool_id,
+                        {"step": 3, "question_type": job["question_type"]},
+                    )
+                    if live
+                    else None
+                )
                 try:
                     package["report"], package["evidence"] = _build_report()
-                except Exception:
-                    if live:
-                        self._agos_record_tool(
-                            package,
-                            narrative_tool_id,
-                            {"step": 3, "question_type": job["question_type"]},
-                            "failed",
-                        )
+                except Exception as exc:
+                    self._agos_complete_tool(
+                        invocation_id, status="failed", error=str(exc)
+                    )
                     raise
                 else:
-                    if live:
-                        self._agos_record_tool(
-                            package,
-                            narrative_tool_id,
-                            {"step": 3, "question_type": job["question_type"]},
-                            "success",
-                        )
+                    evidence_refs = [
+                        str(ref)
+                        for item in package["evidence"]
+                        for ref in [getattr(item, "source_url", None)]
+                        if ref
+                    ]
+                    self._agos_complete_tool(
+                        invocation_id,
+                        output={
+                            "report": (
+                                dataclasses.asdict(package["report"])
+                                if dataclasses.is_dataclass(package["report"])
+                                else package["report"]
+                            ),
+                            "evidence_count": len(package["evidence"]),
+                        },
+                        evidence_refs=evidence_refs,
+                        status="success",
+                    )
         # ── Agent OS: mark evidence-eligible memories as actually used ──
         self._agos_mark_evidence_used(package)
         return package
@@ -2946,29 +2990,44 @@ class AnalysisFlow:
             self._agos_runtime_instance = AgosRuntime()
         return self._agos_runtime_instance
 
-    def _agos_record_tool(self, package: dict, tool_id: str, args: dict, status: str) -> None:
-        """Record a tool invocation in Agent OS audit trail (fail-soft).
+    def _agos_begin_tool(self, package: dict, tool_id: str, args: dict) -> str | None:
+        """Persist a pending receipt before an allowed external execution."""
+        from .agos_runtime import agos_enabled
 
-        NOTE: This is a POST-EXECUTION audit record. The actual pre-execution
-        gate is _agos_assert_tool_allowed() which must be called BEFORE execution.
-        """
-        try:
-            from .agos_runtime import agos_enabled
-            if not agos_enabled():
-                return
-            job = package.get("job")
-            if not job:
-                return
-            runtime = self._get_agos_runtime()
-            if runtime._tool_registry is None:
-                return
-            if not runtime._tool_registry.is_known(tool_id):
-                return
-            inv_id = runtime.record_tool_invocation(job["job_id"], tool_id, args)
-            if inv_id:
-                runtime.complete_tool_invocation(inv_id, status=status)
-        except Exception:
-            pass  # fail-soft: audit failure does not block pipeline
+        if not agos_enabled():
+            return None
+        job = package.get("job")
+        if not job:
+            raise RuntimeError(f"cannot audit tool {tool_id}: run identity missing")
+        invocation_id = self._get_agos_runtime().record_tool_invocation(
+            job["job_id"], tool_id, args
+        )
+        if invocation_id is None:
+            raise RuntimeError(
+                f"cannot execute allowed tool {tool_id}: invocation receipt "
+                "could not be persisted"
+            )
+        return invocation_id
+
+    def _agos_complete_tool(
+        self,
+        invocation_id: str | None,
+        *,
+        output: Any = None,
+        status: str,
+        error: str | None = None,
+        evidence_refs: list[str] | None = None,
+    ) -> None:
+        """Bind the actual result to its receipt; audit errors are observable."""
+        if invocation_id is None:
+            return
+        self._get_agos_runtime().complete_tool_invocation(
+            invocation_id,
+            output=output,
+            status=status,
+            error=error,
+            evidence_refs=evidence_refs,
+        )
 
     def _agos_assert_tool_allowed(self, package: dict, tool_id: str) -> bool:
         """Pre-execution gate: check if tool is allowed to run.

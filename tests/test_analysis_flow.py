@@ -73,6 +73,58 @@ def test_lineage_snapshot_event_is_idempotent_and_events_are_immutable(tmp_path,
         )
 
 
+def test_snapshot_persists_receipt_before_external_collection(tmp_path, monkeypatch):
+    events = []
+    docs = _docs()
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(
+        flow,
+        "_agos_begin_tool",
+        lambda *args: events.append("receipt") or "inv-1",
+    )
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda *args, **kwargs: events.append(("complete", kwargs)),
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect",
+        lambda *args, **kwargs: events.append("collect") or docs,
+    )
+
+    flow.create_snapshot("BTC")
+
+    assert events[0:2] == ["receipt", "collect"]
+    assert events[2][0] == "complete"
+    assert events[2][1]["output"] == [
+        analysis_flow_module.doc_to_dict(doc) for doc in docs
+    ]
+
+
+def test_snapshot_does_not_execute_when_receipt_persistence_fails(
+    tmp_path, monkeypatch
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
+    monkeypatch.setattr(
+        flow,
+        "_agos_begin_tool",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
+    )
+    called = False
+
+    def collect_must_not_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return _docs()
+
+    monkeypatch.setattr("trustforge.analysis_flow.collect", collect_must_not_run)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        flow.create_snapshot("BTC")
+    assert called is False
+
+
 def test_same_snapshot_matrix_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")

@@ -301,9 +301,10 @@ class AgosRuntime:
         self,
         invocation_id: str,
         *,
-        output: dict[str, Any] | str | None = None,
+        output: Any = None,
         status: str = "success",
         error: str | None = None,
+        evidence_refs: list[str] | None = None,
     ) -> None:
         """Complete a tool invocation with result."""
         if not agos_enabled():
@@ -312,7 +313,10 @@ class AgosRuntime:
         try:
             self._ensure_init()
             if self._tool_registry is None:
-                return
+                raise RuntimeError(
+                    "tool invocation completion unavailable: Agent OS tool "
+                    "registry failed to initialize"
+                )
 
             output_hash = None
             if output is not None:
@@ -323,9 +327,11 @@ class AgosRuntime:
                 output_hash=output_hash,
                 status=status,
                 error=error,
+                evidence_refs=evidence_refs,
             )
-        except Exception as e:
-            logger.warning(f"Tool invocation complete failed: {e}")
+        except Exception:
+            logger.exception("Tool invocation complete failed")
+            raise
 
     def tool_audited_fetch(
         self,
@@ -353,28 +359,27 @@ class AgosRuntime:
             self._tool_registry.assert_executable(tool_id)
 
         inv_id = self.record_tool_invocation(run_id, tool_id, args)
+        if agos_enabled() and inv_id is None:
+            raise PermissionError(
+                f"tool '{tool_id}' cannot execute: invocation receipt "
+                "could not be persisted (fail-closed)"
+            )
 
         try:
             result = fetch_fn(**args)
-            if inv_id:
-                self.complete_tool_invocation(
-                    inv_id, output=result if isinstance(result, (dict, str)) else None,
-                    status="success",
-                )
-            return result
-        except PermissionError:
-            # Re-raise permission errors (they're from assert_executable)
-            if inv_id:
-                self.complete_tool_invocation(
-                    inv_id, status="rejected", error="permission denied"
-                )
-            raise
         except Exception as e:
             if inv_id:
                 self.complete_tool_invocation(
                     inv_id, status="failed", error=str(e)
                 )
             raise
+        if inv_id:
+            self.complete_tool_invocation(
+                inv_id,
+                output=result,
+                status="success",
+            )
+        return result
 
     def finalize_run(self, run_id: str) -> None:
         """Finalize lineage for a run (called at end of analysis)."""

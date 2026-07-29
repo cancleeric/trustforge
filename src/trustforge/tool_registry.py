@@ -116,9 +116,9 @@ def invocation_input_hash(tool_id: str, args: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def invocation_output_hash(output: dict[str, Any] | str) -> str:
+def invocation_output_hash(output: Any) -> str:
     """Compute deterministic hash for tool invocation output."""
-    if isinstance(output, dict):
+    if not isinstance(output, str):
         payload = json.dumps(
             output, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
@@ -415,6 +415,7 @@ class ToolRegistryRepository:
         output_hash: str | None,
         status: str,
         error: str | None = None,
+        evidence_refs: list[str] | None = None,
     ) -> None:
         """Update an invocation's completion status.
 
@@ -430,24 +431,32 @@ class ToolRegistryRepository:
             raise ValueError("cannot transition to 'pending'; use a terminal status")
 
         conn = self._connect()
-        row = conn.execute(
-            "SELECT status FROM tool_invocations WHERE invocation_id = ?",
-            (invocation_id,),
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"invocation not found: {invocation_id!r}")
-        if row[0] != "pending":
+        cursor = conn.execute(
+            """UPDATE tool_invocations
+               SET output_hash = ?, status = ?, error = ?, evidence_refs = ?,
+                   completed_at = ?
+               WHERE invocation_id = ? AND status = 'pending'""",
+            (
+                output_hash,
+                status,
+                error,
+                json.dumps(evidence_refs or []),
+                _now_iso(),
+                invocation_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            row = conn.execute(
+                "SELECT status FROM tool_invocations WHERE invocation_id = ?",
+                (invocation_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"invocation not found: {invocation_id!r}")
             raise ValueError(
                 f"invocation {invocation_id!r} is already '{row[0]}'; "
                 f"only 'pending' invocations can be completed"
             )
-
-        conn.execute(
-            """UPDATE tool_invocations
-               SET output_hash = ?, status = ?, error = ?, completed_at = ?
-               WHERE invocation_id = ? AND status = 'pending'""",
-            (output_hash, status, error, _now_iso(), invocation_id),
-        )
         conn.commit()
 
     def get_invocation(self, invocation_id: str) -> ToolInvocation | None:

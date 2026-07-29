@@ -259,12 +259,44 @@ class TestInvocationAudit:
             inv.invocation_id,
             output_hash="b" * 64,
             status="success",
+            evidence_refs=["evidence://one", "evidence://two"],
         )
 
         result = repo.get_invocation(inv.invocation_id)
         assert result.status == "success"
         assert result.output_hash == "b" * 64
+        assert result.evidence_refs == ["evidence://one", "evidence://two"]
         assert result.completed_at is not None
+
+    def test_complete_invocation_rejects_stale_terminal_update(
+        self, repo: ToolRegistryRepository
+    ):
+        repo.register_tool(_make_cap(tool_id="atomic-tool"))
+        inv = _make_invocation(tool_id="atomic-tool")
+        repo.record_invocation(inv)
+        repo.complete_invocation(
+            inv.invocation_id, output_hash="b" * 64, status="success"
+        )
+
+        with pytest.raises(ValueError, match="already 'success'"):
+            repo.complete_invocation(
+                inv.invocation_id,
+                output_hash="c" * 64,
+                status="failed",
+                error="stale writer",
+            )
+
+        result = repo.get_invocation(inv.invocation_id)
+        assert result.status == "success"
+        assert result.output_hash == "b" * 64
+
+    def test_complete_invocation_rejects_missing_row(
+        self, repo: ToolRegistryRepository
+    ):
+        with pytest.raises(ValueError, match="invocation not found"):
+            repo.complete_invocation(
+                "missing", output_hash=None, status="failed"
+            )
 
     def test_complete_invocation_failed(self, repo: ToolRegistryRepository):
         repo.register_tool(_make_cap(tool_id="fail-tool"))
@@ -328,3 +360,8 @@ class TestHashUtils:
         h1 = invocation_output_hash("raw response body")
         h2 = invocation_output_hash("raw response body")
         assert h1 == h2
+
+    def test_output_hash_list(self):
+        assert invocation_output_hash([{"id": 1}]) == invocation_output_hash(
+            [{"id": 1}]
+        )
