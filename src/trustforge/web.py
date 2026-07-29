@@ -5596,6 +5596,7 @@ def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, s
     try:
         from .analysis_flow import (
             AnalysisFlow,
+            MultiAngleAuthorityError,
             MultiAngleBudgetError,
             MultiAngleCapacityError,
             MultiAngleIdempotencyConflictError,
@@ -5618,6 +5619,12 @@ def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, s
         return 429, _json_envelope_err("rate_limited", str(exc))
     except MultiAngleBudgetError as exc:
         return 409, _json_envelope_err("multi_angle_budget_unavailable", str(exc))
+    except MultiAngleAuthorityError as exc:
+        logging.error(
+            "multi_angle_authority_unavailable phase=http_submit error_type=%s",
+            type(exc).__name__,
+        )
+        return 503, _json_envelope_err("multi_angle_authority_unavailable", str(exc))
     except MultiAngleCapacityError as exc:
         return 503, _json_envelope_err("multi_angle_queue_unavailable", str(exc))
     except ValueError as exc:

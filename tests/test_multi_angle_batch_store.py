@@ -10,6 +10,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from trustforge.multi_angle_batch_store import (
+    ANGLE_MODES,
     AtomicBatchRequest,
     BatchConflictError,
     BatchStoreBackendError,
@@ -137,8 +138,8 @@ def test_sqlite_fault_rolls_back_budget_request_and_manifest(tmp_path):
     store = _sqlite_store(tmp_path)
     with sqlite3.connect(tmp_path / "batch.db") as conn:
         conn.execute(
-            "INSERT INTO atomic_jobs VALUES(?,?,?,?)",
-            (_job_ids("fault")[2], "other", "news", "pending"),
+            "INSERT INTO atomic_jobs VALUES(?,?,?,?,?)",
+            (_job_ids("fault")[2], "other", "news", "pending", None),
         )
     with pytest.raises(BatchStoreBackendError):
         store.create_batch(_request("fault"))
@@ -146,6 +147,83 @@ def test_sqlite_fault_rolls_back_budget_request_and_manifest(tmp_path):
         assert conn.execute("SELECT remaining_usd FROM atomic_budget").fetchone()[0] == "0.50"
         assert conn.execute("SELECT count(*) FROM atomic_requests").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM atomic_batches").fetchone()[0] == 0
+
+
+def test_sqlite_worker_claim_consumes_authority_allocation_idempotently(tmp_path):
+    store = _sqlite_store(tmp_path)
+    request = _request("claim")
+    result = store.create_batch(request)
+    job_id = result.job_ids[0]
+    assert store.claim_allocation(
+        batch_id=request.batch_id, mode=ANGLE_MODES[0], job_id=job_id,
+        owner_token="attempt-owner-a", config_version="v1",
+        expected_amount_usd=Decimal("0.10"),
+    )
+    with pytest.raises(BatchStoreIntegrityError):
+        store.claim_allocation(
+            batch_id=request.batch_id, mode=ANGLE_MODES[0], job_id=job_id,
+            owner_token="attempt-owner-b", config_version="v1",
+            expected_amount_usd=Decimal("0.10"),
+        )
+    with pytest.raises(BatchStoreIntegrityError):
+        store.claim_allocation(
+            batch_id=request.batch_id, mode=ANGLE_MODES[0], job_id=job_id,
+            owner_token="attempt-owner-a", config_version="stale-v2",
+            expected_amount_usd=Decimal("0.10"),
+        )
+    with pytest.raises(BatchStoreIntegrityError):
+        store.claim_allocation(
+            batch_id=request.batch_id, mode=ANGLE_MODES[0], job_id=job_id,
+            owner_token="attempt-owner-a", config_version="v1",
+            expected_amount_usd=Decimal("0.11"),
+        )
+    assert store.claim_allocation(
+        batch_id=request.batch_id, mode=ANGLE_MODES[0], job_id=job_id,
+        owner_token="attempt-owner-a", config_version="v1",
+        expected_amount_usd=Decimal("0.10"),
+    )
+    with sqlite3.connect(tmp_path / "batch.db") as conn:
+        assert conn.execute(
+            """SELECT state FROM atomic_allocations
+               WHERE batch_id=? AND mode=?""",
+            (request.batch_id, ANGLE_MODES[0]),
+        ).fetchone()[0] == "claimed"
+        assert conn.execute(
+            "SELECT state FROM atomic_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()[0] == "claimed"
+
+
+def test_sqlite_worker_claim_rejects_non_authority_job(tmp_path):
+    store = _sqlite_store(tmp_path)
+    request = _request("claim-bad")
+    store.create_batch(request)
+    with pytest.raises(ValueError):
+        store.claim_allocation(
+            batch_id=request.batch_id, mode=ANGLE_MODES[0], job_id="forged"
+            , owner_token="attempt-owner-a", config_version="v1",
+            expected_amount_usd=Decimal("0.10")
+        )
+
+
+def test_sqlite_call_slots_are_once_only_even_for_same_owner(tmp_path):
+    store = _sqlite_store(tmp_path)
+    request = _request("slots")
+    job_id = store.create_batch(request).job_ids[0]
+    claim = {
+        "batch_id": request.batch_id,
+        "mode": ANGLE_MODES[0],
+        "job_id": job_id,
+        "owner_token": "attempt-owner-a",
+        "config_version": "v1",
+        "expected_amount_usd": Decimal("0.10"),
+    }
+    store.claim_allocation(**claim)
+    assert store.consume_call_slot(**claim, slot="claim_extraction")
+    with pytest.raises(BatchStoreIntegrityError):
+        store.consume_call_slot(**claim, slot="claim_extraction")
+    assert store.consume_call_slot(**claim, slot="evidence_narrative")
+    with pytest.raises(BatchStoreIntegrityError):
+        store.consume_call_slot(**claim, slot="evidence_narrative")
 
 
 def test_replay_with_incomplete_manifest_is_integrity_error(tmp_path):
@@ -215,6 +293,7 @@ class _Client:
                             "S": self.request.request_fingerprint
                         },
                         "caller_hash": {"S": self.request.caller_hash},
+                        "snapshot_id": {"S": self.request.snapshot_id},
                     }
                 )
             elif pk.startswith("BATCH#") and sk.startswith("ALLOCATION#"):
@@ -354,6 +433,108 @@ def test_dynamodb_incomplete_replay_manifest_is_integrity_error():
         DynamoDBAtomicMultiAngleBatchStore(
             client=client, table_name="sandbox"
         ).create_batch(client.request)
+
+
+def test_dynamodb_worker_claim_uses_strict_owner_bound_transaction():
+    client = _Client()
+    store = DynamoDBAtomicMultiAngleBatchStore(
+        client=client, table_name="sandbox"
+    )
+    job_id = _job_ids(client.request.batch_id)[0]
+    assert store.claim_allocation(
+        batch_id=client.request.batch_id, mode=ANGLE_MODES[0], job_id=job_id,
+        owner_token="attempt-owner-a", config_version="v1",
+        expected_amount_usd=Decimal("0.10"),
+    )
+    tx = client.calls[0]["TransactItems"]
+    assert len(tx) == 3
+    batch = tx[0]["ConditionCheck"]
+    allocation, job = (item["Update"] for item in tx[1:])
+    assert batch["Key"]["pk"] == {"S": f"BATCH#{client.request.batch_id}"}
+    assert "config_version=:version" == batch["ConditionExpression"]
+    assert allocation["Key"] == {
+        "pk": {"S": f"BATCH#{client.request.batch_id}"},
+        "sk": {"S": f"ALLOCATION#{ANGLE_MODES[0]}"},
+    }
+    assert "job_id=:job" in allocation["ConditionExpression"]
+    assert "amount_usd=:amount" in allocation["ConditionExpression"]
+    assert "owner_token=:owner" in allocation["ConditionExpression"]
+    assert job["Key"] == {"pk": {"S": f"JOB#{job_id}"}, "sk": {"S": "META"}}
+    assert "batch_id=:batch" in job["ConditionExpression"]
+    assert "#mode=:mode" in job["ConditionExpression"]
+
+
+def test_dynamodb_worker_claim_conditional_failure_is_integrity_error():
+    client = _Client(cancel_index=0)
+    store = DynamoDBAtomicMultiAngleBatchStore(
+        client=client, table_name="sandbox"
+    )
+    with pytest.raises(BatchStoreIntegrityError):
+        store.claim_allocation(
+            batch_id=client.request.batch_id,
+            mode=ANGLE_MODES[0],
+            job_id=_job_ids(client.request.batch_id)[0],
+            owner_token="attempt-owner-a",
+            config_version="v1",
+            expected_amount_usd=Decimal("0.10"),
+        )
+
+
+def test_dynamodb_worker_claim_backend_failure_is_fail_closed():
+    class BrokenClient:
+        def transact_write_items(self, **_kwargs):
+            raise RuntimeError("network")
+
+    store = DynamoDBAtomicMultiAngleBatchStore(
+        client=BrokenClient(), table_name="sandbox"
+    )
+    request = _request("worker-backend")
+    with pytest.raises(BatchStoreBackendError):
+        store.claim_allocation(
+            batch_id=request.batch_id,
+            mode=ANGLE_MODES[0],
+            job_id=_job_ids(request.batch_id)[0],
+            owner_token="attempt-owner-a",
+            config_version="v1",
+            expected_amount_usd=Decimal("0.10"),
+        )
+
+
+def test_dynamodb_call_slot_uses_strict_config_owner_amount_transaction():
+    client = _Client()
+    request = client.request
+    job_id = _job_ids(request.batch_id)[0]
+    store = DynamoDBAtomicMultiAngleBatchStore(
+        client=client, table_name="sandbox"
+    )
+    assert store.consume_call_slot(
+        batch_id=request.batch_id, mode=ANGLE_MODES[0], job_id=job_id,
+        owner_token="attempt-owner-a", config_version="v1",
+        expected_amount_usd=Decimal("0.10"), slot="claim_extraction",
+    )
+    tx = client.calls[0]["TransactItems"]
+    assert len(tx) == 2
+    assert tx[0]["ConditionCheck"]["ConditionExpression"] == "config_version=:version"
+    update = tx[1]["Update"]
+    assert update["ExpressionAttributeNames"]["#slot"] == "claim_extraction_slot"
+    condition = update["ConditionExpression"]
+    assert "owner_token=:owner" in condition
+    assert "amount_usd=:amount" in condition
+    assert "#slot=:available" in condition
+
+
+def test_dynamodb_call_slot_second_consume_fails_closed():
+    client = _Client(cancel_index=1)
+    request = client.request
+    with pytest.raises(BatchStoreIntegrityError):
+        DynamoDBAtomicMultiAngleBatchStore(
+            client=client, table_name="sandbox"
+        ).consume_call_slot(
+            batch_id=request.batch_id, mode=ANGLE_MODES[0],
+            job_id=_job_ids(request.batch_id)[0],
+            owner_token="attempt-owner-a", config_version="v1",
+            expected_amount_usd=Decimal("0.10"), slot="evidence_narrative",
+        )
 
 
 @pytest.mark.parametrize(
