@@ -232,6 +232,9 @@
         "minLength": 1,
         "type": "string"
       },
+      "conflict_detected": {
+        "type": "boolean"
+      },
       "dimensions": {
         "items": {
           "additionalProperties": false,
@@ -257,7 +260,11 @@
               "if": {
                 "properties": {
                   "status": {
-                    "const": "unknown"
+                    "enum": [
+                      "unknown",
+                      "stale",
+                      "conflicted"
+                    ]
                   }
                 }
               },
@@ -360,7 +367,9 @@
                 "eligible",
                 "coverage_gate_not_met",
                 "fact_unknown",
-                "fact_unavailable"
+                "fact_unavailable",
+                "fact_conflicted",
+                "stale"
               ]
             },
             "signed_delta": {
@@ -371,7 +380,9 @@
             "status": {
               "enum": [
                 "known",
-                "unknown"
+                "unknown",
+                "stale",
+                "conflicted"
               ]
             },
             "weight": {
@@ -457,6 +468,7 @@
       "as_of",
       "total_delta",
       "total_delta_cap",
+      "conflict_detected",
       "gate",
       "dimensions"
     ],
@@ -1416,6 +1428,9 @@
             "minLength": 1,
             "type": "string"
           },
+          "conflict_detected": {
+            "type": "boolean"
+          },
           "dimensions": {
             "items": {
               "additionalProperties": false,
@@ -1441,7 +1456,11 @@
                   "if": {
                     "properties": {
                       "status": {
-                        "const": "unknown"
+                        "enum": [
+                          "unknown",
+                          "stale",
+                          "conflicted"
+                        ]
                       }
                     }
                   },
@@ -1544,7 +1563,9 @@
                     "eligible",
                     "coverage_gate_not_met",
                     "fact_unknown",
-                    "fact_unavailable"
+                    "fact_unavailable",
+                    "fact_conflicted",
+                    "stale"
                   ]
                 },
                 "signed_delta": {
@@ -1555,7 +1576,9 @@
                 "status": {
                   "enum": [
                     "known",
-                    "unknown"
+                    "unknown",
+                    "stale",
+                    "conflicted"
                   ]
                 },
                 "weight": {
@@ -1641,6 +1664,7 @@
           "as_of",
           "total_delta",
           "total_delta_cap",
+          "conflict_detected",
           "gate",
           "dimensions"
         ],

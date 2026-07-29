@@ -1,3 +1,0 @@
-source_revision: assessment-2026-07-27
-observation: A source-code repository alone cannot quantify off-chain governance capture resistance.
-decision: governance_capture_resistance=unknown

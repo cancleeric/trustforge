@@ -67,6 +67,35 @@ def view(*dimensions: IntrinsicDimension, asset_id: str = "asset:test") -> Asset
     return AssetIntrinsicView(asset_id=asset_id, as_of=AS_OF, dimensions=dimensions)
 
 
+def conflicted_dimension(
+    name: IntrinsicDimensionName,
+    *,
+    valid_from: datetime = AS_OF,
+) -> IntrinsicDimension:
+    return IntrinsicDimension(
+        name=name,
+        status=IntrinsicFactStatus.CONFLICTED,
+        value=None,
+        as_of=valid_from,
+        valid_from=valid_from,
+        valid_until=None,
+        fetched_at=valid_from,
+        provenance=IntrinsicProvenance(
+            source_urls=(
+                "https://a.example/source-a",
+                "https://b.example/source-b",
+            ),
+            methodology="conflicting upstream observations",
+            content_hash="a" * 64,
+            coverage="conflicting coverage",
+            evidence_path="data/asset_intrinsic_evidence/btc-issuance-v30.txt",
+            source_revision="conflict-revision",
+            evidence_kind="decision_record",
+            source_coordinates="conflicting coordinates",
+        ),
+    )
+
+
 def test_gate_passes_three_known_two_families_and_sum_equals_total() -> None:
     result = assess_intrinsic_shadow(
         view(
@@ -179,14 +208,83 @@ def test_future_known_fact_is_rendered_unknown_and_neutral() -> None:
     assert result["total_delta"] == 0.0
 
 
-def test_real_btc_and_bnb_are_honest_zero() -> None:
+def test_real_bnb_is_honest_zero_without_control_governance_proof() -> None:
     repository = AssetIntrinsicRepository(load_asset_intrinsic_records(FIXTURE))
-    for asset_id in ("asset:btc", "asset:bnb"):
-        pit = repository.pit_view(asset_id, AS_OF)
-        assert pit is not None
-        result = assess_intrinsic_shadow(pit)
-        assert result["total_delta"] == 0.0
-        assert result["gate"]["passed"] is False
+    pit = repository.pit_view("asset:bnb", AS_OF)
+    assert pit is not None
+    result = assess_intrinsic_shadow(pit)
+    assert result["total_delta"] == 0.0
+    assert result["gate"]["passed"] is False
+    assert result["conflict_detected"] is False
+
+
+def test_real_btc_control_and_governance_multi_host_produces_nonzero_shadow() -> None:
+    repository = AssetIntrinsicRepository(load_asset_intrinsic_records(FIXTURE))
+    pit = repository.pit_view("asset:btc", AS_OF)
+    assert pit is not None
+    result = assess_intrinsic_shadow(pit)
+    # BTC now has four known dimensions (issuance, control, supply, governance)
+    # spanning at least two source families, so the coverage gate is met.
+    assert result["gate"]["passed"] is True
+    assert result["gate"]["known_count"] >= 3
+    assert result["gate"]["source_family_count"] >= 2
+    assert result["total_delta"] != 0.0
+    assert result["conflict_detected"] is False
+    # Control and governance must not be scored as symbol/issuer branches; each
+    # known dimension contributes the same (value - 0.5) * weight formula.
+    control = next(d for d in result["dimensions"] if d["name"] == "control_dispersion")
+    assert control["status"] == "known"
+    assert abs(control["signed_delta"] - (control["normalized"] - 0.5) * control["weight"]) < 1e-9
+
+
+# ---- #870 conflicted status, PIT replay determinism ----
+
+
+def test_conflicted_dimension_contributes_zero_and_is_excluded_from_known_count() -> None:
+    conflicted_view = view(
+        dimension(IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, 1.0, "a.example"),
+        conflicted_dimension(IntrinsicDimensionName.CONTROL_DISPERSION),
+        dimension(IntrinsicDimensionName.SUPPLY_VERIFIABILITY, 1.0, "b.example"),
+        dimension(IntrinsicDimensionName.GOVERNANCE_CAPTURE_RESISTANCE, 1.0, "a.example"),
+    )
+    result = assess_intrinsic_shadow(conflicted_view)
+
+    control = next(d for d in result["dimensions"] if d["name"] == "control_dispersion")
+    assert control["status"] == "conflicted"
+    assert control["signed_delta"] == 0.0
+    assert control["raw"] is None
+    assert control["reason_code"] == "fact_conflicted"
+    # A conflicted fact never counts toward the known-dimension gate.
+    assert result["gate"]["known_count"] == 3
+    assert result["gate"]["passed"] is True
+    assert result["conflict_detected"] is True
+
+    # The conflicted dimension adds nothing: the total equals the same view
+    # with the conflicted fact omitted entirely.
+    without_conflict = assess_intrinsic_shadow(
+        view(
+            dimension(IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, 1.0, "a.example"),
+            dimension(IntrinsicDimensionName.SUPPLY_VERIFIABILITY, 1.0, "b.example"),
+            dimension(IntrinsicDimensionName.GOVERNANCE_CAPTURE_RESISTANCE, 1.0, "a.example"),
+        )
+    )
+    assert without_conflict["conflict_detected"] is False
+    assert result["total_delta"] == without_conflict["total_delta"]
+
+
+def test_pit_replay_is_deterministic_for_same_asset_and_as_of() -> None:
+    repository = AssetIntrinsicRepository(load_asset_intrinsic_records(FIXTURE))
+    as_of = datetime(2026, 7, 28, tzinfo=timezone.utc)
+
+    first_view = repository.pit_view("asset:btc", as_of)
+    second_view = repository.pit_view("asset:btc", as_of)
+    assert first_view is not None
+    assert second_view is not None
+    assert [d.name for d in first_view.dimensions] == [d.name for d in second_view.dimensions]
+
+    first_result = assess_intrinsic_shadow(first_view)
+    second_result = assess_intrinsic_shadow(second_view)
+    assert first_result == second_result
 
 
 def test_assessment_schema_accepts_output_and_report_field_remains_optional() -> None:
