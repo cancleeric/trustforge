@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -392,15 +393,16 @@ class MemoryRetrievalAdapter:
         # Persist (or discover existing)
         try:
             self._repo.save(entry)
-        except Exception:
+        except sqlite3.IntegrityError:
             # Duplicate (provider, content_hash) already exists.
             # Find the existing record so we return the real persisted ID.
             existing = self._find_existing(provider, content_hash, kind)
             if existing is not None:
                 self._repo.record_retrieval(existing.memory_id, run_id)
                 return existing
-            # If we truly can't find it, return the candidate
-            # (evidence_eligible=False is safe default)
+            # An integrity failure without a resolvable duplicate must not
+            # produce a phantom lineage reference.
+            raise
 
         return entry
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
+from unittest.mock import patch
 
 import pytest
 
@@ -217,6 +219,32 @@ class TestRetrievalAdapter:
             refs2[0].memory_id
         ]
         assert second_run_entries[0].run_id == "run-8b"
+
+    def test_non_duplicate_persistence_failure_is_not_silenced(
+        self, adapter: MemoryRetrievalAdapter, repo: MemoryRepository
+    ):
+        """Storage failures must not emit phantom memory references."""
+        with patch.object(repo, "save", side_effect=OSError("disk unavailable")):
+            with pytest.raises(OSError, match="disk unavailable"):
+                adapter.retrieve_from_source(
+                    [{"content": "not persisted", "published_at": "2026-07-01T00:00:00Z"}],
+                    run_id="run-storage-failure",
+                    source_provider="newsapi",
+                )
+        assert repo.find_by_run("run-storage-failure") == []
+
+    def test_unresolved_integrity_failure_is_not_silenced(
+        self, adapter: MemoryRetrievalAdapter, repo: MemoryRepository
+    ):
+        with patch.object(
+            repo, "save", side_effect=sqlite3.IntegrityError("foreign key")
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="foreign key"):
+                adapter.retrieve_from_source(
+                    [{"content": "no duplicate", "published_at": "2026-07-01T00:00:00Z"}],
+                    run_id="run-integrity-failure",
+                    source_provider="newsapi",
+                )
 
 
 # ─── Execution Log Tests ─────────────────────────────────────────────────────
