@@ -135,6 +135,13 @@
   pointer-events: auto;
 }
 
+/* 工作區開啟後星系仍持續運作，但只作低干擾背景；不可攔截滑鼠或鍵盤。
+   inert/aria-hidden 在 DOM 層移除互動與輔具焦點，這裡補 CSS hit-test 防線。 */
+.hermes-galaxy-background,
+.hermes-galaxy-background>* {
+  pointer-events: none !important;
+}
+
 /* ── keyframes（逐字移植自設計稿，名稱加 hermes- 前綴避免與他處衝突） ── */
 @keyframes hermes-pulse {
 
@@ -803,7 +810,7 @@
   inset: var(--hermes-top) 300px 120px;
   overflow: hidden;
   color: var(--color-hermes-tx);
-  background: linear-gradient(180deg, #050b13, #03080f);
+  background: linear-gradient(180deg, rgba(5, 11, 19, .94), rgba(3, 8, 15, .9));
   border: 1px solid rgba(77, 216, 224, .38);
   box-shadow: 0 0 35px rgba(0, 0, 0, .78), inset 0 0 45px rgba(77, 216, 224, .035);
   clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
