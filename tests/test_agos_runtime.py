@@ -77,24 +77,32 @@ class TestFeatureFlag:
 
 
 class TestContextBuild:
-    def test_analysis_flow_uses_thread_local_agos_runtimes(self, tmp_path: Path):
+    def test_analysis_flow_uses_thread_local_agos_runtimes(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setenv("TRUSTFORGE_DATA_DIR", str(tmp_path / "agos-workers"))
         flow = AnalysisFlow(tmp_path / "thread-local-runtime.db")
         runtimes: list[AgosRuntime] = []
 
         def resolve_runtime() -> None:
-            runtimes.append(flow._get_agos_runtime())
+            runtime = flow._get_agos_runtime()
+            runtime._ensure_init()
+            runtimes.append(runtime)
 
         threads = [threading.Thread(target=resolve_runtime) for _ in range(2)]
         try:
             for thread in threads:
                 thread.start()
-            for thread in threads:
                 thread.join()
             assert len(runtimes) == 2
             assert runtimes[0] is not runtimes[1]
             assert len(flow._agos_runtimes) == 2
         finally:
             flow.close()
+        assert all(runtime._memory_repo._conn is None for runtime in runtimes)
+        assert all(runtime._skill_registry._conn is None for runtime in runtimes)
+        assert all(runtime._tool_registry._conn is None for runtime in runtimes)
+        assert all(runtime._context_builder._conn is None for runtime in runtimes)
 
     def test_read_only_runtime_does_not_bootstrap_tool_capabilities(
         self, data_dir: Path

@@ -259,7 +259,9 @@ class ContextBuilder:
                 )
                 verify_db_authorization(AGOS_SCHEMA_AUTH_PURPOSE)
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(self._db_path))
+            self._conn = sqlite3.connect(
+                str(self._db_path), check_same_thread=False
+            )
             self._conn.execute("PRAGMA journal_mode=WAL")
             _ensure_manifest_table(self._conn)
         return self._conn
