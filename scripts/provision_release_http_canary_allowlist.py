@@ -12,10 +12,23 @@ import re
 import shutil
 import stat
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.release_http_canary import ACTIVATION_CONTRACT, ReleaseHTTPCanaryPolicy
+from trustforge.canary_cost_budget import (
+    CanaryCostBudget,
+    CanaryCostBudgetError,
+    verify_budget,
+)
+from trustforge.release_http_canary import (
+    ACTIVATION_CONTRACT,
+    ALLOWLIST_SCHEMA,
+    ReleaseHTTPCanaryPolicy,
+    parse_canary_request,
+    request_binding_digest,
+)
 from trustforge.safe_fs import (
     pinned_directory,
     read_regular_file,
@@ -31,8 +44,7 @@ try:
 except ModuleNotFoundError:  # Direct execution adds scripts/, not the repository root.
     from verify_release_install_evidence import _control_ledger, _json_file
 
-REQUEST_SCHEMA = "trustforge.release-http-canary-request/v1"
-ALLOWLIST_SCHEMA = "trustforge.release-http-canary-allowlist/v1"
+REQUEST_SCHEMA = "trustforge.release-http-canary-request/v2"
 DEFAULT_COORDINATION_LOCK = Path("/run/trustforge-release-control/coordination.lock")
 _LOCATION = "location ~ ^/(healthz|api/)"
 
@@ -330,28 +342,38 @@ def _request(path: Path) -> list[dict]:
     for entry in payload["entries"]:
         if not isinstance(entry, dict) or set(entry) != {
             "trusted_identity",
-            "endpoint",
-            "assets",
+            "path",
+            "live_token_digest",
+            "cost_budget",
         }:
             raise SystemExit("canary allowlist request entry is invalid")
-        identity, endpoint, assets = (
+        identity, request_path, token_digest, budget = (
             entry["trusted_identity"],
-            entry["endpoint"],
-            entry["assets"],
+            entry["path"],
+            entry["live_token_digest"],
+            entry["cost_budget"],
         )
+        request = parse_canary_request(request_path) if isinstance(request_path, str) else None
         if (
             not isinstance(identity, str)
             or not (1 <= len(identity.encode()) <= 256)
-            or endpoint not in {"analyze", "compare"}
-            or not isinstance(assets, list)
-            or len(assets) != (2 if endpoint == "compare" else 1)
+            or request is None
+            or request.sample_mode
+            or not isinstance(token_digest, str)
+            or (
+                request.live_mode
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", token_digest) is None
+            )
+            or (not request.live_mode and token_digest != "")
+            or not isinstance(budget, dict)
         ):
             raise SystemExit("canary allowlist request entry is invalid")
         normalized.append(
             {
                 "trusted_identity": identity,
-                "endpoint": endpoint,
-                "assets": assets,
+                "path": request_path,
+                "live_token_digest": token_digest,
+                "cost_budget": budget,
             }
         )
     if len({canonical_json(item) for item in normalized}) != len(normalized):
@@ -395,17 +417,78 @@ def _payload(
     }
     if any(runtime.get(name) != value for name, value in expected.items()):
         raise SystemExit("runtime does not match authenticated control initialization")
-    entries = [
-        {
-            **entry,
-            "active_release_digest": expected["a_artifact_digest"],
-            "candidate_release_digest": expected["b_artifact_digest"],
-            "ramp_id": initialized["policy"]["ramp_id"],
-            "control_ledger_id": expected["control_ledger_id"],
-            "policy_digest": initialized["policy"]["policy_digest"],
+    key_payload = _json_file(args.keys)
+    try:
+        budget_keyring = {
+            key: bytes.fromhex(value)
+            for key, value in key_payload["canary_cost_budget_public"].items()
         }
-        for entry in _request(args.request)
-    ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit("canary cost budget public keys are invalid") from exc
+    snapshot = SimpleNamespace(
+        ledger_id=expected["control_ledger_id"],
+        active=SimpleNamespace(
+            release_digest=expected["a_artifact_digest"]
+        ),
+        candidate=SimpleNamespace(
+            release_digest=expected["b_artifact_digest"]
+        ),
+        policy=SimpleNamespace(
+            ramp_id=initialized["policy"]["ramp_id"],
+            policy_digest=initialized["policy"]["policy_digest"],
+        ),
+        control_event_head=records[-1]["event_hash"],
+        canary_epoch=records[-1]["event_hash"],
+    )
+    entries = []
+    for requested in _request(args.request):
+        request = parse_canary_request(requested["path"])
+        assert request is not None
+        digest = request_binding_digest(
+            requested["trusted_identity"],
+            request,
+            snapshot,
+            online_stance_mode=True,
+            live_token_digest=requested["live_token_digest"],
+        )
+        try:
+            budget = CanaryCostBudget(**requested["cost_budget"])
+            verify_budget(
+                budget,
+                keyring=budget_keyring,
+                now=datetime.now(timezone.utc),
+                deployment_ledger_id=snapshot.ledger_id,
+                canary_epoch=snapshot.canary_epoch,
+                active_artifact_digest=snapshot.active.release_digest,
+                candidate_artifact_digest=snapshot.candidate.release_digest,
+                ramp_id=snapshot.policy.ramp_id,
+                routing_policy_digest=snapshot.policy.policy_digest,
+                request_binding_digest=digest,
+            )
+        except (CanaryCostBudgetError, TypeError, ValueError) as exc:
+            raise SystemExit(
+                "canary allowlist signed budget is invalid"
+            ) from exc
+        entries.append(
+            {
+                "trusted_identity": requested["trusted_identity"],
+                "endpoint": request.endpoint,
+                "assets": list(request.assets),
+                "query_digest": request.query_digest,
+                "question_type": request.question_type,
+                "live_mode": request.live_mode,
+                "sample_mode": request.sample_mode,
+                "data_mode": request.data_mode,
+                "llm_mode": request.llm_mode,
+                "online_stance_mode": True,
+                "active_release_digest": expected["a_artifact_digest"],
+                "candidate_release_digest": expected["b_artifact_digest"],
+                "ramp_id": initialized["policy"]["ramp_id"],
+                "control_ledger_id": expected["control_ledger_id"],
+                "policy_digest": initialized["policy"]["policy_digest"],
+                "cost_budget": requested["cost_budget"],
+            }
+        )
     return {
         "schema": ALLOWLIST_SCHEMA,
         "activation_contract": ACTIVATION_CONTRACT,

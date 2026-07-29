@@ -11,20 +11,31 @@ import os
 import socket
 import socketserver
 import stat
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 
-from trustforge.release_router import ReleaseABRouter
+from trustforge import web
+from trustforge.budget_guard import online_stance_requested
 from trustforge.release_http_canary import (
     ReleaseHTTPCanaryPolicy,
     validate_analyze_compare_response,
 )
+from trustforge.release_router import ReleaseABRouter
 from trustforge.release_router_runtime import build_runtime_router
 
 SOCKET_PATH = "/run/trustforge/release-router.sock"
 MAX_HEADER_BYTES = 16 * 1024
 FORWARDED_REQUEST_HEADERS = frozenset(
-    {"accept", "accept-encoding", "authorization", "cookie", "if-none-match"}
+    {
+        "accept",
+        "accept-encoding",
+        "authorization",
+        "cookie",
+        "if-none-match",
+        "x-live-token",
+    }
 )
+COST_RESERVATION_STALE_WINDOW = timedelta(minutes=5)
 
 
 def build_router() -> ReleaseABRouter:
@@ -37,12 +48,31 @@ def build_router_with_canary_policy() -> tuple[
 ]:
     """Compose the service router and its fail-closed HTTP canary policy."""
     router = build_runtime_router(response_validator=validate_analyze_compare_response)
+    cost_reconciliation_ready = True
     try:
-        canary_policy = ReleaseHTTPCanaryPolicy.load()
+        router.ledger.reconcile_stale_cost_reservations(
+            now=datetime.now(timezone.utc),
+            stale_after=COST_RESERVATION_STALE_WINDOW,
+        )
+    except Exception:
+        # Free real-data/off-LLM canaries may continue. Paid cohorts cannot:
+        # admitting them without a trustworthy outstanding-cost projection
+        # could exceed the signed ramp cap after a process crash.
+        cost_reconciliation_ready = False
+    try:
+        canary_policy = ReleaseHTTPCanaryPolicy.load(
+            budget_keyring=getattr(router, "cost_budget_keyring", {}),
+            online_stance_requested_fn=online_stance_requested,
+            live_token_validator=lambda token: (
+                web._bedrock_allowed() and web._live_token_matches(token)
+            ),
+        )
     except FileNotFoundError:
         # K2a's no-provision state must keep the ingress available but make B
         # impossible. K2b owns authenticated, atomic activation provisioning.
         canary_policy = ReleaseHTTPCanaryPolicy.disabled()
+    if not cost_reconciliation_ready:
+        canary_policy = canary_policy.without_cost_bearing()
     return (
         router,
         canary_policy,
@@ -72,20 +102,32 @@ class ReleaseRouterHandler(BaseHTTPRequestHandler):
         try:
             try:
                 snapshot = self.router.ledger.routing_snapshot()
-                subject, expected_head = self.canary_policy.routing_subject(
+                decision = self.canary_policy.routing_decision(
                     trusted_identity=identity,
                     path=self.path,
                     snapshot=snapshot,
+                    live_token=self.headers.get("X-Live-Token"),
                 )
+                subject = decision.subject
+                expected_head = decision.control_head
+                cost_budget = decision.cost_budget
+                request_binding = decision.request_binding_digest
             except Exception:
                 # An unauthenticated/unreadable snapshot can never authorize B.
                 # Let the router independently reach its pinned-A fallback.
-                subject, expected_head = None, None
+                subject, expected_head, cost_budget, request_binding = (
+                    None,
+                    None,
+                    None,
+                    None,
+                )
             response = self.router.route(
                 stable_subject=subject,
                 path=self.path,
                 request_headers=forwarded,
                 expected_control_head=expected_head,
+                cost_budget=cost_budget,
+                request_binding_digest=request_binding,
             )
         except Exception:
             self.send_error(503, "release router unavailable")
