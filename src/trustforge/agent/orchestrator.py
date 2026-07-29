@@ -1558,6 +1558,9 @@ def run_agent_pipeline(
             "model": client.config.model_id or "offline/regex-fallback",
             "step_elapsed_sec": _step1_elapsed,
             "llm_active": _is_llm_step1,
+            # 保留本次真正抽取出的 provenance ID，供驗證端 fail-closed 比對；
+            # 線上 LLM 的 #llmN ID 無法由 deterministic extractor 重建。
+            "claim_ids": [claim.id for claim in claims],
         },
         summary=(
             f"Step1 抽取 {len(claims)} 條主張；"

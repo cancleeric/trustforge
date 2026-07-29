@@ -450,11 +450,17 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
 
     # ── Section B.1: claim_id 溯源驗證 ────────────────────────────────────
     print("▶ claim_id 溯源驗證...")
-    # run_agent_pipeline 會對同一批 docs 呼叫 deterministic extract_claims；
-    # 在驗證端重建同一組 ID，才能驗證真正的 Claim provenance。
-    from trustforge.trust.scoring import extract_claims
-
-    traceable_claim_ids = {claim.id for claim in extract_claims(docs)}
+    # 從 Step 1 執行紀錄取得本次真正抽取出的 IDs。線上 LLM 產生 #llmN，
+    # 不能用 deterministic extractor 的 #N 重新推算，否則合法引用會被誤拒。
+    step1_events = [
+        event for event in log.events
+        if event.get("tool") == "bedrock.complete"
+        and event.get("params", {}).get("step") == 1
+    ]
+    traceable_claim_ids = set(
+        step1_events[-1].get("params", {}).get("claim_ids", [])
+        if step1_events else []
+    )
     trace_result = verify_claim_id_traceability(
         report,
         evidence,
