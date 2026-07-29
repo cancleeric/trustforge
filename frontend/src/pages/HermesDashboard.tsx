@@ -673,18 +673,25 @@ export default function HermesDashboard() {
           />
         </div>
 
-        {!activeModule && (
-          <div className="hermes-boot-layer" data-region="galaxy" style={{ opacity: boot.galaxy ? 1 : 0, transition: 'opacity .6s ease-out' }}>
-            <CurrencyGalaxy
-              model={model}
-              selectedId={selectedId}
-              hoveredId={hoveredId}
-              focusPulse={focusPulse}
-              onSelect={selectCoin}
-              onHover={setHoveredId}
-            />
-          </div>
-        )}
+        <div
+          className={`hermes-boot-layer${activeModule ? ' hermes-galaxy-background' : ''}`}
+          data-region="galaxy"
+          aria-hidden={activeModule ? true : undefined}
+          inert={activeModule ? true : undefined}
+          style={{
+            opacity: boot.galaxy ? (activeModule ? 0.28 : 1) : 0,
+            transition: 'opacity .6s ease-out',
+          }}
+        >
+          <CurrencyGalaxy
+            model={model}
+            selectedId={selectedId}
+            hoveredId={hoveredId}
+            focusPulse={focusPulse}
+            onSelect={selectCoin}
+            onHover={setHoveredId}
+          />
+        </div>
 
         {!isRightRailCollapsed && (
           <div className="hermes-boot-layer" style={{ opacity: boot.right ? 1 : 0, transition: 'opacity .5s ease-out' }}>

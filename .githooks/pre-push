@@ -6,8 +6,22 @@
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-PYTHON="python3"
-if [ -x .venv/bin/python ]; then PYTHON=.venv/bin/python; fi
+if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c 'import coverage, xdist' >/dev/null 2>&1; then
+  if [ ! -f uv.lock ]; then
+    echo "[pre-push] FAILED: dev venv is missing/incomplete and uv.lock is unavailable." >&2
+    exit 1
+  fi
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "[pre-push] FAILED: dev venv is missing/incomplete and uv is not on PATH." >&2
+    exit 1
+  fi
+  echo "[pre-push] bootstrapping frozen dev venv from uv.lock"
+  if ! uv sync --frozen --extra dev; then
+    echo "[pre-push] FAILED: frozen dev venv bootstrap"
+    exit 1
+  fi
+fi
+PYTHON=.venv/bin/python
 echo "[pre-push] pytest interpreter: ${PYTHON}"
 run_gate() {
   label="$1"

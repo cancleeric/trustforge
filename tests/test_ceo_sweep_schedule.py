@@ -693,6 +693,9 @@ def test_ci_runs_on_develop_and_main_and_pre_push_is_full_local_gate():
     assert "frontend lint" in hook
     assert "frontend build" in hook
     assert "git diff --check" in hook
+    assert "uv sync --frozen --extra dev" in hook
+    assert "import coverage, xdist" in hook
+    assert "PYTHON=.venv/bin/python" in hook
 
 
 def test_active_agent_contract_uses_half_hour_ceo_sweep():
