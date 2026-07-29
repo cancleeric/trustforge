@@ -532,6 +532,18 @@ def validate_intrinsic_shadow_observation(payload: dict) -> dict:
                 raise ValueError(
                     "intrinsic provenance timestamps violate PIT ordering"
                 )
+        if status in {"known", "stale"}:
+            if provenance is None:
+                raise ValueError(
+                    "coverage-eligible intrinsic provenance is missing"
+                )
+            urls = provenance["source_urls"]
+            if not urls:
+                raise ValueError(
+                    "coverage-eligible intrinsic source URLs are missing"
+                )
+            families.update(normalized_source_family(url) for url in urls)
+            known_count += 1
         if status == "known":
             raw, normalized = dimension["raw"], dimension["normalized"]
             if (
@@ -547,11 +559,6 @@ def validate_intrinsic_shadow_observation(payload: dict) -> dict:
                 or provenance["evidence_kind"] != "upstream_excerpt"
             ):
                 raise ValueError("known intrinsic dimension value is malformed")
-            urls = provenance.get("source_urls")
-            if not isinstance(urls, list) or not urls:
-                raise ValueError("known intrinsic provenance is malformed")
-            families.update(normalized_source_family(url) for url in urls)
-            known_count += 1
             expected_reason = "eligible" if gate["passed"] else "coverage_gate_not_met"
             expected_delta = (
                 round((float(normalized) - 0.5) * DIMENSION_WEIGHT, 8)
