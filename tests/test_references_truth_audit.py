@@ -10,6 +10,7 @@ def test_references_truth_audit_is_conservative_and_reproducible():
 
     assert "Taiwan regulatory sources are not marked verified" in checks
     assert "production deploy workflow is documented as disabled" in checks
+    assert "only the approved hourly release train and optional CI workflows are active" in checks
 
 
 def test_references_truth_audit_rejects_taiwan_sources_marked_verified(tmp_path):

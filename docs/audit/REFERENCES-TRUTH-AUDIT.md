@@ -171,7 +171,7 @@
 | SQLite 快取 | ✅ 已實作 | ✅ verified | `src/trustforge/ingestion/cache.py` (line 612+) | `CACHE_BACKEND=sqlite` 路徑完整 |
 | nginx | ✅ 已實作 | 🟡 implemented-not-verified | `deploy/nginx.conf`, `deploy/nginx-react-http.conf` 等 | 設定檔存在，production 未驗證 |
 | Docker | ✅ 已實作 | ✅ verified | `Dockerfile` | python:3.12-slim 基底 |
-| GitHub Actions CI | ✅ 已實作 | 🟡 implemented-not-verified | `.github/workflows/ci.yml.disabled` | **所有 workflow 均帶 `.disabled` 後綴**，`workflow_dispatch` only，不自動觸發；Production Deploy workflow（`deploy-production.yml.disabled`）明確停用。能手動觸發但未進入 CI 自動門控。 |
+| GitHub Actions CI / Release Train | ✅ 已實作 | 🟡 implemented-not-verified | `.github/workflows/hourly-release-train.yml`; `.github/workflows/ci.yml.disabled`; issue #1000 | 每小時 release train 已啟用，透過 GitHub OIDC 取得短效 AWS 機器身分；舊 Production Deploy workflow（`deploy-production.yml.disabled`）維持停用，避免雙重發布。待首次無人登入完整發布驗收後才能升為 verified。 |
 
 ---
 
@@ -251,7 +251,7 @@
 
 1. **HOYA BIT live ticker**：references 標 ✅ 已實作，但程式碼明確 `disabled`（待 `TRUSTFORGE_HOYABIT_TICKER_URL` 設定）。**實際狀態：⚠ blocked-external**。
 2. **Reddit**：references 標 ⛔ 已排除，但 `social.py` 仍保留 RSS 爬取碼（降級邏輯）。分歧不嚴重——⛔ 符合 references 標記，程式碼只是未清除舊實作。
-3. **GitHub Actions CI**：references 標 ✅ 已實作，但三個 workflow 均帶 `.disabled` 後綴且只有 `workflow_dispatch` 觸發。**實際狀態：🟡 implemented-not-verified**（CI 能手動跑但非自動觸發；Production Deploy workflow 停用）。
+3. **GitHub Actions CI / Release Train**：每小時 release train 已啟用並使用 GitHub OIDC 短效 AWS 身分；舊 Production Deploy workflow 仍停用以避免雙重發布。**實際狀態：🟡 implemented-not-verified**，須以首次無人工登入的完整發布 receipt 才能升為 verified。
 4. **AWS SSM + EventBridge**：references 標 ✅ 已實作，SSM 讀取碼存在但 EventBridge IaC 定義未見於 repo。**實際狀態：🟡 implemented-not-verified**。
 5. **協同行為檢測**：references 標 🔬 研究中，實際已有 `_coordination_template_flags` / `_coordination_burst_flags` + insights `detect_manipulation_burst`，但 CEO 定案降為 informational-only（不扣分）。**實際狀態：🟡 implemented-not-verified**（有碼、有測試、但不影響信任分）。
 

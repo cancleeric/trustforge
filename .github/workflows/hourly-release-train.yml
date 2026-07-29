@@ -1,0 +1,83 @@
+name: Hourly Release Train
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: trustforge-production-release-train
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  promote-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 120
+    steps:
+      - name: Checkout develop with full history
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure release identity
+        run: |
+          git config user.name "TrustForge Release Train"
+          git config user.email "release-train@hurricanesoft.com.tw"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install frozen Python dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frozen frontend dependencies
+        run: npm --prefix frontend ci --include=dev
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: Verify AWS machine identity
+        run: |
+          test "$(aws sts get-caller-identity --query Account --output text)" = "795930814369"
+          test "${AWS_ACCESS_KEY_ID#ASIA}" != "${AWS_ACCESS_KEY_ID}"
+
+      - name: Run verified promotion and production deployment
+        env:
+          BEDROCK_MODEL_ID: au.anthropic.claude-haiku-4-5-20251001-v1:0
+          REGION: ap-southeast-2
+          TRUSTFORGE_BOOTSTRAP: "0"
+          TRUSTFORGE_TOKEN_SSM_PREFIX: /trustforge/runtime
+        run: .venv/bin/python scripts/hourly_release_train.py --execute
+
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-train-${{ github.run_id }}
+          path: out/release-train/
+          if-no-files-found: warn
+          retention-days: 30
