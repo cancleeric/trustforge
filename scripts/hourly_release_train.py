@@ -234,7 +234,18 @@ def verify_runtime_identity(expected_digest: str) -> None:
 def verify_frontend_identity(expected_sha: str) -> str:
     short_sha = expected_sha[:7]
     index = run(
-        ["curl", "-fsS", "--max-time", "15", f"{PRODUCTION_URL}/"],
+        [
+            "curl",
+            "-fsS",
+            "--max-time",
+            "15",
+            "--retry",
+            "4",
+            "--retry-delay",
+            "2",
+            "--retry-all-errors",
+            f"{PRODUCTION_URL}/",
+        ],
         capture=True,
     )
     assets = set(re.findall(r"assets/index-[A-Za-z0-9_-]+\.js", index))
@@ -242,7 +253,18 @@ def verify_frontend_identity(expected_sha: str) -> str:
         raise RuntimeError("production frontend index does not identify exactly one app bundle")
     asset = assets.pop()
     bundle = run(
-        ["curl", "-fsS", "--max-time", "30", f"{PRODUCTION_URL}/{asset}"],
+        [
+            "curl",
+            "-fsS",
+            "--max-time",
+            "30",
+            "--retry",
+            "4",
+            "--retry-delay",
+            "2",
+            "--retry-all-errors",
+            f"{PRODUCTION_URL}/{asset}",
+        ],
         capture=True,
     )
     if short_sha not in bundle:

@@ -106,6 +106,29 @@ def test_frontend_identity_requires_release_sha_and_question_picker(monkeypatch)
     assert train.verify_frontend_identity(expected_sha) == "assets/index-release.js"
 
 
+def test_frontend_identity_retries_public_reload_window(monkeypatch):
+    expected_sha = "abcdef1234567890abcdef1234567890abcdef12"
+    responses = iter(
+        [
+            '<script type="module" src="/assets/index-release.js"></script>',
+            f"bundle-{expected_sha[:7]}-隨機競賽題目-Random competition question",
+        ]
+    )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return next(responses)
+
+    monkeypatch.setattr(train, "run", fake_run)
+    train.verify_frontend_identity(expected_sha)
+    assert len(calls) == 2
+    for command in calls:
+        assert command[command.index("--retry") + 1] == "4"
+        assert command[command.index("--retry-delay") + 1] == "2"
+        assert "--retry-all-errors" in command
+
+
 @pytest.mark.parametrize(
     "bundle",
     [
