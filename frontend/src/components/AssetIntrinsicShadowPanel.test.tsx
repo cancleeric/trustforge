@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
-import AssetIntrinsicShadowPanel, { parseIntrinsicAssessment } from './AssetIntrinsicShadowPanel'
+import AssetIntrinsicShadowPanel, {
+  parseIntrinsicAssessment,
+  type IntrinsicOfficialState,
+} from './AssetIntrinsicShadowPanel'
 
 const names = [
   'issuance_predictability',
@@ -104,18 +109,20 @@ function conflictedDim(name: string) {
 
 function officialAssessment() {
   const payload = passedAssessment()
+  const officialState: IntrinsicOfficialState = {
+    schema_version: 'trustforge.intrinsic-official-state/v1',
+    state: 'official',
+    capability_id: 'asset-intrinsic-v1',
+    verified_at: '2026-07-28T00:00:00Z',
+    expires_at: null,
+    release_id: 'release-1',
+    reason: 'verified',
+  }
   return {
     ...payload,
     mode: 'official',
     affects_official_score: true,
-    release_capability: { capability: 'asset_intrinsic', promoted_at: '2026-07-28T00:00:00Z' },
-    promotion_receipt: {
-      receipt_id: 'rc-001',
-      policy_digest: 'sha256:policy-abc',
-      decision: 'pass',
-      reasons: ['non-inferiority gate met', 'calibration not worsened'],
-      calibration_claim: { brier_before: 0.2, brier_after: 0.18 },
-    },
+    official_state: officialState,
   }
 }
 
@@ -234,7 +241,7 @@ describe('AssetIntrinsicShadowPanel', () => {
     wrongReason.dimensions[0].reason_code = 'eligible'
     expect(parseIntrinsicAssessment(wrongReason)).toBeNull()
     renderPanel({ mode: 'shadow', affects_official_score: true })
-    expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
+    expect(screen.getByText(/資料格式不相容|payload is incompatible/)).toBeInTheDocument()
     expect(screen.queryByText('已驗證')).not.toBeInTheDocument()
     expect(screen.queryByText('覆蓋閘已通過')).not.toBeInTheDocument()
   })
@@ -308,56 +315,34 @@ describe('AssetIntrinsicShadowPanel', () => {
     expect(parseIntrinsicAssessment(conflictedWrongReason)).toBeNull()
   })
 
-  // -- #878 official parsing skeleton ---------------------------------------
+  // -- #1084 UIA: no client-side promotion ----------------------------------
 
-  it('renders official only from a fully-receipted, release-capable and eligible payload', () => {
-    const parsed = parseIntrinsicAssessment(officialAssessment())
-    expect(parsed).not.toBeNull()
-    expect(parsed?.mode).toBe('official')
+  it('treats the typed official fixture as contract-only and cannot promote rendering', () => {
+    const artifact = JSON.parse(readFileSync(
+      resolve(process.cwd(), '../docs/contracts/trustforge-data-contracts-v1.json'),
+      'utf8',
+    ))
+    const schema = artifact.IntrinsicOfficialState
+    const fixture = officialAssessment().official_state
+    expect(Object.keys(fixture).sort()).toEqual([...schema.required].sort())
+    expect(Object.keys(fixture).sort()).toEqual(Object.keys(schema.properties).sort())
+    expect(schema.additionalProperties).toBe(false)
+    expect(schema.properties.state.enum).toContain(fixture.state)
+    expect(schema.properties.schema_version.const).toBe(fixture.schema_version)
+    expect(parseIntrinsicAssessment(officialAssessment())).toBeNull()
     const { container } = renderPanel(officialAssessment())
-    expect(container.querySelector('[data-intrinsic-mode="official"]')).not.toBeNull()
-    expect(screen.getByText('OFFICIAL／已納入正式信任分')).toBeInTheDocument()
-    expect(screen.getByText(/已記錄發行能力與 promotion receipt/)).toBeInTheDocument()
-    expect(screen.getByText(/Promotion receipt: rc-001/)).toBeInTheDocument()
+    expect(container.querySelector('[data-intrinsic-mode="official"]')).toBeNull()
+    expect(screen.queryByText(/OFFICIAL/)).not.toBeInTheDocument()
+    expect(screen.getByText(/資料格式不相容|payload is incompatible/)).toBeInTheDocument()
   })
 
-  it('official skeleton fail-closed: missing release_capability or receipt -> downgrade', () => {
-    const noCapability = officialAssessment()
-    delete (noCapability as Record<string, unknown>).release_capability
-    expect(parseIntrinsicAssessment(noCapability)).toBeNull()
-    const noReceipt = officialAssessment()
-    delete (noReceipt as Record<string, unknown>).promotion_receipt
-    expect(parseIntrinsicAssessment(noReceipt)).toBeNull()
-    // receipt missing a field
-    const partialReceipt = officialAssessment()
-    delete (partialReceipt.promotion_receipt as Record<string, unknown>).calibration_claim
-    expect(parseIntrinsicAssessment(partialReceipt)).toBeNull()
-    // decision !== pass (e.g. block) masquerading as official
-    const blocked = officialAssessment()
-    blocked.promotion_receipt.decision = 'block'
-    expect(parseIntrinsicAssessment(blocked)).toBeNull()
-    // official must claim affects_official_score=true; a shadow-style false is inconsistent
-    const shadowish = officialAssessment()
-    shadowish.affects_official_score = false
-    expect(parseIntrinsicAssessment(shadowish)).toBeNull()
-    // a bare shadow payload cannot self-declare official by just flipping mode
+  it('rejects every caller-supplied promotion signal', () => {
     const fakeOfficial = assessment()
     fakeOfficial.mode = 'official'
     expect(parseIntrinsicAssessment(fakeOfficial)).toBeNull()
-    const emptyCapability = officialAssessment()
-    emptyCapability.release_capability = {} as typeof emptyCapability.release_capability
-    expect(parseIntrinsicAssessment(emptyCapability)).toBeNull()
-    const wrongCapability = officialAssessment()
-    wrongCapability.release_capability.capability = 'other' as 'asset_intrinsic'
-    expect(parseIntrinsicAssessment(wrongCapability)).toBeNull()
-    const unpromoted = officialAssessment()
-    unpromoted.gate = assessment().gate
-    unpromoted.total_delta = 0
-    unpromoted.dimensions = assessment().dimensions
-    expect(parseIntrinsicAssessment(unpromoted)).toBeNull()
-    // all invalid official payloads downgrade to the unavailable notice
-    renderPanel(blocked)
-    expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
+    for (const field of ['promotion_receipt', 'release_capability', 'calibration_claim', 'official_state']) {
+      expect(parseIntrinsicAssessment({ ...assessment(), [field]: {} })).toBeNull()
+    }
   })
 
   // -- AC5 banned-words audit ------------------------------------------------

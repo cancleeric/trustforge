@@ -2799,6 +2799,60 @@ components:
           items:
             type: integer
 
+    IntrinsicOfficialState:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      $id: https://trustforge.local/contracts/intrinsic-official-state/v1
+      title: TrustForge IntrinsicOfficialState
+      type: object
+      required:
+        - schema_version
+        - state
+        - capability_id
+        - verified_at
+        - expires_at
+        - release_id
+        - reason
+      properties:
+        schema_version:
+          const: trustforge.intrinsic-official-state/v1
+        state:
+          enum: [shadow, blocked, official, error]
+        capability_id:
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 128
+              pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+            - type: "null"
+        verified_at:
+          type: string
+          format: date-time
+          maxLength: 64
+          pattern: '(?:Z|[+-]\d{2}:\d{2})$'
+        expires_at:
+          anyOf:
+            - type: string
+              format: date-time
+              maxLength: 64
+              pattern: '(?:Z|[+-]\d{2}:\d{2})$'
+            - type: "null"
+        release_id:
+          anyOf:
+            - type: string
+              minLength: 1
+              maxLength: 128
+              pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+            - type: "null"
+        reason:
+          enum:
+            - authority_unavailable
+            - shadow_only
+            - promotion_blocked
+            - verified
+            - expired
+            - invalid_authority
+      additionalProperties: false
+
     Report:
       type: object
       required:
@@ -2884,6 +2938,14 @@ components:
             → `abstain`；非 abstain 且 `calibrated_confidence < 0.5` →
             `low_confidence`；其餘 → `normal`。缺鍵（舊格式資料）一律正規化
             為 `normal`（保守 fallback，不代表真的高信心）。
+        asset_intrinsic_official_state:
+          anyOf:
+            - $ref: "#/components/schemas/IntrinsicOfficialState"
+            - type: "null"
+          description: |
+            安全的 typed public state。正常 analyze/comparison 路徑沒有可信
+            authority 時不會輸出此欄位；此 schema 不含 receipt、key、trust
+            root、路徑、校準或 authority material。
 
     AnalyzeSingleData:
       type: object

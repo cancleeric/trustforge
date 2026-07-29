@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import collections
+import copy
 import dataclasses
 import hashlib
 import hmac
@@ -51,6 +52,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from jsonschema import Draft202012Validator, FormatChecker
+
 from . import admin_config
 from . import backend_registry
 from . import rate_limit_store
@@ -59,6 +62,7 @@ from .agent.orchestrator import aggregate_trust_by_kind
 from .asset_context_repository import AssetContextRepository, load_asset_context_records
 from .asset_intrinsic import AssetIntrinsicRepository, load_asset_intrinsic_records
 from .asset_intrinsic_shadow import assess_intrinsic_shadow
+from .data_contracts import contract_schemas
 from .ecolink_repository import EcoLinkRepository, load_ecolink_fixtures
 from .peer_metrics import snapshots_comparable
 from .peer_metrics_repository import PeerMetricsRepository, load_peer_metrics_fixture
@@ -5529,8 +5533,7 @@ def _handle_api_eco_link(qs: dict | None = None) -> tuple[int, str]:
         return 502, _json_envelope_err("upstream_error", "EcoLink 影響路徑資料暫時無法讀取，請稍後再試")
 
 
-def _parse_report_generated_at(report) -> datetime | None:
-    raw = getattr(report, "generated_at", "")
+def _parse_generated_at(raw: object) -> datetime | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
     try:
@@ -5542,6 +5545,10 @@ def _parse_report_generated_at(report) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def _parse_report_generated_at(report) -> datetime | None:
+    return _parse_generated_at(getattr(report, "generated_at", ""))
 
 
 def _risk_notices_for_context(context: dict | None) -> list[dict]:
@@ -5569,34 +5576,59 @@ def _risk_notices_for_context(context: dict | None) -> list[dict]:
     return notices
 
 
-def _public_report_dict(report) -> dict:
-    data = dataclasses.asdict(report)
-    as_of = _parse_report_generated_at(report)
-    supplied_context = data.get("asset_context")
-    malformed_context = supplied_context is not None and not isinstance(supplied_context, dict)
-    context = supplied_context if isinstance(supplied_context, dict) else None
+def _public_report_dict(report) -> dict | None:
+    return _public_report_mapping(dataclasses.asdict(report))
+
+
+def _public_report_mapping(report: dict) -> dict | None:
+    """Rebuild a public Report from canonical fields and server-owned context."""
+    if not isinstance(report, dict):
+        return None
+    report_schema = contract_schemas()["Report"]
+    canonical_fields = set(report_schema["properties"])
+    server_fields = {
+        "asset_context",
+        "asset_intrinsic_assessment",
+        "asset_intrinsic_official_state",
+        "risk_notices",
+    }
+    data: dict = {}
+    for key, value in report.items():
+        compact_key = re.sub(r"[^a-z0-9]+", "", str(key).casefold())
+        # UIA has no trusted authority. Remove the canonical spelling and all
+        # punctuation/case aliases before selecting the public allowlist.
+        if compact_key == "assetintrinsicofficialstate":
+            continue
+        if key in canonical_fields and key not in server_fields:
+            data[key] = copy.deepcopy(value)
+    if _contains_authority_material(data):
+        return None
+    as_of = _parse_generated_at(data.get("generated_at"))
     trusted_context: dict | None = None
-    if not malformed_context:
-        context_repository = _asset_context_repository()
-        context_record = (
-            context_repository.by_symbol(getattr(report, "coin", ""), as_of=as_of)
-            if context_repository and as_of is not None
-            else None
-        )
-        trusted_context = context_record.context.to_dict() if context_record else None
-        if context is None:
-            context = trusted_context
-    data["asset_context"] = context
-    if malformed_context:
-        data["risk_notices"] = []
-    elif not data.get("risk_notices"):
-        data["risk_notices"] = _risk_notices_for_context(context)
+    context_repository = _asset_context_repository()
+    context_record = (
+        context_repository.by_symbol(str(data.get("coin", "")), as_of=as_of)
+        if context_repository and as_of is not None
+        else None
+    )
+    candidate_context = context_record.context.to_dict() if context_record else None
+    context_validator = Draft202012Validator(contract_schemas()["AssetContext"])
+    if isinstance(candidate_context, dict) and context_validator.is_valid(candidate_context):
+        trusted_context = candidate_context
+    data["asset_context"] = trusted_context
+    data["risk_notices"] = _risk_notices_for_context(trusted_context)
     # Never trust a caller-prefilled shadow object.  Public output is always
     # recomputed from the server-owned context identity and verified PIT facts.
     data["asset_intrinsic_assessment"] = _public_intrinsic_assessment(
-        trusted_context if not malformed_context else None,
+        trusted_context,
         as_of,
     )
+    validator = Draft202012Validator(
+        report_schema,
+        format_checker=FormatChecker(),
+    )
+    if not validator.is_valid(data):
+        return None
     return data
 
 
@@ -5611,13 +5643,89 @@ def _public_intrinsic_assessment(
     try:
         repository = _asset_intrinsic_repository()
         view = repository.pit_view(asset_id, as_of) if repository else None
-        return assess_intrinsic_shadow(view) if view is not None else None
+        if view is None:
+            return None
+        assessment = assess_intrinsic_shadow(view)
+        # #1084 UIA: normal analyze/comparison assembly has no trusted current
+        # authority and therefore accepts only the server-recomputed shadow
+        # contract. Caller-like promotion signals fail soft to null.
+        if not isinstance(assessment, dict):
+            raise ValueError("normal analyze route accepts a mapping only")
+        if _contains_sensitive_intrinsic_field(assessment):
+            raise ValueError("intrinsic assessment contains authority material")
+        validator = Draft202012Validator(
+            contract_schemas()["AssetIntrinsicAssessment"],
+            format_checker=FormatChecker(),
+        )
+        if not validator.is_valid(assessment):
+            raise ValueError("intrinsic assessment violates canonical schema")
+        return assessment
     except (OSError, TypeError, ValueError):
         logging.getLogger(__name__).warning(
             "asset intrinsic shadow assessment unavailable",
             exc_info=True,
         )
         return None
+
+
+_SENSITIVE_INTRINSIC_KEY_PARTS = (
+    "signature",
+    "private_key",
+    "public_key",
+    "receipt",
+    "trust_root",
+    "authority",
+    "calibration",
+    "policy",
+    "dataset",
+    "observation",
+    "ledger_path",
+    "evidence_path",
+)
+
+
+def _contains_sensitive_intrinsic_field(value: object) -> bool:
+    """Recursively reject aliases and nested authority-bearing metadata."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+            if any(part in normalized for part in _SENSITIVE_INTRINSIC_KEY_PARTS):
+                return True
+            if _contains_sensitive_intrinsic_field(nested):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_sensitive_intrinsic_field(item) for item in value)
+    return False
+
+
+_AUTHORITY_KEY_TOKENS = (
+    "officialstate",
+    "rawreceipt",
+    "promotionreceipt",
+    "signature",
+    "privatekey",
+    "trustroot",
+    "calibrationclaim",
+    "authority",
+    "secret",
+)
+
+
+def _contains_authority_material(value: object) -> bool:
+    """Reject authority aliases without rejecting legitimate dataset lineage."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            compact = re.sub(r"[^a-z0-9]+", "", str(key).casefold())
+            if any(token in compact for token in _AUTHORITY_KEY_TOKENS):
+                return True
+            if _contains_authority_material(nested):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_authority_material(item) for item in value)
+    elif isinstance(value, str):
+        compact = re.sub(r"[^a-z0-9]+", "", value.casefold())
+        return any(token in compact for token in _AUTHORITY_KEY_TOKENS)
+    return False
 
 
 def _public_snapshot_dict(snap: dict) -> dict:
@@ -5664,10 +5772,42 @@ def _build_comparison_json_payload(result) -> dict:
         "evidence_a": [_public_evidence_dict(ev) for ev in result.evidence_a],
         "report_b": _public_report_dict(result.report_b),
         "evidence_b": [_public_evidence_dict(ev) for ev in result.evidence_b],
-        "comparison_report": result.comparison.to_dict() if result.comparison else None,
+        "comparison_report": (
+            _public_comparison_report_dict(result.comparison.to_dict())
+            if result.comparison
+            else None
+        ),
         "execution": result.log.manifest(),
         "execution_log": result.log.events,
     }
+
+
+def _public_comparison_report_dict(value: dict) -> dict | None:
+    """Sanitize reports nested inside a structured comparison report."""
+    if not isinstance(value, dict):
+        return None
+    public = copy.deepcopy(value)
+    for key in ("supporting_report_a", "supporting_report_b"):
+        report = public.get(key)
+        if isinstance(report, dict):
+            public[key] = _public_report_mapping(report)
+    if _contains_authority_material(public):
+        return None
+    validator = Draft202012Validator(
+        contract_schemas()["ComparisonReport"],
+        format_checker=FormatChecker(),
+    )
+    if not validator.is_valid(public):
+        return None
+    report_validator = Draft202012Validator(
+        contract_schemas()["Report"],
+        format_checker=FormatChecker(),
+    )
+    for key in ("supporting_report_a", "supporting_report_b"):
+        report = public.get(key)
+        if report is not None and not report_validator.is_valid(report):
+            return None
+    return public
 
 
 def _handle_api_multi_angle_get(qs: dict | None = None) -> tuple[int, str]:
@@ -6739,9 +6879,9 @@ def _handle_api_comparison_snapshot(qs: dict) -> tuple[int, str]:
         if not a or not b: return 404, _json_envelope_err("snapshot_pending", "比較快照尚未發布")
         data = {
             "version": a["version"],
-            "report_a": a["report"], "evidence_a": a["evidence"], "trust_radar_a": a["trust_radar"],
+            "report_a": _public_report_mapping(a["report"]), "evidence_a": a["evidence"], "trust_radar_a": a["trust_radar"],
             "trust_components_aggregate_a": a["trust_components_aggregate"], "price_provenance_a": a["price_provenance"],
-            "report_b": b["report"], "evidence_b": b["evidence"], "trust_radar_b": b["trust_radar"],
+            "report_b": _public_report_mapping(b["report"]), "evidence_b": b["evidence"], "trust_radar_b": b["trust_radar"],
             "trust_components_aggregate_b": b["trust_components_aggregate"], "price_provenance_b": b["price_provenance"],
             "execution": {"run_id": f"{a['execution']['run_id']}+{b['execution']['run_id']}", "nodes": a["execution"]["nodes"]},
             "execution_log": a["execution_log"] + b["execution_log"],
@@ -7031,22 +7171,17 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 ),
             )
             report_a, evidence_a, report_b, evidence_b, log = result
-            payload = {
-                "version": VERSION,
-                "report_a": _public_report_dict(report_a),
-                "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
+            # Start with the one canonical comparison public builder so nested
+            # supporting reports cannot bypass its sanitizer.
+            payload = _build_comparison_json_payload(result)
+            payload.update({
                 "trust_radar_a": aggregate_trust_by_kind(evidence_a),
                 "trust_components_aggregate_a": _aggregate_trust_components(evidence_a),
                 "price_provenance_a": _price_provenance_data(evidence_a),
-                "report_b": _public_report_dict(report_b),
-                "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
-                "comparison_report": result.comparison.to_dict() if result.comparison else None,
-                "execution": log.manifest(),
-                "execution_log": log.events,
-            }
+            })
         else:
             report, evidence, log = _dedup_analyze_call(
                 dedup_key,
