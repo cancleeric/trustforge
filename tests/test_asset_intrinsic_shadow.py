@@ -201,3 +201,47 @@ def test_assessment_schema_accepts_output_and_report_field_remains_optional() ->
     report_schema = schemas["Report"]
     assert "asset_intrinsic_assessment" not in report_schema["required"]
     assert "asset_intrinsic_assessment" in report_schema["properties"]
+
+
+# ---- #873 issuance/supply tests ----
+
+
+def test_known_issuance_and_supply_for_second_protocol_are_eligible() -> None:
+    repository = AssetIntrinsicRepository(load_asset_intrinsic_records(FIXTURE))
+    eth_valid_as_of = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    eth_view = repository.pit_view("asset:eth", eth_valid_as_of)
+
+    assert eth_view is not None
+    eth_dimensions = {d.name for d in eth_view.eligible_dimensions}
+    assert IntrinsicDimensionName.ISSUANCE_PREDICTABILITY in eth_dimensions
+    assert IntrinsicDimensionName.SUPPLY_VERIFIABILITY in eth_dimensions
+
+
+def test_identical_pep_under_different_asset_id_produces_identical_results() -> None:
+    dims = (
+        dimension(IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, 1.0, "ethereum.org"),
+        dimension(IntrinsicDimensionName.SUPPLY_VERIFIABILITY, 1.0, "ethereum.org"),
+        dimension(IntrinsicDimensionName.CONTROL_DISPERSION, 0.0, "consensus.ethereum.org"),
+    )
+    first = assess_intrinsic_shadow(view(*dims, asset_id="asset:eth"))
+    second = assess_intrinsic_shadow(view(*dims, asset_id="asset:anything-else"))
+
+    assert first["total_delta"] == second["total_delta"]
+    for fd, sd in zip(first["dimensions"], second["dimensions"]):
+        assert fd["signed_delta"] == sd["signed_delta"]
+
+
+def test_stale_future_and_conflicted_issuance_supply_contribute_zero() -> None:
+    repository = AssetIntrinsicRepository(load_asset_intrinsic_records(FIXTURE))
+    as_of_before_eth = datetime(2026, 7, 28, tzinfo=timezone.utc)
+    as_of_after_eth = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+    # ETH record is valid_from 2026-07-29: as_of_before_eth → no ETH visible (future) → zero
+    view_before = repository.pit_view("asset:eth", as_of_before_eth)
+    assert view_before is None
+
+    # ETH record is valid at 2026-07-30: has 2 known dimensions → gate fails → zero
+    view_after = repository.pit_view("asset:eth", as_of_after_eth)
+    assert view_after is not None
+    result = assess_intrinsic_shadow(view_after)
+    assert result["total_delta"] == 0.0

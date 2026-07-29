@@ -1,0 +1,3 @@
+coverage_boundary: pep-coverage-boundary
+observation: This dimension is outside the scope of the protocol evidence pack (PEP) that generated this record.
+decision: not_covered_by_current_pep
