@@ -134,11 +134,14 @@ def verify_audit(path: Path = DEFAULT_AUDIT) -> list[str]:
     checks.append("production deploy workflow is documented as disabled")
 
     active_workflows = sorted(path.name for path in WORKFLOWS.glob("*.yml"))
-    expected = ["ci.yml"] if (WORKFLOWS / "ci.yml").exists() else []
+    expected = ["hourly-release-train.yml"]
+    if (WORKFLOWS / "ci.yml").exists():
+        expected.append("ci.yml")
+        expected.sort()
     if active_workflows != expected:
         rendered = ", ".join(active_workflows) or "(none)"
         raise AssertionError(f"unexpected active GitHub workflow files: {rendered}")
-    checks.append("only the non-deployment CI workflow is active (or all disabled)")
+    checks.append("only the approved hourly release train and optional CI workflows are active")
 
     return checks
 
