@@ -4,7 +4,7 @@
 
 ## Task 1: 建立 agos_runtime.py 模組
 
-- [ ] 建立 `src/trustforge/agos_runtime.py`
+- [x] 建立 `src/trustforge/agos_runtime.py`
 - [ ] 實作 `agos_enabled() -> bool`（env var check）
 - [ ] 實作 `AgosRuntime` class（lazy init of memory_repo, skill_loader, tool_registry, context_builder）
 - [ ] 實作 `AgosLineageQuery` class（run-scoped query interface）
@@ -43,7 +43,7 @@
 
 ## Task 6: 測試
 
-- [ ] 建立 `tests/test_agos_runtime.py`
+- [x] 建立 `tests/test_agos_runtime.py`
 - [ ] 測試 full run with AGOS_ENABLED=1 → manifest + lineage produced
 - [ ] 測試 AGOS_ENABLED=0 → no Agent OS calls
 - [ ] 測試 graceful degradation: component failure → run continues

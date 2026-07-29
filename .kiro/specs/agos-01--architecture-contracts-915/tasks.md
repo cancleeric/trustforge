@@ -4,8 +4,8 @@
 
 ## Task 1: 建立 docs/contracts/ 目錄與 Memory OS Contract
 
-- [ ] 建立 `docs/contracts/` 目錄
-- [ ] 撰寫 `docs/contracts/MEMORY-OS-CONTRACT.md`
+- [x] 建立 `docs/contracts/` 目錄
+- [x] 撰寫 `docs/contracts/MEMORY-OS-CONTRACT.md`
   - 定義 memory_entry schema（identity, kind, provider, hash, timestamps）
   - 定義 evidence_eligible 預設行為（fail-closed, default=false）
   - 列出成為 Evidence 的必要條件
@@ -18,7 +18,7 @@
 
 ## Task 2: 撰寫 Task Skill Contract
 
-- [ ] 撰寫 `docs/contracts/TASK-SKILL-CONTRACT.md`
+- [x] 撰寫 `docs/contracts/TASK-SKILL-CONTRACT.md`
   - 定義 skill identity schema（skill_id, family, name, version）
   - 定義 immutable revision（content-addressed SHA-256）
   - 定義 dependency edge schema（requires, optional, conflicts）
@@ -32,7 +32,7 @@
 
 ## Task 3: 撰寫 Tool Capability Contract
 
-- [ ] 撰寫 `docs/contracts/TOOL-CAPABILITY-CONTRACT.md`
+- [x] 撰寫 `docs/contracts/TOOL-CAPABILITY-CONTRACT.md`
   - 定義 tool_capability schema（identity, side-effect, evidence class, approval）
   - 定義 invocation audit schema（input/output hash, status, error, evidence_refs）
   - 定義 approval requirement rules
@@ -44,7 +44,7 @@
 
 ## Task 4: 撰寫 Context Manifest Contract
 
-- [ ] 撰寫 `docs/contracts/CONTEXT-MANIFEST-CONTRACT.md`
+- [x] 撰寫 `docs/contracts/CONTEXT-MANIFEST-CONTRACT.md`
   - 定義 manifest schema（identity, run_id, content_hash, token budget）
   - 定義 included_refs 結構（snapshot, question, memory, skill, tool, policy）
   - 定義 excluded_refs 結構（stale, over_budget, approval_required, evidence_ineligible）
@@ -55,8 +55,8 @@
 
 ## Task 5: 建立 Backlog Index
 
-- [ ] 建立 `docs/backlog/` 目錄
-- [ ] 撰寫 `docs/backlog/AGENT-OS-BACKLOG.md`
+- [x] 建立 `docs/backlog/` 目錄
+- [x] 撰寫 `docs/backlog/AGENT-OS-BACKLOG.md`
   - H-33: Memory OS Schema & Repository (#916)
   - H-34: Task Skill Registry (#917)
   - H-35: Tool Capability Registry (#918)

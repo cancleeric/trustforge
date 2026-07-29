@@ -71,6 +71,12 @@ Governance index:
 | [qa/CONFORMAL-FINDING.md](qa/CONFORMAL-FINDING.md) | W4 Split Conformal Prediction 研究發現：數學實作完成、JOINT coverage 達標，但代理訊號 pseudo-AUC≈0.49（等同隨機）——誠實負結果，不接進 production |
 | [qa/modelhub-integration-351.md](qa/modelhub-integration-351.md) | ModelHub client／候選編排 #351 的驗證、審查證據與未執行邊界 |
 
+## audit/ — 安全審查與 disposition
+
+| 文件 | 說明 |
+|------|------|
+| [audit/AGOS-SECURITY-DISPOSITION.md](audit/AGOS-SECURITY-DISPOSITION.md) | Agent OS #914/#925 安全控制、測試證據、已知限制與待完成審查；目前仍待 CISO/CPO、`/codex-review`、人工 UI Eye scan，以及真 HTTP 成功回應缺陷修正 |
+
 
 ## reports/ — 事故與調查報告
 

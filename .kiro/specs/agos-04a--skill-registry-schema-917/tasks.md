@@ -4,7 +4,7 @@
 
 ## Task 1: 建立 skill_registry.py 模組骨架
 
-- [ ] 建立 `src/trustforge/skill_registry.py`
+- [x] 建立 `src/trustforge/skill_registry.py`
 - [ ] 實作 `TaskSkill` dataclass
 - [ ] 實作 `SkillRevision` dataclass
 - [ ] 實作 `SkillDependency` dataclass
@@ -64,7 +64,7 @@
 
 ## Task 6: 單元測試
 
-- [ ] 建立 `tests/test_skill_registry.py`
+- [x] 建立 `tests/test_skill_registry.py`
 - [ ] 測試 migration upgrade/rollback
 - [ ] 測試 save_skill + get_skill round-trip
 - [ ] 測試 save_revision immutability（same hash/content → OK）

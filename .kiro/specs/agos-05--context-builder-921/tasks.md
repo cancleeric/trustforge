@@ -4,7 +4,7 @@
 
 ## Task 1: 建立 context_builder.py 模組
 
-- [ ] 建立 `src/trustforge/context_builder.py`
+- [x] 建立 `src/trustforge/context_builder.py`
 - [ ] 實作 `IncludedRefs` dataclass
 - [ ] 實作 `ExcludedRef` dataclass
 - [ ] 實作 `ContextManifest` dataclass（含 `to_dict()`, `from_dict()`）
@@ -43,7 +43,7 @@
 
 ## Task 6: 單元測試
 
-- [ ] 建立 `tests/test_context_builder.py`
+- [x] 建立 `tests/test_context_builder.py`
 - [ ] 測試 build produces manifest with correct fields
 - [ ] 測試 deterministic hash（same input → same hash）
 - [ ] 測試 stale memory exclusion

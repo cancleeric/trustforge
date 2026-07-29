@@ -7,22 +7,22 @@
 - [ ] 建立 `tests/test_agos_replay.py`
 - [ ] 實作 `verify_replay(manifest, memory_repo, skill_registry) -> ReplayResult`
   - 可放在 `src/trustforge/agos_replay.py` 或直接在 test 中
-- [ ] 測試：正常 manifest replay → hashes match
+- [x] 測試：正常 manifest replay → hashes match
 - [ ] 測試：tampered content → hash mismatch detected
-- [ ] 測試：skill revision replay → hash reproducible
+- [x] 測試：skill revision replay → hash reproducible
 - [ ] 測試：memory content hash replay → reproducible
 
 ## Task 2: 實作 Security Guard E2E Tests
 
 - [ ] 建立 `tests/test_agos_e2e_guards.py`
-- [ ] 測試：historical memory (hermes-* + semantic) cannot set evidence_eligible
+- [x] 測試：historical memory (hermes-* + semantic) cannot set evidence_eligible
 - [ ] 測試：historical memory cannot enter scoring pipeline
-- [ ] 測試：unknown skill cannot be selected into manifest
-- [ ] 測試：stale skill (no active revision) → excluded
-- [ ] 測試：retired skill → excluded
-- [ ] 測試：unknown tool → is_known=False → cannot execute
-- [ ] 測試：external_write tool without approval → rejected
-- [ ] 測試：deploy_or_release capability → requires approval
+- [x] 測試：unknown skill cannot be selected into manifest
+- [x] 測試：stale skill (no active revision) → excluded
+- [x] 測試：retired skill → excluded
+- [x] 測試：unknown tool → is_known=False → cannot execute
+- [x] 測試：external_write tool without approval → rejected
+- [x] 測試：deploy_or_release capability → requires approval
 
 ## Task 3: 實作 Non-Regression E2E Tests
 
@@ -55,10 +55,10 @@
 
 ## Task 6: Security Disposition Document
 
-- [ ] 建立 `docs/audit/AGOS-SECURITY-DISPOSITION.md`
-- [ ] Security review checklist template
-- [ ] Disposition fields（reviewer, date, commit, status）
-- [ ] Notes section
+- [x] 建立 `docs/audit/AGOS-SECURITY-DISPOSITION.md`
+- [x] Security review checklist template
+- [x] Disposition fields（reviewer, date, commit, status）
+- [x] Notes section
 
 ## Task 7: Final Verification
 
@@ -68,4 +68,15 @@
 - [ ] 執行前端 build 成功
 - [ ] 執行 lint / type-check 通過
 - [ ] 執行完整 pre-push gate 通過
-- [ ] 確認 production deployment/activation 未被觸發
+- [x] 確認 production deployment/activation 未被觸發
+
+### Closeout 補充（2026-07-29）
+
+- [x] 真 `web.Handler`／TCP／外層 `X-Admin-Token` 未授權契約：401
+- [ ] 真 `web.Handler` authenticated success 契約：目前 strict XFAIL；AGOS
+  route 傳 `bytes` 給預期 `str` 的 `_send()`，production backend 修正不在本
+  docs/test-only closeout 權限內
+- [ ] 人工 desktop/mobile Eye scan
+- [ ] harper CISO disposition
+- [ ] gray CPO disposition
+- [ ] DB authorization receipt

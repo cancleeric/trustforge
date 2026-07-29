@@ -86,26 +86,40 @@ Context endpoint returns: `included_refs`, `excluded_refs` (with reasons), `excl
 
 ## Test Evidence
 
-| Test File | Tests | Status |
-|-----------|-------|--------|
-| `tests/test_agos_db_auth.py` | 12 | PASS |
-| `tests/test_memory_os.py` | 27 | PASS |
-| `tests/test_skill_registry.py` | 35 | PASS |
-| `tests/test_tool_registry.py` | 33 | PASS |
-| `tests/test_memory_retrieval.py` | 18 | PASS |
-| `tests/test_skill_loader.py` | 26 | PASS |
-| `tests/test_context_builder.py` | 19 | PASS |
-| `tests/test_agos_runtime.py` | 21 | PASS |
-| `tests/test_agos_admin_api.py` | 18 | PASS |
-| `tests/test_agos_e2e.py` | 17 | PASS |
-| Frontend (AgosBadge + AdminAgosPage) | 15 | PASS |
-| **Total** | **241** | **ALL PASS** |
+The counts below are a historical implementation-round snapshot, not a claim
+that the current full repository gate was rerun during this closeout.
+
+| Test scope | Recorded result |
+|------------|-----------------|
+| `tests/test_agos_db_auth.py` | 12 PASS |
+| `tests/test_memory_os.py` | 27 PASS |
+| `tests/test_skill_registry.py` | 35 PASS |
+| `tests/test_tool_registry.py` | 33 PASS |
+| `tests/test_memory_retrieval.py` | 18 PASS |
+| `tests/test_skill_loader.py` | 26 PASS |
+| `tests/test_context_builder.py` | 19 PASS |
+| `tests/test_agos_runtime.py` | 21 PASS |
+| `tests/test_agos_admin_api.py` | 18 PASS |
+| `tests/test_agos_e2e.py` | 17 PASS |
+| Frontend (AgosBadge + AdminAgosPage) | 15 PASS |
+| Closeout targeted run: `test_agos_http_e2e.py`, `test_agos_admin_api.py`, `test_agos_e2e.py` | 36 PASS, 1 strict XFAIL |
+
+### Open HTTP E2E Finding
+
+`tests/test_agos_http_e2e.py` crosses the real `web.Handler` over a TCP
+connection. It verifies that a request without `X-Admin-Token` is rejected with
+HTTP 401. The authenticated success contract is intentionally a strict XFAIL:
+the AGOS route serializes the dispatcher result to `bytes`, while
+`Handler._send()` expects `str` and calls `.encode()`. The connection closes
+without a response. The production backend fix was outside the docs/test-only
+scope of this closeout, so true authenticated HTTP success is **not complete**.
 
 ## Disposition
 
 - [ ] harper (CISO): APPROVED / BLOCKED
 - [ ] gray (CPO): APPROVED / BLOCKED
 - [ ] /codex-review adversarial gate: PASS / FAIL
+- [ ] Authenticated real-handler HTTP E2E: PASS / FAIL
 
 ## Activation Conditions
 

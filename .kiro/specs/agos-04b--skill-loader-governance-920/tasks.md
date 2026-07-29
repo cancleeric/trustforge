@@ -4,7 +4,7 @@
 
 ## Task 1: 建立 skill_loader.py 模組
 
-- [ ] 建立 `src/trustforge/skill_loader.py`
+- [x] 建立 `src/trustforge/skill_loader.py`
 - [ ] 實作 `FrozenSkillEntry` dataclass
 - [ ] 實作 `FrozenSkillManifest` dataclass
 - [ ] 實作 `ActivationProposal` dataclass
@@ -47,7 +47,7 @@
 
 ## Task 6: 單元測試
 
-- [ ] 建立 `tests/test_skill_loader.py`
+- [x] 建立 `tests/test_skill_loader.py`
 - [ ] 測試 discover filtering (family, lifecycle, risk_class)
 - [ ] 測試 resolve_dependencies normal case (leaf-first order)
 - [ ] 測試 resolve_dependencies stale dep → error

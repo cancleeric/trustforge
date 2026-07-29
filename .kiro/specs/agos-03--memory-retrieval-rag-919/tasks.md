@@ -4,7 +4,7 @@
 
 ## Task 1: 建立 memory_retrieval.py 模組
 
-- [ ] 建立 `src/trustforge/memory_retrieval.py`
+- [x] 建立 `src/trustforge/memory_retrieval.py`
 - [ ] 實作 `MemoryRef` dataclass
 - [ ] 實作 `_is_historical_conclusion(entry) -> bool`
 - [ ] 實作 `_emit_retrieval_event(run_id, refs) -> None`（寫入 execution log）
@@ -33,7 +33,7 @@
 
 ## Task 4: 單元測試
 
-- [ ] 建立 `tests/test_memory_retrieval.py`
+- [x] 建立 `tests/test_memory_retrieval.py`
 - [ ] 測試 retrieve_question_memory 正常流程
 - [ ] 測試 historical conclusion detection（hermes-* + semantic → not eligible）
 - [ ] 測試 non-historical entry with full timestamps → eligible

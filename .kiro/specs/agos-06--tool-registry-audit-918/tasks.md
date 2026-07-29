@@ -4,7 +4,7 @@
 
 ## Task 1: 建立 tool_registry.py 模組骨架
 
-- [ ] 建立 `src/trustforge/tool_registry.py`
+- [x] 建立 `src/trustforge/tool_registry.py`
 - [ ] 實作 `ToolCapability` dataclass
 - [ ] 實作 `ToolInvocation` dataclass
 - [ ] 定義 constants：`VALID_SIDE_EFFECTS`, `VALID_EVIDENCE_CLASSES`, `VALID_APPROVAL_REQS`, `VALID_STATUSES`
@@ -41,7 +41,7 @@
 
 ## Task 4: 單元測試
 
-- [ ] 建立 `tests/test_tool_registry.py`
+- [x] 建立 `tests/test_tool_registry.py`
 - [ ] 測試 migration upgrade/rollback
 - [ ] 測試 register_tool + get_tool round-trip
 - [ ] 測試 is_known: registered → True; unknown → False

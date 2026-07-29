@@ -4,7 +4,7 @@
 
 ## Task 1: 建立 memory_os.py 模組骨架與 dataclass
 
-- [ ] 建立 `src/trustforge/memory_os.py`
+- [x] 建立 `src/trustforge/memory_os.py`
 - [ ] 實作 `MemoryEntry` dataclass（含所有欄位）
 - [ ] 實作 `MemoryLink` dataclass（link_id, from/to, relation, created_at）
 - [ ] 實作 `VALID_KINDS = frozenset({"episodic", "semantic", "procedural", "dialogue"})`
@@ -55,7 +55,7 @@
 
 ## Task 5: 單元測試
 
-- [ ] 建立 `tests/test_memory_os.py`
+- [x] 建立 `tests/test_memory_os.py`
 - [ ] 測試 migration upgrade → tables exist, schema correct
 - [ ] 測試 migration rollback → tables dropped
 - [ ] 測試 save + get round-trip
