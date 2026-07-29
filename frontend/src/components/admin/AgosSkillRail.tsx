@@ -4,7 +4,6 @@
  * Issue: #924 | Epic: #914
  */
 import type { AgosSkillItem } from '../../lib/agosTypes'
-import { AgosBadge } from './AgosBadge'
 
 interface AgosSkillRailProps {
   items: AgosSkillItem[]

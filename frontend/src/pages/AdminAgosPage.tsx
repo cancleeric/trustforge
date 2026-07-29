@@ -5,6 +5,7 @@
  * Issue: #924 | Epic: #914
  */
 import { useState } from 'react'
+import { loadSessionToken } from '../lib/adminConsole'
 import type {
   AgosContextManifest,
   AgosMemoryItem,
@@ -50,15 +51,7 @@ export default function AdminAgosPage() {
     data: null, loading: false, error: null,
   })
 
-  const token = (() => {
-    try {
-      return typeof window !== 'undefined' && window.localStorage
-        ? localStorage.getItem('admin_token') || ''
-        : ''
-    } catch {
-      return ''
-    }
-  })()
+  const token = loadSessionToken() || ''
 
   const fetchData = async (rid: string) => {
     if (!rid.trim()) return
@@ -169,8 +162,8 @@ export default function AdminAgosPage() {
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`px-4 py-2 text-sm font-medium border-b-2 ${activeTab === tab.id
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               aria-selected={activeTab === tab.id}
               role="tab"
