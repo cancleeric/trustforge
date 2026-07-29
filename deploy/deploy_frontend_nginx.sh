@@ -241,6 +241,7 @@ REACT_TLS_DOMAIN="trustforge.hurricanesoft.com.tw"
 SERVICE_FILE="$ETC/systemd/system/trustforge.service"
 BACKUP_SERVICE_FILE="/tmp/tf-bootstrap-service.bak.$$"
 BACKUP_DEFAULT_CONF="/tmp/tf-bootstrap-default-conf.bak.$$"
+BACKUP_LIVE_FILE="/tmp/tf-bootstrap-live-conf.bak.$$"
 BACKUP_CONF_DIR="/tmp/tf-bootstrap-conf-backup.$$"
 DNF_LOG="${TF_BOOTSTRAP_DNF_LOG:-/var/log/tf-nginx-setup.log}"
 
@@ -296,10 +297,26 @@ echo "[fe-nginx] 已裝 nginx + 佈署靜態檔/candidate conf 到 staging 位�
 #      (post-cutover，保留現有拓樸+CSP mode 不動，只換 dist/reload)」還是
 #      「未配置(初次 bootstrap，legacy 全轉發)」，避免 React/TLS cutover
 #      後重跑本腳本（例如單純更新前端 dist）把拓樸打回 legacy ----
+PREV_LIVE_REGULAR=0
 if [ -L "$LIVE_LINK" ] && PREV_LINK="$(readlink "$LIVE_LINK" 2>/dev/null)" && [ -n "$PREV_LINK" ]; then
   PREV_LINK_EXISTED=1
   ACTIVE_CANDIDATE="$PREV_LINK"
   echo "[fe-nginx] 偵測到 live symlink 已配置（$(basename "$PREV_LINK")）→ 視為 post-cutover，本次只更新 dist/candidate conf，不重指 symlink、不改 CSP mode"
+elif [ -f "$LIVE_LINK" ]; then
+  # 舊版 setup_tls.sh 會留下 regular trustforge.conf。它同樣是已配置的
+  # production topology，不能誤判成首次 bootstrap 而切回 HTTP legacy。
+  PREV_LINK_EXISTED=1
+  PREV_LIVE_REGULAR=1
+  cp "$LIVE_LINK" "$BACKUP_LIVE_FILE"
+  if grep -q 'root /opt/trustforge/frontend/current' "$LIVE_LINK"; then
+    PREV_LINK="$CONF_DIR/react.conf"
+  elif grep -q 'listen 443 ssl' "$LIVE_LINK"; then
+    PREV_LINK="$CONF_DIR/legacy-tls.conf"
+  else
+    PREV_LINK="$CONF_DIR/legacy.conf"
+  fi
+  ACTIVE_CANDIDATE="$PREV_LINK"
+  echo "[fe-nginx] 偵測到既有 regular live conf（$(basename "$PREV_LINK")）→ 視為 post-cutover，只更新 dist/candidate conf"
 else
   PREV_LINK_EXISTED=0
   PREV_LINK=""
@@ -395,7 +412,12 @@ ROLLBACK() {
     systemctl stop trustforge 2>/dev/null || true
   fi
 
-  if [ "$PREV_LINK_EXISTED" = 1 ]; then
+  if [ "$PREV_LIVE_REGULAR" = 1 ]; then
+    if ! cp "$BACKUP_LIVE_FILE" "$LIVE_LINK"; then
+      echo "❌ [fe-nginx] rollback：regular live conf 還原失敗" >&2
+      ROLLBACK_OK=0
+    fi
+  elif [ "$PREV_LINK_EXISTED" = 1 ]; then
     if ! ln -sfn "$PREV_LINK" "$LIVE_LINK"; then
       echo "❌ [fe-nginx] rollback：live symlink 還原失敗（ln -sfn ${PREV_LINK} -> ${LIVE_LINK}）" >&2
       ROLLBACK_OK=0
@@ -472,7 +494,7 @@ ROLLBACK() {
     ROLLBACK_OK=0
   fi
 
-  rm -f "$BACKUP_SERVICE_FILE" "$BACKUP_DEFAULT_CONF"
+  rm -f "$BACKUP_SERVICE_FILE" "$BACKUP_DEFAULT_CONF" "$BACKUP_LIVE_FILE"
   rm -rf "$BACKUP_CONF_DIR"
 
   if [ "$ROLLBACK_OK" = 1 ]; then
@@ -588,6 +610,7 @@ else
   fi
 fi
 
+rm -f "$BACKUP_LIVE_FILE"
 trap - ERR
 echo "[fe-nginx] nginx+python 拓樸已就緒（現行拓樸：${ACTIVE_BASENAME}，完成後驗證通過）"
 CMDEOF

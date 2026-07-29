@@ -48,7 +48,7 @@ budget_guard.py (_backend_unavailable_alert)
 ### 3.3 Budget Guard 降級警報（額外）
 - **指標**：`BudgetGuardMultiInstanceProtectionDisabled`
 - **來源**：`budget_guard.py` 的 `_backend_unavailable_alert()`
-- **語意**：多實例預留保護的 DynamoDB 後端不可用，已靜默 fallback 回 process-local
+- **語意**：多實例預留保護的 DynamoDB 後端不可用；admission 已 fail-closed 拒絕，不 fallback process-local
 - **特性**：不受 `TRUSTFORGE_CW_METRICS` opt-in 限制（降級警報而非觀測旁路）
 
 ## 4. 部署指令

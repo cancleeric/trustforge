@@ -43,6 +43,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -325,5 +326,125 @@ describe('MultiAngleOverview', () => {
     mockFetchMultiAngleReport.mockRejectedValue(new Error('Network down'))
     renderWithProvider(<MultiAngleOverview coin="BTC" />)
     expect(await screen.findByText('Network down', undefined, { timeout: 5000 })).toBeInTheDocument()
+  })
+
+  it('allows rerun with an existing report and replaces it only after completion', { timeout: 10000 }, async () => {
+    mockFetchMultiAngleReport
+      .mockResolvedValueOnce({ multi_angle: makeReport({ snapshot_id: 'snap-old', synthesis_summary: 'old summary' }) })
+      .mockResolvedValueOnce({ multi_angle: makeReport({ snapshot_id: 'snap-new', synthesis_summary: 'new summary' }) })
+    mockSubmitMultiAngle.mockResolvedValue({
+      job_ids: { risk: 'j1' }, snapshot_id: 'snap-new', coin: 'BTC',
+    })
+    mockGetAnalysisJob.mockResolvedValue({ ok: true, data: { state: 'completed' } })
+
+    vi.useFakeTimers()
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+    await act(() => vi.runAllTimersAsync())
+    expect(screen.getByText('old summary')).toBeInTheDocument()
+    expect(screen.getByText(/5×/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /五角度綜合分析/ }))
+    expect(screen.getByText('old summary')).toBeInTheDocument()
+    await act(() => vi.advanceTimersByTimeAsync(1200))
+
+    expect(screen.queryByText('old summary')).not.toBeInTheDocument()
+    expect(screen.getByText('new summary')).toBeInTheDocument()
+    expect(screen.getByText(/snap-new/)).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('keeps the previous report when a rerun job fails', { timeout: 10000 }, async () => {
+    mockFetchMultiAngleReport.mockResolvedValue({ multi_angle: makeReport({ synthesis_summary: 'trusted old report' }) })
+    mockSubmitMultiAngle.mockResolvedValue({
+      job_ids: { risk: 'j1' }, snapshot_id: 'snap-new', coin: 'BTC',
+    })
+    mockGetAnalysisJob.mockResolvedValue({ ok: true, data: { state: 'failed', error: 'rerun failed' } })
+
+    vi.useFakeTimers()
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+    await act(() => vi.runAllTimersAsync())
+    fireEvent.click(screen.getByRole('button', { name: /五角度綜合分析/ }))
+    await act(() => vi.advanceTimersByTimeAsync(1200))
+
+    expect(screen.getByText('trusted old report')).toBeInTheDocument()
+    expect(screen.getByText('rerun failed')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('uses localized labels for every backend job state', { timeout: 10000 }, async () => {
+    mockSubmitMultiAngle.mockResolvedValue({
+      job_ids: { risk: 'j1', sentiment: 'j2', fundamentals: 'j3' },
+      snapshot_id: 'snap-new', coin: 'BTC',
+    })
+    mockGetAnalysisJob
+      .mockResolvedValueOnce({ ok: true, data: { state: 'queued' } })
+      .mockResolvedValueOnce({ ok: true, data: { state: 'running' } })
+      .mockResolvedValueOnce({ ok: true, data: { state: 'completed' } })
+
+    vi.useFakeTimers()
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+    await act(() => vi.runAllTimersAsync())
+    fireEvent.click(screen.getByRole('button', { name: /五角度綜合分析/ }))
+    await act(() => vi.advanceTimersByTimeAsync(1200))
+
+    expect(screen.getByText('排隊')).toBeInTheDocument()
+    expect(screen.getByText('執行中')).toBeInTheDocument()
+    expect(screen.getByText('已完成')).toBeInTheDocument()
+    expect(screen.queryByText(/^(queued|running|completed)$/)).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('localizes a transient job-status read failure instead of rendering raw error', { timeout: 10000 }, async () => {
+    mockSubmitMultiAngle.mockResolvedValue({
+      job_ids: { risk: 'j1' }, snapshot_id: 'snap-new', coin: 'BTC',
+    })
+    mockGetAnalysisJob.mockResolvedValue({
+      ok: false,
+      error: { code: 'temporary', message: 'temporary' },
+    })
+
+    vi.useFakeTimers()
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+    await act(() => vi.runAllTimersAsync())
+    fireEvent.click(screen.getByRole('button', { name: /五角度綜合分析/ }))
+    await act(() => vi.advanceTimersByTimeAsync(1200))
+
+    expect(screen.getByText('分析狀態暫時無法讀取')).toBeInTheDocument()
+    expect(screen.queryByText(/^error$/)).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('prevents rapid double submission before React disables the button', async () => {
+    mockSubmitMultiAngle.mockImplementation(() => new Promise(() => {}))
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+    const button = await screen.findByRole('button', { name: /五角度綜合分析/ })
+
+    fireEvent.click(button)
+    fireEvent.click(button)
+
+    expect(mockSubmitMultiAngle).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a completed rerun after the coin changes', async () => {
+    let resolveSubmit!: (value: { job_ids: Record<string, string>; snapshot_id: string; coin: string }) => void
+    mockFetchMultiAngleReport
+      .mockResolvedValueOnce({ multi_angle: makeReport({ coin: 'BTC', synthesis_summary: 'BTC report' }) })
+      .mockResolvedValueOnce({ multi_angle: makeReport({ coin: 'ETH', synthesis_summary: 'ETH report' }) })
+    mockSubmitMultiAngle.mockImplementation(() => new Promise((resolve) => { resolveSubmit = resolve }))
+
+    const view = renderWithProvider(<MultiAngleOverview coin="BTC" />)
+    expect(await screen.findByText('BTC report')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /五角度綜合分析/ }))
+
+    view.rerender(<HermesI18nProvider><MultiAngleOverview coin="ETH" /></HermesI18nProvider>)
+    expect(await screen.findByText('ETH report')).toBeInTheDocument()
+    await act(async () => {
+      resolveSubmit({ job_ids: { risk: 'btc-job' }, snapshot_id: 'btc-new', coin: 'BTC' })
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('ETH report')).toBeInTheDocument()
+    expect(screen.queryByText('BTC report')).not.toBeInTheDocument()
+    expect(mockGetAnalysisJob).not.toHaveBeenCalledWith('btc-job', expect.anything())
   })
 })
