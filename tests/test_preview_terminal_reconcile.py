@@ -586,8 +586,8 @@ def test_reservation_ttl_must_match_handle_canonical_retention():
         ("preview_identity_minute", 1),
         ("preview_global_token_day", 253_402_300_799),
         ("preview_global_usd_minute", 1_700_000_060 + 7 * 86_400),
-        ("preview_identity_concurrency", 1),
-        ("preview_global_concurrency", 253_402_300_799),
+        ("preview_identity_concurrency", 1_700_604_800),
+        ("preview_global_concurrency", 1_700_604_800),
     ],
 )
 def test_reserved_counter_ttl_tamper_is_unavailable_without_write(
@@ -683,6 +683,62 @@ def test_exact_replay_accepts_legitimate_later_rolling_counter_ttl():
         replay = reconciler.reconcile(intent)
 
         assert replay == type(replay)(TerminalOutcome.RECONCILED, replay=True)
+
+
+def test_later_identity_extends_shared_concurrency_ttl_and_both_release_once():
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        request_a = _request()
+        handle_a = _admit(client, request_a)
+        request_b = replace(
+            request_a,
+            interval=TrustedUtcInterval(1_700_000_002.1, 1_700_000_002.2),
+            identity_digest="e" * 64,
+            reservation_id=str(uuid.uuid4()),
+        )
+        handle_b = _admit(client, request_b)
+        global_spec_a = next(
+            spec
+            for spec in build_counter_specs(request_a)
+            if spec.kind == "preview_global_concurrency"
+        )
+        extended = _native(client, global_spec_a.key)
+        assert _number(extended, "value") == 2
+        assert _number(extended, "ttl") == handle_b.created_upper + 7 * 86_400
+        assert _number(extended, "ttl") > handle_a.created_upper + 7 * 86_400
+
+        intent_a = TerminalIntent(
+            handle_a,
+            TrustedUtcInterval(1_700_000_004, 1_700_000_005),
+            TerminalDisposition.KNOWN_SUCCESS,
+            actual_tokens=handle_a.reserved_tokens,
+            actual_micro_usd=handle_a.reserved_micro_usd,
+        )
+        intent_b = TerminalIntent(
+            handle_b,
+            TrustedUtcInterval(1_700_000_004, 1_700_000_005),
+            TerminalDisposition.KNOWN_SUCCESS,
+            actual_tokens=handle_b.reserved_tokens,
+            actual_micro_usd=handle_b.reserved_micro_usd,
+        )
+        reconciler = PreviewTerminalReconciler(client, "preview-store")
+
+        result_a = reconciler.reconcile(intent_a)
+        after_a = _native(client, global_spec_a.key)
+        result_b = reconciler.reconcile(intent_b)
+        after_b = _native(client, global_spec_a.key)
+        replay_a = reconciler.reconcile(intent_a)
+
+        assert result_a.outcome is result_b.outcome is TerminalOutcome.RECONCILED
+        assert _number(after_a, "value") == 1
+        assert _number(after_a, "ttl") == _number(extended, "ttl")
+        assert _number(after_b, "value") == 0
+        assert _number(after_b, "ttl") == _number(extended, "ttl")
+        assert replay_a == type(replay_a)(
+            TerminalOutcome.RECONCILED, replay=True
+        )
+        assert _number(_native(client, global_spec_a.key), "value") == 0
 
 
 def test_concurrent_exact_reconcile_converges_without_double_release():

@@ -133,7 +133,6 @@ class _Counter:
     ttl: int
     expected_ttl: int
     rolling_ttl: bool
-    terminal_replay: bool
 
     def __post_init__(self) -> None:
         copied = dict(self.key)
@@ -149,7 +148,6 @@ class _Counter:
             or type(self.ttl) is not int
             or type(self.expected_ttl) is not int
             or type(self.rolling_ttl) is not bool
-            or type(self.terminal_replay) is not bool
             or not 0 <= self.decrement <= self.value <= self.cap
             or not 0 <= self.version < MAX_DDB_INTEGER
             or not 1 <= self.ttl <= MAX_EPOCH_SECOND
@@ -157,8 +155,7 @@ class _Counter:
             or (
                 self.ttl != self.expected_ttl
                 and not (
-                    self.terminal_replay
-                    and self.rolling_ttl
+                    self.rolling_ttl
                     and self.ttl > self.expected_ttl
                 )
             )
@@ -351,7 +348,6 @@ def decode_terminal_responses(
                 _integer(item["ttl"], 1, MAX_EPOCH_SECOND),
                 expected_ttl,
                 rolling_ttl,
-                replay,
             )
         )
     circuit_response = responses[-1]
