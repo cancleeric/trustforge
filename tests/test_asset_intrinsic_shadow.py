@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,7 +18,10 @@ from trustforge.asset_intrinsic import (
 )
 from trustforge.asset_intrinsic_shadow import (
     TOTAL_DELTA_CAP,
+    _sanitized_query,
+    _sanitized_url,
     assess_intrinsic_shadow,
+    build_intrinsic_shadow_observation,
     normalized_source_family,
 )
 from trustforge.data_contracts import contract_schemas
@@ -245,3 +249,61 @@ def test_stale_future_and_conflicted_issuance_supply_contribute_zero() -> None:
     assert view_after is not None
     result = assess_intrinsic_shadow(view_after)
     assert result["total_delta"] == 0.0
+
+# ---------------------------------------------------------------------------
+# Issue #871: provenance sanitization + intrinsic shadow observation builder.
+# ---------------------------------------------------------------------------
+
+
+def test_sanitized_url_strips_query_fragment_and_userinfo():
+    assert _sanitized_url("https://a.example/path?token=secret") == "https://a.example/path"
+    assert _sanitized_url("https://a.example/x#fragment") == "https://a.example/x"
+    assert _sanitized_url("https://user:pw@a.example/y?z=1") == "https://a.example/y"
+
+
+@pytest.mark.parametrize("hostile", ["", "not-a-url", "//nohost/x", None])
+def test_sanitized_url_drops_unparseable_or_schemeless(hostile):
+    assert _sanitized_url(hostile) == ""
+
+
+def test_sanitized_query_is_stable_sha256_and_carries_no_plaintext():
+    digest = _sanitized_query("super secret query")
+    assert digest.startswith("sha256:")
+    assert len(digest) == len("sha256:") + 64
+    assert _sanitized_query("super secret query") == digest
+    assert "super secret query" not in digest
+
+
+def test_build_intrinsic_shadow_observation_shape_and_sanitization():
+    vista = view(
+        dimension(IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, 1.0, "a.example"),
+        dimension(IntrinsicDimensionName.CONTROL_DISPERSION, 0.0, "b.example"),
+        dimension(IntrinsicDimensionName.SUPPLY_VERIFIABILITY, 1.0, "a.example"),
+    )
+    result = build_intrinsic_shadow_observation(
+        vista, baseline_trust=0.40, candidate_trust=0.42, query="secret query",
+    )
+    assert result["mode"] == "shadow"
+    assert result["affects_official_score"] is False
+    assert result["asset_id"] == "asset:test"
+    assert result["baseline_trust"] == 0.40
+    assert result["candidate_trust"] == 0.42
+    assert result["trust_delta"] == round(0.42 - 0.40, 8)
+    assert result["facts_hash"].startswith("sha256:")
+    assert result["query_hash"].startswith("sha256:")
+    assert "secret query" not in json.dumps(result)
+    for dimension_payload in result["dimensions"]:
+        provenance = dimension_payload.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        for url in provenance["source_urls"]:
+            assert "?" not in url and "#" not in url and "@" not in url
+
+
+def test_build_intrinsic_shadow_observation_fails_closed_on_nonfinite_trust():
+    vista = view(dimension(IntrinsicDimensionName.ISSUANCE_PREDICTABILITY, 1.0, "a.example"))
+    for hostile in (float("nan"), float("inf"), "x", True):
+        with pytest.raises(ValueError):
+            build_intrinsic_shadow_observation(
+                vista, baseline_trust=hostile, candidate_trust=0.5, query="q",
+            )

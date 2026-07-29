@@ -209,6 +209,11 @@ class ShadowObservation:
     provider_calls: int
     cost_usd: float
     claim_ids: tuple[str, ...] = ()
+    # Issue #871: observational asset-intrinsic shadow context captured
+    # alongside one kernel parity observation.  This is purely additive
+    # metadata; it never feeds trust/scoring, calibration, decision state,
+    # direction, or market judgment (see asset_intrinsic_shadow.py).
+    intrinsic_shadow: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _require_digest(self.input_digest, "input_digest")
@@ -231,6 +236,10 @@ class ShadowObservation:
             raise ShadowContractError("claim_ids must be bounded and unique")
         for claim_id in self.claim_ids:
             _text(claim_id, "claim_id")
+        if self.intrinsic_shadow is not None and not isinstance(
+            self.intrinsic_shadow, Mapping
+        ):
+            raise ShadowContractError("intrinsic_shadow must be a Mapping or None")
         canonical_json(to_dict(self))
 
 

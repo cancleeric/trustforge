@@ -11,12 +11,15 @@ import multiprocessing
 import os
 import threading
 import time
-from functools import partial
+from functools import lru_cache, partial
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Sequence
 
 from trustforge_core import KernelOutput, run_kernel
+
+from trustforge.asset_intrinsic_shadow import build_intrinsic_shadow_observation
 
 from .kernel_mapper import to_kernel_input
 from .shadow import ShadowParityResult, compare_outputs
@@ -31,6 +34,10 @@ from .shadow_identity import measured_release_identity, verify_reviewed_loaded_c
 _ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 _RUNTIME_FLAG = "TRUSTFORGE_SHADOW_RUNTIME_ENABLED"
 _OBSERVE_FLAG = "KERNEL_SHADOW_OBSERVE"
+# Issue #871: intrinsic shadow context is captured only when this flag is on,
+# independently of the parity observation.  When off, no intrinsic view is
+# resolved and intrinsic_shadow stays None (AC6: no writes, no behavior diff).
+_INTRINSIC_FLAG = "TRUSTFORGE_SHADOW_INTRINSIC_ENABLED"
 _HARD_TIMEOUT_MS = 1_000.0
 _SINGLE_FLIGHT = threading.BoundedSemaphore(value=1)
 _POISON_LOCK = threading.Lock()
@@ -43,7 +50,50 @@ _CHILD_ENV_NAMES = (
     "TRUSTFORGE_SHADOW_CANDIDATE_RELEASE",
     "TRUSTFORGE_SHADOW_ACTIVE_ARTIFACT_DIGEST",
     "TRUSTFORGE_SHADOW_CANDIDATE_ARTIFACT_DIGEST",
+    "TRUSTFORGE_ASSET_INTRINSIC_RECORDS_PATH",
+    "TRUSTFORGE_SHADOW_INTRINSIC_ENABLED",
 )
+
+
+@lru_cache(maxsize=1)
+def _default_intrinsic_repository():
+    """Load the asset-intrinsic repository from the configured data path.
+
+    Resolves the records file the same way the web process does, but from this
+    module's location (``src/trustforge/agent/`` -> repo root is parents[3]).
+    Returns ``None`` when the file is absent so observation degrades to
+    ``intrinsic_shadow=None`` rather than failing.
+    """
+    configured = os.environ.get("TRUSTFORGE_ASSET_INTRINSIC_RECORDS_PATH")
+    path = Path(configured) if configured else (
+        Path(__file__).resolve().parents[3] / "data" / "asset_intrinsic_records.json"
+    )
+    try:
+        if not path.exists():
+            return None
+        from trustforge.asset_intrinsic import (
+            AssetIntrinsicRepository,
+            load_asset_intrinsic_records,
+        )
+
+        return AssetIntrinsicRepository(load_asset_intrinsic_records(path))
+    except Exception:
+        return None
+
+
+def _default_intrinsic_view_fn(coin, pit_epoch):
+    """Resolve the PIT intrinsic view for one coin (module-resolvable spawn target)."""
+    if not isinstance(coin, str) or not coin:
+        return None
+    try:
+        repository = _default_intrinsic_repository()
+        if repository is None:
+            return None
+        asset_id = "asset:" + coin.strip().lower()
+        as_of = datetime.fromtimestamp(pit_epoch, tz=timezone.utc)
+        return repository.pit_view(asset_id, as_of)
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +178,7 @@ def _observation_worker(
     store_factory,
     child_environment,
     use_measured_candidate,
+    intrinsic_view_fn,
 ) -> None:
     """Spawn-safe candidate boundary; all effects remain inside this process."""
     store = None
@@ -182,6 +233,25 @@ def _observation_worker(
         elapsed_ms = max(0.0, (monotonic_fn() - started) * 1000.0)
         if monotonic_fn() > deadline:
             return
+        # Issue #871: capture sanitized asset-intrinsic shadow context.  This
+        # is purely observational metadata; it never touches the official
+        # confidence, calibrated confidence, decision state, direction, or
+        # market judgment.  The intrinsic flag gates resolution (AC6); any
+        # failure degrades to None so the observation still records parity.
+        intrinsic_shadow = None
+        if _enabled(_INTRINSIC_FLAG) and monotonic_fn() <= deadline:
+            try:
+                view_fn = intrinsic_view_fn or _default_intrinsic_view_fn
+                intrinsic_view = view_fn(coin, pit_epoch)
+                if intrinsic_view is not None:
+                    intrinsic_shadow = build_intrinsic_shadow_observation(
+                        intrinsic_view,
+                        baseline_trust=legacy_trust_raw,
+                        candidate_trust=output.trust_score,
+                        query=query,
+                    )
+            except Exception:
+                intrinsic_shadow = None
         observed_at = datetime.fromtimestamp(
             observed_epoch, tz=timezone.utc,
         ).isoformat().replace("+00:00", "Z")
@@ -205,6 +275,7 @@ def _observation_worker(
             provider_calls=0,
             cost_usd=0.0,
             claim_ids=tuple(claim.id for claim in claims),
+            intrinsic_shadow=intrinsic_shadow,
         )
         event_id = store.observation_event_id(observation)
         store.record_policy_and_observation(
@@ -262,6 +333,7 @@ def observe_candidate(
     kernel_fn: Callable = run_kernel,
     mapper_fn: Callable = to_kernel_input,
     store_factory: Callable[..., object] | None = None,
+    intrinsic_view_fn: Callable[..., object] | None = None,
 ) -> ShadowRuntimeResult:
     """Attempt one bounded observation without affecting the active pipeline.
 
@@ -297,11 +369,14 @@ def observe_candidate(
             kernel_fn, mapper_fn, store_factory,
             {name: os.environ.get(name) for name in _CHILD_ENV_NAMES},
             kernel_fn is run_kernel and mapper_fn is to_kernel_input,
+            intrinsic_view_fn,
         )
         # Fail predictable local-function errors before a child can exist.
         # Do not pickle the complete arguments here: valid multiprocessing
         # synchronization primitives may only be serialized during spawn.
-        for spawn_callable in (monotonic_fn, kernel_fn, mapper_fn, store_factory):
+        for spawn_callable in (
+            monotonic_fn, kernel_fn, mapper_fn, store_factory, intrinsic_view_fn,
+        ):
             if spawn_callable is not None:
                 _reject_unresolvable_spawn_callable(spawn_callable)
         process = context.Process(
