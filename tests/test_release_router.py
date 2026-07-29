@@ -110,6 +110,7 @@ class _Ledger:
         self.subjects = []
         self.reservations = set()
         self.emergency = False
+        self.cost_budgets = []
 
     def routing_snapshot(self):
         return RoutingSnapshot(
@@ -127,8 +128,11 @@ class _Ledger:
             outcome_head=self.head,
         )
 
-    def reserve_candidate(self, *, expected_head, reservation_id):
+    def reserve_candidate(
+        self, *, expected_head, reservation_id, cost_budget=None
+    ):
         assert expected_head == self.head
+        self.cost_budgets.append(cost_budget)
         self.reservations.add(reservation_id)
         self.requests += 1
         self.head = (
@@ -213,6 +217,7 @@ def test_real_separate_http_releases_route_limited_b_without_core_import():
         assert "trustforge_core" not in __import__("inspect").getsource(
             __import__("trustforge.release_router", fromlist=["*"])
         )
+        assert ledger.cost_budgets == [None]
     finally:
         a_server.shutdown()
         b_server.shutdown()

@@ -9,25 +9,44 @@ import socket
 import struct
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.release_router import (
-    ReleaseRoutingError,
-    RoutedResponse,
-    RoutingSnapshot,
+from trustforge.canary_cost_budget import (
+    CanaryCostBudget,
+    CanaryCostBudgetError,
+    verify_budget,
 )
+from trustforge.release_router import ReleaseRoutingError, RoutedResponse, RoutingSnapshot
 from trustforge.safe_fs import read_regular_file
 
 ALLOWLIST_PATH = Path("/etc/trustforge/release-router-allowlist.json")
-ACTIVATION_CONTRACT = "trustforge.release-http-canary-activation/v1"
+ACTIVATION_CONTRACT = "trustforge.release-http-canary-activation/v2"
+ALLOWLIST_SCHEMA = "trustforge.release-http-canary-allowlist/v2"
 _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9._-]{0,19}\Z")
+_QUERY_FIELDS = frozenset({"type", "coin", "coin2", "q", "live", "sample", "real"})
+_DEFAULT_QUERY = "分析該幣種近期市場狀況"
+_QUERY_DOMAIN = b"trustforge.release-http-canary-query.v1\x00"
+_IDENTITY_DOMAIN = b"trustforge.release-http-canary-identity.v1\x00"
+_BINDING_DOMAIN = b"trustforge.release-http-canary-request-binding.v1\x00"
 
 
 @dataclass(frozen=True, slots=True)
 class CanaryRequest:
     endpoint: str
     assets: tuple[str, ...]
+    query_digest: str
+    question_type: str
+    live_mode: bool
+    sample_mode: bool
+    data_mode: str
+    llm_mode: str
+
+    @property
+    def cost_bearing(self) -> bool:
+        return self.llm_mode == "bedrock"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,11 +54,18 @@ class CanaryAllowlistEntry:
     trusted_identity: str
     endpoint: str
     assets: tuple[str, ...]
+    query_digest: str
+    question_type: str
+    live_mode: bool
+    sample_mode: bool
+    data_mode: str
+    llm_mode: str
     active_release_digest: str
     candidate_release_digest: str
     ramp_id: str
     control_ledger_id: str
     policy_digest: str
+    cost_budget: CanaryCostBudget | None = None
 
 
 class ReleaseHTTPCanaryPolicy:
@@ -51,10 +77,14 @@ class ReleaseHTTPCanaryPolicy:
         *,
         trusted_proxy_uid: int | None,
         control_ledger_head: str | None = None,
+        budget_keyring: Mapping[str, bytes] | None = None,
+        clock=None,
     ):
         self._entries = entries
         self.trusted_proxy_uid = trusted_proxy_uid
         self.control_ledger_head = control_ledger_head
+        self._budget_keyring = dict(budget_keyring or {})
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @classmethod
     def disabled(cls) -> "ReleaseHTTPCanaryPolicy":
@@ -62,19 +92,18 @@ class ReleaseHTTPCanaryPolicy:
         return cls((), trusted_proxy_uid=None)
 
     @classmethod
-    def load(cls, path: Path = ALLOWLIST_PATH) -> "ReleaseHTTPCanaryPolicy":
+    def load(
+        cls,
+        path: Path = ALLOWLIST_PATH,
+        *,
+        budget_keyring: Mapping[str, bytes] | None = None,
+        clock=None,
+    ) -> "ReleaseHTTPCanaryPolicy":
         raw, info = read_regular_file(path, maximum_bytes=128 * 1024)
         if info.st_uid != 0 or info.st_mode & 0o077:
             raise ReleaseRoutingError("canary allowlist ownership or mode is unsafe")
         try:
             payload = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ReleaseRoutingError("canary allowlist is invalid") from exc
-        return cls.from_payload(payload)
-
-    @classmethod
-    def from_payload(cls, payload: object) -> "ReleaseHTTPCanaryPolicy":
-        try:
             if set(payload) != {
                 "schema",
                 "activation_contract",
@@ -83,12 +112,12 @@ class ReleaseHTTPCanaryPolicy:
                 "entries",
             }:
                 raise ValueError
-            if payload["schema"] != "trustforge.release-http-canary-allowlist/v1":
+            if payload["schema"] != ALLOWLIST_SCHEMA:
                 raise ValueError
             if payload["activation_contract"] != ACTIVATION_CONTRACT:
                 raise ValueError
             entries = tuple(_entry(value) for value in payload["entries"])
-        except (TypeError, ValueError, KeyError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
             raise ReleaseRoutingError("canary allowlist is invalid") from exc
         proxy_uid = payload["trusted_proxy_uid"]
         control_head = payload["control_ledger_head"]
@@ -107,7 +136,93 @@ class ReleaseHTTPCanaryPolicy:
             entries,
             trusted_proxy_uid=proxy_uid,
             control_ledger_head=control_head,
+            budget_keyring=budget_keyring,
+            clock=clock,
         )
+
+    def _routing_admission(
+        self,
+        *,
+        trusted_identity: str | None,
+        path: str,
+        snapshot: RoutingSnapshot,
+        cost_budget: CanaryCostBudget | None = None,
+    ) -> tuple[str | None, str | None, CanaryCostBudget | None]:
+        if (
+            self.trusted_proxy_uid is None
+            or self.control_ledger_head != snapshot.control_event_head
+            or trusted_identity is None
+            or not (1 <= len(trusted_identity.encode()) <= 256)
+        ):
+            return None, None, None
+        request = parse_canary_request(path)
+        if request is None:
+            return None, None, None
+        match = CanaryAllowlistEntry(
+            trusted_identity=trusted_identity,
+            endpoint=request.endpoint,
+            assets=request.assets,
+            query_digest=request.query_digest,
+            question_type=request.question_type,
+            live_mode=request.live_mode,
+            sample_mode=request.sample_mode,
+            data_mode=request.data_mode,
+            llm_mode=request.llm_mode,
+            active_release_digest=snapshot.active.release_digest,
+            candidate_release_digest=snapshot.candidate.release_digest,
+            ramp_id=snapshot.policy.ramp_id,
+            control_ledger_id=snapshot.ledger_id,
+            policy_digest=snapshot.policy.policy_digest,
+        )
+        matching_entry = next(
+            (
+                entry
+                for entry in self._entries
+                if CanaryAllowlistEntry(
+                    **{
+                        name: getattr(entry, name)
+                        for name in entry.__dataclass_fields__
+                        if name != "cost_budget"
+                    }
+                )
+                == match
+            ),
+            None,
+        )
+        if matching_entry is None:
+            return None, None, None
+        if request.sample_mode:
+            return None, None, None
+        binding = _request_binding(trusted_identity, request, snapshot)
+        request_digest = request_binding_digest(
+            trusted_identity, request, snapshot
+        )
+        # live/Bedrock is never admitted merely because cohort assignment
+        # selected B. It additionally needs an exact signed monetary budget.
+        if request.cost_bearing:
+            cost_budget = cost_budget or matching_entry.cost_budget
+            if cost_budget is None:
+                return None, None, None
+            try:
+                verify_budget(
+                    cost_budget,
+                    keyring=self._budget_keyring,
+                    now=self._clock(),
+                    deployment_ledger_id=snapshot.ledger_id,
+                    canary_epoch=snapshot.canary_epoch,
+                    active_artifact_digest=snapshot.active.release_digest,
+                    candidate_artifact_digest=snapshot.candidate.release_digest,
+                    ramp_id=snapshot.policy.ramp_id,
+                    routing_policy_digest=snapshot.policy.policy_digest,
+                    request_binding_digest=request_digest,
+                )
+            except CanaryCostBudgetError:
+                return None, None, None
+        subject = "sha256:" + hashlib.sha256(
+            b"trustforge.release-http-canary-subject.v1\x00"
+            + canonical_json(binding)
+        ).hexdigest()
+        return subject, snapshot.control_event_head, cost_budget
 
     def routing_subject(
         self,
@@ -115,49 +230,30 @@ class ReleaseHTTPCanaryPolicy:
         trusted_identity: str | None,
         path: str,
         snapshot: RoutingSnapshot,
+        cost_budget: CanaryCostBudget | None = None,
     ) -> tuple[str | None, str | None]:
-        """Return (opaque subject, authenticated head), or A-only `(None, None)`."""
-        if (
-            self.trusted_proxy_uid is None
-            or self.control_ledger_head != snapshot.control_event_head
-            or trusted_identity is None
-            or not (1 <= len(trusted_identity.encode()) <= 256)
-        ):
-            return None, None
-        request = parse_canary_request(path)
-        if request is None:
-            return None, None
-        match = CanaryAllowlistEntry(
+        """Return opaque cohort subject/head without exposing identity or query."""
+        subject, head, _budget = self._routing_admission(
             trusted_identity=trusted_identity,
-            endpoint=request.endpoint,
-            assets=request.assets,
-            active_release_digest=snapshot.active.release_digest,
-            candidate_release_digest=snapshot.candidate.release_digest,
-            ramp_id=snapshot.policy.ramp_id,
-            control_ledger_id=snapshot.ledger_id,
-            policy_digest=snapshot.policy.policy_digest,
+            path=path,
+            snapshot=snapshot,
+            cost_budget=cost_budget,
         )
-        if match not in self._entries:
-            return None, None
-        subject = (
-            "sha256:"
-            + hashlib.sha256(
-                b"trustforge.release-http-canary-subject.v1\x00"
-                + canonical_json(
-                    {
-                        "trusted_identity": trusted_identity,
-                        "endpoint": request.endpoint,
-                        "assets": list(request.assets),
-                        "active_release_digest": snapshot.active.release_digest,
-                        "candidate_release_digest": snapshot.candidate.release_digest,
-                        "ramp_id": snapshot.policy.ramp_id,
-                        "control_ledger_id": snapshot.ledger_id,
-                        "policy_digest": snapshot.policy.policy_digest,
-                    }
-                )
-            ).hexdigest()
+        return subject, head
+
+    def routing_admission(
+        self,
+        *,
+        trusted_identity: str | None,
+        path: str,
+        snapshot: RoutingSnapshot,
+    ) -> tuple[str | None, str | None, CanaryCostBudget | None]:
+        """Separate deterministic cohort identity from signed budget admission."""
+        return self._routing_admission(
+            trusted_identity=trusted_identity,
+            path=path,
+            snapshot=snapshot,
         )
-        return subject, snapshot.control_event_head
 
     def authenticated_identity(
         self, connection: socket.socket, claimed_identity: str | None
@@ -178,6 +274,44 @@ class ReleaseHTTPCanaryPolicy:
         return claimed_identity if peer_uid == self.trusted_proxy_uid else None
 
 
+def _request_binding(
+    trusted_identity: str,
+    request: CanaryRequest,
+    snapshot: RoutingSnapshot,
+) -> dict[str, object]:
+    return {
+        "endpoint": request.endpoint,
+        "assets": list(request.assets),
+        "query_digest": request.query_digest,
+        "question_type": request.question_type,
+        "live_mode": request.live_mode,
+        "sample_mode": request.sample_mode,
+        "data_mode": request.data_mode,
+        "llm_mode": request.llm_mode,
+        "trusted_identity_digest": _secret_digest(
+            _IDENTITY_DOMAIN, trusted_identity
+        ),
+        "active_release_digest": snapshot.active.release_digest,
+        "candidate_release_digest": snapshot.candidate.release_digest,
+        "ramp_id": snapshot.policy.ramp_id,
+        "control_ledger_id": snapshot.ledger_id,
+        "control_head": snapshot.control_event_head or snapshot.canary_epoch,
+        "policy_digest": snapshot.policy.policy_digest,
+    }
+
+
+def request_binding_digest(
+    trusted_identity: str,
+    request: CanaryRequest,
+    snapshot: RoutingSnapshot,
+) -> str:
+    """Return the opaque exact-request identity used by signed cost budgets."""
+    return "sha256:" + hashlib.sha256(
+        _BINDING_DOMAIN
+        + canonical_json(_request_binding(trusted_identity, request, snapshot))
+    ).hexdigest()
+
+
 def _entry(value: object) -> CanaryAllowlistEntry:
     if not isinstance(value, dict):
         raise ValueError
@@ -185,11 +319,18 @@ def _entry(value: object) -> CanaryAllowlistEntry:
         "trusted_identity",
         "endpoint",
         "assets",
+        "query_digest",
+        "question_type",
+        "live_mode",
+        "sample_mode",
+        "data_mode",
+        "llm_mode",
         "active_release_digest",
         "candidate_release_digest",
         "ramp_id",
         "control_ledger_id",
         "policy_digest",
+        "cost_budget",
     }
     if set(value) != fields or value["endpoint"] not in {"analyze", "compare"}:
         raise ValueError
@@ -202,13 +343,43 @@ def _entry(value: object) -> CanaryAllowlistEntry:
     normalized = tuple(_asset(asset) for asset in assets)
     if len(normalized) != (2 if value["endpoint"] == "compare" else 1):
         raise ValueError
+    if (
+        not isinstance(value["live_mode"], bool)
+        or not isinstance(value["sample_mode"], bool)
+        or value["question_type"] not in {"multi_source", "comparison"}
+        or value["data_mode"] not in {"live", "sample"}
+        or value["llm_mode"] not in {"off", "bedrock"}
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["query_digest"])
+    ):
+        raise ValueError
+    encoded_budget = value["cost_budget"]
+    if encoded_budget is not None:
+        if not isinstance(encoded_budget, dict):
+            raise ValueError
+        encoded_budget = CanaryCostBudget(**encoded_budget)
     text_fields = {
         name: value[name]
-        for name in fields - {"assets", "endpoint", "trusted_identity"}
+        for name in fields
+        - {
+            "assets",
+            "endpoint",
+            "trusted_identity",
+            "live_mode",
+            "sample_mode",
+            "cost_budget",
+        }
     }
     if any(not isinstance(item, str) or not item for item in text_fields.values()):
         raise ValueError
-    return CanaryAllowlistEntry(identity, value["endpoint"], normalized, **text_fields)
+    return CanaryAllowlistEntry(
+        trusted_identity=identity,
+        endpoint=value["endpoint"],
+        assets=normalized,
+        live_mode=value["live_mode"],
+        sample_mode=value["sample_mode"],
+        cost_budget=encoded_budget,
+        **text_fields,
+    )
 
 
 def _asset(value: object) -> str:
@@ -234,11 +405,9 @@ def parse_canary_request(path: str) -> CanaryRequest | None:
     values: dict[str, list[str]] = {}
     for key, value in pairs:
         values.setdefault(key, []).append(value)
-    if any(
-        len(value) != 1
-        for key, value in values.items()
-        if key in {"type", "coin", "coin2"}
-    ):
+    if set(values) - _QUERY_FIELDS or any(len(value) != 1 for value in values.values()):
+        return None
+    if any(values.get(flag, ["0"])[0] not in {"0", "1"} for flag in ("live", "sample", "real")):
         return None
     kind = values.get("type", ["multi_source"])[0]
     if kind not in {"multi_source", "comparison"}:
@@ -255,13 +424,43 @@ def parse_canary_request(path: str) -> CanaryRequest | None:
             return None
         if assets[0] == assets[1]:
             return None
-        return CanaryRequest("compare", assets)
-    if values.get("coin2") or "," in coin:
+        endpoint = "compare"
+    else:
+        if values.get("coin2") or "," in coin:
+            return None
+        try:
+            assets = (_asset(coin),)
+        except ValueError:
+            return None
+        endpoint = "analyze"
+    query = values.get("q", [_DEFAULT_QUERY])[0]
+    if not query or len(query) > 1000:
         return None
-    try:
-        return CanaryRequest("analyze", (_asset(coin),))
-    except ValueError:
-        return None
+    live_mode = values.get("live", ["0"])[0] == "1"
+    sample_mode = values.get("sample", ["0"])[0] == "1"
+    # Match web's precedence exactly: live > sample > default real-data/off-LLM.
+    if live_mode:
+        sample_mode = False
+        data_mode, llm_mode = "live", "bedrock"
+    elif sample_mode:
+        data_mode, llm_mode = "sample", "off"
+    else:
+        data_mode, llm_mode = "live", "off"
+    query_digest = _secret_digest(_QUERY_DOMAIN, query)
+    return CanaryRequest(
+        endpoint,
+        assets,
+        query_digest,
+        kind,
+        live_mode,
+        sample_mode,
+        data_mode,
+        llm_mode,
+    )
+
+
+def _secret_digest(domain: bytes, value: str) -> str:
+    return "sha256:" + hashlib.sha256(domain + value.encode("utf-8")).hexdigest()
 
 
 def _reject_json_constant(_value: str) -> None:
@@ -292,14 +491,7 @@ def validate_analyze_compare_response(path: str, response: RoutedResponse) -> No
         ):
             raise ReleaseRoutingError("candidate success envelope is invalid")
         required = (
-            {
-                "report_a",
-                "evidence_a",
-                "report_b",
-                "evidence_b",
-                "comparison_report",
-                "execution",
-            }
+            {"report_a", "evidence_a", "report_b", "evidence_b", "comparison_report", "execution"}
             if request.endpoint == "compare"
             else {"report", "evidence", "execution"}
         )

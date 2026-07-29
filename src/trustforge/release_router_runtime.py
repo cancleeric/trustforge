@@ -235,6 +235,7 @@ def build_runtime_router(
         policy=policy,
         evidence_bundle_digest=initialized["evidence_bundle_digest"],
         stop_after_errors=int(initialized["stop_after_errors"]),
+        cost_budget_keys=material.canary_cost_budget_public,
         require_distributed_lock=True,
     )
     if policy.routing_key_id not in routing_keys:
@@ -244,5 +245,6 @@ def build_runtime_router(
         routing_keys,
         pinned_a_fallback=active,
         manifest_keyring=public_keys,
+        cost_budget_keyring=material.canary_cost_budget_public,
         response_validator=response_validator,
     )

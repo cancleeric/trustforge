@@ -17,6 +17,7 @@ from typing import Callable, Mapping, Protocol
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from trustforge.agent.shadow_contracts import canonical_json
+from trustforge.canary_cost_budget import CanaryCostBudget
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _SAFE_RESPONSE_HEADERS = frozenset(
@@ -127,6 +128,10 @@ class RoutingSnapshot:
     control_event_head: str
     outcome_head: str
     candidate_blocked: bool = False
+    canary_epoch: str = ""
+    candidate_model_calls: int = 0
+    candidate_cost_microusd: int = 0
+    outstanding_cost_reservations: int = 0
 
 
 class ReleaseRoutingLedger(Protocol):
@@ -138,6 +143,7 @@ class ReleaseRoutingLedger(Protocol):
         *,
         expected_head: str,
         reservation_id: str,
+        cost_budget: CanaryCostBudget | None = None,
     ) -> RoutingSnapshot:
         """Atomically reserve one capped B request before any B side effect."""
 
@@ -185,12 +191,14 @@ class ReleaseABRouter:
         *,
         pinned_a_fallback: ReleaseEndpoint,
         manifest_keyring: Mapping[str, bytes],
+        cost_budget_keyring: Mapping[str, bytes] | None = None,
         response_validator: Callable[[str, RoutedResponse], None] | None = None,
     ):
         self.ledger = ledger
         self.keyring = dict(keyring)
         self.pinned_a_fallback = pinned_a_fallback
         self.manifest_keyring = dict(manifest_keyring)
+        self.cost_budget_keyring = dict(cost_budget_keyring or {})
         self.response_validator = response_validator
 
     def route(
@@ -200,6 +208,7 @@ class ReleaseABRouter:
         path: str = "/healthz",
         request_headers: Mapping[str, str] | None = None,
         expected_control_head: str | None = None,
+        cost_budget: CanaryCostBudget | None = None,
     ) -> RoutedResponse:
         snapshot: RoutingSnapshot | None = None
         reservation_id = ""
@@ -225,10 +234,17 @@ class ReleaseABRouter:
                 )
             reservation_id = secrets.token_hex(16)
             try:
-                snapshot = self.ledger.reserve_candidate(
-                    expected_head=snapshot.outcome_head,
-                    reservation_id=reservation_id,
-                )
+                if cost_budget is None:
+                    snapshot = self.ledger.reserve_candidate(
+                        expected_head=snapshot.outcome_head,
+                        reservation_id=reservation_id,
+                    )
+                else:
+                    snapshot = self.ledger.reserve_candidate(
+                        expected_head=snapshot.outcome_head,
+                        reservation_id=reservation_id,
+                        cost_budget=cost_budget,
+                    )
                 break
             except Exception:
                 snapshot = None

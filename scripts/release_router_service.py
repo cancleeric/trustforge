@@ -38,7 +38,9 @@ def build_router_with_canary_policy() -> tuple[
     """Compose the service router and its fail-closed HTTP canary policy."""
     router = build_runtime_router(response_validator=validate_analyze_compare_response)
     try:
-        canary_policy = ReleaseHTTPCanaryPolicy.load()
+        canary_policy = ReleaseHTTPCanaryPolicy.load(
+            budget_keyring=router.cost_budget_keyring
+        )
     except FileNotFoundError:
         # K2a's no-provision state must keep the ingress available but make B
         # impossible. K2b owns authenticated, atomic activation provisioning.
@@ -72,20 +74,23 @@ class ReleaseRouterHandler(BaseHTTPRequestHandler):
         try:
             try:
                 snapshot = self.router.ledger.routing_snapshot()
-                subject, expected_head = self.canary_policy.routing_subject(
+                subject, expected_head, cost_budget = (
+                    self.canary_policy.routing_admission(
                     trusted_identity=identity,
                     path=self.path,
                     snapshot=snapshot,
+                    )
                 )
             except Exception:
                 # An unauthenticated/unreadable snapshot can never authorize B.
                 # Let the router independently reach its pinned-A fallback.
-                subject, expected_head = None, None
+                subject, expected_head, cost_budget = None, None, None
             response = self.router.route(
                 stable_subject=subject,
                 path=self.path,
                 request_headers=forwarded,
                 expected_control_head=expected_head,
+                cost_budget=cost_budget,
             )
         except Exception:
             self.send_error(503, "release router unavailable")
