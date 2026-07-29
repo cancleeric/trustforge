@@ -1874,7 +1874,15 @@ class AnalysisFlow:
           finished_at=excluded.finished_at, duration_sec=excluded.duration_sec,
           event_count=excluded.event_count, retry_count=excluded.retry_count, error=excluded.error
         """, (job_id, stage, state, now, started, now if state in {"completed", "failed"} else None, duration, events, retry, error))
-        job_state = "failed" if state == "failed" else "queued" if state == "queued" else "running"
+        job_state = (
+            "failed"
+            if state == "failed"
+            else "queued"
+            if state == "queued"
+            else "completed"
+            if state == "completed" and stage == STAGES[-1]
+            else "running"
+        )
         self._conn().execute("UPDATE analysis_jobs SET state=?,current_stage=?,error=?,updated_at=? WHERE job_id=?",
                              (job_state, stage, error, now, job_id))
 

@@ -651,6 +651,21 @@ def test_question_rag_prefers_same_coin_and_mode(tmp_path):
     assert matches[0]["mode"] == "risk"
 
 
+def test_final_stage_checkpoint_preserves_completed_job_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs()
+    )
+    flow = AnalysisFlow(tmp_path / "final-checkpoint.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    job_id = flow.enqueue_job(snapshot, "risk", "BTC risk")
+
+    flow._checkpoint(job_id, STAGES[0], "completed")
+    assert flow._job(job_id)["state"] == "running"
+
+    flow._checkpoint(job_id, STAGES[-1], "completed")
+    assert flow._job(job_id)["state"] == "completed"
+
+
 def test_runtime_reconciles_orphaned_intermediate_stage_from_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")
