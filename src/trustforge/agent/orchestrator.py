@@ -1381,24 +1381,20 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     ev_groups_dicts = [g.to_dict() for g in ev_groups]
 
     # #862 facts 去重：同群組（≥2 筆）只留一條聚合摘要，避免重複事實。
-    _grouped_ev_indices: set[int] = set()
-    for g in ev_groups:
-        if len(g.member_indices) >= 2:
-            _grouped_ev_indices.update(g.member_indices)
     # 重建 facts：群組用聚合摘要取代原始逐筆
     aggregated_facts: list[str] = []
-    _seen_fact_indices: set[int] = set()
+    _seen_fact_texts: set[str] = set()
     for g in ev_groups:
         if len(g.member_indices) < 2:
             # 單筆群組：若為客觀事實，保留原始文字
             idx = g.member_indices[0]
             ev = evidence[idx]
             if ev.kind in OBJECTIVE_KINDS and ev.related_claim == judgment_tag:
-                # 用原始 claim text（從 facts 中找對應）
-                for f in facts:
-                    if f not in aggregated_facts:
-                        aggregated_facts.append(f)
-                        break
+                # 從原始 facts 中找出該 evidence 對應的 fact text
+                fact_text = ev.content_reference
+                if fact_text not in _seen_fact_texts:
+                    aggregated_facts.append(fact_text)
+                    _seen_fact_texts.add(fact_text)
         else:
             # 多筆群組：只取客觀事實類，產生聚合摘要
             obj_members = [i for i in g.member_indices

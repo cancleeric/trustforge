@@ -109,6 +109,11 @@ function EvidenceGroupRow({ group, evidence }: { group: EvidenceGroup; evidence:
   const rep = evidence[group.representative_idx]
   const memberCount = group.member_indices.length
 
+  // Bounds safety: stale snapshot could have out-of-range index
+  if (!rep) {
+    return null
+  }
+
   if (memberCount < 2) {
     // 單筆群組：直接渲染為普通 EvidenceRow
     return <EvidenceRow ev={rep} idx={group.representative_idx} />
@@ -155,9 +160,10 @@ function EvidenceGroupRow({ group, evidence }: { group: EvidenceGroup; evidence:
           </div>
         </td>
       </tr>
-      {expanded && group.member_indices.map((idx) => (
-        <EvidenceRow key={idx} ev={evidence[idx]} idx={idx} />
-      ))}
+      {expanded && group.member_indices.map((idx) => {
+        const ev = evidence[idx]
+        return ev ? <EvidenceRow key={idx} ev={ev} idx={idx} /> : null
+      })}
     </>
   )
 }
