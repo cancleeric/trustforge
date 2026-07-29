@@ -419,6 +419,25 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                     "type": "array",
                     "items": {"$ref": "#/$defs/TermAnnotation"},
                 },
+                "evidence_groups": {
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["representative_idx", "member_indices"],
+                                "properties": {
+                                    "representative_idx": {"type": "integer", "minimum": 0},
+                                    "member_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                                    "trend": {"type": ["string", "null"], "enum": ["rising", "falling", "stable", None]},
+                                    "value_range": {"type": ["string", "null"]},
+                                    "latest_value": {"type": ["string", "null"]},
+                                },
+                            },
+                        },
+                        {"type": "null"},
+                    ],
+                },
             },
             "$defs": {
                 "AssetContext": _asset_context_schema_properties(),

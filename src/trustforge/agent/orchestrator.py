@@ -29,6 +29,7 @@ from ..term_annotations import annotate_terms
 from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 from . import narrative_locale as _loc
 from .authoritative_kernel_mapper import run_authoritative_judgment
+from .evidence_grouper import group_evidence
 from .kernel_mapper import to_kernel_claim
 from .kernel_projection import KernelJudgment
 
@@ -1374,6 +1375,98 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     _annotations = annotate_terms(market_judgment)
     term_annotations = [ann.to_dict() for ann in _annotations]
 
+    # #862 非破壞式事實聚合：在 evidence list 完整建立後，計算聚合群組。
+    # 純呈現層 post-processing，不修改 evidence list 本身。
+    ev_groups = group_evidence(evidence)
+    ev_groups_dicts = [g.to_dict() for g in ev_groups]
+
+    # #862 facts 去重：同群組（≥2 筆）只留一條聚合摘要，避免重複事實。
+    # 重建 facts：群組用聚合摘要取代原始逐筆
+    aggregated_facts: list[str] = []
+    _seen_fact_texts: set[str] = set()
+    for g in ev_groups:
+        if len(g.member_indices) < 2:
+            # 單筆群組：若為客觀事實，保留原始文字
+            idx = g.member_indices[0]
+            ev = evidence[idx]
+            if ev.kind in OBJECTIVE_KINDS and ev.related_claim == judgment_tag:
+                # 從原始 facts 中找出該 evidence 對應的 fact text
+                fact_text = ev.content_reference
+                if fact_text not in _seen_fact_texts:
+                    aggregated_facts.append(fact_text)
+                    _seen_fact_texts.add(fact_text)
+        else:
+            # 多筆群組：只取客觀事實類，產生聚合摘要
+            obj_members = [i for i in g.member_indices
+                           if evidence[i].kind in OBJECTIVE_KINDS
+                           and evidence[i].related_claim == judgment_tag]
+            if obj_members:
+                rep_ev = evidence[g.representative_idx]
+                source = rep_ev.source
+                count = len(g.member_indices)
+                indices_str = ", ".join(f"E{i}" for i in g.member_indices[:5])
+                if count > 5:
+                    indices_str += "…"
+                if g.value_range and g.trend:
+                    trend_text = {"rising": "上升趨勢", "falling": "下降趨勢",
+                                  "stable": "持平"}.get(g.trend, "")
+                    aggregated_facts.append(
+                        f"{g.value_range}（{trend_text}），來源 {source}，"
+                        f"{count} 筆觀測 [{indices_str}]"
+                    )
+                elif g.value_range:
+                    aggregated_facts.append(
+                        f"{g.value_range}，來源 {source}，"
+                        f"{count} 筆觀測 [{indices_str}]"
+                    )
+                else:
+                    # 無法提取數值，取代表文字
+                    aggregated_facts.append(rep_ev.content_reference)
+    # 若聚合後 facts 為空（邊界情況），退回原始 facts
+    if not aggregated_facts:
+        aggregated_facts = facts
+
+    # #862 key_basis 面向多樣性：同群組只保留一條 BasisItem，帶全組 evidence_idx。
+    if ev_groups:
+        # 建立 evidence_idx → group 的反查
+        _idx_to_group: dict[int, int] = {}
+        for gi, g in enumerate(ev_groups):
+            for mi in g.member_indices:
+                _idx_to_group[mi] = gi
+        # 去重：同一群組只留第一條出現的 BasisItem，evidence_idx 擴充為全組
+        _seen_groups: set[int] = set()
+        _seen_source_kind: set[tuple[str, str]] = set()
+        deduped_basis: list[BasisItem] = []
+        for bi in key_basis:
+            if not bi.evidence_idx:
+                deduped_basis.append(bi)
+                continue
+            primary_idx = bi.evidence_idx[0]
+            grp_id = _idx_to_group.get(primary_idx)
+            if grp_id is not None and grp_id in _seen_groups:
+                continue  # 同群組已有代表，跳過
+            # 面向多樣性：同 (source, kind) 組合不重複佔位（最多 1 條）
+            ev_rep = evidence[primary_idx]
+            sk_key = (_normalize_source_key(ev_rep.source), ev_rep.kind)
+            if sk_key in _seen_source_kind and len(deduped_basis) >= 3:
+                continue
+            if grp_id is not None:
+                _seen_groups.add(grp_id)
+                # 擴充 evidence_idx 為全組索引
+                g = ev_groups[grp_id]
+                if len(g.member_indices) >= 2:
+                    bi = BasisItem(
+                        claim=bi.claim,
+                        explanation=bi.explanation,
+                        evidence_idx=list(g.member_indices),
+                    )
+            _seen_source_kind.add(sk_key)
+            deduped_basis.append(bi)
+        key_basis = deduped_basis
+
+    # 使用聚合後的 facts
+    facts = aggregated_facts
+
     report = Report(
         coin=coin, question_type=qtype.value, question=query,
         market_judgment=market_judgment, facts=facts, inferences=inferences,
@@ -1391,6 +1484,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         calibrated_confidence=calibrated,
         decision_state=decision_state,
         term_annotations=term_annotations,
+        evidence_groups=ev_groups_dicts,
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
     # --- telemetry: record build_report invocation ---

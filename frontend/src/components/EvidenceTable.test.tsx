@@ -1,0 +1,109 @@
+// @vitest-environment jsdom
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
+import EvidenceTable from './EvidenceTable'
+import type { Evidence, EvidenceGroup } from '../lib/types'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
+
+function makeEvidence(overrides: Partial<Evidence> = {}): Evidence {
+  return {
+    source: 'test-source',
+    fetched_at: '2026-07-20T10:00:00Z',
+    content_reference: 'Test content reference',
+    related_claim: 'BTC 市場判斷',
+    source_url: '',
+    kind: 'onchain',
+    trust: 0.75,
+    trust_components: { reputation: 0.95 },
+    flags: [],
+    info_flags: [],
+    ...overrides,
+  }
+}
+
+const evidence: Evidence[] = [
+  makeEvidence({ source: 'f2pool', content_reference: '算力: 828 TH/s', trust: 0.8 }),
+  makeEvidence({ source: 'f2pool', content_reference: '算力: 855 TH/s', trust: 0.85 }),
+  makeEvidence({ source: 'f2pool', content_reference: '算力: 891 TH/s', trust: 0.9 }),
+  makeEvidence({ source: 'coindesk', content_reference: 'ETF 資金淨流入', kind: 'news', trust: 0.6 }),
+]
+
+const groupedEvidence: EvidenceGroup[] = [
+  {
+    representative_idx: 2,
+    member_indices: [0, 1, 2],
+    trend: 'rising',
+    value_range: '828–891 TH/s',
+    latest_value: '891.0 TH/s',
+  },
+  {
+    representative_idx: 3,
+    member_indices: [3],
+    trend: null,
+    value_range: null,
+    latest_value: null,
+  },
+]
+
+function Wrapper({ children }: { children: React.ReactNode }) {
+  return <HermesI18nProvider>{children}</HermesI18nProvider>
+}
+
+describe('EvidenceTable', () => {
+  it('renders flat mode when evidenceGroups is not provided', () => {
+    render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })
+    // All 4 evidence items rendered individually
+    expect(screen.getByText('E0')).toBeInTheDocument()
+    expect(screen.getByText('E1')).toBeInTheDocument()
+    expect(screen.getByText('E2')).toBeInTheDocument()
+    expect(screen.getByText('E3')).toBeInTheDocument()
+  })
+
+  it('renders flat mode when evidenceGroups is null', () => {
+    render(<EvidenceTable evidence={evidence} evidenceGroups={null} />, { wrapper: Wrapper })
+    expect(screen.getByText('E0')).toBeInTheDocument()
+    expect(screen.getByText('E3')).toBeInTheDocument()
+  })
+
+  it('renders grouped mode with evidenceGroups', () => {
+    render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
+    // Group row shows member count badge
+    expect(screen.getByText('3 筆觀測')).toBeInTheDocument()
+    // Group row shows value range
+    expect(screen.getByText('828–891 TH/s')).toBeInTheDocument()
+    // Singleton group renders as normal row
+    expect(screen.getByText('E3')).toBeInTheDocument()
+  })
+
+  it('group row shows trend badge', () => {
+    render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
+    expect(screen.getByLabelText('上升趨勢')).toBeInTheDocument()
+  })
+
+  it('group row shows latest value when collapsed', () => {
+    render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
+    expect(screen.getByText(/最新：891.0 TH\/s/)).toBeInTheDocument()
+  })
+
+  it('expanding group reveals member rows', () => {
+    render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
+    // Initially collapsed — member E0, E1, E2 not shown individually
+    expect(screen.queryByText('E0')).not.toBeInTheDocument()
+    // Click group row to expand
+    const groupRow = screen.getByLabelText(/證據群組：F2pool/)
+    fireEvent.click(groupRow)
+    // Now member rows are visible
+    expect(screen.getByText('E0')).toBeInTheDocument()
+    expect(screen.getByText('E1')).toBeInTheDocument()
+    expect(screen.getByText('E2')).toBeInTheDocument()
+  })
+
+  it('collapsing group hides member rows again', () => {
+    render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
+    const groupRow = screen.getByLabelText(/證據群組：F2pool/)
+    fireEvent.click(groupRow) // expand
+    expect(screen.getByText('E0')).toBeInTheDocument()
+    fireEvent.click(groupRow) // collapse
+    expect(screen.queryByText('E0')).not.toBeInTheDocument()
+  })
+})

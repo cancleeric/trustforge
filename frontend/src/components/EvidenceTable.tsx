@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { Evidence } from '../lib/types'
+import type { Evidence, EvidenceGroup } from '../lib/types'
+import { getRenderGroups, trendLabel } from '../lib/evidenceGrouping'
 import { sourceDisplayName } from '../lib/sourceBrand'
 import { safeHref } from '../lib/safeHref'
 import { FlagBadge, InfoFlagBadge, LowTrustBadge, TierBadge } from './Badges'
@@ -82,7 +83,101 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
   )
 }
 
-export default function EvidenceTable({ evidence }: { evidence: Evidence[] }) {
+/** #862 趨勢方向 badge。 */
+function TrendBadge({ trend }: { trend: EvidenceGroup['trend'] }) {
+  if (!trend) return null
+  const config = {
+    rising: { icon: '\u25B2', color: 'var(--color-tf-good)', label: trendLabel(trend) },
+    falling: { icon: '\u25BC', color: 'var(--color-tf-bad)', label: trendLabel(trend) },
+    stable: { icon: '\u2014', color: 'var(--color-tf-muted)', label: trendLabel(trend) },
+  }
+  const { icon, color, label } = config[trend]
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[0.65rem] font-medium"
+      style={{ color, backgroundColor: `color-mix(in srgb, ${color} 12%, transparent)` }}
+      aria-label={label}
+    >
+      {icon} {label}
+    </span>
+  )
+}
+
+/** #862 聚合群組列：折疊態顯示代表摘要 + 趨勢 + 成員數；展開顯示所有成員。 */
+function EvidenceGroupRow({ group, evidence }: { group: EvidenceGroup; evidence: Evidence[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const rep = evidence[group.representative_idx]
+  const memberCount = group.member_indices.length
+
+  // Bounds safety: stale snapshot could have out-of-range index
+  if (!rep) {
+    return null
+  }
+
+  if (memberCount < 2) {
+    // 單筆群組：直接渲染為普通 EvidenceRow
+    return <EvidenceRow ev={rep} idx={group.representative_idx} />
+  }
+
+  return (
+    <>
+      <tr
+        className="hermes-row-hover cursor-pointer bg-tf-card/50"
+        onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+        aria-label={`證據群組：${sourceDisplayName(rep.source)}，${memberCount} 筆觀測`}
+      >
+        <td className="tf-num whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">
+          <span className="inline-block w-4 text-center">{expanded ? '\u25BC' : '\u25B6'}</span>
+        </td>
+        <td className="px-3 py-2 align-top">
+          <div className="flex flex-wrap items-center gap-1.5 text-sm">
+            <span className="font-semibold text-tf-text">{sourceDisplayName(rep.source)}</span>
+            <TierBadge kind={rep.kind} />
+            <TrendBadge trend={group.trend} />
+            {group.value_range && (
+              <span className="text-[0.72rem] font-medium text-tf-text2">{group.value_range}</span>
+            )}
+            <span className="rounded-full bg-tf-border px-1.5 py-0.5 text-[0.65rem] text-tf-muted">
+              {memberCount} 筆觀測
+            </span>
+          </div>
+          {!expanded && group.latest_value && (
+            <p className="mt-0.5 text-xs text-tf-muted">最新：{group.latest_value}</p>
+          )}
+        </td>
+        <td className="px-3 py-2 align-top">
+          <div className="flex items-center gap-2">
+            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-tf-border">
+              <div
+                className="h-full rounded-full"
+                style={{ width: `${Math.max(0, Math.min(1, rep.trust)) * 100}%`, backgroundColor: trustColor(rep.trust) }}
+              />
+            </div>
+            <span className="tf-num text-xs" style={{ color: trustColor(rep.trust) }}>
+              {rep.trust.toFixed(2)}
+            </span>
+          </div>
+        </td>
+      </tr>
+      {expanded && group.member_indices.map((idx) => {
+        const ev = evidence[idx]
+        return ev ? <EvidenceRow key={idx} ev={ev} idx={idx} /> : null
+      })}
+    </>
+  )
+}
+
+export default function EvidenceTable({
+  evidence,
+  evidenceGroups,
+}: {
+  evidence: Evidence[]
+  evidenceGroups?: EvidenceGroup[] | null
+}) {
+  const groups = getRenderGroups(evidenceGroups)
+  const useGrouped = groups.length > 0
+
   return (
     <div className="overflow-x-auto hermes-clip rounded-lg border border-tf-border bg-tf-card">
       <table className="w-full border-collapse text-left">
@@ -94,9 +189,17 @@ export default function EvidenceTable({ evidence }: { evidence: Evidence[] }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-tf-border">
-          {evidence.map((ev, i) => (
-            <EvidenceRow key={i} ev={ev} idx={i} />
-          ))}
+          {useGrouped
+            ? groups.map((group) => (
+              <EvidenceGroupRow
+                key={group.representative_idx}
+                group={group}
+                evidence={evidence}
+              />
+            ))
+            : evidence.map((ev, i) => (
+              <EvidenceRow key={i} ev={ev} idx={i} />
+            ))}
         </tbody>
       </table>
     </div>
