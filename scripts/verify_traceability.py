@@ -161,8 +161,18 @@ def _check_degradation_markers(text: str) -> list[str]:
 # Section 1: claim_id 溯源驗證（FR-3）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def verify_claim_id_traceability(report, evidence: list) -> dict:
-    """驗證 narrative 中引用的 claim_id 可追溯到 evidence。"""
+def verify_claim_id_traceability(
+    report,
+    evidence: list,
+    *,
+    traceable_claim_ids: set[str] | None = None,
+) -> dict:
+    """驗證 narrative 中引用的 claim_id 可追溯到本次 pipeline 原始 claims。
+
+    ``Evidence.related_claim`` 是報告角色標籤（例如「BTC 市場判斷」），不是
+    Claim.id，不能拿來當 provenance。呼叫端應傳入從同一批 Document 抽取的
+    claim id；optional 只為保留既有工具呼叫的向後相容。
+    """
     # 組合所有 inferences 文本
     narrative_text = "\n".join(report.inferences) if report.inferences else ""
     # 也檢查 market_judgment
@@ -173,10 +183,7 @@ def verify_claim_id_traceability(report, evidence: list) -> dict:
     cited_set = set(cited_ids)
 
     # 建立 evidence 中所有可追溯的 claim_id 全集
-    traceable_claims: set = set()
-    for ev in evidence:
-        if ev.related_claim:
-            traceable_claims.add(ev.related_claim)
+    traceable_claims: set[str] = set(traceable_claim_ids or ())
     # cross_source_signal 的 supporting_claim_ids
     if report.cross_source_signal and report.cross_source_signal.get("supporting_claim_ids"):
         for cid in report.cross_source_signal["supporting_claim_ids"]:
@@ -445,7 +452,16 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
 
     # ── Section B.1: claim_id 溯源驗證 ────────────────────────────────────
     print("▶ claim_id 溯源驗證...")
-    trace_result = verify_claim_id_traceability(report, evidence)
+    # run_agent_pipeline 會對同一批 docs 呼叫 deterministic extract_claims；
+    # 在驗證端重建同一組 ID，才能驗證真正的 Claim provenance。
+    from trustforge.trust.scoring import extract_claims
+
+    traceable_claim_ids = {claim.id for claim in extract_claims(docs)}
+    trace_result = verify_claim_id_traceability(
+        report,
+        evidence,
+        traceable_claim_ids=traceable_claim_ids,
+    )
     results["sections"]["claim_id_traceability"] = trace_result
     if not trace_result["meets_minimum"]:
         print(f"  ✗ claim_id 不足：找到 {trace_result['claim_ids_count']} 條，需 ≥5")

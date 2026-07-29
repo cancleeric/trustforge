@@ -218,3 +218,38 @@ class TestStanceLabelFailClosed:
         if label != expected:
             all_pass = False
         assert all_pass is True
+def test_related_claim_label_is_not_treated_as_claim_id():
+    """Evidence.related_claim 是角色標籤，不能冒充 provenance。"""
+    from scripts.verify_traceability import verify_claim_id_traceability
+
+    class Report:
+        market_judgment = ""
+        inferences = ["依據 price_btc_001#0 判斷。"]
+        cross_source_signal = None
+        key_basis = []
+
+    class Evidence:
+        related_claim = "price_btc_001#0"
+
+    result = verify_claim_id_traceability(Report(), [Evidence()])
+    assert result["all_traceable"] is False
+    assert result["untraceable_ids"] == ["price_btc_001#0"]
+
+
+def test_explicit_pipeline_claim_map_makes_real_id_traceable():
+    """只有同批原始 claims 提供的 ID 才能通過溯源。"""
+    from scripts.verify_traceability import verify_claim_id_traceability
+
+    class Report:
+        market_judgment = ""
+        inferences = ["依據 price_btc_001#0 判斷。"]
+        cross_source_signal = None
+        key_basis = []
+
+    result = verify_claim_id_traceability(
+        Report(),
+        [],
+        traceable_claim_ids={"price_btc_001#0"},
+    )
+    assert result["all_traceable"] is True
+    assert result["untraceable_ids"] == []
