@@ -8501,6 +8501,7 @@ class Handler(BaseHTTPRequestHandler):
                     _agos_rt = AgosRuntime(
                         data_dir=getattr(_seed_rt, "_data_dir", None),
                         bootstrap_tools=False,
+                        read_only=True,
                     )
                     headers_dict = {k: v for k, v in getattr(self, "headers", {}).items()}
                     try:

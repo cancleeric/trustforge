@@ -163,10 +163,15 @@ class AgosRuntime:
     """
 
     def __init__(
-        self, *, data_dir: Path | None = None, bootstrap_tools: bool = True
+        self,
+        *,
+        data_dir: Path | None = None,
+        bootstrap_tools: bool = True,
+        read_only: bool = False,
     ) -> None:
         self._data_dir = data_dir or _default_data_dir()
-        self._bootstrap_tools = bootstrap_tools
+        self._read_only = read_only
+        self._bootstrap_tools = bootstrap_tools and not read_only
         self._memory_repo: MemoryRepository | None = None
         self._skill_registry: SkillRegistryRepository | None = None
         self._skill_loader: SkillLoader | None = None
@@ -181,20 +186,35 @@ class AgosRuntime:
             return
 
         try:
-            self._memory_repo = MemoryRepository(db_path=self._data_dir / "memory_os.db")
-            self._memory_repo.ensure_schema()
+            store_paths = {
+                "memory": self._data_dir / "memory_os.db",
+                "skills": self._data_dir / "skill_registry.db",
+                "tools": self._data_dir / "tool_registry.db",
+                "context": self._data_dir / "context_manifests.db",
+            }
+            if self._read_only and not all(path.is_file() for path in store_paths.values()):
+                self._initialized = True
+                return
+
+            self._memory_repo = MemoryRepository(
+                db_path=store_paths["memory"], read_only=self._read_only
+            )
+            if not self._read_only:
+                self._memory_repo.ensure_schema()
 
             self._skill_registry = SkillRegistryRepository(
-                db_path=self._data_dir / "skill_registry.db"
+                db_path=store_paths["skills"], read_only=self._read_only
             )
-            self._skill_registry.ensure_schema()
+            if not self._read_only:
+                self._skill_registry.ensure_schema()
 
             self._skill_loader = SkillLoader(self._skill_registry)
 
             self._tool_registry = ToolRegistryRepository(
-                db_path=self._data_dir / "tool_registry.db"
+                db_path=store_paths["tools"], read_only=self._read_only
             )
-            self._tool_registry.ensure_schema()
+            if not self._read_only:
+                self._tool_registry.ensure_schema()
             # Product-owned runtime capabilities are bootstrapped explicitly so
             # enabling AGOS does not turn every normal pipeline call into an
             # unknown-tool denial. The existence check makes repeated startup
@@ -208,7 +228,8 @@ class AgosRuntime:
                 memory_repo=self._memory_repo,
                 skill_loader=self._skill_loader,
                 tool_registry=self._tool_registry,
-                db_path=self._data_dir / "context_manifests.db",
+                db_path=store_paths["context"],
+                read_only=self._read_only,
             )
 
             self._retrieval_adapter = MemoryRetrievalAdapter(self._memory_repo)

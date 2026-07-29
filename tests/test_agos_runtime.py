@@ -77,6 +77,20 @@ class TestFeatureFlag:
 
 
 class TestContextBuild:
+    def test_read_only_runtime_does_not_create_missing_stores(
+        self, tmp_path: Path
+    ):
+        data_dir = tmp_path / "missing-agos-stores"
+        read_runtime = AgosRuntime(data_dir=data_dir, read_only=True)
+        try:
+            read_runtime._ensure_init()
+            assert read_runtime._initialized is True
+            assert read_runtime._memory_repo is None
+            assert read_runtime.lineage.get_run_memories("absent") == []
+            assert not data_dir.exists()
+        finally:
+            read_runtime.close()
+
     def test_analysis_flow_uses_thread_local_agos_runtimes(
         self, tmp_path: Path, monkeypatch
     ):

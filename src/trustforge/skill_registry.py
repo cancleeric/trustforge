@@ -240,12 +240,22 @@ def _set_version(conn: sqlite3.Connection, version: int) -> None:
 class SkillRegistryRepository:
     """SQLite-backed repository for Task Skills, Revisions, and Dependencies."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
+    def __init__(
+        self, db_path: Path | None = None, *, read_only: bool = False
+    ) -> None:
         self._db_path = db_path or default_db_path()
+        self._read_only = read_only
         self._conn: sqlite3.Connection | None = None
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
+            if self._read_only:
+                self._conn = sqlite3.connect(
+                    f"file:{self._db_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False,
+                )
+                return self._conn
             if not self._db_path.exists():
                 from .agos_db_auth import (
                     AGOS_SCHEMA_AUTH_PURPOSE,

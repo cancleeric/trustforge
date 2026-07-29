@@ -243,15 +243,24 @@ class ContextBuilder:
         skill_loader: SkillLoader | None = None,
         tool_registry: ToolRegistryRepository | None = None,
         db_path: Path | None = None,
+        read_only: bool = False,
     ) -> None:
         self._memory_repo = memory_repo
         self._skill_loader = skill_loader
         self._tool_registry = tool_registry
         self._db_path = db_path or default_db_path()
+        self._read_only = read_only
         self._conn: sqlite3.Connection | None = None
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
+            if self._read_only:
+                self._conn = sqlite3.connect(
+                    f"file:{self._db_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False,
+                )
+                return self._conn
             if not self._db_path.exists():
                 from .agos_db_auth import (
                     AGOS_SCHEMA_AUTH_PURPOSE,
