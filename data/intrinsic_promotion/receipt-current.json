@@ -1,0 +1,55 @@
+{
+  "receipt": {
+    "receipt_domain_version": "trustforge.intrinsic.promotion.receipt/v1",
+    "policy_digest": "sha256:8687d5afeb21b4f7b142357ed17da62e98b352967ab8c3f42823573032839ddc",
+    "observation_root_digest": "sha256:4e10b67a9cc60d0cce822b98c8012399c1e0a33d6656b4838c63cd4d9f20a73b",
+    "benchmark_manifest_digest": "sha256:cc76da3722102228eaee84dba87a76778808ab8987ecb21eed028180d1460986",
+    "evaluated_at": "2026-07-29T00:00:00Z",
+    "policy": {
+      "version": "intrinsic-promotion-policy.v1",
+      "min_observations": 200,
+      "min_assets": 5,
+      "min_days": 30,
+      "min_known": 3,
+      "min_families": 2,
+      "max_abs_delta": 0.08,
+      "brier_degradation_limit": 0.01,
+      "ece_degradation_limit": 0.01,
+      "labels_mature": false,
+      "min_eligible_fraction": 0.6,
+      "max_decision_flips": 0,
+      "max_coverage_disparity": 2,
+      "max_missingness_rate": 0.5,
+      "sensitivity_bound": 0.08,
+      "max_single_source_family_share": 0.6,
+      "corrupt_rate_max": 0.05
+    },
+    "decision": "block",
+    "reasons": [
+      "insufficient_observations",
+      "insufficient_asset_coverage",
+      "insufficient_observation_span",
+      "insufficient_eligible_fraction",
+      "coverage_disparity",
+      "missingness_rate_exceeded"
+    ],
+    "calibration_claim": "withheld_no_mature_labels",
+    "counts": {
+      "observation_count": 3,
+      "valid_count": 3,
+      "corrupt_count": 0,
+      "asset_count": 3,
+      "day_span": 2,
+      "eligible_count": 1,
+      "eligible_fraction": 0.33333333,
+      "corrupt_rate": 0.0,
+      "known_count_min": 0,
+      "known_count_max": 4,
+      "source_family_count_min": 0,
+      "distinct_family_count": 11,
+      "decision_flips": 0,
+      "missingness_rate": 0.6
+    }
+  },
+  "receipt_id": "sha256:281f7e84dbc56bd1fd75b85a7fae0e2ec2b55953b1f59ade59fd0c6b51b44cf7"
+}
