@@ -284,6 +284,7 @@ class ContextBuilder:
         for mref in (memory_refs or []):
             # Re-verify evidence_eligible from DB (never trust caller flag)
             actual_eligible = False
+            frozen_content_hash: str | None = None
             if self._memory_repo:
                 entry = self._memory_repo.get(mref.memory_id)
                 if entry is None:
@@ -300,6 +301,7 @@ class ContextBuilder:
                             continue
                     except (ValueError, TypeError):
                         pass
+                frozen_content_hash = entry.content_hash
             else:
                 # No repo available — cannot verify, default to non-evidentiary
                 actual_eligible = False
@@ -317,6 +319,8 @@ class ContextBuilder:
                 "rank": mref.rank,
                 "reason": mref.reason,
                 "evidence_eligible": actual_eligible,  # DB-verified, not caller-supplied
+                # Freeze the content identity, not only the mutable lookup key.
+                "content_hash": frozen_content_hash,
             })
 
         # 2. Process skill manifest

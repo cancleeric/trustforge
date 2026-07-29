@@ -145,6 +145,8 @@ class TestBuild:
         manifest = builder.build(run_id="run-2", memory_refs=refs)
 
         assert len(manifest.included_refs.memory_refs) == 2
+        assert manifest.included_refs.memory_refs[0]["content_hash"] == "a" * 64
+        assert manifest.included_refs.memory_refs[1]["content_hash"] == "b" * 64
         assert manifest.token_used > 0
 
     def test_build_with_skill_manifest(

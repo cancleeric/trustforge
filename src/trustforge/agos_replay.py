@@ -86,11 +86,12 @@ def verify_replay(
     memory_matches: list[tuple[str, bool]] = []
     for ref in manifest.included_refs.memory_refs:
         memory_id = ref.get("memory_id")
+        expected_hash = ref.get("content_hash")
         label = memory_id if isinstance(memory_id, str) and memory_id else "<missing>"
         match = False
         detail = "invalid frozen reference"
 
-        if isinstance(memory_id, str):
+        if isinstance(memory_id, str) and isinstance(expected_hash, str):
             try:
                 entry = memory_repo.get(memory_id)
             except Exception as exc:  # Repository failures must not verify.
@@ -105,10 +106,14 @@ def verify_replay(
                     )
                 else:
                     computed_hash = memory_content_hash(entry.content_ref)
-                    match = computed_hash == entry.content_hash
+                    match = (
+                        expected_hash == entry.content_hash
+                        and expected_hash == computed_hash
+                    )
                     if not match:
                         detail = (
-                            f"expected {entry.content_hash}, got {computed_hash}"
+                            f"expected {expected_hash}, got {computed_hash} "
+                            f"(stored {entry.content_hash})"
                         )
 
         memory_matches.append((label, match))

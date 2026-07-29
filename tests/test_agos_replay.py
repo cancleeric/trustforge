@@ -47,7 +47,13 @@ def _fixture():
 
     included = IncludedRefs(
         question_ref="question:1",
-        memory_refs=[{"memory_id": memory.memory_id, "evidence_eligible": True}],
+        memory_refs=[
+            {
+                "memory_id": memory.memory_id,
+                "content_hash": memory.content_hash,
+                "evidence_eligible": True,
+            }
+        ],
         skill_refs=[
             {
                 "skill_id": revision.skill_id,
@@ -124,6 +130,23 @@ def test_memory_content_hash_is_reproducible_and_tamper_is_detected():
     assert tampered.passed is False
     assert tampered.memory_hash_matches == [("memory-1", False)]
     assert any(message.startswith("memory memory-1:") for message in tampered.mismatches)
+
+
+def test_memory_id_cannot_be_rebound_to_new_content_and_hash():
+    manifest, memories, skills = _fixture()
+    original = memories.entries["memory-1"]
+    replacement_content = "replacement with internally consistent hash"
+    memories.entries["memory-1"] = replace(
+        original,
+        content_ref=replacement_content,
+        content_hash=memory_content_hash(replacement_content),
+    )
+
+    result = verify_replay(manifest, memories, skills)
+
+    assert result.passed is False
+    assert result.memory_hash_matches == [("memory-1", False)]
+    assert any(message.startswith("memory memory-1:") for message in result.mismatches)
 
 
 def test_missing_references_fail_closed():
