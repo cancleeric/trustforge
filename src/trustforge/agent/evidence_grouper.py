@@ -17,7 +17,16 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Sequence
 
+from trustforge_core.source_identity import canonical_source
+
 from ..schema import Evidence
+
+# ---------------------------------------------------------------------------
+# 常數
+# ---------------------------------------------------------------------------
+
+# 反方 Evidence 的 related_claim 標籤（與 orchestrator._scored_to_evidence 同步）
+_CONTRARIAN_LABEL = "反方／低信任訊號"
 
 # ---------------------------------------------------------------------------
 # 指標名稱與數值提取正則
@@ -73,7 +82,6 @@ def _normalize_source(source: str) -> str:
     orchestrator._normalize_source_key / scoring._canonical_source 同口徑，
     不只 strip+casefold，還套 alias 收斂（如 coindesk.com → coindesk）。
     """
-    from trustforge_core.source_identity import canonical_source
     return canonical_source(source)
 
 
@@ -81,10 +89,10 @@ def _direction_bucket(ev: 'Evidence') -> str:
     """Evidence 方向分桶：正方（supporting）與反方（contrarian）不可聚合。
 
     Evidence 沒有直接的 direction 欄位，但 related_claim 標籤能區分角色：
-    - "反方／低信任訊號" → "contrarian"
+    - _CONTRARIAN_LABEL → "contrarian"
     - 其他 → "supporting"
     """
-    if ev.related_claim == "反方／低信任訊號":
+    if ev.related_claim == _CONTRARIAN_LABEL:
         return "contrarian"
     return "supporting"
 
