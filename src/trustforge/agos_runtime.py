@@ -300,8 +300,16 @@ class AgosRuntime:
     ) -> Any:
         """Wrap a fetch call with tool invocation audit.
 
-        If AGOS is disabled or audit fails, still executes the fetch.
+        Enforces the tool execution gate: unknown or high-risk tools
+        are blocked with PermissionError. If AGOS is disabled, the fetch
+        executes without checks (backward-compatible).
         """
+        if agos_enabled():
+            self._ensure_init()
+            # Enforcement gate — raises PermissionError if tool can't run
+            if self._tool_registry is not None:
+                self._tool_registry.assert_executable(tool_id)
+
         inv_id = self.record_tool_invocation(run_id, tool_id, args)
 
         try:
@@ -312,6 +320,13 @@ class AgosRuntime:
                     status="success",
                 )
             return result
+        except PermissionError:
+            # Re-raise permission errors (they're from assert_executable)
+            if inv_id:
+                self.complete_tool_invocation(
+                    inv_id, status="rejected", error="permission denied"
+                )
+            raise
         except Exception as e:
             if inv_id:
                 self.complete_tool_invocation(

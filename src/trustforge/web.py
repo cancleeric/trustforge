@@ -8490,6 +8490,17 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/admin/hermes-upgrades":
                     code, body = _handle_api_admin_upgrade_queue()
                     return self._send(code, body, "application/json; charset=utf-8")
+                # ── Agent OS Admin API ──
+                if (u.path + "/").startswith("/api/admin/agos/"):
+                    from .agos_admin_api import dispatch_admin_agos
+                    from .agos_runtime import AgosRuntime
+                    _agos_rt = getattr(self.server, "_agos_runtime", None)
+                    if _agos_rt is None:
+                        _agos_rt = AgosRuntime()
+                        self.server._agos_runtime = _agos_rt
+                    headers_dict = {k: v for k, v in getattr(self, "headers", {}).items()}
+                    code, body = dispatch_admin_agos(u.path, u.query or "", headers_dict, _agos_rt)
+                    return self._send(code, json.dumps(body, ensure_ascii=False).encode(), "application/json; charset=utf-8")
                 # 已認證但打到不存在的 admin 子路徑 → JSON 404
                 return self._send(
                     404,

@@ -358,19 +358,17 @@ class MemoryRetrievalAdapter:
     ) -> MemoryEntry:
         """Get existing entry by hash or create new one.
 
-        Handles duplicate gracefully (returns existing).
-        """
-        # Determine evidence eligibility
-        evidence_eligible = False
-        if (
-            published_at
-            and provider
-            and content_hash
-            and kind != "dialogue"
-            and not (kind == "semantic" and provider.startswith("hermes-"))
-        ):
-            evidence_eligible = True
+        Evidence eligibility is determined by calling the canonical
+        validate_evidence_eligible(). If validation fails, the entry is
+        stored as non-evidentiary (evidence_eligible=False). This ensures
+        the adapter NEVER silently promotes ineligible content.
 
+        On duplicate (same provider + content_hash), returns the already-
+        persisted entry rather than a phantom object.
+        """
+        from .memory_os import validate_evidence_eligible
+
+        # Build candidate entry with evidence_eligible=False initially
         entry = MemoryEntry(
             memory_id=str(uuid4()),
             kind=kind,
@@ -379,16 +377,39 @@ class MemoryRetrievalAdapter:
             content_ref=content,
             published_at=published_at,
             retrieved_at=_now_iso(),
-            evidence_eligible=evidence_eligible,
+            evidence_eligible=False,
             run_id=run_id,
         )
 
+        # Attempt to promote to evidence-eligible via canonical validation
+        try:
+            validate_evidence_eligible(entry)
+            # Validation passed — safe to mark eligible
+            entry.evidence_eligible = True
+        except ValueError:
+            # Validation failed — stays non-evidentiary (fail-closed)
+            entry.evidence_eligible = False
+
+        # Persist (or discover existing)
         try:
             self._repo.save(entry)
         except Exception:
-            # Duplicate (provider, content_hash) — find existing
-            # Since we can't query by hash directly, use find_by_kind
-            # and match. In practice the duplicate means it already exists.
-            pass
+            # Duplicate (provider, content_hash) already exists.
+            # Find the existing record so we return the real persisted ID.
+            existing = self._find_existing(provider, content_hash, kind)
+            if existing is not None:
+                return existing
+            # If we truly can't find it, return the candidate
+            # (evidence_eligible=False is safe default)
 
         return entry
+
+    def _find_existing(
+        self, provider: str, content_hash: str, kind: str
+    ) -> MemoryEntry | None:
+        """Look up an existing entry by provider + content_hash."""
+        candidates = self._repo.find_by_kind(kind, limit=500)
+        for c in candidates:
+            if c.provider == provider and c.content_hash == content_hash:
+                return c
+        return None

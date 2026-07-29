@@ -131,7 +131,14 @@ def invocation_output_hash(output: dict[str, Any] | str) -> str:
 
 
 def upgrade(conn: sqlite3.Connection) -> None:
-    """Create Tool Registry tables (idempotent)."""
+    """Create Tool Registry tables (idempotent).
+
+    Requires valid DB authorization token (enforced when AGOS is enabled
+    and not in test mode). See docs/contracts/TOOL-CAPABILITY-CONTRACT.md.
+    """
+    from .agos_db_auth import verify_db_authorization
+    verify_db_authorization("tool_registry")
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -344,6 +351,29 @@ class ToolRegistryRepository:
         if tool is None:
             return False
         return tool.evidence_class in ("candidate_evidence", "trusted_evidence")
+
+    def assert_executable(self, tool_id: str) -> None:
+        """Runtime gate: raises PermissionError if tool cannot be executed.
+
+        Blocks:
+          - Unknown tools (not registered)
+          - High-risk tools (external_write/deploy_or_release) without
+            external approval signal
+
+        This is the enforcement point — callers MUST call this before
+        executing any tool. requires_approval() is advisory; this is mandatory.
+        """
+        if not self.is_known(tool_id):
+            raise PermissionError(
+                f"tool '{tool_id}' is not registered; unknown tools cannot execute"
+            )
+        tool = self.get_tool(tool_id)
+        if tool and tool.side_effect_class in _HIGH_RISK_SIDE_EFFECTS:
+            raise PermissionError(
+                f"tool '{tool_id}' requires human approval "
+                f"(side_effect_class={tool.side_effect_class}); "
+                f"cannot auto-execute"
+            )
 
     # ─── Invocation Audit ────────────────────────────────────────────────
 

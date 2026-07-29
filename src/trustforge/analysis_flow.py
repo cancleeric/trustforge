@@ -2456,6 +2456,8 @@ class AnalysisFlow:
             params={"engine": "sqlite_char_bigram_v1", "snapshot_id": job["snapshot_id"]},
             summary=f"retrieved {len(package['retrieval_context'])} historical question contexts; non-evidentiary",
         )
+        # ── Agent OS hook: build context manifest at run start ──
+        self._agos_build_context(package)
         return package
 
     def _stage_claim_extraction(self, package: dict) -> dict:
@@ -2762,7 +2764,53 @@ class AnalysisFlow:
                     "for snapshot=%s coin=%s",
                     job["snapshot_id"], job["coin"], exc_info=True,
                 )
+        # ── Agent OS hook: finalize lineage at run end ──
+        self._agos_finalize(package)
         return package
+
+    # ─── Agent OS Integration Hooks ──────────────────────────────────────
+
+    def _agos_build_context(self, package: dict) -> None:
+        """Build Agent OS context manifest at run start (fail-soft)."""
+        try:
+            from .agos_runtime import AgosRuntime, agos_enabled
+            if not agos_enabled():
+                return
+            job = package["job"]
+            runtime = self._get_agos_runtime()
+            manifest = runtime.build_context(
+                job["job_id"],
+                question=job["question"],
+                snapshot_ref=job["snapshot_id"],
+            )
+            if manifest:
+                package["agos_manifest"] = manifest
+                package["log"].record(
+                    "agos.context_manifest",
+                    params={"manifest_id": manifest.manifest_id, "content_hash": manifest.content_hash},
+                    summary=f"Agent OS context manifest created ({manifest.token_used}/{manifest.token_budget} tokens)",
+                )
+        except Exception as e:
+            logging.getLogger(__name__).warning("Agent OS context build failed (fail-soft): %s", e)
+
+    def _agos_finalize(self, package: dict) -> None:
+        """Finalize Agent OS lineage at run end (fail-soft)."""
+        try:
+            from .agos_runtime import agos_enabled
+            if not agos_enabled():
+                return
+            job = package["job"]
+            runtime = self._get_agos_runtime()
+            runtime.finalize_run(job["job_id"])
+        except Exception as e:
+            logging.getLogger(__name__).warning("Agent OS finalize failed (fail-soft): %s", e)
+
+    def _get_agos_runtime(self) -> "AgosRuntime":
+        """Lazy singleton for Agent OS runtime."""
+        if not hasattr(self, "_agos_runtime_instance"):
+            from .agos_runtime import AgosRuntime
+            self._agos_runtime_instance = AgosRuntime()
+        return self._agos_runtime_instance
 
     def status(self) -> dict[str, Any]:
         if self._readonly_store_missing():

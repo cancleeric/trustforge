@@ -190,6 +190,40 @@ class TestToolAudit:
             )
             assert result == "ok"
 
+    def test_tool_audited_fetch_blocks_unknown_tool(self, runtime: AgosRuntime):
+        """When AGOS enabled, unknown tool is blocked with PermissionError."""
+        with _enable_agos():
+            runtime._ensure_init()
+
+            def should_not_run(**kwargs):
+                raise AssertionError("should not execute")
+
+            with pytest.raises(PermissionError, match="not registered"):
+                runtime.tool_audited_fetch(
+                    "unregistered-ghost", should_not_run, {},
+                    run_id="run-blocked",
+                )
+
+    def test_tool_audited_fetch_blocks_high_risk(self, runtime: AgosRuntime):
+        """When AGOS enabled, high-risk tool is blocked with PermissionError."""
+        with _enable_agos():
+            runtime._ensure_init()
+            runtime._tool_registry.register_tool(ToolCapability(
+                tool_id="deploy-blocked",
+                name="Deploy",
+                side_effect_class="deploy_or_release",
+                approval_requirement="always",
+            ))
+
+            def should_not_run(**kwargs):
+                raise AssertionError("should not execute")
+
+            with pytest.raises(PermissionError, match="requires human approval"):
+                runtime.tool_audited_fetch(
+                    "deploy-blocked", should_not_run, {},
+                    run_id="run-deploy-block",
+                )
+
 
 # ─── Lineage Query Tests ────────────────────────────────────────────────────
 

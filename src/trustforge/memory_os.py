@@ -147,7 +147,14 @@ def validate_evidence_eligible(entry: MemoryEntry) -> None:
 
 
 def upgrade(conn: sqlite3.Connection) -> None:
-    """Create Memory OS tables (idempotent)."""
+    """Create Memory OS tables (idempotent).
+
+    Requires valid DB authorization token (enforced when AGOS is enabled
+    and not in test mode). See docs/contracts/MEMORY-OS-CONTRACT.md.
+    """
+    from .agos_db_auth import verify_db_authorization
+    verify_db_authorization("memory_os")
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )

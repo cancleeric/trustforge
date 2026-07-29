@@ -8,6 +8,7 @@ import StatusPage from './pages/StatusPage'
 import CostsPage from './pages/CostsPage'
 import HistoryPage from './pages/HistoryPage'
 import AdminPage from './pages/AdminPage'
+import AdminAgosPage from './pages/AdminAgosPage'
 import SettingsPage from './pages/SettingsPage'
 import HelpCenterPage from './pages/HelpCenterPage'
 import AssetContextLookupPage from './pages/AssetContextLookupPage'
@@ -42,6 +43,9 @@ function RoutedContent() {
             宣傳管理入口；真正的守門是後端 X-Admin-Token 認證+fail-closed，
             不是路徑隱蔽）。 */}
         <Route path="/admin" element={<AdminPage />} />
+        {/* Agent OS Admin（#924）：Admin-only 可治理記憶/技能/工具/脈絡
+            視圖，不進 public nav。*/}
+        <Route path="/admin/agos" element={<AdminAgosPage />} />
         {/* Settings 比照 Admin：刻意不進 Header 主導覽（沿用子頁面 sub-header
             麵包屑辨識當前位置，見 BridgeWorkspaceShell 的 bridge-module-heading）。 */}
         <Route path="/settings" element={<SettingsPage />} />
