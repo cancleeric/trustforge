@@ -106,6 +106,27 @@ pytest -q
 
 > 本機 pre-push gate（`.githooks/pre-push`）前端步驟需 Node >=20.12（Vite 8），請依 `.nvmrc` 執行 `nvm use`。
 
+### Bedrock 驗證（issue #863）
+
+設定好 `AWS_REGION` 與 `BEDROCK_MODEL_ID` 後，可依序執行驗證腳本確認推理服務正常：
+
+```bash
+# Step 1: 環境與 IAM 權限檢查（--dry-run 只查環境變數不呼叫 AWS）
+python3 scripts/verify_bedrock.py
+python3 scripts/verify_bedrock.py --dry-run
+
+# Step 2: Smoke test（驗證敘事模型 + stance 分類模型可用）
+python3 scripts/smoke_test_bedrock_extended.py
+
+# Step 3: 完整溯源驗證（claim_id 溯源 + 行文層次 + 護欄生效）
+python3 scripts/verify_traceability.py --coin BTC
+
+# 只跑降級正確性驗證（不需 Bedrock 存取）
+python3 scripts/verify_traceability.py --offline-only
+```
+
+驗證結果輸出到 `out/bedrock_smoke_test.json` 與 `out/bedrock_traceability.json`。
+
 ## 資料來源
 
 | 資料 | 位置 | 說明 |
