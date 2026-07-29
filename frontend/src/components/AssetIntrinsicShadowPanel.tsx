@@ -65,6 +65,11 @@ interface IntrinsicPromotionReceipt {
   calibration_claim: Record<string, unknown>
 }
 
+interface IntrinsicReleaseCapability {
+  capability: 'asset_intrinsic'
+  promoted_at: string
+}
+
 interface IntrinsicAssessment {
   schema_version: '1.0.0'
   mode: 'shadow' | 'official'
@@ -76,7 +81,7 @@ interface IntrinsicAssessment {
   conflict_detected: boolean
   gate: IntrinsicGate
   dimensions: IntrinsicDimension[]
-  release_capability?: Record<string, unknown>
+  release_capability?: IntrinsicReleaseCapability
   promotion_receipt?: IntrinsicPromotionReceipt
 }
 
@@ -85,13 +90,16 @@ const copy = {
     title: '資產內在事實觀察',
     badge: 'SHADOW／不影響正式信任分',
     description: '這是獨立觀察值，只用來驗證方法；不會改動信任分、方向或市場判斷。',
+    officialBadge: 'OFFICIAL／已納入正式信任分',
+    officialDescription: '這項資產結構調整已記錄發行能力與 promotion receipt；它只調整信任分，不直接改變市場方向。',
+    receipt: 'Promotion receipt',
     gatePassed: '覆蓋閘已通過',
     gateFailed: '覆蓋不足，所有調整維持 0',
     known: '已知維度',
     families: '來源家族',
     delta: 'Shadow delta',
     asOf: 'PIT 截止',
-    unavailable: 'Shadow 資料格式不相容，已停止顯示；正式信任分不受影響。',
+    unavailable: '資產結構資料格式不相容，已停止顯示；正式信任分不受影響。',
     knownStatus: '已驗證',
     unknownStatus: '未知',
     staleStatus: '過時',
@@ -107,13 +115,16 @@ const copy = {
     title: 'Asset intrinsic facts',
     badge: 'SHADOW / does not affect official trust score',
     description: 'This independent observation validates the method only. It cannot change the trust score, direction, or market judgment.',
+    officialBadge: 'OFFICIAL / included in official trust score',
+    officialDescription: 'This asset-structure adjustment records a release capability and promotion receipt. It adjusts trust only and does not directly set market direction.',
+    receipt: 'Promotion receipt',
     gatePassed: 'Coverage gate passed',
     gateFailed: 'Insufficient coverage; every adjustment remains zero',
     known: 'Known dimensions',
     families: 'Source families',
     delta: 'Shadow delta',
     asOf: 'PIT cutoff',
-    unavailable: 'The shadow payload is incompatible and was not displayed. The official trust score is unaffected.',
+    unavailable: 'The Asset Structure payload is incompatible and was not displayed. The official trust score is unaffected.',
     knownStatus: 'Verified',
     unknownStatus: 'Unknown',
     staleStatus: 'Stale',
@@ -369,7 +380,12 @@ export function parseIntrinsicAssessment(value: unknown): IntrinsicAssessment | 
     // The frontend never self-declares official; it only validates a receipt.
     if (!exactKeys(value, [...SHARED_ASSESSMENT_KEYS, 'release_capability', 'promotion_receipt'])) return null
     if (value.schema_version !== '1.0.0' || value.affects_official_score !== true) return null
-    if (!object(value.release_capability)) return null
+    if (
+      !object(value.release_capability)
+      || !exactKeys(value.release_capability, ['capability', 'promoted_at'])
+      || value.release_capability.capability !== 'asset_intrinsic'
+      || !awareTimestamp(value.release_capability.promoted_at)
+    ) return null
     const receipt = value.promotion_receipt
     if (!object(receipt) || !exactKeys(receipt, RECEIPT_KEYS)) return null
     if (!nonBlankBounded(receipt.receipt_id, MAX_REVISION_LENGTH)) return null
@@ -378,7 +394,7 @@ export function parseIntrinsicAssessment(value: unknown): IntrinsicAssessment | 
     if (!Array.isArray(receipt.reasons) || !receipt.reasons.every((r: unknown) => nonBlankBounded(r, MAX_TEXT_LENGTH))) return null
     if (!object(receipt.calibration_claim)) return null
     const body = validateAssessmentBody(value)
-    if (!body) return null
+    if (!body || !body.gate.passed) return null
     return { ...value, mode: 'official', dimensions: body.dimensions, gate: body.gate } as IntrinsicAssessment
   }
   return null
@@ -410,21 +426,25 @@ export default function AssetIntrinsicShadowPanel({ value }: { value: unknown })
   if (!assessment) {
     return <p role="status" className="rounded-lg border border-tf-warn bg-tf-card p-3 text-sm text-tf-text2">{text.unavailable}</p>
   }
-  // Official actual rendering is intentionally disabled (#878): the parser
-  // accepts a valid official payload, but this shadow panel must not present
-  // official score-affecting content. Returning null hides nothing the user
-  // needs today, because official is never injected into the report payload.
-  if (assessment.mode === 'official') return null
+  const official = assessment.mode === 'official'
+  const headingId = `intrinsic-${assessment.mode}-${assessment.asset_id}`
 
   return (
-    <section className="hermes-clip min-w-0 overflow-hidden border border-tf-border bg-tf-card p-4" aria-labelledby={`intrinsic-shadow-${assessment.asset_id}`}>
+    <section className="hermes-clip min-w-0 overflow-hidden border border-tf-border bg-tf-card p-4" aria-labelledby={headingId} data-intrinsic-mode={assessment.mode}>
       <p className="text-[11px] font-bold uppercase tracking-wide text-tf-link">{t('intrinsicEyebrow')}</p>
       <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
-        <h3 id={`intrinsic-shadow-${assessment.asset_id}`} className="text-sm font-semibold text-tf-text">{text.title}</h3>
-        <span className="rounded-full border border-tf-warn px-2 py-1 text-[11px] font-bold text-tf-warn">{text.badge}</span>
+        <h3 id={headingId} className="text-sm font-semibold text-tf-text">{text.title}</h3>
+        <span className={`rounded-full border px-2 py-1 text-[11px] font-bold ${official ? 'border-tf-good text-tf-good' : 'border-tf-warn text-tf-warn'}`}>
+          {official ? text.officialBadge : text.badge}
+        </span>
       </div>
-      <p className="mt-2 text-xs leading-5 text-tf-text2">{text.description}</p>
+      <p className="mt-2 text-xs leading-5 text-tf-text2">{official ? text.officialDescription : text.description}</p>
       <p className="mt-2 text-xs leading-5 text-tf-text2">{t('intrinsicIntro')}</p>
+      {official && assessment.promotion_receipt && (
+        <p className="mt-2 min-w-0 break-all rounded border border-tf-good/60 bg-tf-good/10 p-2 font-mono text-[11px] leading-5 text-tf-good">
+          {text.receipt}: {assessment.promotion_receipt.receipt_id}
+        </p>
+      )}
       {assessment.conflict_detected && (
         <p className="mt-2 rounded border border-tf-warn/60 bg-tf-warn/10 p-2 text-xs leading-5 text-tf-warn">{t('intrinsicConflictNote')}</p>
       )}

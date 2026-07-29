@@ -103,8 +103,9 @@ function conflictedDim(name: string) {
 }
 
 function officialAssessment() {
+  const payload = passedAssessment()
   return {
-    ...assessment(),
+    ...payload,
     mode: 'official',
     affects_official_score: true,
     release_capability: { capability: 'asset_intrinsic', promoted_at: '2026-07-28T00:00:00Z' },
@@ -233,7 +234,7 @@ describe('AssetIntrinsicShadowPanel', () => {
     wrongReason.dimensions[0].reason_code = 'eligible'
     expect(parseIntrinsicAssessment(wrongReason)).toBeNull()
     renderPanel({ mode: 'shadow', affects_official_score: true })
-    expect(screen.getByText(/Shadow 資料格式不相容/)).toBeInTheDocument()
+    expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
     expect(screen.queryByText('已驗證')).not.toBeInTheDocument()
     expect(screen.queryByText('覆蓋閘已通過')).not.toBeInTheDocument()
   })
@@ -309,13 +310,15 @@ describe('AssetIntrinsicShadowPanel', () => {
 
   // -- #878 official parsing skeleton ---------------------------------------
 
-  it('official skeleton: parses a fully-receipted official payload but does not render it', () => {
+  it('renders official only from a fully-receipted, release-capable and eligible payload', () => {
     const parsed = parseIntrinsicAssessment(officialAssessment())
     expect(parsed).not.toBeNull()
     expect(parsed?.mode).toBe('official')
-    // official actual rendering is disabled: the shadow panel renders nothing.
     const { container } = renderPanel(officialAssessment())
-    expect(container).toBeEmptyDOMElement()
+    expect(container.querySelector('[data-intrinsic-mode="official"]')).not.toBeNull()
+    expect(screen.getByText('OFFICIAL／已納入正式信任分')).toBeInTheDocument()
+    expect(screen.getByText(/已記錄發行能力與 promotion receipt/)).toBeInTheDocument()
+    expect(screen.getByText(/Promotion receipt: rc-001/)).toBeInTheDocument()
   })
 
   it('official skeleton fail-closed: missing release_capability or receipt -> downgrade', () => {
@@ -341,9 +344,20 @@ describe('AssetIntrinsicShadowPanel', () => {
     const fakeOfficial = assessment()
     fakeOfficial.mode = 'official'
     expect(parseIntrinsicAssessment(fakeOfficial)).toBeNull()
+    const emptyCapability = officialAssessment()
+    emptyCapability.release_capability = {} as typeof emptyCapability.release_capability
+    expect(parseIntrinsicAssessment(emptyCapability)).toBeNull()
+    const wrongCapability = officialAssessment()
+    wrongCapability.release_capability.capability = 'other' as 'asset_intrinsic'
+    expect(parseIntrinsicAssessment(wrongCapability)).toBeNull()
+    const unpromoted = officialAssessment()
+    unpromoted.gate = assessment().gate
+    unpromoted.total_delta = 0
+    unpromoted.dimensions = assessment().dimensions
+    expect(parseIntrinsicAssessment(unpromoted)).toBeNull()
     // all invalid official payloads downgrade to the unavailable notice
     renderPanel(blocked)
-    expect(screen.getByText(/Shadow 資料格式不相容/)).toBeInTheDocument()
+    expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
   })
 
   // -- AC5 banned-words audit ------------------------------------------------
