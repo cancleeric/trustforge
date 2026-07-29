@@ -32,9 +32,25 @@ def _docs() -> list[Document]:
 def test_empty_ingestion_is_a_successful_tool_invocation(tmp_path, monkeypatch):
     flow = AnalysisFlow(tmp_path / "empty-ingestion.sqlite3")
     completed: list[dict[str, object]] = []
+    associations: list[tuple[str, str]] = []
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: [])
     monkeypatch.setattr(flow, "_agos_assert_tool_allowed", lambda *args: True)
     monkeypatch.setattr(flow, "_agos_begin_tool", lambda *args: "inv-empty")
+    monkeypatch.setattr(
+        flow,
+        "_get_agos_runtime",
+        lambda: type(
+            "Runtime",
+            (),
+            {
+                "associate_tool_invocation_run": (
+                    lambda self, invocation_id, run_id: associations.append(
+                        (invocation_id, run_id)
+                    )
+                )
+            },
+        )(),
+    )
     monkeypatch.setattr(
         flow,
         "_agos_complete_tool",
@@ -43,8 +59,9 @@ def test_empty_ingestion_is_a_successful_tool_invocation(tmp_path, monkeypatch):
         ),
     )
 
-    flow.create_snapshot("BTC")
+    snapshot_id = flow.create_snapshot("BTC")
 
+    assert associations == [("inv-empty", snapshot_id)]
     assert completed == [
         {"invocation_id": "inv-empty", "output": [], "status": "success"}
     ]
@@ -145,6 +162,15 @@ def test_snapshot_persists_receipt_before_external_collection(tmp_path, monkeypa
         flow,
         "_agos_begin_tool",
         lambda *args: events.append("receipt") or "inv-1",
+    )
+    monkeypatch.setattr(
+        flow,
+        "_get_agos_runtime",
+        lambda: type(
+            "Runtime",
+            (),
+            {"associate_tool_invocation_run": lambda self, *_args: None},
+        )(),
     )
     monkeypatch.setattr(
         flow,

@@ -1790,7 +1790,8 @@ class AnalysisFlow:
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
         # ── Agent OS pre-execution gate for ingestion ──
-        _gate_package = {"job": {"job_id": f"snapshot-{coin.lower()}"}}
+        audit_run_id = f"snapshot-pending-{uuid.uuid4()}"
+        _gate_package = {"job": {"job_id": audit_run_id}}
         if not self._agos_assert_tool_allowed(_gate_package, "ingestion-collect"):
             # Tool blocked — cannot collect, return empty snapshot
             raise PermissionError(
@@ -1808,14 +1809,24 @@ class AnalysisFlow:
             )
             raise
         raw = [doc_to_dict(doc) for doc in docs]
+        encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        revision = hashlib.sha256(encoded.encode()).hexdigest()
+        snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
+        if invocation_id is not None:
+            try:
+                self._get_agos_runtime().associate_tool_invocation_run(
+                    invocation_id, snapshot_id
+                )
+            except Exception as exc:
+                self._agos_complete_tool(
+                    invocation_id, status="failed", error=str(exc)
+                )
+                raise
         self._agos_complete_tool(
             invocation_id,
             output=raw,
             status="success",
         )
-        encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        revision = hashlib.sha256(encoded.encode()).hexdigest()
-        snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
         cursor = self._conn().execute(
             "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
             (snapshot_id, coin, time.time(), revision, encoded, len(raw)),

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -188,11 +189,73 @@ class TestMemoriesEndpoint:
         assert body["data"]["page"] == 2
         assert len(body["data"]["items"]) == 2
 
+    def test_memories_pagination_is_bounded(
+        self, runtime, admin_headers, _set_admin_token
+    ):
+        status, body = dispatch_admin_agos(
+            "/api/admin/agos/memories",
+            "run_id=no-run&page=-2&page_size=999999",
+            admin_headers,
+            runtime,
+        )
+        assert status == 200
+        assert body["data"]["page"] == 1
+        assert body["data"]["page_size"] == 100
+
 
 # ─── Skills Endpoint Tests ───────────────────────────────────────────────────
 
 
 class TestSkillsEndpoint:
+    def test_skills_filter_family(
+        self, runtime, admin_headers, _set_admin_token, monkeypatch
+    ):
+        manifest = SimpleNamespace(
+            entries=[
+                SimpleNamespace(
+                    skill_id="skill-a", revision_hash="ra", reason="selected"
+                ),
+                SimpleNamespace(
+                    skill_id="skill-b", revision_hash="rb", reason="selected"
+                ),
+            ],
+            created_at="2026-07-30T00:00:00Z",
+        )
+        families = {
+            "skill-a": SimpleNamespace(
+                family="target",
+                risk_class="read_only",
+                lifecycle="active",
+                side_effect_class="none",
+            ),
+            "skill-b": SimpleNamespace(
+                family="other",
+                risk_class="read_only",
+                lifecycle="active",
+                side_effect_class="none",
+            ),
+        }
+        monkeypatch.setattr(
+            type(runtime.lineage),
+            "get_run_skills",
+            lambda _lineage, _run: manifest,
+        )
+        monkeypatch.setattr(
+            runtime._skill_registry, "get_skill", lambda skill_id: families[skill_id]
+        )
+        monkeypatch.setattr(
+            runtime._skill_registry, "get_dependencies", lambda _skill_id: []
+        )
+
+        status, body = dispatch_admin_agos(
+            "/api/admin/agos/skills",
+            "run_id=run-family&family=target",
+            admin_headers,
+            runtime,
+        )
+        assert status == 200
+        assert [item["skill_id"] for item in body["data"]["items"]] == ["skill-a"]
+
     def test_skills_requires_run_id(self, runtime, admin_headers, _set_admin_token):
         status, body = dispatch_admin_agos(
             "/api/admin/agos/skills", "", admin_headers, runtime

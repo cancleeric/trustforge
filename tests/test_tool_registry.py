@@ -248,6 +248,32 @@ class TestSecurityChecks:
 
 
 class TestInvocationAudit:
+    def test_associate_pending_invocation_with_resolved_run(
+        self, repo: ToolRegistryRepository
+    ):
+        repo.register_tool(_make_cap(tool_id="associate-tool"))
+        inv = _make_invocation(tool_id="associate-tool", run_id="pending-run")
+        repo.record_invocation(inv)
+
+        repo.associate_invocation_run(inv.invocation_id, "resolved-run")
+
+        result = repo.get_invocation(inv.invocation_id)
+        assert result is not None
+        assert result.run_id == "resolved-run"
+        assert repo.get_invocations_by_run("pending-run") == []
+
+    def test_cannot_reassociate_completed_invocation(
+        self, repo: ToolRegistryRepository
+    ):
+        repo.register_tool(_make_cap(tool_id="terminal-associate-tool"))
+        inv = _make_invocation(tool_id="terminal-associate-tool")
+        repo.record_invocation(inv)
+        repo.complete_invocation(
+            inv.invocation_id, output_hash=None, status="success"
+        )
+        with pytest.raises(ValueError, match="pending invocation not found"):
+            repo.associate_invocation_run(inv.invocation_id, "other-run")
+
     def test_record_and_get_invocation(self, repo: ToolRegistryRepository):
         repo.register_tool(_make_cap(tool_id="inv-tool"))
         inv = _make_invocation(tool_id="inv-tool")

@@ -96,6 +96,13 @@ def _int_param(params: dict[str, str], key: str, default: int) -> int:
         return default
 
 
+def _pagination_params(params: dict[str, str]) -> tuple[int, int]:
+    """Return bounded, positive pagination parameters."""
+    page = max(1, _int_param(params, "page", 1))
+    page_size = min(100, max(1, _int_param(params, "page_size", 20)))
+    return page, page_size
+
+
 # ─── Endpoint Handlers ───────────────────────────────────────────────────────
 
 
@@ -109,8 +116,7 @@ def handle_admin_memories(
     run_id = params.get("run_id", "")
     kind = params.get("kind", "")
     show_content = params.get("show_content", "false").lower() == "true"
-    page = _int_param(params, "page", 1)
-    page_size = _int_param(params, "page_size", 20)
+    page, page_size = _pagination_params(params)
 
     if not run_id:
         return admin_error("BAD_REQUEST", "run_id parameter is required", 400)
@@ -162,8 +168,8 @@ def handle_admin_skills(
     Returns: revision, dependencies, risk_class, lifecycle, frozen state.
     """
     run_id = params.get("run_id", "")
-    page = _int_param(params, "page", 1)
-    page_size = _int_param(params, "page_size", 20)
+    family = params.get("family", "")
+    page, page_size = _pagination_params(params)
 
     if not run_id:
         return admin_error("BAD_REQUEST", "run_id parameter is required", 400)
@@ -192,6 +198,8 @@ def handle_admin_skills(
             item["dependencies"] = [
                 {"to": d.to_skill_id, "relation": d.relation} for d in deps
             ]
+        if family and item.get("family") != family:
+            continue
         items.append(item)
 
     return admin_response(_paginate(items, page, page_size))
@@ -206,8 +214,7 @@ def handle_admin_tools(
     """
     run_id = params.get("run_id", "")
     status_filter = params.get("status", "")
-    page = _int_param(params, "page", 1)
-    page_size = _int_param(params, "page_size", 20)
+    page, page_size = _pagination_params(params)
 
     if not run_id:
         return admin_error("BAD_REQUEST", "run_id parameter is required", 400)

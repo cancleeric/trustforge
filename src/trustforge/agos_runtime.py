@@ -355,6 +355,15 @@ class AgosRuntime:
             logger.exception("Tool invocation complete failed")
             raise
 
+    def associate_tool_invocation_run(
+        self, invocation_id: str, run_id: str
+    ) -> None:
+        """Associate a pre-execution receipt with a resolved run identity."""
+        self._ensure_init()
+        if self._tool_registry is None:
+            raise RuntimeError("tool registry unavailable for run association")
+        self._tool_registry.associate_invocation_run(invocation_id, run_id)
+
     def tool_audited_fetch(
         self,
         tool_id: str,

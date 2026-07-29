@@ -467,6 +467,21 @@ class ToolRegistryRepository:
             )
         conn.commit()
 
+    def associate_invocation_run(self, invocation_id: str, run_id: str) -> None:
+        """Bind a pending pre-execution receipt to its resolved run identity."""
+        conn = self._connect()
+        cursor = conn.execute(
+            """UPDATE tool_invocations SET run_id = ?
+               WHERE invocation_id = ? AND status = 'pending'""",
+            (run_id, invocation_id),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError(
+                f"pending invocation not found for run association: {invocation_id!r}"
+            )
+        conn.commit()
+
     def get_invocation(self, invocation_id: str) -> ToolInvocation | None:
         """Retrieve a single invocation record."""
         conn = self._connect()
