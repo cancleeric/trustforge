@@ -137,6 +137,7 @@ class AgosLineageQuery:
                 "output_hash": inv.output_hash,
                 "status": inv.status,
                 "error": inv.error,
+                "evidence_refs": list(inv.evidence_refs),
                 "started_at": inv.started_at,
                 "completed_at": inv.completed_at,
             }

@@ -79,6 +79,48 @@ def test_matrix_is_snapshot_isolated_and_atomically_published(tmp_path, monkeypa
     ]
 
 
+def test_source_ingestion_links_snapshot_receipt_to_consuming_run(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs()
+    )
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    job_id = flow.enqueue_job(snapshot, "risk", "BTC risk")
+    completed = []
+    monkeypatch.setattr(
+        flow, "_agos_begin_tool", lambda package, tool_id, args: "inv-ingestion"
+    )
+    monkeypatch.setattr(
+        flow,
+        "_agos_complete_tool",
+        lambda invocation_id, **kwargs: completed.append(
+            {"invocation_id": invocation_id, **kwargs}
+        ),
+    )
+
+    flow._stage_source_ingestion({"job_id": job_id})
+
+    assert completed == [
+        {
+            "invocation_id": "inv-ingestion",
+            "output": {
+                "snapshot_id": snapshot,
+                "document_count": 2,
+                "revision": flow._conn()
+                .execute(
+                    "SELECT source_revision FROM analysis_snapshots "
+                    "WHERE snapshot_id=?",
+                    (snapshot,),
+                )
+                .fetchone()[0],
+            },
+            "status": "success",
+        }
+    ]
+
+
 def test_lineage_snapshot_event_is_idempotent_and_events_are_immutable(tmp_path, monkeypatch):
     docs = _docs()
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: docs)

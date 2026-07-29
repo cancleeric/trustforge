@@ -298,13 +298,13 @@ class ContextBuilder:
 
         if question_ref is not None:
             question_cost = estimate_tokens(question_ref)
-            if question_cost > token_budget:
+            if token_used + question_cost > token_budget:
                 excluded.append(
                     ExcludedRef("question", "question", EXCLUSION_OVER_BUDGET)
                 )
             else:
                 included.question_ref = question_ref
-                token_used = question_cost
+                token_used += question_cost
 
         # 1. Process memory refs
         for mref in (memory_refs or []):

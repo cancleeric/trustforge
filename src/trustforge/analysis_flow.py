@@ -2471,6 +2471,20 @@ class AnalysisFlow:
         job = self._job(package["job_id"])
         snap = self._conn().execute("SELECT * FROM analysis_snapshots WHERE snapshot_id=?", (job["snapshot_id"],)).fetchone()
         package.update(job=job, docs=[doc_from_dict(x) for x in json.loads(snap["docs_json"])], log=ExecutionLog(run_id=job["job_id"]))
+        ingestion_lineage_id = self._agos_begin_tool(
+            package,
+            "ingestion-collect",
+            {"snapshot_id": job["snapshot_id"], "lineage_only": True},
+        )
+        self._agos_complete_tool(
+            ingestion_lineage_id,
+            output={
+                "snapshot_id": job["snapshot_id"],
+                "document_count": snap["document_count"],
+                "revision": snap["source_revision"],
+            },
+            status="success",
+        )
         package["log"].record("ingestion.collect", params={"coin": job["coin"], "snapshot_id": job["snapshot_id"]}, summary=f"locked {snap['document_count']} documents")
         package["retrieval_context"] = self.question_context(job["coin"], job["mode"], job["question"], limit=5)["matches"]
         package["log"].record(

@@ -197,6 +197,23 @@ class TestExclusion:
             ExcludedRef("question", "question", EXCLUSION_OVER_BUDGET)
         ]
 
+    def test_snapshot_and_question_share_one_cumulative_budget(
+        self, builder: ContextBuilder
+    ):
+        manifest = builder.build(
+            run_id="run-cumulative-budget",
+            snapshot_ref="12345678",
+            question_ref="abcdefgh",
+            token_budget=2,
+        )
+
+        assert manifest.included_refs.snapshot_ref == "12345678"
+        assert manifest.included_refs.question_ref is None
+        assert manifest.token_used == 2
+        assert ExcludedRef(
+            "question", "question", EXCLUSION_OVER_BUDGET
+        ) in manifest.excluded_refs
+
     def test_over_budget_excluded(self, builder: ContextBuilder, memory_repo: MemoryRepository):
         # Pre-save entry in DB
         memory_repo.save(MemoryEntry(

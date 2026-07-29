@@ -196,7 +196,10 @@ class TestToolAudit:
             assert inv_id is not None
 
             runtime.complete_tool_invocation(
-                inv_id, output={"price": 65000}, status="success"
+                inv_id,
+                output={"price": 65000},
+                status="success",
+                evidence_refs=["memory-1"],
             )
 
             # Verify via lineage query
@@ -204,6 +207,7 @@ class TestToolAudit:
             assert len(invocations) == 1
             assert invocations[0]["status"] == "success"
             assert invocations[0]["output_hash"] is not None
+            assert invocations[0]["evidence_refs"] == ["memory-1"]
 
     def test_tool_audited_fetch_success(self, runtime: AgosRuntime):
         with _enable_agos():
