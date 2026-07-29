@@ -1787,10 +1787,18 @@ class AnalysisFlow:
         coin = coin.upper()
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
+        # ── Agent OS pre-execution gate for ingestion ──
+        _gate_package = {"job": {"job_id": f"snapshot-{coin.lower()}"}}
+        if not self._agos_assert_tool_allowed(_gate_package, "ingestion-collect"):
+            # Tool blocked — cannot collect, return empty snapshot
+            raise PermissionError(
+                f"Agent OS blocked ingestion-collect for {coin}: "
+                f"tool not registered or requires approval"
+            )
         docs = collect(query, coin=coin, offline=False)
-        # ── Agent OS: audit ingestion collection ──
+        # ── Agent OS post-execution audit ──
         self._agos_record_tool(
-            {"job": {"job_id": f"snapshot-{coin.lower()}"}},
+            _gate_package,
             "ingestion-collect",
             {"coin": coin, "query": query},
             "success" if docs else "failed",
@@ -2842,7 +2850,20 @@ class AnalysisFlow:
                 tools = runtime._tool_registry.list_tools()
                 tool_ids = [t.tool_id for t in tools]
 
-            # 4. Build context manifest
+            # 4. Policy refs: capture active outer-policy revisions
+            policy_refs = None
+            try:
+                from .skills import resolve_active_skills
+                active_policies = resolve_active_skills()
+                if active_policies:
+                    policy_refs = [
+                        {"policy_id": f"outer-{p['family']}", "revision_hash": p["revision"]}
+                        for p in active_policies
+                    ]
+            except Exception:
+                pass  # fail-soft: policies unavailable doesn't block
+
+            # 5. Build context manifest
             manifest = runtime.build_context(
                 job["job_id"],
                 question=job["question"],
@@ -2850,6 +2871,7 @@ class AnalysisFlow:
                 memory_refs=memory_refs,
                 skill_ids=skill_ids,
                 tool_ids=tool_ids,
+                policy_refs=policy_refs,
             )
             if manifest:
                 package["agos_manifest"] = manifest
@@ -2957,28 +2979,43 @@ class AnalysisFlow:
             return True
 
     def _agos_mark_evidence_used(self, package: dict) -> None:
-        """Mark memory entries that were actually consumed by scoring as used_as_evidence.
+        """Mark memory entries that were actually consumed by Trust scoring.
 
-        Called after evidence assembly — the evidence list contains the final
-        set of items that entered Trust scoring. Cross-references with the
-        context manifest to identify which memory refs were actually used.
+        Correlates the final Evidence list (from build_report/scoring) with
+        memory entries via content_hash. Only memories whose content matches
+        an actual Evidence item are marked as used_as_evidence — not all
+        eligible memories in the manifest.
         """
         try:
             from .agos_runtime import agos_enabled
             if not agos_enabled():
                 return
             job = package.get("job")
+            evidence_list = package.get("evidence")
             manifest = package.get("agos_manifest")
-            if not job or not manifest:
+            if not job or not evidence_list or not manifest:
                 return
             runtime = self._get_agos_runtime()
             if runtime._memory_repo is None:
                 return
-            # Mark all evidence-eligible memories in the manifest as used
+
+            # Build set of content hashes from actual Evidence items
+            evidence_hashes = set()
+            for ev in evidence_list:
+                # Evidence objects have content_reference field
+                ref = getattr(ev, "content_reference", None) or ""
+                if ref:
+                    from .memory_os import memory_content_hash
+                    evidence_hashes.add(memory_content_hash(ref))
+
+            # Only mark memories whose hash matches actual evidence
             for mref in manifest.included_refs.memory_refs:
-                if mref.get("evidence_eligible"):
+                if not mref.get("evidence_eligible"):
+                    continue
+                entry = runtime._memory_repo.get(mref["memory_id"])
+                if entry and entry.content_hash in evidence_hashes:
                     runtime._memory_repo.mark_used_as_evidence(
-                        mref["memory_id"], job["job_id"]
+                        entry.memory_id, job["job_id"]
                     )
         except Exception as e:
             logging.getLogger(__name__).warning(

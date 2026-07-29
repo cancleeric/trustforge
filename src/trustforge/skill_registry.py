@@ -217,6 +217,9 @@ class SkillRegistryRepository:
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
+            if not self._db_path.exists():
+                from .agos_db_auth import verify_db_authorization
+                verify_db_authorization("skill_registry")
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(self._db_path))
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -224,12 +227,7 @@ class SkillRegistryRepository:
         return self._conn
 
     def ensure_schema(self) -> None:
-        """Create tables if they don't exist.
-
-        Authorization is verified BEFORE any file I/O.
-        """
-        from .agos_db_auth import verify_db_authorization
-        verify_db_authorization("skill_registry")
+        """Create tables if they don't exist."""
         _upgrade(self._connect())
 
     # ─── Skill CRUD ──────────────────────────────────────────────────────
