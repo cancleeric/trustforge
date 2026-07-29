@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
+import threading
 
+import boto3
+from moto import mock_aws
 import pytest
 
 from trustforge.preview_admission_compiler import (
@@ -15,10 +19,11 @@ from trustforge.preview_durable_admission_gate import (
     DurableAdmissionGate,
     GateState,
     ProofDisposition,
+    QuarantineProof,
     _control_item,
+    _reserved_item,
     admission_plan_fingerprint,
     append_quarantine_action,
-    pre_provider_abort_intent,
 )
 from trustforge.preview_admission_executor import AdmissionOutcome, PreviewAdmissionExecutor
 from trustforge.preview_terminal_reconcile import TerminalDisposition
@@ -57,6 +62,9 @@ class FakeGateClient:
         self.get_calls: list[dict[str, object]] = []
         self.put_calls: list[dict[str, object]] = []
         self.put_response: object = _response()
+        self.reservation_item: object = None
+        self.transact_get_calls: list[dict[str, object]] = []
+        self.transact_write_calls: list[dict[str, object]] = []
 
     def get_item(self, **kwargs: object) -> object:
         self.get_calls.append(kwargs)
@@ -73,6 +81,24 @@ class FakeGateClient:
             self.item = deepcopy(kwargs["Item"])
         return response
 
+    def transact_get_items(self, **kwargs: object) -> object:
+        self.transact_get_calls.append(kwargs)
+        return {
+            "Responses": [
+                {"Item": deepcopy(self.item)} if self.item is not None else {},
+                (
+                    {"Item": deepcopy(self.reservation_item)}
+                    if self.reservation_item is not None
+                    else {}
+                ),
+            ]
+        }
+
+    def transact_write_items(self, **kwargs: object) -> object:
+        self.transact_write_calls.append(kwargs)
+        self.item = deepcopy(kwargs["TransactItems"][-1]["Put"]["Item"])
+        return _response()
+
 
 class IntegratedClient(FakeGateClient):
     def __init__(self, item: object, request: AdmissionCompileRequest):
@@ -83,6 +109,8 @@ class IntegratedClient(FakeGateClient):
 
     def transact_get_items(self, **kwargs: object) -> object:
         self.read_calls.append(kwargs)
+        if len(kwargs["TransactItems"]) == 2:
+            return super().transact_get_items(**kwargs)
         return {
             "Responses": [
                 {} for _ in range(len(build_counter_specs(self.request)) + 1)
@@ -93,6 +121,8 @@ class IntegratedClient(FakeGateClient):
         self.write_calls.append(kwargs)
         actions = kwargs["TransactItems"]
         self.item = deepcopy(actions[-1]["Put"]["Item"])
+        if len(actions) > 2:
+            self.reservation_item = deepcopy(actions[-2]["Put"]["Item"])
         return _response()
 
 
@@ -218,13 +248,14 @@ def test_present_requires_exact_strong_quarantine_and_absent_never_opens():
     assert gate.ready is False
 
     client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    client.reservation_item = _reserved_item(plan.handle)
     present = gate.prove_present(binding, plan.handle)
     assert present.disposition is ProofDisposition.PRESENT
     assert binding.reservation_id not in repr(present)
-    intent = pre_provider_abort_intent(
+    intent = gate.pre_provider_abort_intent(
         present,
         TrustedUtcInterval(
-            plan.handle.created_upper + 1, plan.handle.created_upper + 1.1
+            plan.handle.lease_until, plan.handle.lease_until + 0.1
         ),
     )
     assert intent.disposition is TerminalDisposition.PRE_PROVIDER_ABORT
@@ -273,11 +304,12 @@ def test_executor_uses_shared_durable_gate_and_opens_before_admitted():
     assert result.outcome is AdmissionOutcome.ADMITTED
     assert gate.ready is True
     assert client.item["state"] == {"S": "open"}
-    assert len(client.read_calls) == len(client.write_calls) == 1
-    # startup, exact QUARANTINED proof; no speculative/retry reads
-    assert len(client.get_calls) == 2
-    # standalone DISPATCHING CAS and final OPEN CAS
-    assert len(client.put_calls) == 2
+    assert len(client.read_calls) == 2
+    assert len(client.write_calls) == 2
+    # Only startup is a GetItem; exact proof is one transactional snapshot.
+    assert len(client.get_calls) == 1
+    # Only DISPATCHING is standalone; final OPEN is transaction-bound.
+    assert len(client.put_calls) == 1
     assert client.write_calls[0]["TransactItems"][-1]["Put"]["Item"]["state"] == {
         "S": "quarantined"
     }
@@ -296,6 +328,33 @@ def test_closed_startup_executor_performs_zero_admission_io():
     assert client.read_calls == []
     assert client.write_calls == []
     assert client.put_calls == []
+
+
+@pytest.mark.parametrize("commit", [True, False])
+def test_admission_finalize_response_loss_requires_exact_open_commit(commit):
+    request = _request()
+
+    class LostFinalizeClient(IntegratedClient):
+        def transact_write_items(self, **kwargs: object) -> object:
+            actions = kwargs["TransactItems"]
+            if len(actions) == 2:
+                self.write_calls.append(kwargs)
+                if commit:
+                    self.item = deepcopy(actions[-1]["Put"]["Item"])
+                raise TimeoutError("lost finalize response")
+            return super().transact_write_items(**kwargs)
+
+    client = LostFinalizeClient(_open(), request)
+    gate = DurableAdmissionGate(client, "preview-store")
+
+    result = PreviewAdmissionExecutor(
+        client, "preview-store", durable_gate=gate
+    ).execute(request)
+
+    assert result.outcome is (
+        AdmissionOutcome.ADMITTED if commit else AdmissionOutcome.UNAVAILABLE
+    )
+    assert gate.ready is commit
 
 
 def test_executor_rejects_missing_mismatched_or_subclass_gate():
@@ -359,3 +418,299 @@ def test_finalize_response_loss_without_commit_remains_closed():
     replacement = DurableAdmissionGate(client, "preview-store")
     assert replacement.ready is False
     assert replacement.pending_binding == binding
+
+
+@pytest.mark.parametrize(
+    ("field_name", "wrong"),
+    [
+        ("owner_digest", "d" * 64),
+        ("identity_digest", "e" * 64),
+        ("reserved_tokens", 1),
+        ("reserved_micro_usd", 1),
+        ("policy_digest", "f" * 64),
+        ("lease_until", 1_700_000_099),
+    ],
+)
+def test_same_uuid_forged_handle_cannot_mint_present(field_name, wrong):
+    client = FakeGateClient(_open())
+    gate = DurableAdmissionGate(client, "preview-store")
+    plan = _plan()
+    binding = gate.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    client.reservation_item = _reserved_item(plan.handle)
+    try:
+        forged = replace(plan.handle, **{field_name: wrong})
+    except ValueError:
+        return
+
+    proof = gate.prove_present(binding, forged)
+
+    assert proof.disposition is ProofDisposition.UNRESOLVED
+    with pytest.raises(ValueError):
+        gate.pre_provider_abort_intent(
+            proof,
+            TrustedUtcInterval(
+                plan.handle.lease_until, plan.handle.lease_until + 0.1
+            ),
+        )
+
+
+def test_caller_cannot_construct_or_cross_gate_reuse_present_proof():
+    with pytest.raises(TypeError):
+        QuarantineProof(  # type: ignore[call-arg]
+            ProofDisposition.PRESENT, _plan().handle, None
+        )
+    plan = _plan()
+    client = FakeGateClient(_open())
+    first = DurableAdmissionGate(client, "preview-store")
+    binding = first.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    client.reservation_item = _reserved_item(plan.handle)
+    proof = first.prove_present(binding, plan.handle)
+    second = DurableAdmissionGate(client, "preview-store")
+
+    with pytest.raises(ValueError):
+        second.pre_provider_abort_intent(
+            proof,
+            TrustedUtcInterval(
+                plan.handle.lease_until, plan.handle.lease_until + 0.1
+            ),
+        )
+
+
+@pytest.mark.parametrize("reservation", [None, {}, {"status": {"S": "terminal"}}])
+def test_control_only_or_malformed_reservation_is_unresolved(reservation):
+    client = FakeGateClient(_open())
+    gate = DurableAdmissionGate(client, "preview-store")
+    plan = _plan()
+    binding = gate.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    client.reservation_item = reservation
+
+    assert (
+        gate.prove_present(binding, plan.handle).disposition
+        is ProofDisposition.UNRESOLVED
+    )
+    assert gate.ready is False
+
+
+@pytest.mark.parametrize("mode", ["backend", "malformed", "partial"])
+def test_transactional_proof_failure_never_mints_present(mode):
+    client = FakeGateClient(_open())
+    gate = DurableAdmissionGate(client, "preview-store")
+    plan = _plan()
+    binding = gate.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    client.reservation_item = _reserved_item(plan.handle)
+
+    def hostile(**kwargs: object) -> object:
+        client.transact_get_calls.append(kwargs)
+        if mode == "backend":
+            raise TimeoutError("raw backend secret")
+        if mode == "partial":
+            return {"Responses": [{"Item": client.item}]}
+        return {"Responses": "not-a-list"}
+
+    client.transact_get_items = hostile  # type: ignore[method-assign]
+
+    proof = gate.prove_present(binding, plan.handle)
+
+    assert proof.disposition is ProofDisposition.UNRESOLVED
+    assert "secret" not in repr(proof)
+    assert gate.ready is False
+
+
+def test_pre_provider_abort_requires_trusted_lease_expiry():
+    client = FakeGateClient(_open())
+    gate = DurableAdmissionGate(client, "preview-store")
+    plan = _plan()
+    binding = gate.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    client.reservation_item = _reserved_item(plan.handle)
+    proof = gate.prove_present(binding, plan.handle)
+
+    with pytest.raises(ValueError):
+        gate.pre_provider_abort_intent(
+            proof,
+            TrustedUtcInterval(
+                plan.handle.lease_until - 0.1, plan.handle.lease_until + 0.1
+            ),
+        )
+
+
+@mock_aws
+def test_execute_finalize_vs_recovery_terminal_barrier_has_one_winner():
+    raw = boto3.client("dynamodb", region_name="us-east-1")
+    raw.create_table(
+        TableName="preview-store",
+        KeySchema=[
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    plan = _plan()
+    seed = FakeGateClient(_open())
+    seed_gate = DurableAdmissionGate(seed, "preview-store")
+    binding = seed_gate.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    quarantined = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    reserved = _reserved_item(plan.handle)
+    raw.put_item(TableName="preview-store", Item=quarantined)
+    raw.put_item(TableName="preview-store", Item=reserved)
+
+    barrier = threading.Barrier(2, timeout=3)
+
+    class BarrierClient:
+        def get_item(self, **kwargs):
+            return raw.get_item(**kwargs)
+
+        def put_item(self, **kwargs):
+            return raw.put_item(**kwargs)
+
+        def transact_get_items(self, **kwargs):
+            return raw.transact_get_items(**kwargs)
+
+        def transact_write_items(self, **kwargs):
+            barrier.wait()
+            return raw.transact_write_items(**kwargs)
+
+    client = BarrierClient()
+    gate = DurableAdmissionGate(client, "preview-store")
+    proof = gate.prove_present(binding, plan.handle)
+    terminal = deepcopy(reserved)
+    terminal["status"] = {"S": "terminal"}
+    terminal["version"] = {"N": "1"}
+    terminal["terminal_disposition"] = {"S": "pre_provider_abort"}
+    terminal_request = {
+        "TransactItems": [
+            {
+                "Put": {
+                    "TableName": "preview-store",
+                    "Item": terminal,
+                    "ConditionExpression": "#status=:reserved AND #version=:zero",
+                    "ExpressionAttributeNames": {
+                        "#status": "status",
+                        "#version": "version",
+                    },
+                    "ExpressionAttributeValues": {
+                        ":reserved": {"S": "reserved"},
+                        ":zero": {"N": "0"},
+                    },
+                }
+            }
+        ]
+    }
+    recovery = gate.append_recovery_open_action(proof, terminal_request)
+    outcomes: list[str] = []
+
+    def finalize() -> None:
+        outcomes.append(
+            "admitted" if gate.confirm_admitted(binding, plan.handle) else "closed"
+        )
+
+    def recover() -> None:
+        try:
+            client.transact_write_items(**recovery)
+            outcomes.append("recovered")
+        except Exception:
+            outcomes.append("lost")
+
+    threads = [threading.Thread(target=finalize), threading.Thread(target=recover)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert ("admitted" in outcomes) != ("recovered" in outcomes)
+    reservation = raw.get_item(
+        TableName="preview-store",
+        Key={"pk": reserved["pk"], "sk": reserved["sk"]},
+        ConsistentRead=True,
+    )["Item"]
+    assert (reservation["status"]["S"] == "reserved") == (
+        "admitted" in outcomes
+    )
+
+
+@mock_aws
+def test_confirmed_stale_open_cas_refreshes_for_later_generation():
+    client = boto3.client("dynamodb", region_name="us-east-1")
+    client.create_table(
+        TableName="preview-store",
+        KeySchema=[
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    client.put_item(
+        TableName="preview-store",
+        Item=_control_item(GateState.OPEN, 0, 0, None),
+    )
+    winner = DurableAdmissionGate(client, "preview-store")
+    stale = DurableAdmissionGate(client, "preview-store")
+    plan = _plan()
+    first = winner.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert first is not None
+    client.transact_write_items(**append_quarantine_action(plan, winner, first))
+    assert winner.confirm_admitted(first, plan.handle) is True
+
+    assert (
+        stale.begin(
+            plan,
+            dispatch_lower=plan.handle.created_lower,
+            dispatch_upper=plan.handle.created_upper,
+        )
+        is None
+    )
+    assert stale.ready is True
+    following = stale.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert following is not None
+    assert following.generation == 2

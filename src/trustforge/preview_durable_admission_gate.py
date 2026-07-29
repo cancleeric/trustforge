@@ -14,7 +14,13 @@ import json
 import threading
 from typing import Protocol
 
-from trustforge.preview_admission_compiler import AdmissionHandle, CompiledAdmissionPlan
+from trustforge.preview_admission_compiler import (
+    RETENTION_SECONDS,
+    AdmissionHandle,
+    CompiledAdmissionPlan,
+)
+from trustforge.preview_admission_store import reservation_key
+from trustforge.preview_trusted_clock import TrustedUtcInterval
 
 
 CONTROL_KEY = {
@@ -44,6 +50,10 @@ class GateClient(Protocol):
 
     def put_item(self, **kwargs: object) -> object: ...
 
+    def transact_get_items(self, **kwargs: object) -> object: ...
+
+    def transact_write_items(self, **kwargs: object) -> object: ...
+
 
 @dataclass(frozen=True, slots=True)
 class DispatchBinding:
@@ -68,20 +78,39 @@ class DispatchBinding:
             raise ValueError("invalid dispatch binding")
 
 
-@dataclass(frozen=True, slots=True)
+_PROOF_FACTORY = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class QuarantineProof:
     disposition: ProofDisposition
     handle: AdmissionHandle | None = field(default=None, repr=False)
     binding: DispatchBinding | None = field(default=None, repr=False)
+    _gate_nonce: object = field(default=None, repr=False)
 
-    def __post_init__(self) -> None:
-        present = self.disposition is ProofDisposition.PRESENT
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        disposition: ProofDisposition,
+        gate_nonce: object,
+        handle: AdmissionHandle | None = None,
+        binding: DispatchBinding | None = None,
+    ) -> "QuarantineProof":
+        present = disposition is ProofDisposition.PRESENT
         if (
-            type(self.disposition) is not ProofDisposition
-            or present != (type(self.handle) is AdmissionHandle)
-            or present != (type(self.binding) is DispatchBinding)
+            token is not _PROOF_FACTORY
+            or type(disposition) is not ProofDisposition
+            or present != (type(handle) is AdmissionHandle)
+            or present != (type(binding) is DispatchBinding)
         ):
             raise ValueError("invalid quarantine proof")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "disposition", disposition)
+        object.__setattr__(instance, "handle", handle)
+        object.__setattr__(instance, "binding", binding)
+        object.__setattr__(instance, "_gate_nonce", gate_nonce)
+        return instance
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +128,8 @@ class DurableAdmissionGate:
         if (
             not callable(getattr(client, "get_item", None))
             or not callable(getattr(client, "put_item", None))
+            or not callable(getattr(client, "transact_get_items", None))
+            or not callable(getattr(client, "transact_write_items", None))
             or type(table_name) is not str
             or not table_name
         ):
@@ -108,6 +139,7 @@ class DurableAdmissionGate:
         self._lock = threading.Lock()
         self._control: _Control | None = None
         self._closed = True
+        self._proof_nonce = object()
         self._load_startup_authority()
 
     @classmethod
@@ -187,8 +219,10 @@ class DurableAdmissionGate:
             )
             try:
                 response = self._client.put_item(**request)
-            except Exception:
+            except Exception as exc:
                 self._closed = True
+                if _confirmed_conditional_loss(exc):
+                    self._refresh_newer_open(current)
                 return None
             if not _confirmed_2xx(response):
                 self._closed = True
@@ -198,6 +232,23 @@ class DurableAdmissionGate:
             )
             self._closed = True
             return binding
+
+    def _refresh_newer_open(self, stale: _Control) -> None:
+        try:
+            response = self._client.get_item(
+                TableName=self._table, Key=CONTROL_KEY, ConsistentRead=True
+            )
+            actual = _decode_control(_response_item(response))
+        except Exception:
+            return
+        if (
+            actual is not None
+            and actual.state is GateState.OPEN
+            and actual.generation >= stale.generation
+            and actual.version > stale.version
+        ):
+            self._control = actual
+            self._closed = False
 
     def quarantine_action(self, binding: DispatchBinding) -> dict[str, object]:
         """Return the action appended to the canonical admission transaction."""
@@ -234,13 +285,12 @@ class DurableAdmissionGate:
         return self._open_exact(binding, GateState.DISPATCHING)
 
     def confirm_admitted(self, binding: DispatchBinding, handle: AdmissionHandle) -> bool:
-        """Prove QUARANTINED then reopen before callers may return ADMITTED."""
+        """Atomically reopen only while the exact reservation remains reserved."""
 
         proof = self.prove_present(binding, handle)
-        return (
-            proof.disposition is ProofDisposition.PRESENT
-            and self._open_exact(binding, GateState.QUARANTINED)
-        )
+        if proof.disposition is not ProofDisposition.PRESENT:
+            return False
+        return self._finalize_admitted(proof)
 
     def prove_present(
         self, binding: DispatchBinding, handle: AdmissionHandle
@@ -253,24 +303,192 @@ class DurableAdmissionGate:
             or handle.reservation_id != binding.reservation_id
         ):
             return QuarantineProof(ProofDisposition.UNRESOLVED)
+        unresolved = QuarantineProof._create(
+            _PROOF_FACTORY, ProofDisposition.UNRESOLVED, self._proof_nonce
+        )
         try:
-            response = self._client.get_item(
-                TableName=self._table, Key=CONTROL_KEY, ConsistentRead=True
+            response = self._client.transact_get_items(
+                **_proof_read_request(self._table, handle)
             )
-            item = _response_item(response)
-            control = _decode_control(item)
+            if type(response) is not dict or "Responses" not in response:
+                return unresolved
+            control, durable_handle = _decode_proof_responses(
+                response["Responses"], handle
+            )
         except Exception:
-            return QuarantineProof(ProofDisposition.UNRESOLVED)
+            return unresolved
         if (
             control is None
             or control.state is not GateState.QUARANTINED
             or control.binding != binding
+            or durable_handle != handle
         ):
-            return QuarantineProof(ProofDisposition.UNRESOLVED)
+            return unresolved
         with self._lock:
             self._control = control
             self._closed = True
-        return QuarantineProof(ProofDisposition.PRESENT, handle, binding)
+        return QuarantineProof._create(
+            _PROOF_FACTORY,
+            ProofDisposition.PRESENT,
+            self._proof_nonce,
+            handle,
+            binding,
+        )
+
+    def pre_provider_abort_intent(
+        self, proof: QuarantineProof, interval: TrustedUtcInterval
+    ) -> object:
+        if not self._owns_present(proof):
+            raise ValueError("exact quarantine proof required")
+        assert proof.handle is not None
+        if interval.earliest < proof.handle.lease_until:
+            raise ValueError("reservation lease remains active")
+        from trustforge.preview_terminal_reconcile import (
+            TerminalDisposition,
+            TerminalIntent,
+        )
+
+        return TerminalIntent(
+            handle=proof.handle,
+            interval=interval,
+            disposition=TerminalDisposition.PRE_PROVIDER_ABORT,
+        )
+
+    def append_recovery_open_action(
+        self, proof: QuarantineProof, terminal_request: dict[str, object]
+    ) -> dict[str, object]:
+        """Bind D1's terminal transition and fence OPEN in one transaction."""
+
+        if not self._owns_present(proof):
+            raise ValueError("exact quarantine proof required")
+        assert proof.binding is not None
+        current = self._control
+        if (
+            current is None
+            or current.state is not GateState.QUARANTINED
+            or current.binding != proof.binding
+        ):
+            raise ValueError("stale quarantine proof")
+        actions = terminal_request.get("TransactItems")
+        if type(actions) is not list or not 1 <= len(actions) < 100:
+            raise ValueError("invalid terminal request")
+        assert proof.handle is not None
+        _validate_recovery_reservation_action(
+            actions[0], self._table, proof.handle
+        )
+        following = _Control(
+            GateState.OPEN, current.generation, current.version + 1, None
+        )
+        return {
+            **terminal_request,
+            "TransactItems": [
+                *actions,
+                {
+                    "Put": _put_request(
+                        self._table,
+                        _control_item(
+                            GateState.OPEN,
+                            following.generation,
+                            following.version,
+                            None,
+                        ),
+                        current,
+                    ),
+                },
+            ],
+        }
+
+    def _owns_present(self, proof: QuarantineProof) -> bool:
+        return (
+            type(proof) is QuarantineProof
+            and proof.disposition is ProofDisposition.PRESENT
+            and proof._gate_nonce is self._proof_nonce
+            and type(proof.handle) is AdmissionHandle
+            and type(proof.binding) is DispatchBinding
+        )
+
+    def _finalize_admitted(self, proof: QuarantineProof) -> bool:
+        if not self._owns_present(proof):
+            return False
+        assert proof.handle is not None and proof.binding is not None
+        current = self._control
+        if (
+            current is None
+            or current.state is not GateState.QUARANTINED
+            or current.binding != proof.binding
+        ):
+            return False
+        following = _Control(
+            GateState.OPEN, current.generation, current.version + 1, None
+        )
+        request = {
+            "TransactItems": [
+                {
+                    "ConditionCheck": {
+                        "TableName": self._table,
+                        "Key": _ddb_map(
+                            reservation_key(
+                                proof.handle.key_version,
+                                proof.handle.expiry_shard,
+                                proof.handle.reservation_id,
+                            )
+                        ),
+                        "ConditionExpression": (
+                            "#status=:reserved AND #version=:zero"
+                        ),
+                        "ExpressionAttributeNames": {
+                            "#status": "status",
+                            "#version": "version",
+                        },
+                        "ExpressionAttributeValues": {
+                            ":reserved": {"S": "reserved"},
+                            ":zero": {"N": "0"},
+                        },
+                    }
+                },
+                {
+                    "Put": _put_request(
+                        self._table,
+                        _control_item(
+                            GateState.OPEN,
+                            following.generation,
+                            following.version,
+                            None,
+                        ),
+                        current,
+                    )
+                },
+            ]
+        }
+        try:
+            response = self._client.transact_write_items(**request)
+        except Exception:
+            self._closed = True
+            return self._prove_exact_open_and_reserved(following, proof.handle)
+        if not _confirmed_2xx(response):
+            self._closed = True
+            return self._prove_exact_open_and_reserved(following, proof.handle)
+        self._control = following
+        self._closed = False
+        return True
+
+    def _prove_exact_open_and_reserved(
+        self, expected: _Control, handle: AdmissionHandle
+    ) -> bool:
+        try:
+            response = self._client.transact_get_items(
+                **_proof_read_request(self._table, handle)
+            )
+            actual, durable = _decode_proof_responses(
+                response["Responses"], handle
+            )
+        except Exception:
+            return False
+        if actual != expected or durable != handle:
+            return False
+        self._control = actual
+        self._closed = False
+        return True
 
     def _load_startup_authority(self) -> None:
         try:
@@ -361,33 +579,6 @@ def append_quarantine_action(
     request["TransactItems"] = [*actions, gate.quarantine_action(binding)]
     request["ClientRequestToken"] = plan.handle.reservation_id
     return request
-
-
-def pre_provider_abort_intent(
-    proof: QuarantineProof, interval: object
-) -> object:
-    """Compile the only terminal disposition authorized by QUARANTINED.
-
-    The local import keeps the gate independent from the terminal executor while
-    still making the proof protocol nominal and fail closed for #992.
-    """
-
-    if (
-        type(proof) is not QuarantineProof
-        or proof.disposition is not ProofDisposition.PRESENT
-        or type(proof.handle) is not AdmissionHandle
-    ):
-        raise ValueError("exact quarantine proof required")
-    from trustforge.preview_terminal_reconcile import (
-        TerminalDisposition,
-        TerminalIntent,
-    )
-
-    return TerminalIntent(
-        handle=proof.handle,
-        interval=interval,  # type: ignore[arg-type]
-        disposition=TerminalDisposition.PRE_PROVIDER_ABORT,
-    )
 
 
 _NAMES = {
@@ -525,6 +716,122 @@ def _response_item(response: object) -> object:
     return response.get("Item")
 
 
+def _proof_read_request(
+    table: str, handle: AdmissionHandle
+) -> dict[str, object]:
+    return {
+        "TransactItems": [
+            {"Get": {"TableName": table, "Key": CONTROL_KEY}},
+            {
+                "Get": {
+                    "TableName": table,
+                    "Key": _ddb_map(
+                        reservation_key(
+                            handle.key_version,
+                            handle.expiry_shard,
+                            handle.reservation_id,
+                        )
+                    ),
+                }
+            },
+        ]
+    }
+
+
+def _decode_proof_responses(
+    responses: object, handle: AdmissionHandle
+) -> tuple[_Control, AdmissionHandle]:
+    if type(responses) is not list or len(responses) != 2:
+        raise ValueError("malformed quarantine proof response")
+    control_response, reservation_response = responses
+    if (
+        type(control_response) is not dict
+        or set(control_response) != {"Item"}
+        or type(reservation_response) is not dict
+        or set(reservation_response) != {"Item"}
+        or type(control_response["Item"]) is not dict
+        or type(reservation_response["Item"]) is not dict
+    ):
+        raise ValueError("missing quarantine proof item")
+    control = _decode_control(control_response["Item"])
+    if control is None:
+        raise ValueError("malformed quarantine control")
+    if reservation_response["Item"] != _reserved_item(handle):
+        raise ValueError("conflicting quarantine reservation")
+    return control, handle
+
+
+def _reserved_item(handle: AdmissionHandle) -> dict[str, object]:
+    native: dict[str, object] = {
+        **reservation_key(
+            handle.key_version, handle.expiry_shard, handle.reservation_id
+        ),
+        "kind": "preview_reservation",
+        "status": "reserved",
+        "version": 0,
+        "ttl": handle.created_upper + RETENTION_SECONDS,
+        "reservation_id": handle.reservation_id,
+        "owner_digest": handle.owner_digest,
+        "identity_digest": handle.identity_digest,
+        "epoch_minute": handle.epoch_minute,
+        "utc_day": handle.utc_day,
+        "reserved_tokens": handle.reserved_tokens,
+        "reserved_micro_usd": handle.reserved_micro_usd,
+        "created_lower": handle.created_lower,
+        "created_upper": handle.created_upper,
+        "lease_until": handle.lease_until,
+        "expiry_shard": handle.expiry_shard,
+        "policy_digest": handle.policy_digest,
+        "policy_version": handle.policy_version,
+        "key_version": handle.key_version,
+        "schema_version": handle.schema_version,
+    }
+    if handle.previous_identity_digest is not None:
+        native["previous_identity_digest"] = handle.previous_identity_digest
+    if handle.circuit_half_open_owner is not None:
+        native["circuit_half_open_owner"] = handle.circuit_half_open_owner
+    return _ddb_map(native)
+
+
+def _validate_recovery_reservation_action(
+    action: object, table: str, handle: AdmissionHandle
+) -> None:
+    if type(action) is not dict or set(action) != {"Put"}:
+        raise ValueError("invalid recovery reservation action")
+    body = action["Put"]
+    if type(body) is not dict:
+        raise ValueError("invalid recovery reservation action")
+    item = _copy_ddb_map(_reserved_item(handle))
+    item["status"] = {"S": "terminal"}
+    item["version"] = {"N": "1"}
+    item["terminal_disposition"] = {"S": "pre_provider_abort"}
+    if (
+        body.get("TableName") != table
+        or body.get("Item") != item
+        or type(body.get("ConditionExpression")) is not str
+        or not body["ConditionExpression"]
+        or type(body.get("ExpressionAttributeNames")) is not dict
+        or type(body.get("ExpressionAttributeValues")) is not dict
+    ):
+        raise ValueError("invalid recovery reservation action")
+
+
+def _copy_ddb_map(value: dict[str, object]) -> dict[str, object]:
+    return {key: dict(item) for key, item in value.items()}  # type: ignore[arg-type]
+
+
+def _ddb_map(value: dict[str, object]) -> dict[str, object]:
+    encoded: dict[str, object] = {}
+    for key, item in value.items():
+        if type(item) is str:
+            encoded[key] = {"S": item}
+        elif type(item) is int:
+            encoded[key] = {"N": str(item)}
+        else:
+            raise ValueError("unsupported durable value")
+    return encoded
+
+
 def _confirmed_2xx(response: object) -> bool:
     if type(response) is not dict:
         return False
@@ -532,6 +839,26 @@ def _confirmed_2xx(response: object) -> bool:
     return (
         type(metadata) is dict
         and metadata.get("HTTPStatusCode") == 200
+        and type(metadata.get("RequestId")) is str
+        and bool(metadata["RequestId"])
+    )
+
+
+def _confirmed_conditional_loss(exc: Exception) -> bool:
+    from botocore.exceptions import ClientError
+
+    if not isinstance(exc, ClientError) or exc.operation_name != "PutItem":
+        return False
+    response = exc.response
+    if type(response) is not dict:
+        return False
+    error = response.get("Error")
+    metadata = response.get("ResponseMetadata")
+    return (
+        type(error) is dict
+        and error.get("Code") == "ConditionalCheckFailedException"
+        and type(metadata) is dict
+        and metadata.get("HTTPStatusCode") == 400
         and type(metadata.get("RequestId")) is str
         and bool(metadata["RequestId"])
     )

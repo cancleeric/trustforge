@@ -96,6 +96,8 @@ class FakeClient:
         self.control_item = _control_item(GateState.OPEN, 0, 0, None)
         self.control_get_calls: list[dict[str, object]] = []
         self.control_put_calls: list[dict[str, object]] = []
+        self.reservation_item = None
+        self.finalize_calls: list[dict[str, object]] = []
 
     def get_item(self, **kwargs):
         self.control_get_calls.append(kwargs)
@@ -107,6 +109,17 @@ class FakeClient:
         return {"ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "gate"}}
 
     def transact_get_items(self, **kwargs):
+        if len(kwargs["TransactItems"]) == 2:
+            return {
+                "Responses": [
+                    {"Item": self.control_item},
+                    (
+                        {"Item": self.reservation_item}
+                        if self.reservation_item is not None
+                        else {}
+                    ),
+                ]
+            }
         self.read_calls.append(kwargs)
         return {
             "Responses": _responses(
@@ -115,6 +128,12 @@ class FakeClient:
         }
 
     def transact_write_items(self, **kwargs):
+        if len(kwargs["TransactItems"]) == 2:
+            self.finalize_calls.append(kwargs)
+            self.control_item = kwargs["TransactItems"][-1]["Put"]["Item"]
+            return {
+                "ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "final"}
+            }
         self.write_calls.append(kwargs)
         if callable(self.write):
             return self.write()
@@ -125,6 +144,7 @@ class FakeClient:
             and self.write.get("ResponseMetadata", {}).get("HTTPStatusCode") == 200
         ):
             self.control_item = kwargs["TransactItems"][-1]["Put"]["Item"]
+            self.reservation_item = kwargs["TransactItems"][-2]["Put"]["Item"]
         return self.write
 
 
@@ -556,7 +576,8 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
 
         def transact_get_items(self, **kwargs):
             response = client.transact_get_items(**kwargs)
-            reads_complete.wait()
+            if len(kwargs["TransactItems"]) > 2:
+                reads_complete.wait()
             return response
 
         def get_item(self, **kwargs):
@@ -566,8 +587,9 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
             return client.put_item(**kwargs)
 
         def transact_write_items(self, **kwargs):
-            with self.lock:
-                self.write_attempts += 1
+            if len(kwargs["TransactItems"]) > 2:
+                with self.lock:
+                    self.write_attempts += 1
             return client.transact_write_items(**kwargs)
 
     shared_client = SameSnapshotClient()
