@@ -53,6 +53,8 @@ class AdmissionAmbiguity:
             or not math.isfinite(self.interval.earliest)
             or not math.isfinite(self.interval.latest)
             or self.interval.earliest > self.interval.latest
+            or self.interval.earliest != self.handle.created_lower
+            or self.interval.latest != self.handle.created_upper
         ):
             raise ValueError("invalid admission ambiguity")
 
@@ -309,18 +311,18 @@ class PreviewAdmissionExecutor:
                     if not self._durable_gate.confirm_rejected(binding):
                         self._latched_closed = True
                     return _UNAVAILABLE
-                self._latch(plan.handle, request.interval, binding)
+                self._latch(plan.handle, binding)
                 self._durable_gate.close()
                 return _UNAVAILABLE
             if not _confirmed_success(response):
-                self._latch(plan.handle, request.interval, binding)
+                self._latch(plan.handle, binding)
                 self._durable_gate.close()
                 return _UNAVAILABLE
             if (
                 binding is None
                 or not self._durable_gate.confirm_admitted(binding, plan.handle)
             ):
-                self._latch(plan.handle, request.interval, binding)
+                self._latch(plan.handle, binding)
                 return _UNAVAILABLE
             return AdmissionExecutionResult(
                 AdmissionOutcome.ADMITTED, handle=plan.handle
@@ -329,14 +331,15 @@ class PreviewAdmissionExecutor:
     def _latch(
         self,
         handle: AdmissionHandle,
-        interval: TrustedUtcInterval,
         binding: DispatchBinding,
     ) -> None:
         # Called only while _write_gate is held.
         self._ambiguity = AdmissionAmbiguity(
             handle=handle,
             write_fingerprint=binding.plan_fingerprint,
-            interval=interval,
+            interval=TrustedUtcInterval(
+                handle.created_lower, handle.created_upper
+            ),
         )
         self._latched_closed = True
 

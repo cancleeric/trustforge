@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 from moto import mock_aws
+import pytest
 
 from trustforge.preview_admission_compiler import (
     AdmissionHandle,
@@ -733,8 +734,9 @@ def test_midpage_deadline_checkpoints_exact_item_and_next_run_resumes():
     assert seen_start == [f"ID#{handles[1].reservation_id}"]
 
 
+@pytest.mark.parametrize("restart", [False, True])
 @mock_aws
-def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate():
+def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate(restart):
     raw = boto3.client("dynamodb", region_name="us-east-1")
     _create(raw)
 
@@ -804,18 +806,23 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate():
     assert first.outcome.value == "unavailable"
     assert executor.latched_closed is True
     assert client.write_calls == 1
-    # A replacement process has no process-local ambiguity object; durable
-    # QUARANTINED is the only authority.
-    replacement_clock = PreviewTrustedClock(
-        dynamodb_client=client, table_name="preview-store"
+    assert executor._ambiguity.interval == TrustedUtcInterval(
+        executor._ambiguity.handle.created_lower,
+        executor._ambiguity.handle.created_upper,
     )
-    replacement_gate = DurableAdmissionGate(
-        client, "preview-store", trusted_clock=replacement_clock
-    )
-    executor = PreviewAdmissionExecutor(
-        client, "preview-store", durable_gate=replacement_gate
-    )
-    assert executor._ambiguity is None
+    if restart:
+        # A replacement process has no process-local ambiguity object; durable
+        # QUARANTINED is the only authority.
+        replacement_clock = PreviewTrustedClock(
+            dynamodb_client=client, table_name="preview-store"
+        )
+        gate = DurableAdmissionGate(
+            client, "preview-store", trusted_clock=replacement_clock
+        )
+        executor = PreviewAdmissionExecutor(
+            client, "preview-store", durable_gate=gate
+        )
+        assert executor._ambiguity is None
 
     # While closed, execute performs zero DynamoDB I/O.
     calls_before = dict(client.calls)
@@ -824,13 +831,18 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate():
 
     terminal = PreviewTerminalReconciler(client, "preview-store")
     resolver = PreviewAmbiguityRecovery(
-        client, "preview-store", terminal, replacement_gate
+        client, "preview-store", terminal, gate
     )
     client.block_terminal_read = True
     results = {}
     resolve_thread = threading.Thread(
         target=lambda: results.setdefault(
-            "resolved", executor.recover_pending(resolver)
+            "resolved",
+            (
+                executor.recover_pending(resolver)
+                if restart
+                else executor.resolve_ambiguity(resolver)
+            ),
         )
     )
     resolve_thread.start()
