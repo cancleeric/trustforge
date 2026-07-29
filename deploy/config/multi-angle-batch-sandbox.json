@@ -1,8 +1,8 @@
 {
-  "enabled": true,
+  "enabled": false,
   "account_id": "795930814369",
   "caller_arn": "arn:aws:iam::795930814369:user/trustforge-896-sandbox-runner",
-  "table_arn": "arn:aws:dynamodb:us-east-1:795930814369:table/trustforge-issue896-sandbox-2",
+  "table_arn": "arn:aws:dynamodb:us-east-1:795930814369:table/trustforge-issue896-sandbox-3",
   "region": "us-east-1",
-  "config_version": "issue-896-v2"
+  "config_version": "issue-896-v3"
 }

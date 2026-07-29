@@ -151,3 +151,44 @@ def test_runbook_lists_underlying_transaction_item_permissions():
         "dynamodb:UpdateItem",
     ):
         assert action in runbook
+
+
+def test_committed_allowlist_is_locked_after_proof():
+    allowlist = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "deploy/config/multi-angle-batch-sandbox.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert allowlist["enabled"] is False
+
+
+def test_committed_runner_policy_is_exact_table_except_sts_identity():
+    policy = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "deploy/iam/issue-896-sandbox-runner-policy.json"
+        ).read_text(encoding="utf-8")
+    )
+    statements = {statement["Sid"]: statement for statement in policy["Statement"]}
+    assert statements["CallerIdentity"] == {
+        "Sid": "CallerIdentity",
+        "Effect": "Allow",
+        "Action": "sts:GetCallerIdentity",
+        "Resource": "*",
+    }
+    table_arn = (
+        "arn:aws:dynamodb:us-east-1:795930814369:"
+        "table/trustforge-issue896-sandbox-3"
+    )
+    assert statements["SandboxTableOnly"]["Resource"] == table_arn
+    assert set(statements["SandboxTableOnly"]["Action"]) == {
+        "dynamodb:TransactWriteItems",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:GetItem",
+        "dynamodb:BatchGetItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:ListTagsOfResource",
+    }
