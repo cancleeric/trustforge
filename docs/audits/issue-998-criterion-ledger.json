@@ -605,5 +605,95 @@
       {"issue":1037,"state_at_review":"OPEN"}
     ],
     "final_harper_disposition": "Programmatic fail-closed and shadow-isolation controls are substantial, but four engineering findings and four release-evidence P0 boundaries remain open. Keep the candidate shadow-only; do not claim 11/11 complete or production/release readiness."
+  },
+  "phase3_codex_review": {
+    "reviewer_route": "/codex-review",
+    "reviewed_commit": "b9004e86b22bbd31469d13bf618503fc028e8670",
+    "reviewed_at": "2026-07-30",
+    "scope": "All 70 A-K criteria and the complete cross-track dependency chain.",
+    "record": "docs/audits/ISSUE-998-PHASE-3-CODEX-REVIEW-2026-07-30.md",
+    "independence_limits": [
+      "Does not replace gray CPO review.",
+      "Does not replace Harper CISO/cost review.",
+      "Does not replace actual-branch Eye review.",
+      "Does not replace Phase 4 external or elapsed-observation reconciliation.",
+      "Does not erase or backdate HISTORICAL_GAP.",
+      "Does not implement feature remediation."
+    ],
+    "summary": {
+      "rows_total": 70,
+      "rows_reviewed": 70,
+      "codex_pass": 49,
+      "remediate": 5,
+      "defer_external": 16,
+      "historical_gap_rows_retained": 70,
+      "p0_release_blockers": 4,
+      "p1_criterion_findings": 5,
+      "additional_p1_findings": 1,
+      "disposition": "REMAIN_SHADOW_RELEASE_BLOCKED",
+      "parent_issue_748": "OPEN",
+      "audit_issue_998": "OPEN"
+    },
+    "result_sets": {
+      "CODEX_PASS": [
+        "A-1","A-2","A-3","A-4","A-5","A-6",
+        "B-1","B-2","B-3","B-4","B-5","B-6",
+        "C-2","C-3","C-4","C-6",
+        "D-1","D-2","D-4",
+        "E-1","E-2","E-3","E-4","E-5","E-6",
+        "F-1","F-2","F-3","F-4","F-5","F-6",
+        "G-2","G-3","G-4","G-6","G-7",
+        "H-2","H-3","H-4","H-5","H-6","H-7","H-8",
+        "I-1","I-2","I-4","I-5","I-6",
+        "J-3"
+      ],
+      "REMEDIATE": ["C-1","C-5","H-1","I-3","J-2"],
+      "DEFER_EXTERNAL": [
+        "D-3","D-5","F-7","G-1","G-5","I-7",
+        "J-1","J-4","J-5","J-6","J-7",
+        "K-1","K-2","K-3","K-4","K-5"
+      ]
+    },
+    "findings": [
+      {
+        "severity": "P1",
+        "criterion_ids": ["C-1","C-5"],
+        "issue": 1035,
+        "finding": "Typed independent control-plane replay and canonical source-withdrawal PIT proof are absent."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["H-1"],
+        "issue": 1036,
+        "finding": "Candidate application is not behind the sole canonical core composition boundary."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["I-3"],
+        "issue": null,
+        "finding": "The frontend accepts a structurally fabricated official receipt/capability while the backend emits no official contract and no signature, policy, release, observation-root or current-BLOCK binding is verified; a separate <=12h remediation issue is required."
+      },
+      {
+        "severity": "P1",
+        "criterion_ids": ["J-2"],
+        "issue": 1037,
+        "finding": "The hermetic drill bypasses the actual release-router request path."
+      }
+    ],
+    "release_blockers": [
+      {"severity":"P0","issue":1031,"criteria":["K-1","K-3","K-4","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1032,"criteria":["K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1033,"criteria":["K-1","K-2","K-5"],"state_at_review":"OPEN"},
+      {"severity":"P0","issue":1034,"criteria":["K-1","K-2","K-3","K-4","K-5"],"state_at_review":"OPEN"}
+    ],
+    "cross_dependency_disposition": {
+      "C_to_F_G_H": "BLOCKED_BY_1035",
+      "D_holder_evidence": "UNKNOWN_EXTERNAL_NO_NUMERIC_VALUE",
+      "G_to_H": "PROMOTION_BLOCK_REMAIN_SHADOW",
+      "G_H_to_I": "OFFICIAL_BLOCKED_BY_G_AND_I3_AUTHENTICITY",
+      "J_to_K": "HERMETIC_NOT_RELEASE_EVIDENCE",
+      "K_release_graph": "BLOCKED_BY_1031_1032_1033_1034"
+    },
+    "final_codex_disposition": "Five criteria require remediation, sixteen require external or elapsed evidence, and four P0 release-evidence boundaries remain open. Keep #748/#998 open and the candidate shadow-only."
   }
 }
