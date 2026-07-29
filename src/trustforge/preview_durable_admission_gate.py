@@ -302,7 +302,9 @@ class DurableAdmissionGate:
             or type(handle) is not AdmissionHandle
             or handle.reservation_id != binding.reservation_id
         ):
-            return QuarantineProof(ProofDisposition.UNRESOLVED)
+            return QuarantineProof._create(
+                _PROOF_FACTORY, ProofDisposition.UNRESOLVED, self._proof_nonce
+            )
         unresolved = QuarantineProof._create(
             _PROOF_FACTORY, ProofDisposition.UNRESOLVED, self._proof_nonce
         )

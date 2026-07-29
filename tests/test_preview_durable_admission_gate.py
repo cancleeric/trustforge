@@ -488,6 +488,15 @@ def test_caller_cannot_construct_or_cross_gate_reuse_present_proof():
         )
 
 
+def test_invalid_proof_inputs_fail_closed_without_raising():
+    plan = _plan()
+    client = IntegratedClient(_open(), _request())
+    gate = DurableAdmissionGate(client, "preview-store")
+
+    assert gate.prove_present(None, plan.handle).disposition is ProofDisposition.UNRESOLVED
+    assert gate.prove_present(object(), object()).disposition is ProofDisposition.UNRESOLVED
+
+
 @pytest.mark.parametrize("reservation", [None, {}, {"status": {"S": "terminal"}}])
 def test_control_only_or_malformed_reservation_is_unresolved(reservation):
     client = FakeGateClient(_open())
