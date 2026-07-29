@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   promote-and-deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, trustforge-release]
     environment: production
     timeout-minutes: 120
     steps:
