@@ -98,15 +98,49 @@ export async function submitMultiAngle(
   question?: string,
   locale?: string,
   signal?: AbortSignal,
+  idempotencyKey?: string,
 ): Promise<MultiAngleSubmitResponse> {
   const body: Record<string, string> = { coin }
   if (question) body.question = question
   if (locale) body.locale = locale
-  const res = await fetch('/api/multi-angle', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  })
-  return decodeEnvelope<MultiAngleSubmitResponse>(res)
+  const bodyJson = JSON.stringify(body)
+  const stableKey = idempotencyKey ?? crypto.randomUUID()
+  let res: Response | undefined
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    res = await fetch('/api/multi-angle', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': stableKey,
+      },
+      body: bodyJson,
+      signal,
+    })
+    if (res.status !== 202) break
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'))
+        return
+      }
+      let timer: ReturnType<typeof setTimeout>
+      const onAbort = () => {
+        clearTimeout(timer)
+        reject(new DOMException('Aborted', 'AbortError'))
+      }
+      timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve()
+      }, Math.min(250 * (2 ** attempt), 2000))
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+  if (!res || res.status === 202) {
+    throw new MultiAngleApiError(
+      'idempotency_request_timeout',
+      '五角度請求仍在建立中，請稍後重試',
+      202,
+    )
+  }
+  const result = await decodeEnvelope<MultiAngleSubmitResponse>(res)
+  return result
 }
