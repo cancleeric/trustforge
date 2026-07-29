@@ -184,10 +184,8 @@ def verify_claim_id_traceability(
 
     # 建立 evidence 中所有可追溯的 claim_id 全集
     traceable_claims: set[str] = set(traceable_claim_ids or ())
-    # cross_source_signal 的 supporting_claim_ids
-    if report.cross_source_signal and report.cross_source_signal.get("supporting_claim_ids"):
-        for cid in report.cross_source_signal["supporting_claim_ids"]:
-            traceable_claims.add(cid)
+    # cross_source_signal.supporting_claim_ids 只是另一個引用位置，不能自行成為
+    # provenance 信任來源；只有呼叫端從本次 pipeline 原始 claims 提供的 ID 才可信。
     # key_basis 的 claim 也可能引用
     for basis in (report.key_basis or []):
         if hasattr(basis, "claim") and basis.claim:
@@ -452,11 +450,17 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
 
     # ── Section B.1: claim_id 溯源驗證 ────────────────────────────────────
     print("▶ claim_id 溯源驗證...")
-    # run_agent_pipeline 會對同一批 docs 呼叫 deterministic extract_claims；
-    # 在驗證端重建同一組 ID，才能驗證真正的 Claim provenance。
-    from trustforge.trust.scoring import extract_claims
-
-    traceable_claim_ids = {claim.id for claim in extract_claims(docs)}
+    # 從 Step 1 執行紀錄取得本次真正抽取出的 IDs。線上 LLM 產生 #llmN，
+    # 不能用 deterministic extractor 的 #N 重新推算，否則合法引用會被誤拒。
+    step1_events = [
+        event for event in log.events
+        if event.get("tool") == "bedrock.complete"
+        and event.get("params", {}).get("step") == 1
+    ]
+    traceable_claim_ids = set(
+        step1_events[-1].get("params", {}).get("claim_ids", [])
+        if step1_events else []
+    )
     trace_result = verify_claim_id_traceability(
         report,
         evidence,

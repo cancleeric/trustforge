@@ -93,6 +93,59 @@ def test_lease_recovers_dead_owner(tmp_path, monkeypatch):
         assert (lock / "owner.json").is_file()
 
 
+def test_gate_localizes_uv_runtime_so_home_can_remain_denied(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    runtime = home / ".local/share/uv/python/cpython-3.12.8-macos-aarch64-none"
+    interpreter = runtime / "bin/python3.12"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"python")
+    sandbox = tmp_path / "gate"
+    venv = sandbox / ".venv"
+    venv_python = venv / "bin/python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(interpreter)
+    (venv / "bin/python3").symlink_to(interpreter)
+    (venv / "pyvenv.cfg").write_text(f"home = {runtime / 'bin'}\n")
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        target = Path(command[-1])
+        (target / "bin").mkdir(parents=True)
+        (target / "bin/python3.12").write_bytes(b"python")
+
+    monkeypatch.setattr(train.subprocess, "run", fake_run)
+    localized = train._localize_gate_interpreter(
+        home=home,
+        venv=venv,
+        sandbox_root=sandbox,
+    )
+
+    assert localized == sandbox / ".python-runtime"
+    assert calls == [["/bin/cp", "-cR", str(runtime), str(localized)]]
+    assert venv_python.resolve() == localized / "bin/python3.12"
+    assert f"home = {localized / 'bin'}" == (
+        venv / "pyvenv.cfg"
+    ).read_text().strip()
+
+
+def test_gate_rejects_non_uv_interpreter_below_home(tmp_path):
+    home = tmp_path / "home"
+    interpreter = home / "bin/python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"python")
+    venv = tmp_path / "gate/.venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").symlink_to(interpreter)
+
+    with pytest.raises(RuntimeError, match="outside the uv runtime root"):
+        train._localize_gate_interpreter(
+            home=home,
+            venv=venv,
+            sandbox_root=tmp_path / "gate",
+        )
+
+
 def test_frontend_identity_requires_release_sha_and_question_picker(monkeypatch):
     expected_sha = "abcdef1234567890abcdef1234567890abcdef12"
     responses = iter(

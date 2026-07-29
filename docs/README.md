@@ -61,6 +61,7 @@ Governance index:
 | [plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md](plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md) | 三軌統一學習架構開發計劃：#501 replacement semantic disposition 已完成；implementation authorization 與 production scope 仍維持未授權／EMPTY |
 | [plans/PLAN-next-competition-readiness-2026-07-24.md](plans/PLAN-next-competition-readiness-2026-07-24.md) | 競賽就緒衝刺排序（剩約 8 天）：首選 #636 telemetry 安全修（harper 必審）；次選 Demo 敘事整合入口（三模組被評審看見）；模組③真實資料源本輪不建議動工；#633/#634/#637 技術債延後 |
 | [plans/PLAN-demo-narrative-entry-2026-07-24.md](plans/PLAN-demo-narrative-entry-2026-07-24.md) | Demo 敘事整合入口執行計劃：首選方案 B（HermesDashboard 首屏新增「新手 3 步」敘事卡片，導向資產脈絡查詢/名詞解釋/同層生態），不做主導覽升級或獨立整合頁；PR1-3 拆解（≤12h）、reviewer、CEO 裁示點 |
+| [plans/PLAN-HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-2026-07-29.md](plans/PLAN-HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-2026-07-29.md) | Hermes 等級 Memory / Skill 能力開發計劃：依 gap report 拆出 Memory OS、Skill Registry / Loader、Context Builder、Tool Capability Registry、Agent OS UI 的 issue / PR 路線、schema 草案與驗收 gate |
 
 ## qa/ — 測試與研究發現
 
@@ -85,6 +86,7 @@ Governance index:
 | [plans/AI-AGENT-CONTEXT-GAP-AUDIT-2026-07-27.md](plans/AI-AGENT-CONTEXT-GAP-AUDIT-2026-07-27.md) | AI Agent 新手脈絡三模組缺口稽核：已落地證據、未達標項、P0/P1/P2 改善順序與驗證紀錄 |
 | [reports/OUTER-FRAMEWORK-UPGRADE-GOVERNANCE-2026-07-27.md](reports/OUTER-FRAMEWORK-UPGRADE-GOVERNANCE-2026-07-27.md) | 外框模組與升級治理：31 個控制面模組、5 個 policy family、sandbox、人審 gate、active pointer 與 rollback 邊界 |
 | [reports/FIRST-PRINCIPLES-REVIEW-2026-07-27.md](reports/FIRST-PRINCIPLES-REVIEW-2026-07-27.md) | 第一性原理審視報告：Evidence-first 閉環、真正護城河、主要風險、不可變原則與 P0/P1/P2 建議路線 |
+| [reports/HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-GAP-2026-07-29.md](reports/HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-GAP-2026-07-29.md) | Hermes 等級 Memory / Skill 能力缺口報告：Memory OS、Skill Registry、Context Builder、Tool Capability Registry 與 Agent OS UI 路線圖 |
 | [reports/REPORT-2026-07-23-hardcoded-paths-portability.md](reports/REPORT-2026-07-23-hardcoded-paths-portability.md) | 本機排程硬編碼路徑事故：#518／PR #536 根治、審查證據、未執行真機驗收與剩餘 freshness 告警風險 |
 
 ## handoff/ — 交接文件

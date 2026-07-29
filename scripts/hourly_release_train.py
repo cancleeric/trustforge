@@ -133,6 +133,11 @@ def gate(worktree: Path) -> None:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
             bundle.extractall(sandbox_root, filter="data")
         subprocess.run(["/bin/cp", "-cR", str(trusted_venv), str(sandbox_root / ".venv")], check=True)
+        _localize_gate_interpreter(
+            home=Path.home(),
+            venv=sandbox_root / ".venv",
+            sandbox_root=sandbox_root,
+        )
         subprocess.run(
             ["/bin/cp", "-cR", str(trusted_modules), str(sandbox_root / "frontend" / "node_modules")],
             check=True,
@@ -168,6 +173,39 @@ def gate(worktree: Path) -> None:
         env["TRUSTFORGE_GATE_SANDBOX"] = "1"
         env["HOME"] = str(sandbox_root)
         subprocess.run(command, cwd=sandbox_root, env=env, check=True)
+
+
+def _localize_gate_interpreter(
+    *, home: Path, venv: Path, sandbox_root: Path
+) -> Path | None:
+    """Clone a uv runtime into the sandbox so HOME can remain fully denied."""
+    home = home.resolve()
+    interpreter = venv / "bin" / "python"
+    resolved = interpreter.resolve(strict=True)
+    uv_python_root = (home / ".local" / "share" / "uv" / "python").resolve()
+    if not resolved.is_relative_to(home):
+        return None
+    if not resolved.is_relative_to(uv_python_root):
+        raise RuntimeError(
+            "trusted gate interpreter resolves inside HOME outside the uv runtime root"
+        )
+    runtime = resolved.parent.parent
+    local_runtime = sandbox_root / ".python-runtime"
+    subprocess.run(
+        ["/bin/cp", "-cR", str(runtime), str(local_runtime)],
+        check=True,
+    )
+    local_python = local_runtime / "bin" / resolved.name
+    for name in ("python", "python3", f"python{sys.version_info.major}.{sys.version_info.minor}"):
+        link = venv / "bin" / name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(local_python)
+    config = venv / "pyvenv.cfg"
+    body = config.read_text(encoding="utf-8")
+    body = re.sub(r"(?m)^home = .*$", f"home = {local_runtime / 'bin'}", body)
+    config.write_text(body, encoding="utf-8")
+    return local_runtime
 
 
 def production_identity() -> tuple[str, str]:
