@@ -61,6 +61,7 @@ Governance index:
 | [plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md](plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md) | 三軌統一學習架構開發計劃：#501 replacement semantic disposition 已完成；implementation authorization 與 production scope 仍維持未授權／EMPTY |
 | [plans/PLAN-next-competition-readiness-2026-07-24.md](plans/PLAN-next-competition-readiness-2026-07-24.md) | 競賽就緒衝刺排序（剩約 8 天）：首選 #636 telemetry 安全修（harper 必審）；次選 Demo 敘事整合入口（三模組被評審看見）；模組③真實資料源本輪不建議動工；#633/#634/#637 技術債延後 |
 | [plans/PLAN-demo-narrative-entry-2026-07-24.md](plans/PLAN-demo-narrative-entry-2026-07-24.md) | Demo 敘事整合入口執行計劃：首選方案 B（HermesDashboard 首屏新增「新手 3 步」敘事卡片，導向資產脈絡查詢/名詞解釋/同層生態），不做主導覽升級或獨立整合頁；PR1-3 拆解（≤12h）、reviewer、CEO 裁示點 |
+| [plans/PLAN-HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-2026-07-29.md](plans/PLAN-HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-2026-07-29.md) | Hermes 等級 Memory / Skill 能力開發計劃：依 gap report 拆出 Memory OS、Skill Registry / Loader、Context Builder、Tool Capability Registry、Agent OS UI 的 issue / PR 路線、schema 草案與驗收 gate |
 
 ## qa/ — 測試與研究發現
 
