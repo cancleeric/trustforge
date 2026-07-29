@@ -26,6 +26,19 @@ MAX_TEXT_LENGTH = 4_096
 MAX_PATH_LENGTH = 255
 MAX_REVISION_LENGTH = 256
 MAX_TIMESTAMP_LENGTH = 64
+STALE_WINDOW_DAYS: int = 365
+
+
+def asset_intrinsic_migration_contract() -> dict[str, Any]:
+    return {
+        "schema_version": ASSET_INTRINSIC_SCHEMA_VERSION,
+        "supported_migrations": [],
+        "description": (
+            "Initial schema; five-dimension asset-intrinsic profiles with "
+            "PIT-safe views."
+        ),
+        "breaking_changes": [],
+    }
 
 
 class IntrinsicDimensionName(StrEnum):
@@ -323,6 +336,16 @@ def load_asset_intrinsic_records(
     records = tuple(parse_asset_intrinsic_record(item) for item in raw)
     root = evidence_root if evidence_root is not None else path.resolve().parent.parent
     verify_asset_intrinsic_evidence(records, root)
+    from trustforge.asset_intrinsic_shadow import (
+        validate_intrinsic_forbidden_inferences,
+    )
+    for record in records:
+        violations = validate_intrinsic_forbidden_inferences(record.profile)
+        if violations:
+            raise ValueError(
+                f"forbidden inference in asset {record.profile.asset_id}: "
+                + "; ".join(violations)
+            )
     return records
 
 

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 from trustforge.asset_intrinsic import (
     INTRINSIC_DIMENSION_NAMES,
+    STALE_WINDOW_DAYS,
     AssetIntrinsicView,
     IntrinsicDimension,
     IntrinsicFactStatus,
@@ -23,6 +24,68 @@ DIMENSION_WEIGHT = 0.032
 TOTAL_DELTA_CAP = 0.08
 REQUIRED_KNOWN_DIMENSIONS = 3
 REQUIRED_SOURCE_FAMILIES = 2
+
+
+_FORBIDDEN_INFERENCE_PATTERNS: list[tuple[str, str]] = [
+    (
+        r"(price|market\s*cap|trading\s*volume|exchange\s*rate|价格).*(infer|推|derive|導出|trust|score|confidence)",
+        "price-inferred",
+    ),
+    (
+        r"\b(lost|dormant|inaccessible|dead)\s.*\b(coin|key|wallet|address|私鑰|錢包|地址)",
+        "lost-key estimates",
+    ),
+    (
+        r"(address_cluster|address|地址).*(represents|equals|maps\s+to|is\s+the\s+same\s+as|is|==|=|＝|代表|等同於|映射).*(entity|実体|entity|實體)",
+        "address=entity",
+    ),
+    (
+        r"(popularity|popular|widely\s+used|most\s+traded|adoption|受欢迎|普及).*(trust|score|infer|推|implies|暗示|信賴|評分|confidence)",
+        "popularity-inferred",
+    ),
+    (
+        r"(wall\s+street|institution.*hold|ETF\s+inflow|fund\s+owns|华尔街|機構|ETF|基金).*(ownership|所有權|保有|trust|score|信賴|評分|safety)",
+        "Wall Street ownership",
+    ),
+    (
+        r"(trust|distrust|this\s+coin|the\s+issuer|issuer|symbol|name|発行者|発行体|信任|不信任).*(is|=|等于|＝|安全|secure|safe|deterministic|確定|good|bad|trustworthy|rug|scam|骗局|風險)",
+        "issuer/symbol hardcode",
+    ),
+]
+
+
+_FORBIDDEN_INFERENCE_NEGATION = re.compile(
+    r"\b(?:no|not|exclud\w*|without|never|deny|denies|denied|reject\w*)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def validate_intrinsic_forbidden_inferences(profile) -> list[str]:
+    """Scan dimension provenance fields for forbidden-inference patterns.
+
+    Covers methodology, coverage and source_coordinates.  Returns a list
+    of violation strings; callers must raise ValueError fail-closed when
+    the list is non-empty.
+    """
+    violations: list[str] = []
+    for dim in profile.dimensions:
+        texts = [
+            ("methodology", dim.provenance.methodology),
+            ("coverage", dim.provenance.coverage),
+            ("source_coordinates", dim.provenance.source_coordinates),
+        ]
+        for field_name, text in texts:
+            for pattern, label in _FORBIDDEN_INFERENCE_PATTERNS:
+                for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                    prefix = text[:match.start()]
+                    prefix_window = prefix[-60:]
+                    if not _FORBIDDEN_INFERENCE_NEGATION.search(prefix_window):
+                        violations.append(
+                            f"forbidden inference: {label} in dimension "
+                            f"{dim.name.value} ({field_name})"
+                        )
+                        break
+    return violations
 
 
 def normalized_source_family(url: str) -> str:
@@ -128,6 +191,12 @@ def _dimension_output(
             coverage=dimension.provenance.coverage,
             provenance=_public_provenance(dimension),
         )
+    if assessment_as_of - dimension.as_of > timedelta(days=STALE_WINDOW_DAYS):
+        return _stale_dimension(
+            dimension.name.value,
+            coverage=dimension.provenance.coverage,
+            provenance=_public_provenance(dimension),
+        )
     if type(dimension.value) not in {int, float}:
         raise ValueError("known intrinsic value must be numeric")
     normalized = float(dimension.value)
@@ -163,6 +232,25 @@ def _unknown_dimension(
         "weight": DIMENSION_WEIGHT,
         "signed_delta": 0.0,
         "reason_code": reason_code,
+        "coverage": coverage,
+        "provenance": provenance,
+    }
+
+
+def _stale_dimension(
+    name: str,
+    *,
+    coverage: str,
+    provenance: dict,
+) -> dict:
+    return {
+        "name": name,
+        "status": "stale",
+        "raw": None,
+        "normalized": None,
+        "weight": DIMENSION_WEIGHT,
+        "signed_delta": 0.0,
+        "reason_code": "stale",
         "coverage": coverage,
         "provenance": provenance,
     }
