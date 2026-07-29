@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime
 import threading
 
 import boto3
@@ -20,6 +21,7 @@ from trustforge.preview_durable_admission_gate import (
     GateState,
     ProofDisposition,
     QuarantineProof,
+    RecoveryAuthority,
     _control_item,
     _reserved_item,
     admission_plan_fingerprint,
@@ -34,7 +36,11 @@ from trustforge.preview_terminal_reconcile import (
     compile_terminal,
     decode_terminal_responses,
 )
-from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
+from trustforge.preview_trusted_clock import (
+    PreviewTrustedClock,
+    TrustedBuckets,
+    TrustedUtcInterval,
+)
 
 
 def _request() -> AdmissionCompileRequest:
@@ -72,6 +78,14 @@ class FakeGateClient:
         self.reservation_item: object = None
         self.transact_get_calls: list[dict[str, object]] = []
         self.transact_write_calls: list[dict[str, object]] = []
+        self.trusted_second = 1_700_000_100
+
+    def describe_table(self, **kwargs: object) -> object:
+        del kwargs
+        date = datetime.fromtimestamp(self.trusted_second, UTC).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        return {"ResponseMetadata": {"HTTPHeaders": {"date": date}}}
 
     def get_item(self, **kwargs: object) -> object:
         self.get_calls.append(kwargs)
@@ -135,6 +149,18 @@ class IntegratedClient(FakeGateClient):
 
 def _open(generation: int = 0, version: int = 0) -> dict[str, object]:
     return _control_item(GateState.OPEN, generation, version, None)
+
+
+def _clock(client, second: float) -> PreviewTrustedClock:
+    client.trusted_second = int(second)
+    clock = PreviewTrustedClock(
+        dynamodb_client=client,
+        table_name="preview-store",
+        monotonic_clock=lambda: 0.0,
+        wall_clock=lambda: float(second),
+    )
+    clock.refresh()
+    return clock
 
 
 @pytest.mark.parametrize(
@@ -259,13 +285,10 @@ def test_present_requires_exact_strong_quarantine_and_absent_never_opens():
     present = gate.prove_present(binding, plan.handle)
     assert present.disposition is ProofDisposition.PRESENT
     assert binding.reservation_id not in repr(present)
-    intent = gate.pre_provider_abort_intent(
-        present,
-        TrustedUtcInterval(
-            plan.handle.lease_until + 0.1, plan.handle.lease_until + 0.2
-        ),
+    authority = gate.pre_provider_abort_authority(
+        present, _clock(client, plan.handle.lease_until + 1)
     )
-    assert intent.disposition is TerminalDisposition.PRE_PROVIDER_ABORT
+    assert authority.intent.disposition is TerminalDisposition.PRE_PROVIDER_ABORT
 
 
 def test_restart_retains_nominal_pending_binding_but_never_opens():
@@ -459,11 +482,8 @@ def test_same_uuid_forged_handle_cannot_mint_present(field_name, wrong):
 
     assert proof.disposition is ProofDisposition.UNRESOLVED
     with pytest.raises(ValueError):
-        gate.pre_provider_abort_intent(
-            proof,
-            TrustedUtcInterval(
-                plan.handle.lease_until, plan.handle.lease_until + 0.1
-            ),
+        gate.pre_provider_abort_authority(
+            proof, _clock(client, plan.handle.lease_until + 1)
         )
 
 
@@ -487,12 +507,47 @@ def test_caller_cannot_construct_or_cross_gate_reuse_present_proof():
     second = DurableAdmissionGate(client, "preview-store")
 
     with pytest.raises(ValueError):
-        second.pre_provider_abort_intent(
+        second.pre_provider_abort_authority(
+            proof, _clock(client, plan.handle.lease_until + 1)
+        )
+
+
+def test_recovery_authority_rejects_forged_or_mismatched_clock():
+    plan = _plan()
+    client = FakeGateClient(_open())
+    gate = DurableAdmissionGate(client, "preview-store")
+    binding = gate.begin(
+        plan,
+        dispatch_lower=plan.handle.created_lower,
+        dispatch_upper=plan.handle.created_upper,
+    )
+    assert binding is not None
+    client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
+    client.reservation_item = _reserved_item(plan.handle)
+    proof = gate.prove_present(binding, plan.handle)
+
+    with pytest.raises(TypeError):
+        RecoveryAuthority(proof, None, None, None)  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        gate.pre_provider_abort_authority(  # type: ignore[arg-type]
             proof,
             TrustedUtcInterval(
-                plan.handle.lease_until, plan.handle.lease_until + 0.1
+                plan.handle.lease_until + 1, plan.handle.lease_until + 2
             ),
         )
+    other = FakeGateClient(_open())
+    with pytest.raises(ValueError):
+        gate.pre_provider_abort_authority(
+            proof, _clock(other, plan.handle.lease_until + 1)
+        )
+    wrong_table = PreviewTrustedClock(
+        dynamodb_client=client,
+        table_name="other-store",
+        monotonic_clock=lambda: 0.0,
+        wall_clock=lambda: float(plan.handle.lease_until + 1),
+    )
+    with pytest.raises(ValueError):
+        gate.pre_provider_abort_authority(proof, wrong_table)
 
 
 def test_invalid_proof_inputs_fail_closed_without_raising():
@@ -572,12 +627,8 @@ def test_pre_provider_abort_requires_trusted_lease_expiry(earliest_delta):
     proof = gate.prove_present(binding, plan.handle)
 
     with pytest.raises(ValueError):
-        gate.pre_provider_abort_intent(
-            proof,
-            TrustedUtcInterval(
-                plan.handle.lease_until + earliest_delta,
-                plan.handle.lease_until + 0.1,
-            ),
+        gate.pre_provider_abort_authority(
+            proof, _clock(client, plan.handle.lease_until + earliest_delta)
         )
 
 
@@ -624,13 +675,18 @@ def test_execute_finalize_vs_recovery_terminal_barrier_has_one_winner():
             barrier.wait()
             return raw.transact_write_items(**kwargs)
 
+        def describe_table(self, **kwargs):
+            return raw.describe_table(**kwargs)
+
     client = BarrierClient()
     gate = DurableAdmissionGate(client, "preview-store")
     proof = gate.prove_present(binding, plan.handle)
-    interval = TrustedUtcInterval(
-        plan.handle.lease_until + 0.1, plan.handle.lease_until + 0.2
+    clock = PreviewTrustedClock(
+        dynamodb_client=client, table_name="preview-store"
     )
-    intent = gate.pre_provider_abort_intent(proof, interval)
+    clock.refresh()
+    authority = gate.pre_provider_abort_authority(proof, clock)
+    intent = authority.intent
     terminal_read = raw.transact_get_items(
         **build_terminal_read_request(intent, "preview-store")
     )
@@ -639,7 +695,7 @@ def test_execute_finalize_vs_recovery_terminal_barrier_has_one_winner():
         "preview-store",
         decode_terminal_responses(intent, terminal_read["Responses"]),
     )
-    recovery = gate.append_recovery_open_action(proof, terminal_plan)
+    recovery = gate.append_recovery_open_action(authority, terminal_plan)
     outcomes: list[str] = []
 
     def finalize() -> None:
@@ -749,20 +805,30 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
         **append_quarantine_action(admission, gate, binding)
     )
     proof = gate.prove_present(binding, admission.handle)
-    interval = TrustedUtcInterval(
-        admission.handle.lease_until + 0.1,
-        admission.handle.lease_until + 0.2,
+    clock = PreviewTrustedClock(
+        dynamodb_client=client, table_name="preview-store"
     )
-    intent = gate.pre_provider_abort_intent(proof, interval)
+    clock.refresh()
+    authority = gate.pre_provider_abort_authority(proof, clock)
+    clock = PreviewTrustedClock(
+        dynamodb_client=client, table_name="preview-store"
+    )
+    clock.refresh()
+    authority = gate.pre_provider_abort_authority(proof, clock)
+    intent = authority.intent
+    interval = intent.interval
     read = client.transact_get_items(
         **build_terminal_read_request(intent, "preview-store")
     )
     snapshot = decode_terminal_responses(intent, read["Responses"])
     sealed = compile_terminal(intent, "preview-store", snapshot)
-    composed = gate.append_recovery_open_action(proof, sealed)
-    assert composed["ClientRequestToken"] == sealed.client_request_token()
+    other_gate = DurableAdmissionGate(client, "preview-store")
+    with pytest.raises(ValueError):
+        other_gate.append_recovery_open_action(authority, sealed)
+    composed = gate.append_recovery_open_action(authority, sealed)
+    assert composed["ClientRequestToken"] != sealed.client_request_token()
     assert (
-        gate.append_recovery_open_action(proof, sealed)["ClientRequestToken"]
+        gate.append_recovery_open_action(authority, sealed)["ClientRequestToken"]
         == composed["ClientRequestToken"]
     )
     assert all(
@@ -771,14 +837,14 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
     )
 
     with pytest.raises(ValueError):
-        gate.append_recovery_open_action(proof, {})  # type: ignore[arg-type]
+        gate.append_recovery_open_action(authority, {})  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         CompiledTerminalPlan({}, False, intent)  # type: ignore[call-arg]
 
     mutated = sealed.transact_write_items_request()
     mutated["TransactItems"][0]["Put"]["ConditionExpression"] = "forged"
     mutated["TransactItems"].append({"Delete": {}})
-    appended = gate.append_recovery_open_action(proof, sealed)
+    appended = gate.append_recovery_open_action(authority, sealed)
     assert appended["TransactItems"][0]["Put"]["ConditionExpression"] != "forged"
     assert all("Delete" not in action for action in appended["TransactItems"])
 
@@ -798,7 +864,7 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
         decode_terminal_responses(wrong_disposition, wrong_read["Responses"]),
     )
     with pytest.raises(ValueError):
-        gate.append_recovery_open_action(proof, wrong_plan)
+        gate.append_recovery_open_action(authority, wrong_plan)
 
     wrong_table = compile_terminal(intent, "other-store", snapshot)
     assert all(
@@ -806,7 +872,7 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
         for action in wrong_table.transact_write_items_request()["TransactItems"]
     )
     with pytest.raises(ValueError):
-        gate.append_recovery_open_action(proof, wrong_table)
+        gate.append_recovery_open_action(authority, wrong_table)
 
     forged_handle = replace(admission.handle, reserved_tokens=1)
     forged_intent = TerminalIntent(
@@ -830,7 +896,7 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
     )
     assert replay.replay is True
     with pytest.raises(ValueError):
-        gate.append_recovery_open_action(proof, replay)
+        gate.append_recovery_open_action(authority, replay)
 
 
 @pytest.mark.parametrize("earliest_delta", [-0.1, 0.0])
@@ -864,6 +930,11 @@ def test_direct_external_unexpired_terminal_plan_rejected_at_composition(
         **append_quarantine_action(admission, gate, binding)
     )
     proof = gate.prove_present(binding, admission.handle)
+    clock = PreviewTrustedClock(
+        dynamodb_client=client, table_name="preview-store"
+    )
+    clock.refresh()
+    authority = gate.pre_provider_abort_authority(proof, clock)
     interval = TrustedUtcInterval(
         admission.handle.lease_until + earliest_delta,
         admission.handle.lease_until + 0.1,
@@ -881,4 +952,4 @@ def test_direct_external_unexpired_terminal_plan_rejected_at_composition(
     )
 
     with pytest.raises(ValueError):
-        gate.append_recovery_open_action(proof, plan)
+        gate.append_recovery_open_action(authority, plan)

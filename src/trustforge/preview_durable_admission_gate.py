@@ -20,7 +20,7 @@ from trustforge.preview_admission_compiler import (
     CompiledAdmissionPlan,
 )
 from trustforge.preview_admission_store import reservation_key
-from trustforge.preview_trusted_clock import TrustedUtcInterval
+from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
 
 
 CONTROL_KEY = {
@@ -79,6 +79,7 @@ class DispatchBinding:
 
 
 _PROOF_FACTORY = object()
+_AUTHORITY_FACTORY = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -109,6 +110,32 @@ class QuarantineProof:
         object.__setattr__(instance, "disposition", disposition)
         object.__setattr__(instance, "handle", handle)
         object.__setattr__(instance, "binding", binding)
+        object.__setattr__(instance, "_gate_nonce", gate_nonce)
+        return instance
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RecoveryAuthority:
+    proof: QuarantineProof = field(repr=False)
+    interval: TrustedUtcInterval = field(repr=False)
+    intent: object = field(repr=False)
+    _gate_nonce: object = field(repr=False)
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        gate_nonce: object,
+        proof: QuarantineProof,
+        interval: TrustedUtcInterval,
+        intent: object,
+    ) -> "RecoveryAuthority":
+        if token is not _AUTHORITY_FACTORY:
+            raise ValueError("invalid recovery authority")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "proof", proof)
+        object.__setattr__(instance, "interval", interval)
+        object.__setattr__(instance, "intent", intent)
         object.__setattr__(instance, "_gate_nonce", gate_nonce)
         return instance
 
@@ -337,11 +364,18 @@ class DurableAdmissionGate:
             binding,
         )
 
-    def pre_provider_abort_intent(
-        self, proof: QuarantineProof, interval: TrustedUtcInterval
-    ) -> object:
+    def pre_provider_abort_authority(
+        self, proof: QuarantineProof, trusted_clock: PreviewTrustedClock
+    ) -> RecoveryAuthority:
         if not self._owns_present(proof):
             raise ValueError("exact quarantine proof required")
+        if (
+            type(trusted_clock) is not PreviewTrustedClock
+            or trusted_clock._client is not self._client
+            or trusted_clock._table_name != self._table
+        ):
+            raise ValueError("matching trusted clock required")
+        interval = trusted_clock.trusted_interval()
         assert proof.handle is not None
         if interval.earliest <= proof.handle.lease_until:
             raise ValueError("reservation lease remains active")
@@ -350,19 +384,27 @@ class DurableAdmissionGate:
             TerminalIntent,
         )
 
-        return TerminalIntent(
+        intent = TerminalIntent(
             handle=proof.handle,
             interval=interval,
             disposition=TerminalDisposition.PRE_PROVIDER_ABORT,
         )
+        return RecoveryAuthority._create(
+            _AUTHORITY_FACTORY, self._proof_nonce, proof, interval, intent
+        )
 
     def append_recovery_open_action(
-        self, proof: QuarantineProof, terminal_plan: object
+        self, authority: RecoveryAuthority, terminal_plan: object
     ) -> dict[str, object]:
         """Bind D1's terminal transition and fence OPEN in one transaction."""
 
-        if not self._owns_present(proof):
-            raise ValueError("exact quarantine proof required")
+        if (
+            type(authority) is not RecoveryAuthority
+            or authority._gate_nonce is not self._proof_nonce
+            or not self._owns_present(authority.proof)
+        ):
+            raise ValueError("exact recovery authority required")
+        proof = authority.proof
         from trustforge.preview_terminal_reconcile import (
             CompiledTerminalPlan,
             TerminalDisposition,
@@ -374,10 +416,12 @@ class DurableAdmissionGate:
             or terminal_plan.replay
             or terminal_plan.table_name != self._table
             or type(terminal_plan.intent) is not TerminalIntent
+            or terminal_plan.intent is not authority.intent
             or terminal_plan.intent.disposition
             is not TerminalDisposition.PRE_PROVIDER_ABORT
             or terminal_plan.intent.handle != proof.handle
             or type(terminal_plan.intent.interval) is not TrustedUtcInterval
+            or terminal_plan.intent.interval != authority.interval
             or terminal_plan.intent.interval.earliest
             <= proof.handle.lease_until
         ):
@@ -407,7 +451,9 @@ class DurableAdmissionGate:
         )
         return {
             **terminal_request,
-            "ClientRequestToken": terminal_plan.client_request_token(),
+            "ClientRequestToken": _recovery_client_token(
+                proof.handle.reservation_id
+            ),
             "TransactItems": [
                 *actions,
                 {
@@ -578,6 +624,11 @@ class DurableAdmissionGate:
         self._control = actual
         self._closed = False
         return True
+
+
+def _recovery_client_token(reservation_id: str) -> str:
+    material = b"preview-quarantine-recovery-v1\0" + reservation_id.encode("ascii")
+    return hashlib.sha256(material).hexdigest()[:36]
 
 
 def admission_plan_fingerprint(plan: CompiledAdmissionPlan) -> str:
