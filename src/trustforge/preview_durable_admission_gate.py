@@ -151,7 +151,13 @@ class _Control:
 class DurableAdmissionGate:
     """Serializes dispatches across processes using exact DynamoDB CAS writes."""
 
-    def __init__(self, client: GateClient, table_name: str) -> None:
+    def __init__(
+        self,
+        client: GateClient,
+        table_name: str,
+        *,
+        trusted_clock: PreviewTrustedClock,
+    ) -> None:
         if (
             not callable(getattr(client, "get_item", None))
             or not callable(getattr(client, "put_item", None))
@@ -159,10 +165,14 @@ class DurableAdmissionGate:
             or not callable(getattr(client, "transact_write_items", None))
             or type(table_name) is not str
             or not table_name
+            or type(trusted_clock) is not PreviewTrustedClock
+            or trusted_clock._client is not client
+            or trusted_clock._table_name != table_name
         ):
             raise ValueError("invalid durable admission gate")
         self._client = client
         self._table = table_name
+        self._trusted_clock = trusted_clock
         self._lock = threading.Lock()
         self._control: _Control | None = None
         self._closed = True
@@ -181,7 +191,11 @@ class DurableAdmissionGate:
             region_name=region_name,
             config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
         )
-        return cls(client, table_name)
+        clock = PreviewTrustedClock(
+            dynamodb_client=client,
+            table_name=table_name,
+        )
+        return cls(client, table_name, trusted_clock=clock)
 
     @property
     def ready(self) -> bool:
@@ -365,17 +379,15 @@ class DurableAdmissionGate:
         )
 
     def pre_provider_abort_authority(
-        self, proof: QuarantineProof, trusted_clock: PreviewTrustedClock
+        self, proof: QuarantineProof
     ) -> RecoveryAuthority:
         if not self._owns_present(proof):
             raise ValueError("exact quarantine proof required")
-        if (
-            type(trusted_clock) is not PreviewTrustedClock
-            or trusted_clock._client is not self._client
-            or trusted_clock._table_name != self._table
-        ):
-            raise ValueError("matching trusted clock required")
-        interval = trusted_clock.trusted_interval()
+        interval = (
+            self._trusted_clock.refresh()
+            if self._trusted_clock.needs_refresh()
+            else self._trusted_clock.trusted_interval()
+        )
         assert proof.handle is not None
         if interval.earliest <= proof.handle.lease_until:
             raise ValueError("reservation lease remains active")

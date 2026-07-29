@@ -30,6 +30,7 @@ from trustforge.preview_durable_admission_gate import (
     _control_item,
 )
 from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
+from trustforge.preview_trusted_clock import PreviewTrustedClock
 
 
 def _request(reservation_id: str = "12345678-1234-4234-9234-123456789abc"):
@@ -152,7 +153,14 @@ def _executor(client, table_name: str = "preview-store"):
     return PreviewAdmissionExecutor(
         client,
         table_name,
-        durable_gate=DurableAdmissionGate(client, table_name),
+        durable_gate=DurableAdmissionGate(
+            client,
+            table_name,
+            trusted_clock=PreviewTrustedClock(
+                dynamodb_client=client,
+                table_name=table_name,
+            ),
+        ),
     )
 
 
@@ -458,7 +466,9 @@ def test_factory_configures_exactly_one_sdk_attempt(monkeypatch):
 
     monkeypatch.setattr(boto3, "client", client)
 
-    PreviewAdmissionExecutor.from_boto3("preview-store", region_name="us-east-1")
+    executor = PreviewAdmissionExecutor.from_boto3(
+        "preview-store", region_name="us-east-1"
+    )
 
     assert captured["service_name"] == "dynamodb"
     assert captured["region_name"] == "us-east-1"
@@ -466,6 +476,9 @@ def test_factory_configures_exactly_one_sdk_attempt(monkeypatch):
         "total_max_attempts": 1,
         "mode": "standard",
     }
+    assert executor._durable_gate._client is fake
+    assert executor._durable_gate._trusted_clock._client is fake
+    assert executor._durable_gate._trusted_clock._table_name == "preview-store"
 
 
 def test_source_has_no_provider_or_retry_boundary():

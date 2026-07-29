@@ -21,6 +21,7 @@ from trustforge.preview_durable_admission_gate import (
     DurableAdmissionGate,
     append_quarantine_action,
 )
+from trustforge.preview_trusted_clock import PreviewTrustedClock
 
 
 class DynamoAdmissionClient(Protocol):
@@ -126,7 +127,14 @@ class PreviewAdmissionExecutor:
         return cls(
             client,
             table_name,
-            durable_gate=DurableAdmissionGate(client, table_name),
+            durable_gate=DurableAdmissionGate(
+                client,
+                table_name,
+                trusted_clock=PreviewTrustedClock(
+                    dynamodb_client=client,
+                    table_name=table_name,
+                ),
+            ),
         )
 
     def execute(self, request: AdmissionCompileRequest) -> AdmissionExecutionResult:

@@ -163,6 +163,19 @@ def _clock(client, second: float) -> PreviewTrustedClock:
     return clock
 
 
+def _gate(client, table_name: str = "preview-store") -> DurableAdmissionGate:
+    if hasattr(client, "trusted_second"):
+        clock = _clock(client, float(client.trusted_second))
+    else:
+        clock = PreviewTrustedClock(
+            dynamodb_client=client, table_name=table_name
+        )
+        clock.refresh()
+    return DurableAdmissionGate(
+        client, table_name, trusted_clock=clock
+    )
+
+
 @pytest.mark.parametrize(
     "item",
     [
@@ -175,7 +188,7 @@ def _clock(client, second: float) -> PreviewTrustedClock:
 )
 def test_startup_requires_strict_open_authority(item):
     client = FakeGateClient(item)
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
 
     assert gate.ready is False
     assert client.get_calls == [
@@ -190,7 +203,7 @@ def test_startup_requires_strict_open_authority(item):
 
 def test_begin_is_standalone_cas_and_transaction_atomically_quarantines():
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
 
     binding = gate.begin(
@@ -215,7 +228,7 @@ def test_begin_is_standalone_cas_and_transaction_atomically_quarantines():
 
 def test_confirmed_rejection_reopens_exact_dispatch():
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
     binding = gate.begin(
         plan,
@@ -240,7 +253,7 @@ def test_confirmed_rejection_reopens_exact_dispatch():
 
 def test_ambiguous_prewrite_stays_closed_and_does_not_repeat_io():
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     client.put_response = TimeoutError("sensitive")
     plan = _plan()
 
@@ -266,7 +279,7 @@ def test_ambiguous_prewrite_stays_closed_and_does_not_repeat_io():
 
 def test_present_requires_exact_strong_quarantine_and_absent_never_opens():
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
     binding = gate.begin(
         plan,
@@ -285,15 +298,13 @@ def test_present_requires_exact_strong_quarantine_and_absent_never_opens():
     present = gate.prove_present(binding, plan.handle)
     assert present.disposition is ProofDisposition.PRESENT
     assert binding.reservation_id not in repr(present)
-    authority = gate.pre_provider_abort_authority(
-        present, _clock(client, plan.handle.lease_until + 1)
-    )
+    authority = gate.pre_provider_abort_authority(present)
     assert authority.intent.disposition is TerminalDisposition.PRE_PROVIDER_ABORT
 
 
 def test_restart_retains_nominal_pending_binding_but_never_opens():
     client = FakeGateClient(_open())
-    original = DurableAdmissionGate(client, "preview-store")
+    original = _gate(client)
     plan = _plan()
     binding = original.begin(
         plan,
@@ -303,7 +314,7 @@ def test_restart_retains_nominal_pending_binding_but_never_opens():
     assert binding is not None
     client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
 
-    replacement = DurableAdmissionGate(client, "preview-store")
+    replacement = _gate(client)
 
     assert replacement.ready is False
     assert replacement.pending_binding == binding
@@ -324,7 +335,7 @@ def test_fingerprint_is_stable_domain_separated_sha256_without_secret():
 def test_executor_uses_shared_durable_gate_and_opens_before_admitted():
     request = _request()
     client = IntegratedClient(_open(), request)
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     executor = PreviewAdmissionExecutor(
         client, "preview-store", durable_gate=gate
     )
@@ -348,7 +359,7 @@ def test_executor_uses_shared_durable_gate_and_opens_before_admitted():
 def test_closed_startup_executor_performs_zero_admission_io():
     request = _request()
     client = IntegratedClient(None, request)
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
 
     result = PreviewAdmissionExecutor(
         client, "preview-store", durable_gate=gate
@@ -375,7 +386,7 @@ def test_admission_finalize_response_loss_requires_exact_open_commit(commit):
             return super().transact_write_items(**kwargs)
 
     client = LostFinalizeClient(_open(), request)
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
 
     result = PreviewAdmissionExecutor(
         client, "preview-store", durable_gate=gate
@@ -391,7 +402,7 @@ def test_executor_rejects_missing_mismatched_or_subclass_gate():
     request = _request()
     first = IntegratedClient(_open(), request)
     second = IntegratedClient(_open(), request)
-    gate = DurableAdmissionGate(first, "preview-store")
+    gate = _gate(first)
 
     with pytest.raises(ValueError):
         PreviewAdmissionExecutor(first, "preview-store", durable_gate=None)  # type: ignore[arg-type]
@@ -403,14 +414,16 @@ def test_executor_rejects_missing_mismatched_or_subclass_gate():
     class DerivedGate(DurableAdmissionGate):
         pass
 
-    derived = DerivedGate(first, "preview-store")
+    derived = DerivedGate(
+        first, "preview-store", trusted_clock=gate._trusted_clock
+    )
     with pytest.raises(ValueError):
         PreviewAdmissionExecutor(first, "preview-store", durable_gate=derived)
 
 
 def test_finalize_response_loss_accepts_only_exact_strong_open_proof():
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
     binding = gate.begin(
         plan,
@@ -433,7 +446,7 @@ def test_finalize_response_loss_accepts_only_exact_strong_open_proof():
 
 def test_finalize_response_loss_without_commit_remains_closed():
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
     binding = gate.begin(
         plan,
@@ -445,7 +458,7 @@ def test_finalize_response_loss_without_commit_remains_closed():
 
     assert gate.confirm_rejected(binding) is False
     assert gate.ready is False
-    replacement = DurableAdmissionGate(client, "preview-store")
+    replacement = _gate(client)
     assert replacement.ready is False
     assert replacement.pending_binding == binding
 
@@ -463,7 +476,7 @@ def test_finalize_response_loss_without_commit_remains_closed():
 )
 def test_same_uuid_forged_handle_cannot_mint_present(field_name, wrong):
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
     binding = gate.begin(
         plan,
@@ -482,9 +495,7 @@ def test_same_uuid_forged_handle_cannot_mint_present(field_name, wrong):
 
     assert proof.disposition is ProofDisposition.UNRESOLVED
     with pytest.raises(ValueError):
-        gate.pre_provider_abort_authority(
-            proof, _clock(client, plan.handle.lease_until + 1)
-        )
+        gate.pre_provider_abort_authority(proof)
 
 
 def test_caller_cannot_construct_or_cross_gate_reuse_present_proof():
@@ -494,7 +505,7 @@ def test_caller_cannot_construct_or_cross_gate_reuse_present_proof():
         )
     plan = _plan()
     client = FakeGateClient(_open())
-    first = DurableAdmissionGate(client, "preview-store")
+    first = _gate(client)
     binding = first.begin(
         plan,
         dispatch_lower=plan.handle.created_lower,
@@ -504,18 +515,16 @@ def test_caller_cannot_construct_or_cross_gate_reuse_present_proof():
     client.item = _control_item(GateState.QUARANTINED, 1, 2, binding)
     client.reservation_item = _reserved_item(plan.handle)
     proof = first.prove_present(binding, plan.handle)
-    second = DurableAdmissionGate(client, "preview-store")
+    second = _gate(client)
 
     with pytest.raises(ValueError):
-        second.pre_provider_abort_authority(
-            proof, _clock(client, plan.handle.lease_until + 1)
-        )
+        second.pre_provider_abort_authority(proof)
 
 
 def test_recovery_authority_rejects_forged_or_mismatched_clock():
     plan = _plan()
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     binding = gate.begin(
         plan,
         dispatch_lower=plan.handle.created_lower,
@@ -528,7 +537,7 @@ def test_recovery_authority_rejects_forged_or_mismatched_clock():
 
     with pytest.raises(TypeError):
         RecoveryAuthority(proof, None, None, None)  # type: ignore[call-arg]
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         gate.pre_provider_abort_authority(  # type: ignore[arg-type]
             proof,
             TrustedUtcInterval(
@@ -536,7 +545,7 @@ def test_recovery_authority_rejects_forged_or_mismatched_clock():
             ),
         )
     other = FakeGateClient(_open())
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         gate.pre_provider_abort_authority(
             proof, _clock(other, plan.handle.lease_until + 1)
         )
@@ -546,14 +555,41 @@ def test_recovery_authority_rejects_forged_or_mismatched_clock():
         monotonic_clock=lambda: 0.0,
         wall_clock=lambda: float(plan.handle.lease_until + 1),
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         gate.pre_provider_abort_authority(proof, wrong_table)
+
+
+def test_gate_constructor_binds_exact_matching_trusted_clock():
+    client = FakeGateClient(_open())
+    clock = _clock(client, client.trusted_second)
+    gate = DurableAdmissionGate(
+        client, "preview-store", trusted_clock=clock
+    )
+
+    assert gate._trusted_clock is clock
+    with pytest.raises(TypeError):
+        DurableAdmissionGate(client, "preview-store")  # type: ignore[call-arg]
+    other = FakeGateClient(_open())
+    with pytest.raises(ValueError):
+        DurableAdmissionGate(
+            client,
+            "preview-store",
+            trusted_clock=_clock(other, other.trusted_second),
+        )
+    wrong_table = PreviewTrustedClock(
+        dynamodb_client=client,
+        table_name="other-store",
+    )
+    with pytest.raises(ValueError):
+        DurableAdmissionGate(
+            client, "preview-store", trusted_clock=wrong_table
+        )
 
 
 def test_invalid_proof_inputs_fail_closed_without_raising():
     plan = _plan()
     client = IntegratedClient(_open(), _request())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
 
     assert gate.prove_present(None, plan.handle).disposition is ProofDisposition.UNRESOLVED
     assert gate.prove_present(object(), object()).disposition is ProofDisposition.UNRESOLVED
@@ -562,7 +598,7 @@ def test_invalid_proof_inputs_fail_closed_without_raising():
 @pytest.mark.parametrize("reservation", [None, {}, {"status": {"S": "terminal"}}])
 def test_control_only_or_malformed_reservation_is_unresolved(reservation):
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
     binding = gate.begin(
         plan,
@@ -583,7 +619,7 @@ def test_control_only_or_malformed_reservation_is_unresolved(reservation):
 @pytest.mark.parametrize("mode", ["backend", "malformed", "partial"])
 def test_transactional_proof_failure_never_mints_present(mode):
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     plan = _plan()
     binding = gate.begin(
         plan,
@@ -614,8 +650,9 @@ def test_transactional_proof_failure_never_mints_present(mode):
 @pytest.mark.parametrize("earliest_delta", [0.0, -0.1])
 def test_pre_provider_abort_requires_trusted_lease_expiry(earliest_delta):
     client = FakeGateClient(_open())
-    gate = DurableAdmissionGate(client, "preview-store")
     plan = _plan()
+    client.trusted_second = int(plan.handle.lease_until + earliest_delta)
+    gate = _gate(client)
     binding = gate.begin(
         plan,
         dispatch_lower=plan.handle.created_lower,
@@ -627,9 +664,7 @@ def test_pre_provider_abort_requires_trusted_lease_expiry(earliest_delta):
     proof = gate.prove_present(binding, plan.handle)
 
     with pytest.raises(ValueError):
-        gate.pre_provider_abort_authority(
-            proof, _clock(client, plan.handle.lease_until + earliest_delta)
-        )
+        gate.pre_provider_abort_authority(proof)
 
 
 @mock_aws
@@ -649,7 +684,7 @@ def test_execute_finalize_vs_recovery_terminal_barrier_has_one_winner():
     )
     plan = _plan()
     raw.put_item(TableName="preview-store", Item=_open())
-    seed_gate = DurableAdmissionGate(raw, "preview-store")
+    seed_gate = _gate(raw)
     binding = seed_gate.begin(
         plan,
         dispatch_lower=plan.handle.created_lower,
@@ -679,13 +714,9 @@ def test_execute_finalize_vs_recovery_terminal_barrier_has_one_winner():
             return raw.describe_table(**kwargs)
 
     client = BarrierClient()
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     proof = gate.prove_present(binding, plan.handle)
-    clock = PreviewTrustedClock(
-        dynamodb_client=client, table_name="preview-store"
-    )
-    clock.refresh()
-    authority = gate.pre_provider_abort_authority(proof, clock)
+    authority = gate.pre_provider_abort_authority(proof)
     intent = authority.intent
     terminal_read = raw.transact_get_items(
         **build_terminal_read_request(intent, "preview-store")
@@ -747,8 +778,8 @@ def test_confirmed_stale_open_cas_refreshes_for_later_generation():
         TableName="preview-store",
         Item=_control_item(GateState.OPEN, 0, 0, None),
     )
-    winner = DurableAdmissionGate(client, "preview-store")
-    stale = DurableAdmissionGate(client, "preview-store")
+    winner = _gate(client)
+    stale = _gate(client)
     plan = _plan()
     first = winner.begin(
         plan,
@@ -793,7 +824,7 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
         BillingMode="PAY_PER_REQUEST",
     )
     client.put_item(TableName="preview-store", Item=_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     admission = _plan()
     binding = gate.begin(
         admission,
@@ -805,16 +836,7 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
         **append_quarantine_action(admission, gate, binding)
     )
     proof = gate.prove_present(binding, admission.handle)
-    clock = PreviewTrustedClock(
-        dynamodb_client=client, table_name="preview-store"
-    )
-    clock.refresh()
-    authority = gate.pre_provider_abort_authority(proof, clock)
-    clock = PreviewTrustedClock(
-        dynamodb_client=client, table_name="preview-store"
-    )
-    clock.refresh()
-    authority = gate.pre_provider_abort_authority(proof, clock)
+    authority = gate.pre_provider_abort_authority(proof)
     intent = authority.intent
     interval = intent.interval
     read = client.transact_get_items(
@@ -822,7 +844,7 @@ def test_recovery_accepts_only_sealed_canonical_matching_terminal_plan():
     )
     snapshot = decode_terminal_responses(intent, read["Responses"])
     sealed = compile_terminal(intent, "preview-store", snapshot)
-    other_gate = DurableAdmissionGate(client, "preview-store")
+    other_gate = _gate(client)
     with pytest.raises(ValueError):
         other_gate.append_recovery_open_action(authority, sealed)
     composed = gate.append_recovery_open_action(authority, sealed)
@@ -918,7 +940,7 @@ def test_direct_external_unexpired_terminal_plan_rejected_at_composition(
         BillingMode="PAY_PER_REQUEST",
     )
     client.put_item(TableName="preview-store", Item=_open())
-    gate = DurableAdmissionGate(client, "preview-store")
+    gate = _gate(client)
     admission = _plan()
     binding = gate.begin(
         admission,
@@ -930,11 +952,7 @@ def test_direct_external_unexpired_terminal_plan_rejected_at_composition(
         **append_quarantine_action(admission, gate, binding)
     )
     proof = gate.prove_present(binding, admission.handle)
-    clock = PreviewTrustedClock(
-        dynamodb_client=client, table_name="preview-store"
-    )
-    clock.refresh()
-    authority = gate.pre_provider_abort_authority(proof, clock)
+    authority = gate.pre_provider_abort_authority(proof)
     interval = TrustedUtcInterval(
         admission.handle.lease_until + earliest_delta,
         admission.handle.lease_until + 0.1,
