@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -90,3 +91,415 @@ def test_lease_recovers_dead_owner(tmp_path, monkeypatch):
     monkeypatch.setattr(train.os, "kill", dead_owner)
     with train.lease():
         assert (lock / "owner.json").is_file()
+
+
+def test_frontend_identity_requires_release_sha_and_question_picker(monkeypatch):
+    expected_sha = "abcdef1234567890abcdef1234567890abcdef12"
+    responses = iter(
+        [
+            '<script type="module" src="/assets/index-release.js"></script>',
+            f'bundle-{expected_sha[:7]}-隨機競賽題目-Random competition question',
+        ]
+    )
+    monkeypatch.setattr(train, "run", lambda *args, **kwargs: next(responses))
+
+    assert train.verify_frontend_identity(expected_sha) == "assets/index-release.js"
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        "bundle-wrongsha-隨機競賽題目-Random competition question",
+        "bundle-abcdef1-without-picker",
+    ],
+)
+def test_frontend_identity_fails_closed_on_stale_or_incomplete_bundle(monkeypatch, bundle):
+    responses = iter(
+        [
+            '<script type="module" src="/assets/index-release.js"></script>',
+            bundle,
+        ]
+    )
+    monkeypatch.setattr(train, "run", lambda *args, **kwargs: next(responses))
+
+    with pytest.raises(RuntimeError):
+        train.verify_frontend_identity("abcdef1234567890abcdef1234567890abcdef12")
+
+
+def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_subprocess_run(command, **kwargs):
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr(train.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(train, "production_identity", lambda: ("a" * 40, "b" * 64))
+    monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
+    monkeypatch.setattr(train, "verify_frontend_identity", lambda sha: "assets/index-release.js")
+    monkeypatch.setattr(train, "production_instance", lambda: "i-production")
+    monkeypatch.setattr(
+        train,
+        "capture_frontend_state",
+        lambda instance, sha: (
+            "/opt/trustforge/frontend/releases/previous",
+            "/etc/nginx/trustforge-sites/react-http.conf",
+            "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
+        ),
+    )
+    monkeypatch.setattr(train, "discard_frontend_snapshot", lambda *args: None)
+
+    result = train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
+
+    assert [call[0][-1] for call in calls] == [
+        "TRUSTFORGE_BOOTSTRAP=0 bash deploy/deploy_ec2.sh",
+        "bash deploy/deploy_frontend_nginx.sh",
+    ]
+    assert calls[1][1]["env"]["VITE_GIT_SHA"] == "a" * 40
+    assert result == {
+        "git_sha": "a" * 40,
+        "artifact_digest": "b" * 64,
+        "frontend_asset": "assets/index-release.js",
+    }
+
+
+def test_production_deploy_stops_before_frontend_when_backend_identity_mismatches(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append(command),
+    )
+    monkeypatch.setattr(train, "production_identity", lambda: ("b" * 40, "c" * 64))
+    rollback_calls = []
+    monkeypatch.setattr(
+        train,
+        "restore_backend",
+        lambda *args: rollback_calls.append(args),
+    )
+
+    with pytest.raises(RuntimeError, match="active SHA"):
+        train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
+
+    assert calls == [["/bin/zsh", "-lc", "TRUSTFORGE_BOOTSTRAP=0 bash deploy/deploy_ec2.sh"]]
+    assert rollback_calls == [(tmp_path, "b" * 40, "c" * 64)]
+
+
+def test_production_deploy_restores_backend_when_backend_command_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(train, "production_identity", lambda: ("p" * 40, "q" * 64))
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("backend post-activation failed")),
+    )
+    rollback_calls = []
+    monkeypatch.setattr(
+        train,
+        "restore_backend",
+        lambda *args: rollback_calls.append(args),
+    )
+
+    with pytest.raises(RuntimeError, match="backend post-activation failed"):
+        train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
+
+    assert rollback_calls == [(tmp_path, "p" * 40, "q" * 64)]
+
+
+def test_production_deploy_restores_backend_when_frontend_fails(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_subprocess_run(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "bash deploy/deploy_frontend_nginx.sh":
+            raise RuntimeError("frontend failed")
+
+    monkeypatch.setattr(train.subprocess, "run", fake_subprocess_run)
+    identities = iter([("p" * 40, "q" * 64), ("a" * 40, "b" * 64)])
+    monkeypatch.setattr(train, "production_identity", lambda: next(identities))
+    monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
+    monkeypatch.setattr(train, "production_instance", lambda: "i-production")
+    monkeypatch.setattr(
+        train,
+        "capture_frontend_state",
+        lambda instance, sha: (
+            "/opt/trustforge/frontend/releases/previous",
+            "/etc/nginx/trustforge-sites/react-http.conf",
+            "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
+        ),
+    )
+    frontend_rollbacks = []
+    monkeypatch.setattr(
+        train,
+        "restore_frontend",
+        lambda *args: frontend_rollbacks.append(args),
+    )
+    rollback_calls = []
+    monkeypatch.setattr(
+        train,
+        "restore_backend",
+        lambda *args: rollback_calls.append(args),
+    )
+
+    with pytest.raises(RuntimeError, match="frontend failed"):
+        train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
+
+    assert frontend_rollbacks == [
+        (
+            "i-production",
+            "/opt/trustforge/frontend/releases/previous",
+            "/etc/nginx/trustforge-sites/react-http.conf",
+            "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
+        )
+    ]
+    assert rollback_calls == [(tmp_path, "p" * 40, "q" * 64)]
+
+
+def test_production_deploy_restores_both_layers_when_public_frontend_check_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(train.subprocess, "run", lambda *args, **kwargs: None)
+    identities = iter([("p" * 40, "q" * 64), ("a" * 40, "b" * 64)])
+    monkeypatch.setattr(train, "production_identity", lambda: next(identities))
+    monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
+    monkeypatch.setattr(train, "production_instance", lambda: "i-production")
+    monkeypatch.setattr(
+        train,
+        "capture_frontend_state",
+        lambda instance, sha: (
+            "/opt/trustforge/frontend/releases/previous",
+            "/etc/nginx/trustforge-sites/react-http.conf",
+            "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
+        ),
+    )
+    monkeypatch.setattr(
+        train,
+        "verify_frontend_identity",
+        lambda sha: (_ for _ in ()).throw(RuntimeError("public bundle stale")),
+    )
+    frontend_rollbacks = []
+    backend_rollbacks = []
+    monkeypatch.setattr(
+        train,
+        "restore_frontend",
+        lambda *args: frontend_rollbacks.append(args),
+    )
+    monkeypatch.setattr(
+        train,
+        "restore_backend",
+        lambda *args: backend_rollbacks.append(args),
+    )
+
+    with pytest.raises(RuntimeError, match="public bundle stale"):
+        train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
+
+    assert frontend_rollbacks == [
+        (
+            "i-production",
+            "/opt/trustforge/frontend/releases/previous",
+            "/etc/nginx/trustforge-sites/react-http.conf",
+            "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
+        )
+    ]
+    assert backend_rollbacks == [(tmp_path, "p" * 40, "q" * 64)]
+
+
+def test_restore_backend_reactivates_verified_previous_artifact(monkeypatch, tmp_path):
+    expected_sha = "a" * 40
+    expected_digest = "b" * 64
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["aws", "s3", "cp"]:
+            return json.dumps({"git_sha": expected_sha, "version": "v0.27.4"})
+        raise AssertionError(command)
+
+    monkeypatch.setattr(train, "run", fake_run)
+    monkeypatch.setattr(train, "production_instance", lambda: "i-0123456789abcdef0")
+    calls = []
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+    monkeypatch.setattr(
+        train,
+        "production_identity",
+        lambda: (expected_sha, expected_digest),
+    )
+    runtime_checks = []
+    monkeypatch.setattr(
+        train,
+        "verify_runtime_identity",
+        lambda digest: runtime_checks.append(digest),
+    )
+
+    train.restore_backend(tmp_path, expected_sha, expected_digest)
+
+    assert calls[0][0][:4] == ["aws", "s3", "cp", "-"]
+    assert json.loads(calls[0][1]["input"]) == {
+        "digest": expected_digest,
+        "version": "v0.27.4",
+    }
+    assert calls[1][0] == [
+        "bash",
+        "deploy/activate_release.sh",
+        "--target",
+        "i-0123456789abcdef0",
+    ]
+    assert runtime_checks == [expected_digest]
+
+
+def test_restore_frontend_atomically_switches_to_previous_release(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        train,
+        "run_ssm",
+        lambda instance, commands: calls.append((instance, commands)) or "",
+    )
+
+    train.restore_frontend(
+        "i-production",
+        "/opt/trustforge/frontend/releases/previous-123",
+        "/etc/nginx/trustforge-sites/react-http.conf",
+        "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz",
+    )
+
+    assert calls[0][0] == "i-production"
+    assert "mv -Tf" in "\n".join(calls[0][1])
+    assert "tar -C / -xzf" in "\n".join(calls[0][1])
+    assert "/etc/nginx/conf.d/trustforge.conf.rollback" in "\n".join(calls[0][1])
+    assert "rm -rf /etc/nginx/trustforge-sites" in calls[0][1]
+    assert "systemctl daemon-reload" in calls[0][1]
+    assert "nginx -t" in calls[0][1]
+    assert "systemctl reload nginx" in calls[0][1]
+
+
+@pytest.mark.parametrize(
+    ("remote_output", "expected_target", "expected_nginx_target"),
+    [
+        (
+            "/opt/trustforge/frontend/releases/previous-123\n"
+            "/etc/nginx/trustforge-sites/react-http.conf",
+            "/opt/trustforge/frontend/releases/previous-123",
+            "/etc/nginx/trustforge-sites/react-http.conf",
+        ),
+        ("__ABSENT__\n__ABSENT__", "__ABSENT__", "__ABSENT__"),
+    ],
+)
+def test_capture_frontend_state_includes_live_config_snapshot(
+    monkeypatch,
+    remote_output,
+    expected_target,
+    expected_nginx_target,
+):
+    calls = []
+    monkeypatch.setattr(
+        train,
+        "run_ssm",
+        lambda instance, commands: calls.append((instance, commands)) or remote_output,
+    )
+
+    target, nginx_target, snapshot = train.capture_frontend_state("i-production", "a" * 40)
+
+    assert target == expected_target
+    assert nginx_target == expected_nginx_target
+    assert snapshot == "/opt/trustforge/.frontend-rollback-aaaaaaaaaaaa.tar.gz"
+    command_text = "\n".join(calls[0][1])
+    assert "etc/nginx/trustforge-sites" in command_text
+    assert "etc/systemd/system/trustforge.service" in command_text
+
+
+def test_execute_records_combined_production_deploy_result(monkeypatch, tmp_path):
+    monkeypatch.setattr(train, "OUT", tmp_path / "out")
+    monkeypatch.setattr(train, "require_clean_root", lambda: None)
+    monkeypatch.setattr(train, "gate", lambda worktree: None)
+    monkeypatch.setattr(train, "bump_patch_version", lambda worktree: "0.27.5")
+    monkeypatch.setattr(train, "require_backup_receipt", lambda command, run_id: tmp_path / "backup.json")
+    monkeypatch.setattr(train, "production_identity", lambda: ("c" * 40, "d" * 64))
+    deployed = {
+        "git_sha": "b" * 40,
+        "artifact_digest": "e" * 64,
+        "frontend_asset": "assets/index-release.js",
+    }
+    monkeypatch.setattr(train, "deploy_production", lambda *args: deployed)
+
+    def fake_run(command, *, cwd=train.ROOT, capture=False):
+        if command[:3] == ["git", "rev-list", "--left-right"]:
+            return "0 1"
+        if command[:3] == ["git", "rev-parse", "origin/main"]:
+            return "a" * 40
+        if command[:3] == ["git", "worktree", "add"]:
+            Path(command[4]).mkdir(parents=True)
+            return ""
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return ("b" if Path(cwd).name == "main" else "f") * 40
+        return ""
+
+    monkeypatch.setattr(train, "run", fake_run)
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+    recorded = []
+    monkeypatch.setattr(
+        train,
+        "record",
+        lambda receipt: recorded.append(receipt) or tmp_path / "receipt.json",
+    )
+
+    assert train.execute(SimpleNamespace(dry_run=False)) == tmp_path / "receipt.json"
+    assert recorded[-1]["status"] == "completed"
+    assert recorded[-1]["steps"][-1] == {"production_deploy": "passed", **deployed}
+
+
+def test_execute_does_not_noop_when_public_frontend_is_stale(monkeypatch, tmp_path):
+    monkeypatch.setattr(train, "OUT", tmp_path / "out")
+    monkeypatch.setattr(train, "require_clean_root", lambda: None)
+    monkeypatch.setattr(train, "gate", lambda worktree: None)
+    monkeypatch.setattr(train, "require_backup_receipt", lambda command, run_id: tmp_path / "backup.json")
+    monkeypatch.setattr(train, "production_identity", lambda: ("a" * 40, "d" * 64))
+    monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
+    monkeypatch.setattr(
+        train,
+        "verify_frontend_identity",
+        lambda sha: (_ for _ in ()).throw(RuntimeError("stale frontend")),
+    )
+    deployed = {
+        "git_sha": "a" * 40,
+        "artifact_digest": "d" * 64,
+        "frontend_asset": "assets/index-release.js",
+    }
+    deploy_calls = []
+    monkeypatch.setattr(
+        train,
+        "deploy_production",
+        lambda *args: deploy_calls.append(args) or deployed,
+    )
+
+    def fake_run(command, *, cwd=train.ROOT, capture=False):
+        if command[:3] == ["git", "rev-list", "--left-right"]:
+            return "0 0"
+        if command[:3] == ["git", "rev-parse", "origin/main"]:
+            return "a" * 40
+        if command[:3] == ["git", "worktree", "add"]:
+            Path(command[4]).mkdir(parents=True)
+            return ""
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return "a" * 40
+        return ""
+
+    monkeypatch.setattr(train, "run", fake_run)
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+    recorded = []
+    monkeypatch.setattr(
+        train,
+        "record",
+        lambda receipt: recorded.append(receipt) or tmp_path / "receipt.json",
+    )
+
+    train.execute(SimpleNamespace(dry_run=False))
+
+    assert deploy_calls
+    assert recorded[-1]["status"] == "completed"
+    assert recorded[-1]["frontend_drift"] == "stale frontend"

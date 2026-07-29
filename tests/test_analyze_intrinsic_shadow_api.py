@@ -33,7 +33,32 @@ def report(coin: str, generated_at: str = "2026-07-28T00:00:00Z") -> Report:
     )
 
 
-def test_real_btc_and_bnb_api_shadow_is_zero_without_changing_official_fields() -> None:
+def _assert_intrinsic_delta_is_derived(assessment: dict) -> None:
+    derived = round(
+        sum(float(dimension["signed_delta"]) for dimension in assessment["dimensions"]),
+        8,
+    )
+    if assessment["gate"]["passed"]:
+        cap = float(assessment["total_delta_cap"])
+        expected = max(-cap, min(cap, derived))
+        assert assessment["total_delta"] == pytest.approx(expected)
+        assert abs(assessment["total_delta"]) <= cap
+    else:
+        assert assessment["total_delta"] == 0.0
+
+
+def test_intrinsic_delta_helper_accepts_legitimate_cap_clamping() -> None:
+    _assert_intrinsic_delta_is_derived(
+        {
+            "dimensions": [{"signed_delta": 0.3}, {"signed_delta": 0.2}],
+            "gate": {"passed": True},
+            "total_delta": 0.08,
+            "total_delta_cap": 0.08,
+        }
+    )
+
+
+def test_real_btc_and_bnb_api_shadow_is_derived_without_changing_official_fields() -> None:
     for coin in ("BTC", "BNB"):
         original = report(coin)
         payload = web._build_analyze_json_payload(original, [], _Log())
@@ -41,8 +66,8 @@ def test_real_btc_and_bnb_api_shadow_is_zero_without_changing_official_fields() 
         shadow = public["asset_intrinsic_assessment"]
 
         assert shadow is not None
-        assert shadow["total_delta"] == 0.0
-        assert shadow["gate"]["passed"] is False
+        _assert_intrinsic_delta_is_derived(shadow)
+        assert shadow["gate"]["passed"] is (coin == "BTC")
         assert public["confidence"] == original.confidence
         assert public["calibrated_confidence"] == original.calibrated_confidence
         assert public["decision_state"] == original.decision_state
@@ -107,8 +132,10 @@ def test_forged_prefilled_assessment_is_ignored_and_recomputed() -> None:
     public = web._public_report_dict(forged)
 
     assert public["asset_intrinsic_assessment"] != forged.asset_intrinsic_assessment
-    assert public["asset_intrinsic_assessment"]["total_delta"] == 0.0
-    assert public["asset_intrinsic_assessment"]["gate"]["passed"] is False
+    _assert_intrinsic_delta_is_derived(public["asset_intrinsic_assessment"])
+    assert public["asset_intrinsic_assessment"]["asset_id"] == "asset:btc"
+    assert public["asset_intrinsic_assessment"]["dimensions"]
+    assert public["asset_intrinsic_assessment"]["gate"]["passed"] is True
 
 
 @pytest.mark.parametrize("malformed_context", [[], "asset:btc"])
@@ -135,4 +162,5 @@ def test_existing_risk_notices_do_not_block_trusted_context_or_assessment() -> N
     assert public["asset_context"]["asset_id"] == "asset:btc"
     assert public["risk_notices"] == existing.risk_notices
     assert public["asset_intrinsic_assessment"]["asset_id"] == "asset:btc"
-    assert public["asset_intrinsic_assessment"]["total_delta"] == 0.0
+    _assert_intrinsic_delta_is_derived(public["asset_intrinsic_assessment"])
+    assert public["asset_intrinsic_assessment"]["gate"]["passed"] is True

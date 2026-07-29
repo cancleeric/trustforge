@@ -1,0 +1,3 @@
+benchmark corpus reproducible excerpt
+value: 0.70
+scope: single protocol-derived parameter; benchmark measurement only

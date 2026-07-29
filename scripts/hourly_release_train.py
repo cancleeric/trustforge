@@ -205,6 +205,336 @@ def verify_runtime_identity(expected_digest: str) -> None:
         raise RuntimeError("production serving endpoint artifact digest mismatch")
 
 
+def verify_frontend_identity(expected_sha: str) -> str:
+    short_sha = expected_sha[:7]
+    index = run(
+        ["curl", "-fsS", "--max-time", "15", f"{PRODUCTION_URL}/"],
+        capture=True,
+    )
+    assets = set(re.findall(r"assets/index-[A-Za-z0-9_-]+\.js", index))
+    if len(assets) != 1:
+        raise RuntimeError("production frontend index does not identify exactly one app bundle")
+    asset = assets.pop()
+    bundle = run(
+        ["curl", "-fsS", "--max-time", "30", f"{PRODUCTION_URL}/{asset}"],
+        capture=True,
+    )
+    if short_sha not in bundle:
+        raise RuntimeError("production frontend bundle SHA does not match verified main SHA")
+    if "隨機競賽題目" not in bundle or "Random competition question" not in bundle:
+        raise RuntimeError("production frontend bundle lacks competition question picker")
+    return asset
+
+
+def production_instance() -> str:
+    instances = run(
+        [
+            "aws",
+            "ec2",
+            "describe-instances",
+            "--region",
+            PRODUCTION_REGION,
+            "--filters",
+            "Name=tag:Name,Values=trustforge-demo",
+            "Name=instance-state-name,Values=running",
+            "--query",
+            "Reservations[].Instances[].InstanceId",
+            "--output",
+            "text",
+        ],
+        capture=True,
+    ).split()
+    if len(instances) != 1:
+        raise RuntimeError("production EC2 target is not unique")
+    return instances[0]
+
+
+def run_ssm(instance: str, commands: list[str]) -> str:
+    command_id = run(
+        [
+            "aws",
+            "ssm",
+            "send-command",
+            "--region",
+            PRODUCTION_REGION,
+            "--instance-ids",
+            instance,
+            "--document-name",
+            "AWS-RunShellScript",
+            "--parameters",
+            json.dumps({"commands": commands}),
+            "--query",
+            "Command.CommandId",
+            "--output",
+            "text",
+        ],
+        capture=True,
+    ).strip()
+    if not command_id or command_id == "None":
+        raise RuntimeError("production SSM command was not created")
+    subprocess.run(
+        [
+            "aws",
+            "ssm",
+            "wait",
+            "command-executed",
+            "--region",
+            PRODUCTION_REGION,
+            "--command-id",
+            command_id,
+            "--instance-id",
+            instance,
+        ],
+        check=False,
+    )
+    invocation = json.loads(
+        run(
+            [
+                "aws",
+                "ssm",
+                "get-command-invocation",
+                "--region",
+                PRODUCTION_REGION,
+                "--command-id",
+                command_id,
+                "--instance-id",
+                instance,
+                "--output",
+                "json",
+            ],
+            capture=True,
+        )
+    )
+    if invocation.get("Status") != "Success" or invocation.get("ResponseCode") != 0:
+        raise RuntimeError(
+            "production SSM command failed: "
+            f"{invocation.get('Status')} response={invocation.get('ResponseCode')}"
+        )
+    return str(invocation.get("StandardOutputContent", "")).strip()
+
+
+def capture_frontend_state(instance: str, release_sha: str) -> tuple[str, str, str]:
+    if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+        raise RuntimeError("frontend snapshot release SHA is invalid")
+    snapshot = f"/opt/trustforge/.frontend-rollback-{release_sha[:12]}.tar.gz"
+    target = run_ssm(
+        instance,
+        [
+            "set -e",
+            (
+                "if [ -L /opt/trustforge/frontend/current ]; then "
+                "readlink /opt/trustforge/frontend/current; else echo __ABSENT__; fi"
+            ),
+            (
+                "if [ -L /etc/nginx/conf.d/trustforge.conf ]; then "
+                "readlink /etc/nginx/conf.d/trustforge.conf; else echo __ABSENT__; fi"
+            ),
+            (
+                f"tar -C / --ignore-failed-read -czf {snapshot} "
+                "etc/nginx/conf.d/default.conf "
+                "etc/nginx/trustforge-sites "
+                "etc/systemd/system/trustforge.service"
+            ),
+        ],
+    ).splitlines()
+    if len(target) < 2:
+        raise RuntimeError("production frontend state snapshot output is incomplete")
+    frontend_target, nginx_target = target[:2]
+    if frontend_target != "__ABSENT__" and not re.fullmatch(
+        r"/opt/trustforge/frontend/releases/[A-Za-z0-9._-]+", frontend_target
+    ):
+        raise RuntimeError("production frontend current target is invalid")
+    if nginx_target != "__ABSENT__" and not re.fullmatch(
+        r"/etc/nginx/trustforge-sites/[A-Za-z0-9._-]+\.conf", nginx_target
+    ):
+        raise RuntimeError("production nginx live target is invalid")
+    return frontend_target, nginx_target, snapshot
+
+
+def restore_frontend(
+    instance: str,
+    expected_target: str,
+    expected_nginx_target: str,
+    snapshot: str,
+) -> None:
+    if expected_target != "__ABSENT__" and not re.fullmatch(
+        r"/opt/trustforge/frontend/releases/[A-Za-z0-9._-]+", expected_target
+    ):
+        raise RuntimeError("rollback frontend target is invalid")
+    if not re.fullmatch(r"/opt/trustforge/\.frontend-rollback-[0-9a-f]{12}\.tar\.gz", snapshot):
+        raise RuntimeError("rollback frontend snapshot is invalid")
+    if expected_nginx_target != "__ABSENT__" and not re.fullmatch(
+        r"/etc/nginx/trustforge-sites/[A-Za-z0-9._-]+\.conf",
+        expected_nginx_target,
+    ):
+        raise RuntimeError("rollback nginx live target is invalid")
+    switch_command = (
+        "rm -f /opt/trustforge/frontend/current"
+        if expected_target == "__ABSENT__"
+        else (
+            f"ln -sfn {expected_target} /opt/trustforge/frontend/current.rollback && "
+            "mv -Tf /opt/trustforge/frontend/current.rollback /opt/trustforge/frontend/current"
+        )
+    )
+    nginx_switch_command = (
+        "rm -f /etc/nginx/conf.d/trustforge.conf"
+        if expected_nginx_target == "__ABSENT__"
+        else (
+            f"ln -sfn {expected_nginx_target} /etc/nginx/conf.d/trustforge.conf.rollback && "
+            "mv -Tf /etc/nginx/conf.d/trustforge.conf.rollback /etc/nginx/conf.d/trustforge.conf"
+        )
+    )
+    run_ssm(
+        instance,
+        [
+            "set -e",
+            f"test -f {snapshot}",
+            "rm -f /etc/nginx/conf.d/default.conf /etc/systemd/system/trustforge.service",
+            "rm -rf /etc/nginx/trustforge-sites",
+            f"tar -C / -xzf {snapshot}",
+            switch_command,
+            nginx_switch_command,
+            "systemctl daemon-reload",
+            "nginx -t",
+            "systemctl reload nginx",
+            "systemctl try-restart trustforge",
+            "curl -fsS http://localhost/healthz >/dev/null",
+            f"rm -f {snapshot}",
+        ],
+    )
+
+
+def discard_frontend_snapshot(instance: str, snapshot: str) -> None:
+    if not re.fullmatch(r"/opt/trustforge/\.frontend-rollback-[0-9a-f]{12}\.tar\.gz", snapshot):
+        raise RuntimeError("frontend snapshot path is invalid")
+    run_ssm(instance, [f"rm -f {snapshot}"])
+
+
+def restore_backend(main_tree: Path, expected_sha: str, expected_digest: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+        raise RuntimeError("rollback backend SHA is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        raise RuntimeError("rollback backend digest is invalid")
+    bucket = f"trustforge-deploy-{PRODUCTION_ACCOUNT}"
+    manifest = json.loads(
+        run(
+            [
+                "aws",
+                "s3",
+                "cp",
+                f"s3://{bucket}/artifacts/{expected_digest}/manifest.json",
+                "-",
+                "--region",
+                PRODUCTION_REGION,
+            ],
+            capture=True,
+        )
+    )
+    if manifest.get("git_sha") != expected_sha:
+        raise RuntimeError("rollback backend manifest SHA mismatch")
+    version = str(manifest.get("version", ""))
+    if not version:
+        raise RuntimeError("rollback backend manifest version is missing")
+    instance = production_instance()
+    pointer = json.dumps({"digest": expected_digest, "version": version}, sort_keys=True)
+    subprocess.run(
+        [
+            "aws",
+            "s3",
+            "cp",
+            "-",
+            f"s3://{bucket}/pointers/candidate.json",
+            "--region",
+            PRODUCTION_REGION,
+        ],
+        input=pointer,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ["bash", "deploy/activate_release.sh", "--target", instance],
+        cwd=main_tree,
+        env=os.environ,
+        check=True,
+    )
+    restored_sha, restored_digest = production_identity()
+    if (restored_sha, restored_digest) != (expected_sha, expected_digest):
+        raise RuntimeError("rollback backend identity verification failed")
+    verify_runtime_identity(expected_digest)
+
+
+def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> dict[str, str]:
+    previous_sha, previous_digest = production_identity()
+    env = dict(
+        os.environ,
+        TRUSTFORGE_RELEASE_SHA=main_sha,
+        TRUSTFORGE_RELEASE_BRANCH=release_branch,
+    )
+    frontend_instance = ""
+    previous_frontend_target = ""
+    previous_nginx_target = ""
+    frontend_snapshot = ""
+    try:
+        subprocess.run(
+            ["/bin/zsh", "-lc", "TRUSTFORGE_BOOTSTRAP=0 bash deploy/deploy_ec2.sh"],
+            cwd=main_tree,
+            env=env,
+            check=True,
+        )
+        deployed_sha, deployed_digest = production_identity()
+        if deployed_sha != main_sha:
+            raise RuntimeError("production active SHA does not match the verified main SHA")
+        verify_runtime_identity(deployed_digest)
+        frontend_instance = production_instance()
+        (
+            previous_frontend_target,
+            previous_nginx_target,
+            frontend_snapshot,
+        ) = capture_frontend_state(
+            frontend_instance,
+            main_sha,
+        )
+        subprocess.run(
+            ["/bin/zsh", "-lc", "bash deploy/deploy_frontend_nginx.sh"],
+            cwd=main_tree,
+            env=dict(env, VITE_GIT_SHA=main_sha),
+            check=True,
+        )
+        frontend_asset = verify_frontend_identity(main_sha)
+        discard_frontend_snapshot(frontend_instance, frontend_snapshot)
+    except Exception as deploy_error:
+        rollback_errors = []
+        if (
+            frontend_instance
+            and previous_frontend_target
+            and previous_nginx_target
+            and frontend_snapshot
+        ):
+            try:
+                restore_frontend(
+                    frontend_instance,
+                    previous_frontend_target,
+                    previous_nginx_target,
+                    frontend_snapshot,
+                )
+            except Exception as rollback_error:
+                rollback_errors.append(f"frontend: {rollback_error}")
+        try:
+            restore_backend(main_tree, previous_sha, previous_digest)
+        except Exception as rollback_error:
+            rollback_errors.append(f"backend: {rollback_error}")
+        if rollback_errors:
+            raise RuntimeError(
+                "production deploy failed and rollback failed: " + "; ".join(rollback_errors)
+            ) from deploy_error
+        raise
+    return {
+        "git_sha": deployed_sha,
+        "artifact_digest": deployed_digest,
+        "frontend_asset": frontend_asset,
+    }
+
+
 def require_backup_receipt(command: str, run_id: str) -> Path:
     receipt = OUT / f"{run_id}-backup.json"
     if receipt.exists():
@@ -247,16 +577,26 @@ def execute(args: argparse.Namespace) -> Path:
                 runtime_in_sync = True
             except Exception as drift:
                 receipt["runtime_drift"] = str(drift)
+            frontend_in_sync = False
+            try:
+                verify_frontend_identity(main_sha_remote)
+                frontend_in_sync = True
+            except Exception as drift:
+                receipt["frontend_drift"] = str(drift)
             if args.dry_run:
                 receipt["status"] = "dry-run"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
-            if develop_only == 0 and production_sha == main_sha_remote and runtime_in_sync:
+            if (
+                develop_only == 0
+                and production_sha == main_sha_remote
+                and runtime_in_sync
+                and frontend_in_sync
+            ):
                 receipt["status"] = "no-op"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
             backup_command = "bash deploy/backup_production_release.sh"
-            deploy_command = "TRUSTFORGE_BOOTSTRAP=0 bash deploy/deploy_ec2.sh"
             with tempfile.TemporaryDirectory(prefix="trustforge-release-train-") as temporary:
                 base = Path(temporary)
                 develop_tree = base / "develop"
@@ -306,13 +646,8 @@ def execute(args: argparse.Namespace) -> Path:
                         receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
                     else:
                         receipt["steps"].append({"main": main_sha, "release_branch": "existing-main-retry"})
-                    env = dict(os.environ, TRUSTFORGE_RELEASE_SHA=main_sha, TRUSTFORGE_RELEASE_BRANCH=release_branch)
-                    subprocess.run(["/bin/zsh", "-lc", deploy_command], cwd=main_tree, env=env, check=True)
-                    deployed_sha, deployed_digest = production_identity()
-                    if deployed_sha != main_sha:
-                        raise RuntimeError("production active SHA does not match the verified main SHA")
-                    verify_runtime_identity(deployed_digest)
-                    receipt["steps"].append({"production_deploy": "passed", "git_sha": deployed_sha, "artifact_digest": deployed_digest})
+                    deployed = deploy_production(main_tree, main_sha, release_branch)
+                    receipt["steps"].append({"production_deploy": "passed", **deployed})
                 finally:
                     cleanup = []
                     for tree in (main_tree, develop_tree):
