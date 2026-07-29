@@ -393,7 +393,11 @@ class ContextBuilder:
                     excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_APPROVAL_REQUIRED))
                     continue
 
-            tool_ref = {"tool_id": tool_id}
+            capability = self._tool_registry.get_tool(tool_id)
+            if capability is None:
+                excluded.append(ExcludedRef(tool_id, "tool", EXCLUSION_STALE))
+                continue
+            tool_ref = {"tool_id": tool_id, "version": capability.version}
             tool_cost = estimate_tokens(
                 json.dumps(tool_ref, sort_keys=True, separators=(",", ":"))
             )

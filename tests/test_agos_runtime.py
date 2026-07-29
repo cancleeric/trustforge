@@ -76,6 +76,17 @@ class TestFeatureFlag:
 
 
 class TestContextBuild:
+    def test_read_only_runtime_does_not_bootstrap_tool_capabilities(
+        self, data_dir: Path
+    ):
+        read_runtime = AgosRuntime(data_dir=data_dir, bootstrap_tools=False)
+        try:
+            read_runtime._ensure_init()
+            assert read_runtime._tool_registry is not None
+            assert read_runtime._tool_registry.list_tools() == []
+        finally:
+            read_runtime.close()
+
     def test_initialization_failure_remains_retryable(
         self, runtime: AgosRuntime
     ):

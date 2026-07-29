@@ -182,6 +182,9 @@ class TestBuild:
         )
         manifest = builder.build(run_id="run-4", tool_refs=["cg-price"])
         assert len(manifest.included_refs.tool_refs) == 1
+        assert manifest.included_refs.tool_refs == [
+            {"tool_id": "cg-price", "version": "1.0.0"}
+        ]
 
 
 # ─── Exclusion Tests ─────────────────────────────────────────────────────────

@@ -109,9 +109,12 @@ class AgosLineageQuery:
                 "memory_id": e.memory_id,
                 "kind": e.kind,
                 "provider": e.provider,
+                "content_hash": e.content_hash,
                 "evidence_eligible": e.evidence_eligible,
                 "content_ref": e.content_ref,
+                "published_at": e.published_at,
                 "retrieved_at": e.retrieved_at,
+                "expires_at": e.expires_at,
             }
             for e in entries
         ]
@@ -159,8 +162,11 @@ class AgosRuntime:
     all methods are no-ops.
     """
 
-    def __init__(self, *, data_dir: Path | None = None) -> None:
+    def __init__(
+        self, *, data_dir: Path | None = None, bootstrap_tools: bool = True
+    ) -> None:
         self._data_dir = data_dir or _default_data_dir()
+        self._bootstrap_tools = bootstrap_tools
         self._memory_repo: MemoryRepository | None = None
         self._skill_registry: SkillRegistryRepository | None = None
         self._skill_loader: SkillLoader | None = None
@@ -193,9 +199,10 @@ class AgosRuntime:
             # enabling AGOS does not turn every normal pipeline call into an
             # unknown-tool denial. The existence check makes repeated startup
             # idempotent while preserving registry append-only semantics.
-            for capability in _BUILTIN_TOOL_CAPABILITIES:
-                if not self._tool_registry.is_known(capability.tool_id):
-                    self._tool_registry.register_tool(capability)
+            if self._bootstrap_tools:
+                for capability in _BUILTIN_TOOL_CAPABILITIES:
+                    if not self._tool_registry.is_known(capability.tool_id):
+                        self._tool_registry.register_tool(capability)
 
             self._context_builder = ContextBuilder(
                 memory_repo=self._memory_repo,

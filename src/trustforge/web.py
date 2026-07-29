@@ -8499,7 +8499,8 @@ class Handler(BaseHTTPRequestHandler):
                     # initialized runtime's thread-bound SQLite connections.
                     _seed_rt = getattr(self.server, "_agos_runtime", None)
                     _agos_rt = AgosRuntime(
-                        data_dir=getattr(_seed_rt, "_data_dir", None)
+                        data_dir=getattr(_seed_rt, "_data_dir", None),
+                        bootstrap_tools=False,
                     )
                     headers_dict = {k: v for k, v in getattr(self, "headers", {}).items()}
                     try:

@@ -124,7 +124,11 @@ class TestMemoriesEndpoint:
         assert status == 200
         assert body["data"]["total"] == 1
         # Content should be redacted by default
-        assert body["data"]["items"][0]["content_ref"] == "[REDACTED]"
+        item = body["data"]["items"][0]
+        assert item["content_ref"] == "[REDACTED]"
+        assert item["content_hash"] == memory_content_hash("sensitive content here")
+        assert item["published_at"] == "2026-07-01T00:00:00Z"
+        assert item["expires_at"] is None
 
     def test_memories_show_content(self, runtime, admin_headers, _set_admin_token):
         runtime._memory_repo.save(MemoryEntry(
