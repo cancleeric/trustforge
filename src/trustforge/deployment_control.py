@@ -104,6 +104,17 @@ class ActivationCompletionReceipt:
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class CanaryStartContext:
+    ledger_id: str
+    control_head: str
+    expected_sequence: int
+    transaction_id: str
+    phase: str
+    active_artifact_digest: str
+    candidate_artifact_digest: str
+
+
 class DeploymentControlLedger(ReleaseRoutingLedger):
     """Project authenticated control state from one append-only SSOT ledger."""
 
@@ -953,6 +964,69 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
     ) -> dict[str, Any]:
         with self.ledger.coordination_lock():
             return self._prepare_locked(action, receipt, now=now)
+
+    def guarded_prepare_canary_start(
+        self,
+        receipt: DeploymentAuthorization,
+        *,
+        now: datetime,
+        guard: Callable[[CanaryStartContext], None],
+    ) -> dict[str, Any]:
+        """Run an external evidence guard under the release coordination lock."""
+        with self.ledger.coordination_lock():
+            trusted_now = self._current_time()
+            if abs((now.astimezone(timezone.utc) - trusted_now).total_seconds()) > 5:
+                raise DeploymentControlError("operator time is not current")
+            records = self._records()
+            state = self.routing_snapshot()
+            self._validate_authorization_receipt(
+                receipt,
+                action="start",
+                ledger_id=state.ledger_id,
+                effective_at=trusted_now,
+                expected_control_head=records[-1]["event_hash"],
+                expected_sequence=len(records) + 1,
+            )
+            if (
+                state.phase not in {"disabled", "stopped"}
+                or state.activation_status == "prepared"
+                or state.candidate_blocked
+            ):
+                raise DeploymentControlError(
+                    "canary start is not allowed from current state"
+                )
+            transaction_id = hashlib.sha256(
+                b"trustforge.activation-transaction.v1\x00"
+                + canonical_json(
+                    {
+                        "ledger_id": state.ledger_id,
+                        "action": "start",
+                        "nonce": receipt.nonce,
+                    }
+                )
+            ).hexdigest()
+            guard(
+                CanaryStartContext(
+                    ledger_id=state.ledger_id,
+                    control_head=records[-1]["event_hash"],
+                    expected_sequence=len(records) + 1,
+                    transaction_id=transaction_id,
+                    phase=state.phase,
+                    active_artifact_digest=self.active.release_digest,
+                    candidate_artifact_digest=self.candidate.release_digest,
+                )
+            )
+            return self._prepare_locked("start", receipt, now=trusted_now)
+
+    def activation_transaction(
+        self, transaction_id: str
+    ) -> tuple[dict[str, Any], ...]:
+        """Return authenticated control records for one activation transaction."""
+        return tuple(
+            record
+            for record in self._records()
+            if record["event"].get("transaction_id") == transaction_id
+        )
 
     def _prepare_locked(
         self, action: Action, receipt: DeploymentAuthorization, *, now: datetime
