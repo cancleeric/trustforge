@@ -161,8 +161,18 @@ def _check_degradation_markers(text: str) -> list[str]:
 # Section 1: claim_id 溯源驗證（FR-3）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def verify_claim_id_traceability(report, evidence: list) -> dict:
-    """驗證 narrative 中引用的 claim_id 可追溯到 evidence。"""
+def verify_claim_id_traceability(
+    report,
+    evidence: list,
+    *,
+    traceable_claim_ids: set[str] | None = None,
+) -> dict:
+    """驗證 narrative 中引用的 claim_id 可追溯到本次 pipeline 原始 claims。
+
+    ``Evidence.related_claim`` 是報告角色標籤（例如「BTC 市場判斷」），不是
+    Claim.id，不能拿來當 provenance。呼叫端應傳入從同一批 Document 抽取的
+    claim id；optional 只為保留既有工具呼叫的向後相容。
+    """
     # 組合所有 inferences 文本
     narrative_text = "\n".join(report.inferences) if report.inferences else ""
     # 也檢查 market_judgment
@@ -173,10 +183,7 @@ def verify_claim_id_traceability(report, evidence: list) -> dict:
     cited_set = set(cited_ids)
 
     # 建立 evidence 中所有可追溯的 claim_id 全集
-    traceable_claims: set = set()
-    for ev in evidence:
-        if ev.related_claim:
-            traceable_claims.add(ev.related_claim)
+    traceable_claims: set[str] = set(traceable_claim_ids or ())
     # cross_source_signal 的 supporting_claim_ids
     if report.cross_source_signal and report.cross_source_signal.get("supporting_claim_ids"):
         for cid in report.cross_source_signal["supporting_claim_ids"]:
@@ -386,6 +393,10 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
         all_pass = False
     else:
         print(f"  ✓ 降級測試通過：pipeline 安全完成，降級標記={degraded_result.get('has_degradation_indication')}")
+    # FR-4 fail-closed: pipeline 完成但無降級標記 = 偽裝成功 = fail
+    if degraded_result.get("pipeline_completed") and not degraded_result.get("has_degradation_indication"):
+        print(f"  ✗ 降級測試：pipeline 完成但無降級標記（偽裝成功）")
+        all_pass = False
 
     if offline_only:
         results["overall"] = "pass (offline-only)" if all_pass else "fail"
@@ -395,11 +406,20 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
     # ── Section B: 線上推理完整驗證 ─────────────────────────────────────
     model_id = os.getenv("BEDROCK_MODEL_ID", "").strip()
     if not model_id:
-        print("⚠ BEDROCK_MODEL_ID 未設定，跳過線上驗證")
-        results["overall"] = "skip (no model_id)"
-        results["sections"]["online_test"] = {"status": "skipped", "reason": "BEDROCK_MODEL_ID not set"}
-        _write_artifact(results)
-        return 0  # 不算失敗，只是跳過
+        # FR-3 fail-closed: 未設定 MODEL_ID 時，無 --allow-skip 不得 exit 0
+        allow_skip = "--allow-skip" in sys.argv
+        if allow_skip:
+            print("⚠ BEDROCK_MODEL_ID 未設定，--allow-skip 生效，跳過線上驗證")
+            results["overall"] = "skip (no model_id, --allow-skip)"
+            results["sections"]["online_test"] = {"status": "skipped", "reason": "BEDROCK_MODEL_ID not set"}
+            _write_artifact(results)
+            return 0
+        else:
+            print("❌ BEDROCK_MODEL_ID 未設定且未提供 --allow-skip，exit 2", file=sys.stderr)
+            results["overall"] = "skip (no model_id, fail-closed)"
+            results["sections"]["online_test"] = {"status": "skipped", "reason": "BEDROCK_MODEL_ID not set, no --allow-skip"}
+            _write_artifact(results)
+            return 2  # 明確非成功：skipped ≠ pass
 
     print(f"▶ 線上推理驗證（model={model_id}, coin={coin}）...")
     docs = _build_fixture_docs(coin)
@@ -432,13 +452,28 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
 
     # ── Section B.1: claim_id 溯源驗證 ────────────────────────────────────
     print("▶ claim_id 溯源驗證...")
-    trace_result = verify_claim_id_traceability(report, evidence)
+    # run_agent_pipeline 會對同一批 docs 呼叫 deterministic extract_claims；
+    # 在驗證端重建同一組 ID，才能驗證真正的 Claim provenance。
+    from trustforge.trust.scoring import extract_claims
+
+    traceable_claim_ids = {claim.id for claim in extract_claims(docs)}
+    trace_result = verify_claim_id_traceability(
+        report,
+        evidence,
+        traceable_claim_ids=traceable_claim_ids,
+    )
     results["sections"]["claim_id_traceability"] = trace_result
     if not trace_result["meets_minimum"]:
         print(f"  ✗ claim_id 不足：找到 {trace_result['claim_ids_count']} 條，需 ≥5")
         all_pass = False
     else:
         print(f"  ✓ claim_id 溯源：{trace_result['claim_ids_count']} 條引用")
+    # FR-2 fail-closed: 引用不存在的 claim_id → 失敗
+    if not trace_result["all_traceable"]:
+        print(f"  ✗ claim_id 不可追溯：{trace_result['untraceable_ids'][:5]}")
+        all_pass = False
+    elif trace_result["meets_minimum"]:
+        print(f"  ✓ 所有 claim_id 可追溯")
 
     # ── Section B.2: 行文層次驗證 ─────────────────────────────────────────
     print("▶ 行文層次驗證...")
@@ -512,6 +547,8 @@ if __name__ == "__main__":
     for arg in sys.argv[1:]:
         if arg == "--offline-only":
             offline_only = True
+        elif arg == "--allow-skip":
+            pass  # 已在 run_full_verification 中透過 sys.argv 讀取
         elif arg.startswith("--coin"):
             if "=" in arg:
                 coin = arg.split("=", 1)[1].upper()
