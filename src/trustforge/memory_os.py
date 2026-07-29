@@ -350,6 +350,18 @@ class MemoryRepository:
         ).fetchall()
         return [self._row_to_entry(r) for r in rows]
 
+    def find_by_provider_hash(
+        self, provider: str, content_hash: str
+    ) -> MemoryEntry | None:
+        """Resolve the repository's unique content identity directly."""
+        conn = self._connect()
+        row = conn.execute(
+            """SELECT * FROM memory_entries
+               WHERE provider = ? AND content_hash = ?""",
+            (provider, content_hash),
+        ).fetchone()
+        return self._row_to_entry(row) if row is not None else None
+
     def find_by_run(self, run_id: str) -> list[MemoryEntry]:
         """Find all memory entries retrieved by a specific run."""
         conn = self._connect()

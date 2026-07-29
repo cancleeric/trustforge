@@ -410,8 +410,5 @@ class MemoryRetrievalAdapter:
         self, provider: str, content_hash: str, kind: str
     ) -> MemoryEntry | None:
         """Look up an existing entry by provider + content_hash."""
-        candidates = self._repo.find_by_kind(kind, limit=500)
-        for c in candidates:
-            if c.provider == provider and c.content_hash == content_hash:
-                return c
-        return None
+        entry = self._repo.find_by_provider_hash(provider, content_hash)
+        return entry if entry is not None and entry.kind == kind else None

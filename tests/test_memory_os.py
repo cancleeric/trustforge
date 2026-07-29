@@ -145,6 +145,25 @@ class TestRepositoryCRUD:
         assert len(results) == 2
         assert all(r.kind == "episodic" for r in results)
 
+    def test_find_by_provider_hash_has_no_recency_limit(
+        self, repo: MemoryRepository
+    ):
+        target = _make_entry(
+            provider="archive", content_hash="9" * 64, kind="semantic"
+        )
+        repo.save(target)
+        for index in range(501):
+            repo.save(
+                _make_entry(
+                    provider=f"source-{index}",
+                    content_hash=f"{index:064x}",
+                    kind="semantic",
+                )
+            )
+        found = repo.find_by_provider_hash("archive", "9" * 64)
+        assert found is not None
+        assert found.memory_id == target.memory_id
+
     def test_find_by_run(self, repo: MemoryRepository):
         run_id = "run-123"
         repo.save(_make_entry(run_id=run_id, content_hash="f" * 64))
