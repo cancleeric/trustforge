@@ -27,6 +27,7 @@ ROUTER_KINDS = frozenset(
     {
         "candidate_reservation",
         "candidate_result",
+        "candidate_cost_reconciliation",
         "router_emergency_stop",
     }
 )

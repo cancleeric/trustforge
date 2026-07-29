@@ -37,9 +37,12 @@ def _policy() -> RoutingPolicy:
         "routing_key_id": "route-1",
         "ramp_id": "ramp-1",
     }
-    digest = "sha256:" + hashlib.sha256(
-        b"trustforge.routing-policy.v1\x00" + canonical_json(raw)
-    ).hexdigest()
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"trustforge.routing-policy.v1\x00" + canonical_json(raw)
+        ).hexdigest()
+    )
     return RoutingPolicy(**raw, policy_digest=digest)
 
 
@@ -50,14 +53,13 @@ def _snapshot() -> RoutingSnapshot:
         desired_phase="canary",
         activation_status="completed",
         active=ReleaseEndpoint("sha256:" + "a" * 64, "http://127.0.0.1:8001", "m1"),
-        candidate=ReleaseEndpoint(
-            "sha256:" + "b" * 64, "http://127.0.0.1:8002", "m1"
-        ),
+        candidate=ReleaseEndpoint("sha256:" + "b" * 64, "http://127.0.0.1:8002", "m1"),
         policy=_policy(),
         candidate_requests=0,
         consecutive_errors=0,
         stop_after_errors=2,
-        ledger_head="sha256:" + "c" * 64,
+        control_event_head="sha256:" + "c" * 64,
+        outcome_head="sha256:" + "e" * 64,
     )
 
 
@@ -112,7 +114,9 @@ def test_invalid_or_noncanonical_request_is_never_canary_eligible(path):
 def test_allowlist_is_bound_to_identity_assets_releases_ramp_and_control_state():
     snapshot = _snapshot()
     policy = ReleaseHTTPCanaryPolicy(
-        (_entry("analyze", ("BTC",)),), trusted_proxy_uid=1234
+        (_entry("analyze", ("BTC",)),),
+        trusted_proxy_uid=1234,
+        control_ledger_head=snapshot.control_event_head,
     )
 
     subject, expected_head = policy.routing_subject(
@@ -121,7 +125,7 @@ def test_allowlist_is_bound_to_identity_assets_releases_ramp_and_control_state()
         snapshot=snapshot,
     )
     assert subject is not None and subject.startswith("sha256:")
-    assert expected_head == snapshot.ledger_head
+    assert expected_head == snapshot.control_event_head
 
     assert policy.routing_subject(
         trusted_identity="other@example.test",
@@ -134,14 +138,25 @@ def test_allowlist_is_bound_to_identity_assets_releases_ramp_and_control_state()
             for field in snapshot.__dataclass_fields__
             if field != "candidate"
         },
-        candidate=ReleaseEndpoint(
-            "sha256:" + "d" * 64, "http://127.0.0.1:8003", "m1"
-        ),
+        candidate=ReleaseEndpoint("sha256:" + "d" * 64, "http://127.0.0.1:8003", "m1"),
     )
     assert policy.routing_subject(
         trusted_identity="operator@example.test",
         path="/api/analyze?coin=BTC",
         snapshot=changed,
+    ) == (None, None)
+    advanced_head = RoutingSnapshot(
+        **{
+            field: getattr(snapshot, field)
+            for field in snapshot.__dataclass_fields__
+            if field != "control_event_head"
+        },
+        control_event_head="sha256:" + "d" * 64,
+    )
+    assert policy.routing_subject(
+        trusted_identity="operator@example.test",
+        path="/api/analyze?coin=BTC",
+        snapshot=advanced_head,
     ) == (None, None)
 
 
@@ -154,7 +169,9 @@ def test_identity_header_is_ignored_for_non_proxy_unix_peer():
             return self.uid, 99
 
     policy = ReleaseHTTPCanaryPolicy(
-        (_entry("analyze", ("BTC",)),), trusted_proxy_uid=1234
+        (_entry("analyze", ("BTC",)),),
+        trusted_proxy_uid=1234,
+        control_ledger_head=_snapshot().control_event_head,
     )
     assert (
         policy.authenticated_identity(
@@ -220,33 +237,40 @@ def _allowlist_payload(entries):
         "schema": "trustforge.release-http-canary-allowlist/v1",
         "activation_contract": ACTIVATION_CONTRACT,
         "trusted_proxy_uid": 1234,
+        "control_ledger_head": _snapshot().control_event_head,
         "entries": entries,
     }
 
 
-def test_versioned_activation_contract_allows_exact_nonempty_policy(monkeypatch):
-    entry = _entry("analyze", ("BTC",))
-    raw_entry = {
+def _raw_entry(endpoint="analyze", assets=("BTC",)):
+    entry = _entry(endpoint, assets)
+    return {
         field: list(value) if field == "assets" else value
         for field, value in (
             (name, getattr(entry, name)) for name in entry.__dataclass_fields__
         )
     }
+
+
+def test_versioned_activation_contract_allows_exact_nonempty_policy(monkeypatch):
     monkeypatch.setattr(
         release_http_canary,
         "read_regular_file",
         lambda *_args, **_kwargs: (
-            json.dumps(_allowlist_payload([raw_entry])).encode(),
+            json.dumps(_allowlist_payload([_raw_entry()])).encode(),
             SimpleNamespace(st_uid=0, st_mode=0o100600),
         ),
     )
     policy = ReleaseHTTPCanaryPolicy.load()
     assert policy.trusted_proxy_uid == 1234
-    assert policy.routing_subject(
-        trusted_identity="operator@example.test",
-        path="/api/analyze?coin=BTC",
-        snapshot=_snapshot(),
-    )[0] is not None
+    assert (
+        policy.routing_subject(
+            trusted_identity="operator@example.test",
+            path="/api/analyze?coin=BTC",
+            snapshot=_snapshot(),
+        )[0]
+        is not None
+    )
 
 
 @pytest.mark.parametrize(
@@ -254,6 +278,12 @@ def test_versioned_activation_contract_allows_exact_nonempty_policy(monkeypatch)
     [
         b"{not-json",
         json.dumps(_allowlist_payload([])).encode(),
+        json.dumps(
+            {
+                **_allowlist_payload([_raw_entry()]),
+                "control_ledger_head": "sha256:short",
+            }
+        ).encode(),
         json.dumps(
             {
                 **_allowlist_payload([{"not": "an entry"}]),

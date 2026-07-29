@@ -14,10 +14,12 @@ import pytest
 from scripts.migrate_release_ledgers import (
     _allowed_entry,
     _copy_ledger,
+    _copy_public_receipt,
     _publish_swap,
     _recover,
 )
 from scripts.provision_release_ledgers import _recover_provision
+from trustforge import release_router_runtime
 
 
 def _write_canonical(path: Path, payload: dict[str, object]) -> None:
@@ -531,6 +533,56 @@ def test_migration_copies_terminal_latch_but_omits_derived_checkpoint(
     assert (target / f"epoch-stop-{epoch}.json").read_text().startswith("epoch-stop")
     assert not (target / "authorization-checkpoint.json").exists()
     assert grp.getgrgid(target.stat().st_gid).gr_gid == os.getegid()
+
+
+def test_migration_upgrades_v1_permission_receipt(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source"
+    stage = tmp_path / "stage"
+    source.mkdir()
+    stage.mkdir()
+    receipt = source / "provision-receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "trustforge.release-ledger-provision-receipt/v1",
+                "control_public": {"key_id": "control", "public_key": "1" * 64},
+                "outcome_public": {"key_id": "outcome", "public_key": "2" * 64},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    receipt.chmod(0o644)
+    real_lstat = os.lstat
+
+    def root_lstat(path):
+        info = real_lstat(path)
+        if Path(path) == receipt:
+            values = list(info)
+            values[4] = 0
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr("scripts.migrate_release_ledgers.os.lstat", root_lstat)
+    monkeypatch.setattr("scripts.migrate_release_ledgers.os.fchown", lambda *_: None)
+    _copy_public_receipt(source, stage)
+    migrated = json.loads((stage / receipt.name).read_text())
+    assert migrated["schema"] == "trustforge.release-ledger-provision-receipt/v2"
+    assert "candidate_cost_reconciliation" in migrated["outcome_event_kinds"]
+    monkeypatch.setattr(
+        release_router_runtime,
+        "read_regular_file",
+        lambda *_args, **_kwargs: (
+            (stage / receipt.name).read_bytes(),
+            type(
+                "Info",
+                (),
+                {"st_uid": 0, "st_mode": stat.S_IFREG | 0o644, "st_nlink": 1},
+            )(),
+        ),
+    )
+    assert release_router_runtime._provision_receipt(stage / receipt.name) == migrated
 
 
 def test_exclusive_migration_lock_fences_concurrent_writer(tmp_path: Path) -> None:

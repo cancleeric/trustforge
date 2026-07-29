@@ -137,9 +137,7 @@ def _policy() -> RoutingPolicy:
         "routing_key_id": "drill-route-1",
         "ramp_id": "drill-ramp-1",
     }
-    digest = _sha256_raw(
-        b"trustforge.routing-policy.v1\x00" + canonical_json(payload)
-    )
+    digest = _sha256_raw(b"trustforge.routing-policy.v1\x00" + canonical_json(payload))
     return RoutingPolicy(**payload, policy_digest=digest)
 
 
@@ -252,6 +250,7 @@ def _make_ledgers(work_dir: Path) -> tuple[SignedEventLedger, SignedEventLedger]
                 {
                     "candidate_reservation",
                     "candidate_result",
+                    "candidate_cost_reconciliation",
                     "router_emergency_stop",
                 }
             )
@@ -296,9 +295,7 @@ def _authorization(
         "key_id": auth_key_id,
         "receipt_version": "trustforge.deployment-authorization/v3",
     }
-    signature = auth_private.sign(
-        AUTH_DOMAIN + canonical_json(unsigned)
-    ).hex()
+    signature = auth_private.sign(AUTH_DOMAIN + canonical_json(unsigned)).hex()
     return DeploymentAuthorization(**unsigned, signature=signature)
 
 
@@ -395,17 +392,11 @@ def run_drill(
     # Temporary keyring: every signing identity is generated fresh for this run
     # and never leaves the work directory. No production key is read or touched.
     manifest_private = Ed25519PrivateKey.generate()
-    manifest_public = manifest_private.public_key().public_bytes(
-        Encoding.Raw, PublicFormat.Raw
-    )
     manifest_key_id = "drill-manifest-1"
     auth_private = Ed25519PrivateKey.generate()
     auth_key_id = "drill-auth-1"
     complete_private = Ed25519PrivateKey.generate()
     complete_key_id = "drill-complete-1"
-    gate_key = secrets.token_bytes(32)
-    gate_key_id = "drill-gate-1"
-
     a_path, a_digest, b_path, b_digest = _build_artifacts(work_dir)
     a_server, a_handler = _start_release_server(
         b"ACTIVE", a_digest, manifest_private, manifest_key_id
@@ -425,21 +416,21 @@ def run_drill(
         b_origin = b_handler.origin
         a_endpoint = ReleaseEndpoint(a_digest, a_origin, manifest_key_id)
         b_endpoint = ReleaseEndpoint(b_digest, b_origin, manifest_key_id)
-        confirmation = (
-            f"PRODUCTION:{DRILL_TARGET}:{a_digest}:{b_digest}"
-        )
+        confirmation = f"PRODUCTION:{DRILL_TARGET}:{a_digest}:{b_digest}"
 
         control_ledger, outcome_ledger = _make_ledgers(work_dir)
         control = DeploymentControlLedger(
             control_ledger,
             outcome_ledger=outcome_ledger,
             authorization_keys={
-                auth_key_id: auth_private.public_key()
-                .public_bytes(Encoding.Raw, PublicFormat.Raw)
+                auth_key_id: auth_private.public_key().public_bytes(
+                    Encoding.Raw, PublicFormat.Raw
+                )
             },
             completion_keys={
-                complete_key_id: complete_private.public_key()
-                .public_bytes(Encoding.Raw, PublicFormat.Raw)
+                complete_key_id: complete_private.public_key().public_bytes(
+                    Encoding.Raw, PublicFormat.Raw
+                )
             },
             target=DRILL_TARGET,
             target_confirmation=confirmation,
@@ -482,9 +473,7 @@ def run_drill(
         )
         canary_state = control.routing_snapshot()
         if canary_state.phase != "canary":
-            raise RollbackDrillError(
-                f"canary phase not reached: {canary_state.phase}"
-            )
+            raise RollbackDrillError(f"canary phase not reached: {canary_state.phase}")
 
         # Replay identical PIT inputs against A and B; capture baseline digests.
         a_replay_digest, b_replay_digest, replay_detail = _replay_pit_inputs(
@@ -557,8 +546,7 @@ def run_drill(
             )
         if final_state.activation_status != "completed":
             raise RollbackDrillError(
-                f"rollback left activation unresolved: "
-                f"{final_state.activation_status}"
+                f"rollback left activation unresolved: {final_state.activation_status}"
             )
 
         # Confirm A is serving healthy immediately after rollback (SLO).
@@ -618,15 +606,9 @@ def run_drill(
             },
             "latency": {
                 "regression_injected_at_monotonic": round(t_regression, 6),
-                "rollback_prepare_start_monotonic": round(
-                    t_rollback_start, 6
-                ),
-                "rollback_complete_monotonic": round(
-                    t_rollback_complete, 6
-                ),
-                "a_health_confirmed_monotonic": round(
-                    t_a_health_confirmed, 6
-                ),
+                "rollback_prepare_start_monotonic": round(t_rollback_start, 6),
+                "rollback_complete_monotonic": round(t_rollback_complete, 6),
+                "a_health_confirmed_monotonic": round(t_a_health_confirmed, 6),
             },
             "replay": {
                 "inputs": list(pit_inputs),
@@ -789,18 +771,17 @@ def run(
         "result": report["result"],
         "active_artifact_digest": report["active_artifact_digest"],
         "candidate_artifact_digest": report["candidate_artifact_digest"],
-        "rollback_reconcile_seconds": report["slo"][
-            "rollback_reconcile_seconds"
-        ]["observed"],
-        "a_health_restored_seconds": report["slo"][
-            "a_health_restored_seconds"
-        ]["observed"],
+        "rollback_reconcile_seconds": report["slo"]["rollback_reconcile_seconds"][
+            "observed"
+        ],
+        "a_health_restored_seconds": report["slo"]["a_health_restored_seconds"][
+            "observed"
+        ],
         "slo_pass": report["slo_pass"],
         "gate_key_hex": gate_key.hex(),
         "gate_key_id": gate_key_id,
         "receipt_output_digest": output_digest,
-        "receipt_output_digest_match": receipt.get("output_digest")
-        == output_digest,
+        "receipt_output_digest_match": receipt.get("output_digest") == output_digest,
     }
 
 
@@ -820,9 +801,7 @@ def main() -> int:
         "--gate-key-hex",
         help="HMAC gate key (>=32 bytes, hex). Generated if omitted.",
     )
-    parser.add_argument(
-        "--gate-key-id", default="drill-gate-1"
-    )
+    parser.add_argument("--gate-key-id", default="drill-gate-1")
     parser.add_argument(
         "--summary",
         type=Path,
@@ -855,9 +834,7 @@ def main() -> int:
     print(f"receipt={summary['receipt_path']}")
     if args.summary is not None:
         args.summary.parent.mkdir(parents=True, exist_ok=True)
-        args.summary.write_text(
-            json.dumps(summary, sort_keys=True) + "\n"
-        )
+        args.summary.write_text(json.dumps(summary, sort_keys=True) + "\n")
     return 0 if summary["slo_pass"] else 1
 
 

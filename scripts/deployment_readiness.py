@@ -144,6 +144,7 @@ def _build_control(
                 {
                     "candidate_reservation",
                     "candidate_result",
+                    "candidate_cost_reconciliation",
                     "router_emergency_stop",
                 }
             )
@@ -245,7 +246,8 @@ def _redacted_status(control: DeploymentControlLedger) -> dict:
         "status_version": "trustforge.deployment-status/v1",
         "target": control.target,
         "ledger_id": state.ledger_id,
-        "ledger_head": state.ledger_head,
+        "control_event_head": state.control_event_head,
+        "outcome_head": state.outcome_head,
         "phase": state.phase,
         "desired_phase": state.desired_phase,
         "activation_status": state.activation_status,
@@ -264,9 +266,7 @@ def _key_roles_for_command(command: str) -> frozenset[str]:
     if command == "status":
         return frozenset({"control-public", "outcome-public"})
     if command == "rebuild-checkpoint":
-        return frozenset(
-            {"control-public", "outcome-public", "control-private"}
-        )
+        return frozenset({"control-public", "outcome-public", "control-private"})
     if command in {"stop", "rollback-a"}:
         return frozenset(
             {

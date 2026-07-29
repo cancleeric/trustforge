@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.release_router import ReleaseRoutingError, RoutedResponse, RoutingSnapshot
+from trustforge.release_router import (
+    ReleaseRoutingError,
+    RoutedResponse,
+    RoutingSnapshot,
+)
 from trustforge.safe_fs import read_regular_file
 
 ALLOWLIST_PATH = Path("/etc/trustforge/release-router-allowlist.json")
@@ -46,9 +50,11 @@ class ReleaseHTTPCanaryPolicy:
         entries: tuple[CanaryAllowlistEntry, ...],
         *,
         trusted_proxy_uid: int | None,
+        control_ledger_head: str | None = None,
     ):
         self._entries = entries
         self.trusted_proxy_uid = trusted_proxy_uid
+        self.control_ledger_head = control_ledger_head
 
     @classmethod
     def disabled(cls) -> "ReleaseHTTPCanaryPolicy":
@@ -62,10 +68,18 @@ class ReleaseHTTPCanaryPolicy:
             raise ReleaseRoutingError("canary allowlist ownership or mode is unsafe")
         try:
             payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReleaseRoutingError("canary allowlist is invalid") from exc
+        return cls.from_payload(payload)
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ReleaseHTTPCanaryPolicy":
+        try:
             if set(payload) != {
                 "schema",
                 "activation_contract",
                 "trusted_proxy_uid",
+                "control_ledger_head",
                 "entries",
             }:
                 raise ValueError
@@ -74,19 +88,26 @@ class ReleaseHTTPCanaryPolicy:
             if payload["activation_contract"] != ACTIVATION_CONTRACT:
                 raise ValueError
             entries = tuple(_entry(value) for value in payload["entries"])
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+        except (TypeError, ValueError, KeyError) as exc:
             raise ReleaseRoutingError("canary allowlist is invalid") from exc
         proxy_uid = payload["trusted_proxy_uid"]
+        control_head = payload["control_ledger_head"]
         if (
             not isinstance(proxy_uid, int)
             or isinstance(proxy_uid, bool)
             or proxy_uid < 1
+            or not isinstance(control_head, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", control_head) is None
             or not entries
             or len(entries) > 1_000
             or len(set(entries)) != len(entries)
         ):
             raise ReleaseRoutingError("canary allowlist entries are invalid")
-        return cls(entries, trusted_proxy_uid=proxy_uid)
+        return cls(
+            entries,
+            trusted_proxy_uid=proxy_uid,
+            control_ledger_head=control_head,
+        )
 
     def routing_subject(
         self,
@@ -98,6 +119,7 @@ class ReleaseHTTPCanaryPolicy:
         """Return (opaque subject, authenticated head), or A-only `(None, None)`."""
         if (
             self.trusted_proxy_uid is None
+            or self.control_ledger_head != snapshot.control_event_head
             or trusted_identity is None
             or not (1 <= len(trusted_identity.encode()) <= 256)
         ):
@@ -117,22 +139,25 @@ class ReleaseHTTPCanaryPolicy:
         )
         if match not in self._entries:
             return None, None
-        subject = "sha256:" + hashlib.sha256(
-            b"trustforge.release-http-canary-subject.v1\x00"
-            + canonical_json(
-                {
-                    "trusted_identity": trusted_identity,
-                    "endpoint": request.endpoint,
-                    "assets": list(request.assets),
-                    "active_release_digest": snapshot.active.release_digest,
-                    "candidate_release_digest": snapshot.candidate.release_digest,
-                    "ramp_id": snapshot.policy.ramp_id,
-                    "control_ledger_id": snapshot.ledger_id,
-                    "policy_digest": snapshot.policy.policy_digest,
-                }
-            )
-        ).hexdigest()
-        return subject, snapshot.ledger_head
+        subject = (
+            "sha256:"
+            + hashlib.sha256(
+                b"trustforge.release-http-canary-subject.v1\x00"
+                + canonical_json(
+                    {
+                        "trusted_identity": trusted_identity,
+                        "endpoint": request.endpoint,
+                        "assets": list(request.assets),
+                        "active_release_digest": snapshot.active.release_digest,
+                        "candidate_release_digest": snapshot.candidate.release_digest,
+                        "ramp_id": snapshot.policy.ramp_id,
+                        "control_ledger_id": snapshot.ledger_id,
+                        "policy_digest": snapshot.policy.policy_digest,
+                    }
+                )
+            ).hexdigest()
+        )
+        return subject, snapshot.control_event_head
 
     def authenticated_identity(
         self, connection: socket.socket, claimed_identity: str | None
@@ -177,7 +202,10 @@ def _entry(value: object) -> CanaryAllowlistEntry:
     normalized = tuple(_asset(asset) for asset in assets)
     if len(normalized) != (2 if value["endpoint"] == "compare" else 1):
         raise ValueError
-    text_fields = {name: value[name] for name in fields - {"assets", "endpoint", "trusted_identity"}}
+    text_fields = {
+        name: value[name]
+        for name in fields - {"assets", "endpoint", "trusted_identity"}
+    }
     if any(not isinstance(item, str) or not item for item in text_fields.values()):
         raise ValueError
     return CanaryAllowlistEntry(identity, value["endpoint"], normalized, **text_fields)
@@ -206,7 +234,11 @@ def parse_canary_request(path: str) -> CanaryRequest | None:
     values: dict[str, list[str]] = {}
     for key, value in pairs:
         values.setdefault(key, []).append(value)
-    if any(len(value) != 1 for key, value in values.items() if key in {"type", "coin", "coin2"}):
+    if any(
+        len(value) != 1
+        for key, value in values.items()
+        if key in {"type", "coin", "coin2"}
+    ):
         return None
     kind = values.get("type", ["multi_source"])[0]
     if kind not in {"multi_source", "comparison"}:
@@ -260,7 +292,14 @@ def validate_analyze_compare_response(path: str, response: RoutedResponse) -> No
         ):
             raise ReleaseRoutingError("candidate success envelope is invalid")
         required = (
-            {"report_a", "evidence_a", "report_b", "evidence_b", "comparison_report", "execution"}
+            {
+                "report_a",
+                "evidence_a",
+                "report_b",
+                "evidence_b",
+                "comparison_report",
+                "execution",
+            }
             if request.endpoint == "compare"
             else {"report", "evidence", "execution"}
         )

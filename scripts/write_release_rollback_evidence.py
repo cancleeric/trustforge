@@ -10,7 +10,7 @@ import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA = "trustforge.release-install-rollback-failed/v2"
+SCHEMA = "trustforge.release-install-rollback-failed/v3"
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -36,17 +36,28 @@ def main() -> int:
     parser.add_argument("--prior-release", required=True)
     parser.add_argument("--target-unit-sha256", required=True)
     parser.add_argument("--prior-unit-sha256", required=True)
+    parser.add_argument("--target-allowlist-sha256", required=True)
+    parser.add_argument("--prior-allowlist-sha256", required=True)
     parser.add_argument("--target-pid", type=int, required=True)
     parser.add_argument("--restored-pid", type=int, required=True)
     args = parser.parse_args()
     for label, digest in (
         ("release evidence", args.target_evidence_sha256),
         ("router archive", args.target_archive_sha256),
+        ("target allowlist", args.target_allowlist_sha256),
     ):
         if len(digest) != 64 or any(
             character not in "0123456789abcdef" for character in digest
         ):
             raise SystemExit(f"{label} SHA-256 is invalid")
+    if args.prior_allowlist_sha256 != "absent" and (
+        len(args.prior_allowlist_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in args.prior_allowlist_sha256
+        )
+    ):
+        raise SystemExit("prior allowlist SHA-256 is invalid")
     parent_fd = os.open(
         args.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     )
@@ -82,6 +93,8 @@ def main() -> int:
             "target_release": args.target_release,
             "target_evidence_sha256": args.target_evidence_sha256,
             "target_archive_sha256": args.target_archive_sha256,
+            "target_allowlist_sha256": args.target_allowlist_sha256,
+            "prior_allowlist_sha256": args.prior_allowlist_sha256,
             "target_unit_sha256": args.target_unit_sha256,
             "timestamp": datetime.now(UTC).isoformat(),
         }

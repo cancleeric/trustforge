@@ -124,7 +124,8 @@ class RoutingSnapshot:
     candidate_requests: int
     consecutive_errors: int
     stop_after_errors: int
-    ledger_head: str
+    control_event_head: str
+    outcome_head: str
     candidate_blocked: bool = False
 
 
@@ -211,7 +212,7 @@ class ReleaseABRouter:
                 return self._request_a_fallback(path, request_headers)
             if (
                 expected_control_head is not None
-                and snapshot.ledger_head != expected_control_head
+                and snapshot.control_event_head != expected_control_head
             ):
                 return self._request_a_fallback(path, request_headers)
             if not self._candidate_selected(snapshot, stable_subject):
@@ -225,7 +226,7 @@ class ReleaseABRouter:
             reservation_id = secrets.token_hex(16)
             try:
                 snapshot = self.ledger.reserve_candidate(
-                    expected_head=snapshot.ledger_head,
+                    expected_head=snapshot.outcome_head,
                     reservation_id=reservation_id,
                 )
                 break
@@ -255,7 +256,7 @@ class ReleaseABRouter:
             if self.response_validator is not None:
                 self.response_validator(path, response)
             self.ledger.record_candidate_result(
-                expected_head=snapshot.ledger_head,
+                expected_head=snapshot.outcome_head,
                 reservation_id=reservation_id,
                 ok=True,
                 status_code=response.status_code,
@@ -271,7 +272,7 @@ class ReleaseABRouter:
             )
             try:
                 self.ledger.record_candidate_result(
-                    expected_head=snapshot.ledger_head,
+                    expected_head=snapshot.outcome_head,
                     reservation_id=reservation_id,
                     ok=False,
                     status_code=0,

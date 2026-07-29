@@ -271,7 +271,7 @@ intentional non-reversible host mutations; rollback does not delete users,
 groups, or memberships.
 
 The release workflow must provide a canonical
-`trustforge.release-install-evidence/v1` receipt and its root-owned `0400`
+`trustforge.release-install-evidence/v2` receipt and its root-owned `0400`
 Ed25519 public keyring. The domain-separated signature binds the exact unit,
 runtime configuration, runtime public key material, both ledger bootstraps,
 the complete authenticated control events/head and ledger identity, retained A
