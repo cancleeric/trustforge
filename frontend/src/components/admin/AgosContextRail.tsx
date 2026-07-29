@@ -6,6 +6,7 @@
 import type { AgosContextManifest } from '../../lib/agosTypes'
 import { AgosBadge } from './AgosBadge'
 import { AgosTokenBudgetBar } from './AgosTokenBudgetBar'
+import { AgosRailState } from './AgosRailState'
 
 interface AgosContextRailProps {
   manifest: AgosContextManifest | null
@@ -15,23 +16,56 @@ interface AgosContextRailProps {
 
 export function AgosContextRail({ manifest, loading, error }: AgosContextRailProps) {
   if (loading) {
-    return <div className="animate-pulse space-y-2">{[1, 2, 3].map(i => (
-      <div key={i} className="h-8 bg-gray-100 rounded" />
-    ))}</div>
+    return <AgosRailState kind="loading" />
   }
   if (error) {
-    return <div className="text-red-600 p-4 border border-red-200 rounded">{error}</div>
+    return <AgosRailState kind={error === 'unauthorized' ? 'unauthorized' : 'error'} message={error === 'unauthorized' ? undefined : error} />
   }
   if (!manifest) {
-    return <p className="text-gray-500 p-4">No context manifest for this run.</p>
+    return <AgosRailState kind="empty" message="No context manifest for this run." />
   }
 
   return (
     <div className="space-y-4">
+      <dl className="grid gap-2 rounded-lg border p-3 text-xs sm:grid-cols-2">
+        <div><dt className="text-gray-500">Manifest ID</dt><dd className="break-all font-mono">{manifest.manifest_id}</dd></div>
+        <div><dt className="text-gray-500">Run ID</dt><dd className="break-all font-mono">{manifest.run_id}</dd></div>
+        <div><dt className="text-gray-500">Frozen at</dt><dd>{manifest.created_at}</dd></div>
+        <div><dt className="text-gray-500">Snapshot ref</dt><dd className="break-all font-mono">{manifest.included_refs.snapshot_ref || 'None'}</dd></div>
+        <div><dt className="text-gray-500">Question ref</dt><dd className="break-all font-mono">{manifest.included_refs.question_ref || 'None'}</dd></div>
+      </dl>
       {/* Token Budget */}
       <div>
         <h4 className="text-sm font-medium text-gray-700 mb-2">Token Budget</h4>
         <AgosTokenBudgetBar used={manifest.token_used} total={manifest.token_budget} />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        {manifest.included_refs.memory_refs.map(ref => (
+          <div key={ref.memory_id} className="rounded border p-3 text-xs">
+            <strong>Memory #{ref.rank}</strong>
+            <p className="break-all font-mono">{ref.memory_id}</p>
+            <p>{ref.reason}</p>
+            <AgosBadge variant={ref.evidence_eligible ? 'trusted' : 'historical'} label={ref.evidence_eligible ? 'Evidence' : 'Context only'} />
+          </div>
+        ))}
+        {manifest.included_refs.skill_refs.map(ref => (
+          <div key={`${ref.skill_id}-${ref.revision_hash}`} className="rounded border p-3 text-xs">
+            <strong className="break-all">{ref.skill_id}</strong>
+            <p className="break-all font-mono">{ref.revision_hash}</p><p>{ref.reason}</p>
+          </div>
+        ))}
+        {manifest.included_refs.tool_refs.map(ref => (
+          <div key={`${ref.tool_id}-${ref.version || ''}`} className="rounded border p-3 text-xs">
+            <strong className="break-all">{ref.tool_id}</strong><p>Version: {ref.version || 'Unknown'}</p>
+          </div>
+        ))}
+        {manifest.included_refs.policy_refs.map((ref, index) => (
+          <div key={index} className="rounded border p-3 text-xs">
+            <strong>Policy</strong>
+            {Object.entries(ref).map(([key, value]) => <p key={key} className="break-all"><span className="text-gray-500">{key}:</span> {value}</p>)}
+          </div>
+        ))}
       </div>
 
       {/* Content Hash */}

@@ -16,6 +16,7 @@ import { AgosContextRail } from '../components/admin/AgosContextRail'
 import { AgosMemoryRail } from '../components/admin/AgosMemoryRail'
 import { AgosSkillRail } from '../components/admin/AgosSkillRail'
 import { AgosToolRail } from '../components/admin/AgosToolRail'
+import { AgosRailState } from '../components/admin/AgosRailState'
 
 type TabId = 'memory' | 'skill' | 'tool' | 'context'
 
@@ -51,10 +52,11 @@ export default function AdminAgosPage() {
     data: null, loading: false, error: null,
   })
 
-  const token = loadSessionToken() || ''
+  const token = loadSessionToken()
 
   const fetchData = async (rid: string) => {
     if (!rid.trim()) return
+    if (!token) return
     setSearchRunId(rid)
 
     const headers: Record<string, string> = {
@@ -76,12 +78,25 @@ export default function AdminAgosPage() {
         fetch(`${base}/context?run_id=${encodeURIComponent(rid)}`, { headers }),
       ])
 
+      const responseError = async (response: Response, fallback: string) => {
+        if (response.status === 401 || response.status === 403) return 'unauthorized'
+        try {
+          const body = await response.json()
+          return body.error?.message || fallback
+        } catch {
+          return fallback
+        }
+      }
+
       // Process memories
       if (memRes.status === 'fulfilled' && memRes.value.ok) {
         const json = await memRes.value.json()
         setMemories({ data: json.data?.items || [], loading: false, error: null })
       } else {
-        setMemories({ data: [], loading: false, error: 'Failed to fetch memories' })
+        const error = memRes.status === 'fulfilled'
+          ? await responseError(memRes.value, 'Failed to fetch memories')
+          : 'Failed to fetch memories'
+        setMemories({ data: [], loading: false, error })
       }
 
       // Process skills
@@ -89,7 +104,10 @@ export default function AdminAgosPage() {
         const json = await skillRes.value.json()
         setSkills({ data: json.data?.items || [], loading: false, error: null })
       } else {
-        setSkills({ data: [], loading: false, error: 'Failed to fetch skills' })
+        const error = skillRes.status === 'fulfilled'
+          ? await responseError(skillRes.value, 'Failed to fetch skills')
+          : 'Failed to fetch skills'
+        setSkills({ data: [], loading: false, error })
       }
 
       // Process tools
@@ -97,7 +115,10 @@ export default function AdminAgosPage() {
         const json = await toolRes.value.json()
         setTools({ data: json.data?.items || [], loading: false, error: null })
       } else {
-        setTools({ data: [], loading: false, error: 'Failed to fetch tools' })
+        const error = toolRes.status === 'fulfilled'
+          ? await responseError(toolRes.value, 'Failed to fetch tools')
+          : 'Failed to fetch tools'
+        setTools({ data: [], loading: false, error })
       }
 
       // Process context
@@ -109,7 +130,10 @@ export default function AdminAgosPage() {
           setContext({ data: null, loading: false, error: json.error?.message || 'Not found' })
         }
       } else {
-        setContext({ data: null, loading: false, error: 'Failed to fetch context' })
+        const error = ctxRes.status === 'fulfilled'
+          ? await responseError(ctxRes.value, 'Failed to fetch context')
+          : 'Failed to fetch context'
+        setContext({ data: null, loading: false, error })
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Network error'
@@ -131,7 +155,8 @@ export default function AdminAgosPage() {
       </div>
 
       {/* Run ID Input */}
-      <div className="flex gap-2">
+      {!token && <AgosRailState kind="unauthorized" />}
+      <div className="flex flex-col gap-2 sm:flex-row">
         <input
           type="text"
           value={runId}
@@ -143,7 +168,7 @@ export default function AdminAgosPage() {
         />
         <button
           onClick={() => fetchData(runId)}
-          disabled={!runId.trim()}
+          disabled={!runId.trim() || !token}
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Query
@@ -156,7 +181,7 @@ export default function AdminAgosPage() {
 
       {/* Tabs */}
       <div className="border-b border-gray-200">
-        <nav className="flex -mb-px" aria-label="Agent OS tabs">
+        <nav className="flex -mb-px overflow-x-auto" aria-label="Agent OS tabs" role="tablist">
           {TABS.map(tab => (
             <button
               key={tab.id}

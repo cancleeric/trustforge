@@ -5,6 +5,7 @@
  */
 import type { AgosMemoryItem } from '../../lib/agosTypes'
 import { AgosBadge, evidenceBadgeVariant } from './AgosBadge'
+import { AgosRailState } from './AgosRailState'
 
 interface AgosMemoryRailProps {
   items: AgosMemoryItem[]
@@ -14,46 +15,40 @@ interface AgosMemoryRailProps {
 
 export function AgosMemoryRail({ items, loading, error }: AgosMemoryRailProps) {
   if (loading) {
-    return <div className="animate-pulse space-y-2">{[1, 2, 3].map(i => (
-      <div key={i} className="h-12 bg-gray-100 rounded" />
-    ))}</div>
+    return <AgosRailState kind="loading" />
   }
   if (error) {
-    return <div className="text-red-600 p-4 border border-red-200 rounded">{error}</div>
+    return <AgosRailState kind={error === 'unauthorized' ? 'unauthorized' : 'error'} message={error === 'unauthorized' ? undefined : error} />
   }
   if (items.length === 0) {
-    return <p className="text-gray-500 p-4">No memory entries for this run.</p>
+    return <AgosRailState kind="empty" message="No memory entries for this run." />
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b text-left text-gray-600">
-            <th className="p-2">Kind</th>
-            <th className="p-2">Provider</th>
-            <th className="p-2">Eligibility</th>
-            <th className="p-2">Retrieved</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map(item => (
-            <tr key={item.memory_id} className="border-b hover:bg-gray-50">
-              <td className="p-2">
-                <AgosBadge variant="historical" label={item.kind} />
-              </td>
-              <td className="p-2 font-mono text-xs">{item.provider}</td>
-              <td className="p-2">
+    <div className="grid gap-3 lg:grid-cols-2">
+      {items.map(item => (
+        <article key={item.memory_id} className="min-w-0 rounded-lg border border-gray-200 p-4 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <AgosBadge variant="historical" label={item.kind} />
+            <AgosBadge variant={item.inclusion_status.startsWith('included') ? 'trusted' : 'candidate'} label={item.inclusion_status} />
                 <AgosBadge
-                  variant={evidenceBadgeVariant(item.evidence_eligible)}
-                  label={item.evidence_eligible ? 'Evidence' : 'Context only'}
+              variant={evidenceBadgeVariant(item.evidence_eligible_verified)}
+              label={item.evidence_eligible_verified ? 'Evidence verified' : 'Context only'}
                 />
-              </td>
-              <td className="p-2 text-xs text-gray-500">{item.retrieved_at}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+          </div>
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            <dt className="text-gray-500">Memory</dt><dd className="break-all font-mono">{item.memory_id}</dd>
+            <dt className="text-gray-500">Provider</dt><dd className="break-all font-mono">{item.provider}</dd>
+            <dt className="text-gray-500">Rank</dt><dd>{item.lineage_rank ?? '—'}</dd>
+            <dt className="text-gray-500">Selection</dt><dd>{item.selection_reason}</dd>
+            <dt className="text-gray-500">Content hash</dt><dd className="break-all font-mono">{item.content_hash}</dd>
+            <dt className="text-gray-500">Content ref</dt><dd className="break-all font-mono">{item.content_ref}</dd>
+            <dt className="text-gray-500">Published</dt><dd>{item.published_at || '—'}</dd>
+            <dt className="text-gray-500">Retrieved</dt><dd>{item.retrieved_at}</dd>
+            <dt className="text-gray-500">Expires</dt><dd>{item.expires_at || 'Never'}</dd>
+          </dl>
+        </article>
+      ))}
     </div>
   )
 }

@@ -5,6 +5,7 @@
  */
 import type { AgosToolItem } from '../../lib/agosTypes'
 import { AgosBadge, statusBadgeVariant } from './AgosBadge'
+import { AgosRailState } from './AgosRailState'
 
 interface AgosToolRailProps {
   items: AgosToolItem[]
@@ -14,47 +15,37 @@ interface AgosToolRailProps {
 
 export function AgosToolRail({ items, loading, error }: AgosToolRailProps) {
   if (loading) {
-    return <div className="animate-pulse space-y-2">{[1, 2, 3].map(i => (
-      <div key={i} className="h-12 bg-gray-100 rounded" />
-    ))}</div>
+    return <AgosRailState kind="loading" />
   }
   if (error) {
-    return <div className="text-red-600 p-4 border border-red-200 rounded">{error}</div>
+    return <AgosRailState kind={error === 'unauthorized' ? 'unauthorized' : 'error'} message={error === 'unauthorized' ? undefined : error} />
   }
   if (items.length === 0) {
-    return <p className="text-gray-500 p-4">No tool invocations for this run.</p>
+    return <AgosRailState kind="empty" message="No tool invocations for this run." />
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b text-left text-gray-600">
-            <th className="p-2">Tool</th>
-            <th className="p-2">Status</th>
-            <th className="p-2">Input Hash</th>
-            <th className="p-2">Started</th>
-            <th className="p-2">Error</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map(item => (
-            <tr key={item.invocation_id} className="border-b hover:bg-gray-50">
-              <td className="p-2 font-mono text-xs">{item.tool_id}</td>
-              <td className="p-2">
-                <AgosBadge variant={statusBadgeVariant(item.status)} label={item.status} />
-              </td>
-              <td className="p-2">
-                <code className="text-xs bg-gray-100 px-1 rounded">
-                  {item.input_hash.slice(0, 12)}...
-                </code>
-              </td>
-              <td className="p-2 text-xs text-gray-500">{item.started_at}</td>
-              <td className="p-2 text-xs text-red-500">{item.error || '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="grid gap-3 lg:grid-cols-2">
+      {items.map(item => (
+        <article key={item.invocation_id} className="min-w-0 rounded-lg border border-gray-200 p-4 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <strong className="break-all font-mono text-xs">{item.tool_id}</strong>
+            <AgosBadge variant={statusBadgeVariant(item.status)} label={item.status} />
+            {item.side_effect_class && <AgosBadge variant={item.side_effect_class === 'read_only' ? 'risk-read' : item.side_effect_class === 'local_write' ? 'risk-local' : item.side_effect_class === 'external_write' ? 'risk-external' : item.side_effect_class === 'deploy_or_release' ? 'risk-deploy' : 'historical'} label={item.side_effect_class} />}
+          </div>
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            <dt className="text-gray-500">Invocation</dt><dd className="break-all font-mono">{item.invocation_id}</dd>
+            <dt className="text-gray-500">Approval</dt><dd>{item.approval_requirement || 'Unknown'}</dd>
+            <dt className="text-gray-500">Evidence class</dt><dd>{item.evidence_class || 'Unknown'}</dd>
+            <dt className="text-gray-500">Evidence refs</dt><dd className="break-all">{item.evidence_refs?.join(', ') || 'None'}</dd>
+            <dt className="text-gray-500">Input hash</dt><dd className="break-all font-mono">{item.input_hash}</dd>
+            <dt className="text-gray-500">Output hash</dt><dd className="break-all font-mono">{item.output_hash || '—'}</dd>
+            <dt className="text-gray-500">Started</dt><dd>{item.started_at}</dd>
+            <dt className="text-gray-500">Completed</dt><dd>{item.completed_at || '—'}</dd>
+            <dt className="text-gray-500">Error</dt><dd className="text-red-600">{item.error || '—'}</dd>
+          </dl>
+        </article>
+      ))}
     </div>
   )
 }
