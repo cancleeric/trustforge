@@ -144,8 +144,12 @@ export default function CurrencyGalaxy({
 
   return (
     <div
+      // inset 搬到 .hermes-galaxy-canvas：≤900px 有規則會把外層
+      // [data-region='galaxy'] 也推到 --hermes-top，inline style 蓋不掉，
+      // 同一個偏移就被套兩次（實測 390x844 多出 130px 死空白）。
+      className="hermes-galaxy-canvas"
       style={{
-        position: 'absolute', left: 'var(--hermes-rail)', right: 'var(--hermes-right-rail)', top: 'var(--hermes-top)', bottom: 'var(--hermes-bottom)', overflow: 'hidden',
+        overflow: 'hidden',
         background: 'radial-gradient(ellipse at 50% 44%,#0d1c2a 0%,#050a12 70%)',
         filter: focusPulse ? 'brightness(1.35) saturate(1.3)' : 'brightness(1) saturate(1)',
         transition: 'filter .4s ease-out',

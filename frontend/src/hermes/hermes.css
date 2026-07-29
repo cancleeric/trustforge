@@ -113,6 +113,17 @@
   backdrop-filter: blur(10px);
 }
 
+/* 星系畫布。桌機外層 [data-region='galaxy'] 是 inset:0 全出血，畫布自己退到
+   --hermes-top/--hermes-rail 才不會壓到頂欄與左右軌。≤900px 外層已被推到
+   --hermes-top（見該媒體查詢），畫布必須歸零，否則偏移套兩次。 */
+.hermes-galaxy-canvas {
+  position: absolute;
+  left: var(--hermes-rail);
+  right: var(--hermes-right-rail);
+  top: var(--hermes-top);
+  bottom: var(--hermes-bottom);
+}
+
 /* Boot layer 必須有實際尺寸；零尺寸容器套 clip-path 會裁掉 absolute HUD。 */
 .hermes-boot-layer {
   position: absolute;
@@ -2785,6 +2796,17 @@
      只在 ≤900px 收窄到 topbar~energy-deck 之間，桌面全螢幕出血效果不變。 */
   [data-region='galaxy'] {
     inset: var(--hermes-top) 0 var(--hermes-bottom) 0;
+  }
+
+  /* 外層已經吃掉 --hermes-top/--hermes-bottom，畫布再吃一次就是套兩次：
+     390x844 實測內容被推到 y=259（=2×129），中間 130px 全黑什麼都不畫。
+     只歸零 top。左右不能碰：外層在這裡左右是 0，軌距仍得由畫布自己讓，
+     否則 561~900 的幣種鈕會被左欄 .hermes-nav-item 蓋住點不到。
+     bottom 那一份重複是 load-bearing 的——它替 .hermes-mobile-divergence
+     留出底部整條帶，一併歸零的話畫布會長到卡片底下，底部焦點讀數
+     （BITCOIN 59/100…）就從半透明卡片透出來跟卡片文字疊成一團。 */
+  [data-region='galaxy']>.hermes-galaxy-canvas {
+    top: 0;
   }
 }
 
