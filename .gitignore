@@ -24,4 +24,11 @@ out/
 .cli/
 .playwright-mcp/
 .kiro/settings/
+
+# 本機審查與執行期產物
+semantic-review/
+skills/hermes/source/*.json
+
+# 本機憑證（正式值存放於 Hurricane Vault）
+whale.alert.apikey
 data/trustforge.db
