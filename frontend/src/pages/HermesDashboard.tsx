@@ -572,6 +572,10 @@ export default function HermesDashboard() {
     setSearchParams(next)
   }, [searchParams, setSearchParams])
 
+  useEffect(() => {
+    setSelectedStage(null)
+  }, [activeModule])
+
   const selCoin = model.byId[selectedId]
   const derivation = deriveSelected(selCoin)
   const telemetryScore = moduleTelemetry?.trustScore == null
@@ -750,16 +754,17 @@ export default function HermesDashboard() {
 
         <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
 
-        {/* N82：FPS/畫質 HUD 改成只有 `?fps=1` 才顯示。
-            兩個理由：
-            1. 它固定在左下角、z-index 9999，窄螢幕會壓在能量列的站點編號上——
-               實測 430x932「60 FPS」壓住「01」12x12px、「HIGH」壓住「02」9x10px，
-               七個模組全中（N78 探針）。它是 position:fixed，站點怎麼排都躲不掉。
-            2. 「60 FPS · HIGH」是給我們自己看的效能數字，一般使用者看不懂也用不到，
-               不該常駐在畫面上。要看效能就自己掛 ?fps=1。
-            注意不要用 qaMode 當開關：探針就是帶 ?qa=1 進來的，那樣等於沒關。
-            自動降畫質邏輯（useAdaptiveQuality）照跑，這裡只收掉顯示。 */}
-        {searchParams.get('fps') === '1' && <FpsMeter fps={fps} quality={quality} measuring={measuring} />}
+        {/* FPS 與自適應品質是使用者判斷動態是否被降級的即時狀態，常駐顯示。
+            定位完全交由 hermes.css：桌面在 energy deck 上方左側，≤560px
+            收成小 badge，避免重演 inline bottom:8 壓住 deck 站點的問題。 */}
+        <FpsMeter
+          fps={fps}
+          quality={quality}
+          measuring={measuring}
+          labels={locale === 'zh-TW'
+            ? { high: '高畫質', medium: '中畫質', low: '低畫質', detecting: '偵測畫質中…' }
+            : { high: 'HIGH', medium: 'MED', low: 'LOW', detecting: 'DETECTING…' }}
+        />
 
       </div>
     </div>
