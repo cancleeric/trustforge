@@ -7,15 +7,15 @@ admission and terminal authorities delivered by #975/#991.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from enum import StrEnum
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
 import ipaddress
 import json
 import math
 import re
-from threading import BoundedSemaphore
+from threading import BoundedSemaphore, RLock
 import uuid
 from typing import Callable, Protocol
 from urllib.parse import urlsplit
@@ -43,7 +43,13 @@ PROVIDER_TIMEOUT_SECONDS = 5
 TOTAL_DEADLINE_SECONDS = 6
 ATTEMPTS = 1
 POLICY_VERSION = 1
-_ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$")
+SOURCE_POLICY_VERSION = "analysis-plan-source-classes-v1"
+PLANNER_ENVELOPE_VERSION = "hermes-preview-envelope-v1"
+PLANNER_SYSTEM_PROMPT = (
+    "Return one bounded internal analysis plan. Do not call tools, retrieve "
+    "resources, or execute the plan."
+)
+_ASSET_RE = re.compile(r"^[A-Z0-9][A-Z0-9._:-]{0,15}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -108,12 +114,14 @@ class PreviewPolicy:
             self.planner_identity,
         )
         if (
-            not _DIGEST_RE.fullmatch(self.policy_digest)
+            self.source_policy_version != SOURCE_POLICY_VERSION
+            or not _DIGEST_RE.fullmatch(self.policy_digest)
             or any(
                 type(value) is not str
                 or not value
                 or len(value) > 64
                 or value != value.strip()
+                or not _strict_ascii_metadata(value)
                 for value in versions
             )
             or not _DIGEST_RE.fullmatch(self.tokenizer_vocab_hash)
@@ -145,6 +153,8 @@ class PreviewPolicy:
             != (1, 3, 20, 1, 4, 8_000, 51_200, 50_000, 500_000)
         ):
             raise ValueError("invalid preview policy")
+        if self.policy_digest != canonical_preview_policy_digest(self):
+            raise ValueError("invalid preview policy digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,13 +166,13 @@ class PreviewRequest:
 
     def __post_init__(self) -> None:
         try:
-            encoded = self.question.encode("utf-8")
+            canonical_question = self.question.strip()
+            encoded = canonical_question.encode("utf-8")
         except Exception:
             raise ValueError("invalid preview request") from None
         if (
             type(self.question) is not str
-            or not self.question.strip()
-            or not 1 <= len(self.question) <= MAX_QUESTION_CODEPOINTS
+            or not 1 <= len(canonical_question) <= MAX_QUESTION_CODEPOINTS
             or len(encoded) > MAX_BODY_BYTES
             or self.locale not in {"zh-TW", "en"}
             or type(self.asset_hints) is not tuple
@@ -178,6 +188,7 @@ class PreviewRequest:
             )
         ):
             raise ValueError("invalid preview request")
+        object.__setattr__(self, "question", canonical_question)
 
     def canonical_payload(self) -> bytes:
         return json.dumps(
@@ -267,15 +278,15 @@ class ExactTokenizer(Protocol):
 @dataclass(frozen=True, slots=True)
 class PlannerResult:
     value: object = field(repr=False)
-    actual_tokens: int
-    actual_micro_usd: int
+    input_tokens: int
+    output_tokens: int
 
     def __post_init__(self) -> None:
         if (
-            type(self.actual_tokens) is not int
-            or not 0 <= self.actual_tokens <= MAX_INPUT_TOKENS + MAX_OUTPUT_TOKENS
-            or type(self.actual_micro_usd) is not int
-            or self.actual_micro_usd < 0
+            type(self.input_tokens) is not int
+            or not 0 <= self.input_tokens <= MAX_INPUT_TOKENS
+            or type(self.output_tokens) is not int
+            or not 0 <= self.output_tokens <= MAX_OUTPUT_TOKENS
         ):
             raise ValueError("invalid planner result")
 
@@ -301,7 +312,11 @@ _PLANNER_FAILURE_TOKEN = object()
 
 class PlannerPortFailure(RuntimeError):
     def __init__(
-        self, terminal_class: PreviewTerminalClass, token: object
+        self,
+        terminal_class: PreviewTerminalClass,
+        token: object,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> None:
         if (
             token is not _PLANNER_FAILURE_TOKEN
@@ -318,11 +333,24 @@ class PlannerPortFailure(RuntimeError):
         ):
             raise ValueError("invalid planner failure")
         self.terminal_class = terminal_class
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
         super().__init__(terminal_class.value)
 
     @classmethod
-    def provider(cls, terminal_class: PreviewTerminalClass) -> "PlannerPortFailure":
-        return cls(terminal_class, _PLANNER_FAILURE_TOKEN)
+    def provider(
+        cls,
+        terminal_class: PreviewTerminalClass,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> "PlannerPortFailure":
+        return cls(
+            terminal_class,
+            _PLANNER_FAILURE_TOKEN,
+            input_tokens,
+            output_tokens,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +359,7 @@ class PreviewAdmission:
     reason: str
     handle: object | None = field(default=None, repr=False)
     payload: bytes | None = field(default=None, repr=False)
+    reserved_input_tokens: int | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,24 +369,96 @@ class PreviewExecution:
     value: object | None = field(default=None, repr=False)
 
 
+class PreviewObservationOutcome(StrEnum):
+    ADMITTED = "admitted"
+    DENIED = "denied"
+    UNAVAILABLE = "unavailable"
+    RECONCILED = "reconciled"
+
+
+_OBSERVATION_TOKEN = object()
+
+
 @dataclass(frozen=True, slots=True)
 class PreviewObservation:
-    outcome: str
-    terminal_class: str | None
+    outcome: PreviewObservationOutcome
+    terminal_class: PreviewTerminalClass | None
     circuit_failure: bool
     policy_version: int
+    _token: object = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            self._token is not _OBSERVATION_TOKEN
+            or type(self.outcome) is not PreviewObservationOutcome
+            or (
+                self.terminal_class is not None
+                and type(self.terminal_class) is not PreviewTerminalClass
+            )
+            or type(self.circuit_failure) is not bool
+            or self.policy_version != POLICY_VERSION
+        ):
+            raise ValueError("invalid preview observation")
+
+    @classmethod
+    def mint(
+        cls,
+        outcome: PreviewObservationOutcome,
+        terminal_class: PreviewTerminalClass | None,
+        circuit_failure: bool,
+    ) -> "PreviewObservation":
+        return cls(
+            outcome,
+            terminal_class,
+            circuit_failure,
+            POLICY_VERSION,
+            _OBSERVATION_TOKEN,
+        )
 
 
 class MonotonicAuthority(Protocol):
     def now(self) -> float: ...
 
 
-class PlannerExecutionTimeout(RuntimeError):
-    pass
-
-
 class PlannerExecutionSaturated(RuntimeError):
     pass
+
+
+class PlannerExecutionState(StrEnum):
+    COMPLETED = "completed"
+    TIMED_OUT = "timed_out"
+
+
+@dataclass(frozen=True, slots=True)
+class PlannerExecution:
+    state: PlannerExecutionState
+    value: object | None = field(default=None, repr=False)
+    failure: BaseException | None = field(default=None, repr=False)
+    termination_proven: bool = False
+    provider_dispatched: bool = True
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.state) is not PlannerExecutionState
+            or type(self.termination_proven) is not bool
+            or type(self.provider_dispatched) is not bool
+            or (
+                self.state is PlannerExecutionState.COMPLETED
+                and (
+                    self.termination_proven is not True
+                    or self.provider_dispatched is not True
+                    or (self.value is None) == (self.failure is None)
+                )
+            )
+            or (
+                self.state is PlannerExecutionState.TIMED_OUT
+                and (
+                    self.value is not None
+                    or self.failure is not None
+                )
+            )
+        ):
+            raise ValueError("invalid planner execution result")
 
 
 class PlannerExecutionAuthority(Protocol):
@@ -365,31 +466,25 @@ class PlannerExecutionAuthority(Protocol):
 
     def invoke(
         self, operation: Callable[[], object], *, timeout_seconds: float
-    ) -> object: ...
-
-
-@dataclass(frozen=True, slots=True)
-class _ExecutionOutcome:
-    value: object | None = None
-    failure: BaseException | None = None
+    ) -> PlannerExecution: ...
 
 
 class BoundedPlannerExecutionAuthority:
-    """A fixed-capacity isolation pool; timed-out work can consume only its slot."""
+    """Bounded production executor whose slots outlive caller-side timeouts."""
 
     def __init__(self, capacity: int) -> None:
-        if type(capacity) is not int or capacity < 1:
+        if type(capacity) is not int or not 1 <= capacity <= 64:
             raise ValueError("invalid planner execution capacity")
         self.capacity = capacity
         self._slots = BoundedSemaphore(capacity)
-        self._pool = ThreadPoolExecutor(
+        self._executor = ThreadPoolExecutor(
             max_workers=capacity,
             thread_name_prefix="hermes-preview",
         )
 
     def invoke(
         self, operation: Callable[[], object], *, timeout_seconds: float
-    ) -> object:
+    ) -> PlannerExecution:
         if (
             not callable(operation)
             or type(timeout_seconds) not in (int, float)
@@ -398,27 +493,68 @@ class BoundedPlannerExecutionAuthority:
         ):
             raise ValueError("invalid planner execution")
         if not self._slots.acquire(blocking=False):
-            raise PlannerExecutionSaturated("planner execution saturated")
+            raise PlannerExecutionSaturated("planner execution capacity exhausted")
+        started = RLock()
+        dispatch_state = {"started": False}
+
+        def guarded_operation() -> object:
+            with started:
+                dispatch_state["started"] = True
+            return operation()
+
         try:
-            future = self._pool.submit(self._capture, operation)
+            future = self._executor.submit(guarded_operation)
         except BaseException:
             self._slots.release()
             raise
         future.add_done_callback(lambda _: self._slots.release())
         try:
-            outcome = future.result(timeout=float(timeout_seconds))
+            value = future.result(timeout=float(timeout_seconds))
         except FutureTimeoutError:
-            raise PlannerExecutionTimeout("planner execution timed out") from None
-        if outcome.failure is not None:
-            raise outcome.failure
-        return outcome.value
-
-    @staticmethod
-    def _capture(operation: Callable[[], object]) -> _ExecutionOutcome:
-        try:
-            return _ExecutionOutcome(value=operation())
+            if future.done():
+                try:
+                    value = future.result()
+                except BaseException as exc:
+                    return PlannerExecution(
+                        PlannerExecutionState.COMPLETED,
+                        failure=exc,
+                        termination_proven=True,
+                    )
+                return PlannerExecution(
+                    PlannerExecutionState.COMPLETED,
+                    value=value,
+                    termination_proven=True,
+                )
+            # cancel() is authoritative only when the operation never started.
+            terminated = future.cancel()
+            with started:
+                provider_dispatched = dispatch_state["started"]
+            return PlannerExecution(
+                PlannerExecutionState.TIMED_OUT,
+                termination_proven=terminated,
+                provider_dispatched=provider_dispatched,
+            )
         except BaseException as exc:
-            return _ExecutionOutcome(failure=exc)
+            return PlannerExecution(
+                PlannerExecutionState.COMPLETED,
+                failure=exc,
+                termination_proven=True,
+            )
+        return PlannerExecution(
+            PlannerExecutionState.COMPLETED,
+            value=value,
+            termination_proven=True,
+        )
+
+    def close(self) -> None:
+        """Stop accepting work and cancel operations that have not started."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def __enter__(self) -> "BoundedPlannerExecutionAuthority":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
 
 class ZeroSensitiveObserver:
@@ -443,20 +579,23 @@ class ZeroSensitiveObserver:
         self._retention = retention_seconds
         self._capacity = capacity
         self._events: list[tuple[float, PreviewObservation]] = []
+        self._lock = RLock()
 
     def record(self, observation: PreviewObservation) -> None:
         if type(observation) is not PreviewObservation:
             raise ValueError("invalid preview observation")
-        now = self._now()
-        self._prune(now)
-        self._events.append((now, observation))
-        if len(self._events) > self._capacity:
-            del self._events[: len(self._events) - self._capacity]
+        with self._lock:
+            now = self._now()
+            self._prune(now)
+            self._events.append((now, observation))
+            if len(self._events) > self._capacity:
+                del self._events[: len(self._events) - self._capacity]
 
     @property
     def events(self) -> list[PreviewObservation]:
-        self._prune(self._now())
-        return [observation for _, observation in self._events]
+        with self._lock:
+            self._prune(self._now())
+            return [observation for _, observation in self._events]
 
     def _now(self) -> float:
         value = self._clock.now()
@@ -540,11 +679,14 @@ class HermesPreviewControlPlane:
         except ValueError:
             before_dispatch = total_deadline
         if before_dispatch >= total_deadline:
-            self.reconcile(
+            if not self.reconcile(
                 admission,
                 terminal_class=PreviewTerminalClass.CLIENT_ABORT,
                 provider_dispatched=False,
-            )
+            ):
+                return PreviewExecution(
+                    PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
+                )
             return PreviewExecution(
                 PreviewControlStatus.UNAVAILABLE, "deadline_unavailable"
             )
@@ -552,9 +694,13 @@ class HermesPreviewControlPlane:
             before_dispatch + PROVIDER_TIMEOUT_SECONDS, total_deadline
         )
         try:
-            result = self._planner_execution.invoke(
+            envelope = canonical_planner_envelope(
+                admission.payload,
+                model_id=self._policy.allowed_model_id,
+            )
+            execution = self._planner_execution.invoke(
                 lambda: self._planner.plan(
-                    admission.payload,
+                    envelope,
                     max_output_tokens=MAX_OUTPUT_TOKENS,
                     provider_deadline=provider_deadline,
                     total_deadline=total_deadline,
@@ -562,6 +708,33 @@ class HermesPreviewControlPlane:
                 ),
                 timeout_seconds=provider_deadline - before_dispatch,
             )
+            if type(execution) is not PlannerExecution:
+                raise ValueError("invalid planner execution authority")
+            if execution.state is PlannerExecutionState.TIMED_OUT:
+                if execution.termination_proven:
+                    terminal_class = (
+                        PreviewTerminalClass.PROVIDER_TIMEOUT
+                        if execution.provider_dispatched
+                        else PreviewTerminalClass.CLIENT_ABORT
+                    )
+                    if not self.reconcile(
+                        admission,
+                        terminal_class=terminal_class,
+                        provider_dispatched=execution.provider_dispatched,
+                    ):
+                        return PreviewExecution(
+                            PreviewControlStatus.UNAVAILABLE,
+                            "terminal_unavailable",
+                        )
+                return PreviewExecution(
+                    PreviewControlStatus.UNAVAILABLE,
+                    "planner_timeout_pending"
+                    if not execution.termination_proven
+                    else "planner_unavailable",
+                )
+            if execution.failure is not None:
+                raise execution.failure
+            result = execution.value
             if type(result) is not PlannerResult:
                 terminal_class = PreviewTerminalClass.SCHEMA_FAILURE
                 result = None
@@ -582,18 +755,17 @@ class HermesPreviewControlPlane:
             return PreviewExecution(
                 PreviewControlStatus.UNAVAILABLE, "planner_saturated"
             )
-        except PlannerExecutionTimeout:
-            terminal_class = PreviewTerminalClass.PROVIDER_TIMEOUT
-            if not self.reconcile(admission, terminal_class=terminal_class):
-                return PreviewExecution(
-                    PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
-                )
-            return PreviewExecution(
-                PreviewControlStatus.UNAVAILABLE, "planner_unavailable"
-            )
         except PlannerPortFailure as exc:
             terminal_class = exc.terminal_class
-            if not self.reconcile(admission, terminal_class=terminal_class):
+            usage = self._usage(
+                admission, exc.input_tokens, exc.output_tokens
+            )
+            if not self.reconcile(
+                admission,
+                terminal_class=terminal_class,
+                actual_tokens=usage[0] if usage is not None else None,
+                actual_micro_usd=usage[1] if usage is not None else None,
+            ):
                 return PreviewExecution(
                     PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
                 )
@@ -609,6 +781,12 @@ class HermesPreviewControlPlane:
             return PreviewExecution(
                 PreviewControlStatus.UNAVAILABLE, "planner_unavailable"
             )
+        except BaseException:
+            self.reconcile(
+                admission,
+                terminal_class=PreviewTerminalClass.SCHEMA_FAILURE,
+            )
+            raise
         if result is None:
             if not self.reconcile(admission, terminal_class=terminal_class):
                 return PreviewExecution(
@@ -617,14 +795,21 @@ class HermesPreviewControlPlane:
             return PreviewExecution(
                 PreviewControlStatus.UNAVAILABLE, "planner_unavailable"
             )
+        usage = self._usage(
+            admission, result.input_tokens, result.output_tokens
+        )
         if not self.reconcile(
             admission,
             terminal_class=terminal_class,
-            actual_tokens=result.actual_tokens,
-            actual_micro_usd=result.actual_micro_usd,
+            actual_tokens=usage[0] if usage is not None else None,
+            actual_micro_usd=usage[1] if usage is not None else None,
         ):
             return PreviewExecution(
                 PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
+            )
+        if usage is None:
+            return PreviewExecution(
+                PreviewControlStatus.UNAVAILABLE, "invalid_provider_usage"
             )
         return PreviewExecution(
             PreviewControlStatus.ADMITTED, "completed", result.value
@@ -645,7 +830,11 @@ class HermesPreviewControlPlane:
                 canonical_client_ip=canonical_client_ip,
             )
             payload = request.canonical_payload()
-            input_tokens = self._tokenizer.count(payload)
+            envelope = canonical_planner_envelope(
+                payload,
+                model_id=self._policy.allowed_model_id,
+            )
+            input_tokens = self._tokenizer.count(envelope)
             if (
                 type(input_tokens) is not int
                 or not 1 <= input_tokens <= MAX_INPUT_TOKENS
@@ -670,7 +859,7 @@ class HermesPreviewControlPlane:
             authority = self._runtime.executor._lifecycle_authority
             snapshot = authority.snapshot()
             digests = authority.derive(snapshot, identity)
-            reservation_id = request.client_request_id or str(uuid.uuid4())
+            reservation_id = str(uuid.uuid4())
             owner_digest = hashlib.sha256(
                 b"TrustForge/PAP1/owner/v1\x00"
                 + reservation_id.encode()
@@ -707,6 +896,7 @@ class HermesPreviewControlPlane:
                 "admitted",
                 handle=result.handle,
                 payload=payload,
+                reserved_input_tokens=input_tokens,
             )
         if result.outcome is AdmissionOutcome.DENIED:
             return self._result(PreviewControlStatus.DENIED, "policy_denied")
@@ -765,15 +955,38 @@ class HermesPreviewControlPlane:
             reconciled = result.outcome is TerminalOutcome.RECONCILED
         except Exception:
             reconciled = False
-        self._observer.record(
-            PreviewObservation(
-                "reconciled" if reconciled else "unavailable",
-                terminal_class.value,
-                terminal_class.counts_for_circuit,
-                self._policy.policy_version,
-            )
+        self._observe(
+            PreviewObservationOutcome.RECONCILED
+            if reconciled
+            else PreviewObservationOutcome.UNAVAILABLE,
+            terminal_class,
+            terminal_class.counts_for_circuit,
         )
         return reconciled
+
+    def _usage(
+        self,
+        admission: PreviewAdmission,
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> tuple[int, int] | None:
+        if (
+            type(input_tokens) is not int
+            or type(output_tokens) is not int
+            or type(admission.reserved_input_tokens) is not int
+            or input_tokens != admission.reserved_input_tokens
+            or not 0 <= output_tokens <= MAX_OUTPUT_TOKENS
+        ):
+            return None
+        return (
+            input_tokens + output_tokens,
+            _ceil_micro_usd(
+                input_tokens,
+                output_tokens,
+                self._policy.input_micro_usd_per_million_tokens,
+                self._policy.output_micro_usd_per_million_tokens,
+            ),
+        )
 
     def _now(self) -> float:
         value = self._monotonic.now()
@@ -788,11 +1001,27 @@ class HermesPreviewControlPlane:
         *,
         handle: object | None = None,
         payload: bytes | None = None,
+        reserved_input_tokens: int | None = None,
     ) -> PreviewAdmission:
-        self._observer.record(
-            PreviewObservation(status.value, None, False, self._policy.policy_version)
+        self._observe(PreviewObservationOutcome(status.value), None, False)
+        return PreviewAdmission(
+            status, reason, handle, payload, reserved_input_tokens
         )
-        return PreviewAdmission(status, reason, handle, payload)
+
+    def _observe(
+        self,
+        outcome: PreviewObservationOutcome,
+        terminal_class: PreviewTerminalClass | None,
+        circuit_failure: bool,
+    ) -> None:
+        try:
+            self._observer.record(
+                PreviewObservation.mint(
+                    outcome, terminal_class, circuit_failure
+                )
+            )
+        except Exception:
+            pass
 
 
 def _uuid4(value: str) -> bool:
@@ -801,6 +1030,52 @@ def _uuid4(value: str) -> bool:
     except (TypeError, ValueError, AttributeError):
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+def _strict_ascii_metadata(value: str) -> bool:
+    return value.isascii() and all(0x21 <= ord(character) <= 0x7E for character in value)
+
+
+def canonical_planner_envelope(payload: bytes, *, model_id: str) -> bytes:
+    """The exact provider input reserved, dispatched, and usage-checked."""
+    if (
+        type(payload) is not bytes
+        or not payload
+        or len(payload) > MAX_BODY_BYTES
+        or type(model_id) is not str
+        or not _strict_ascii_metadata(model_id)
+    ):
+        raise ValueError("invalid planner envelope")
+    try:
+        request = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("invalid planner envelope") from None
+    if (
+        type(request) is not dict
+        or json.dumps(
+            request,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        != payload
+    ):
+        raise ValueError("invalid planner envelope")
+    envelope = json.dumps(
+        {
+            "input": request,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "model": model_id,
+            "system": PLANNER_SYSTEM_PROMPT,
+            "version": PLANNER_ENVELOPE_VERSION,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    if len(envelope) > MAX_BODY_BYTES:
+        raise ValueError("invalid planner envelope")
+    return envelope
 
 
 def _canonical_ip(value: str) -> object:
@@ -818,3 +1093,34 @@ def _ceil_micro_usd(
 ) -> int:
     numerator = input_tokens * input_rate + output_tokens * output_rate
     return (numerator + 999_999) // 1_000_000
+
+
+def canonical_preview_policy_digest(policy: PreviewPolicy) -> str:
+    names = (
+        "source_policy_version",
+        "model_price_policy_version",
+        "tokenizer_package",
+        "tokenizer_version",
+        "tokenizer_vocab_hash",
+        "allowed_model_id",
+        "planner_identity",
+        "input_micro_usd_per_million_tokens",
+        "output_micro_usd_per_million_tokens",
+        "valid_from_epoch",
+        "valid_until_epoch",
+        "policy_version",
+        "identity_requests_minute",
+        "identity_requests_day",
+        "identity_concurrency",
+        "global_concurrency",
+        "minute_tokens",
+        "day_tokens",
+        "minute_micro_usd",
+        "day_micro_usd",
+    )
+    payload = json.dumps(
+        {name: getattr(policy, name) for name in names},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(b"TrustForge/HermesPreviewPolicy/v1\x00" + payload).hexdigest()

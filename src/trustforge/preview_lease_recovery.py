@@ -515,6 +515,11 @@ def _decode_reservation(item: dict[str, object]) -> _Reservation:
         "version": 1,
         "terminal_disposition": disposition.value,
     }
+    circuit_failure = item.get("circuit_failure", 1)
+    if type(circuit_failure) is not int or circuit_failure not in {0, 1}:
+        raise ValueError("malformed terminal circuit classification")
+    if circuit_failure == 0:
+        terminal["circuit_failure"] = 0
     actual_tokens = actual_micro_usd = None
     if disposition in {
         TerminalDisposition.KNOWN_SUCCESS,

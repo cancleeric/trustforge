@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+from threading import Event, Thread
 from types import SimpleNamespace
-from threading import Event
-import time
 import uuid
 
 import pytest
@@ -11,6 +10,8 @@ import trustforge.hermes_preview_control_plane as control
 from trustforge.hermes_preview_control_plane import (
     HermesPreviewControlPlane,
     BoundedPlannerExecutionAuthority,
+    canonical_planner_envelope,
+    canonical_preview_policy_digest,
     PreviewControlStatus,
     PreviewObservation,
     PreviewPolicy,
@@ -18,7 +19,9 @@ from trustforge.hermes_preview_control_plane import (
     PreviewTopology,
     PlannerPortFailure,
     PlannerExecutionSaturated,
-    PlannerExecutionTimeout,
+    PlannerExecution,
+    PlannerExecutionState,
+    PreviewObservationOutcome,
     PlannerResult,
     PreviewTerminalClass,
     TrustedProxyPolicy,
@@ -33,9 +36,6 @@ from trustforge.preview_trusted_clock import (
     TrustedBuckets,
     TrustedUtcInterval,
 )
-
-
-POLICY_DIGEST = "a" * 64
 
 
 class Tokenizer:
@@ -58,20 +58,19 @@ class Planner:
     capabilities = ("plan",)
 
     def __init__(self, result=None):
-        self.result = result or PlannerResult({"strategy": "internal"}, 50, 100)
+        self.result = result or PlannerResult({"strategy": "internal"}, 100, 100)
         self.calls = []
 
     def plan(self, payload, **kwargs):
         self.calls.append((payload, kwargs))
-        if isinstance(self.result, Exception):
+        if isinstance(self.result, BaseException):
             raise self.result
         return self.result
 
 
 def _policy(**changes):
     values = {
-        "policy_digest": POLICY_DIGEST,
-        "source_policy_version": "sources-v1",
+        "source_policy_version": "analysis-plan-source-classes-v1",
         "model_price_policy_version": "price-v1",
         "tokenizer_version": "hermes-tokenizer-v1",
         "tokenizer_package": "hermes-tokenizer",
@@ -84,6 +83,21 @@ def _policy(**changes):
         "valid_until_epoch": 10_000,
     }
     values.update(changes)
+    probe = SimpleNamespace(
+        **{
+            **values,
+            "policy_version": values.get("policy_version", 1),
+            "identity_requests_minute": values.get("identity_requests_minute", 3),
+            "identity_requests_day": values.get("identity_requests_day", 20),
+            "identity_concurrency": values.get("identity_concurrency", 1),
+            "global_concurrency": values.get("global_concurrency", 4),
+            "minute_tokens": values.get("minute_tokens", 8_000),
+            "day_tokens": values.get("day_tokens", 51_200),
+            "minute_micro_usd": values.get("minute_micro_usd", 50_000),
+            "day_micro_usd": values.get("day_micro_usd", 500_000),
+        }
+    )
+    values["policy_digest"] = canonical_preview_policy_digest(probe)
     return PreviewPolicy(**values)
 
 
@@ -184,7 +198,18 @@ class ImmediateExecution:
         self.calls.append((operation, timeout_seconds))
         if self.failure is not None:
             raise self.failure
-        return operation()
+        try:
+            return PlannerExecution(
+                PlannerExecutionState.COMPLETED,
+                value=operation(),
+                termination_proven=True,
+            )
+        except Exception as exc:
+            return PlannerExecution(
+                PlannerExecutionState.COMPLETED,
+                failure=exc,
+                termination_proven=True,
+            )
 
 
 def _plane(
@@ -251,11 +276,57 @@ def test_canonical_payload_is_exact_and_does_not_add_routing_fields():
     assert b"topic" not in payload
 
 
+def test_canonical_provider_envelope_is_the_exact_reserved_and_dispatched_input():
+    tokenizer = Tokenizer(100)
+    planner = Planner()
+    plane, _, _ = _plane(
+        AdmissionOutcome.ADMITTED,
+        tokenizer=tokenizer,
+        planner=planner,
+    )
+    request = _request("任意問題")
+    expected = canonical_planner_envelope(
+        request.canonical_payload(),
+        model_id="approved-model-v1",
+    )
+    plane.execute(
+        request,
+        peer_ip="127.0.0.1",
+        canonical_client_ip="203.0.113.2",
+    )
+    assert tokenizer.payloads == [expected]
+    assert planner.calls[0][0] == expected
+    decoded = control.json.loads(expected)
+    assert decoded["system"] == control.PLANNER_SYSTEM_PROMPT
+    assert decoded["max_output_tokens"] == 512
+    assert decoded["input"]["question"] == "任意問題"
+
+
+def test_question_is_trimmed_and_asset_hints_use_exact_uppercase_contract():
+    request = PreviewRequest("  任意問題  ", "zh-TW", ("BTC:USD",))
+    assert request.question == "任意問題"
+    assert '"question":"任意問題"'.encode() in request.canonical_payload()
+    for invalid in ("btc", "BTC/USD", "-BTC"):
+        with pytest.raises(ValueError):
+            PreviewRequest("ok", "en", (invalid,))
+
+
 def test_policy_is_fixed_and_silent_cap_relaxation_is_rejected():
     with pytest.raises(ValueError, match="invalid preview policy"):
         _policy(global_concurrency=5)
     with pytest.raises(ValueError, match="invalid preview policy"):
         _policy(input_micro_usd_per_million_tokens=25_000_000)
+    for field in (
+        "model_price_policy_version",
+        "tokenizer_package",
+        "tokenizer_version",
+        "allowed_model_id",
+        "planner_identity",
+    ):
+        with pytest.raises(ValueError, match="invalid preview policy"):
+            _policy(**{field: "ascii\u0000escape"})
+        with pytest.raises(ValueError, match="invalid preview policy"):
+            _policy(**{field: "非ASCII"})
 
 
 def test_proxy_identity_requires_trusted_peer_and_canonical_ip():
@@ -309,10 +380,28 @@ def test_admission_uses_exact_token_reservation_and_merged_executor():
     bound = runtime.executor.requests[0]
     assert bound.request.reserved_tokens == 612
     assert bound.request.reserved_micro_usd == 2_391
-    assert tokenizer.payloads == [_request().canonical_payload()]
-    assert observer.events == [
-        PreviewObservation("denied", None, False, 1)
+    assert tokenizer.payloads == [
+        canonical_planner_envelope(
+            _request().canonical_payload(),
+            model_id="approved-model-v1",
+        )
     ]
+    assert observer.events == [
+        PreviewObservation.mint(PreviewObservationOutcome.DENIED, None, False)
+    ]
+
+
+def test_client_request_id_never_becomes_durable_reservation_identity():
+    sentinel = str(uuid.uuid4())
+    plane, runtime, _ = _plane()
+    plane.admit(
+        PreviewRequest("任意問題", "zh-TW", client_request_id=sentinel),
+        peer_ip="127.0.0.1",
+        canonical_client_ip="203.0.113.2",
+    )
+    bound = runtime.executor.requests[0]
+    assert bound.request.reservation_id != sentinel
+    assert sentinel not in repr(bound.request)
 
 
 def test_tokenizer_overflow_and_unsafe_proxy_fail_before_executor():
@@ -412,8 +501,8 @@ def test_execute_binds_attempt_timeout_deadline_and_known_usage(monkeypatch):
         "total_deadline": 6.0,
         "attempts": 1,
     }
-    assert captured[0]["actual_tokens"] == 50
-    assert captured[0]["actual_micro_usd"] == 100
+    assert captured[0]["actual_tokens"] == 200
+    assert captured[0]["actual_micro_usd"] == 782
     assert len(runtime.terminal.intents) == 1
 
 
@@ -437,11 +526,46 @@ def test_schema_failure_is_uncertain_worst_case_and_not_circuit(monkeypatch):
     assert observer.events[-1].circuit_failure is False
 
 
+def test_known_failure_usage_is_locally_priced(monkeypatch):
+    planner = Planner(
+        PlannerPortFailure.provider(
+            PreviewTerminalClass.KNOWN_PROVIDER_FAILURE,
+            input_tokens=100,
+            output_tokens=10,
+        )
+    )
+    plane, _, _ = _plane(AdmissionOutcome.ADMITTED, planner=planner)
+    captured = []
+    monkeypatch.setattr(
+        control, "TerminalIntent", lambda **kwargs: captured.append(kwargs)
+    )
+    plane.execute(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert captured[0]["disposition"] is control.TerminalDisposition.KNOWN_FAILURE
+    assert captured[0]["actual_tokens"] == 110
+    assert captured[0]["actual_micro_usd"] == 430
+
+
+def test_observer_failure_never_changes_durable_result():
+    plane, runtime, observer = _plane()
+    observer.record = lambda observation: (_ for _ in ()).throw(
+        RuntimeError("observer unavailable")
+    )
+    result = plane.admit(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert result.status is PreviewControlStatus.DENIED
+    assert len(runtime.executor.requests) == 1
+
+
 def test_observer_cannot_capture_question_payload_or_provider_exception():
     observer = ZeroSensitiveObserver(clock=Monotonic())
     with pytest.raises(ValueError, match="invalid preview observation"):
         observer.record({"question": "secret"})
-    observer.record(PreviewObservation("denied", None, False, 1))
+    observer.record(
+        PreviewObservation.mint(PreviewObservationOutcome.DENIED, None, False)
+    )
     rendered = repr(observer.events)
     assert "question" not in rendered
     assert "provider exception" not in rendered
@@ -510,11 +634,188 @@ def test_topology_rejects_non_nominal_capability(args):
 def test_observer_is_capacity_and_retention_bounded():
     clock = Monotonic([0, 1, 2, 10])
     observer = ZeroSensitiveObserver(clock=clock, retention_seconds=5, capacity=2)
-    observation = PreviewObservation("denied", None, False, 1)
+    observation = PreviewObservation.mint(
+        PreviewObservationOutcome.DENIED, None, False
+    )
     observer.record(observation)
     observer.record(observation)
     observer.record(observation)
     assert observer.events == []
+
+
+def test_observer_record_and_snapshot_are_thread_safe():
+    observer = ZeroSensitiveObserver(
+        clock=Monotonic(), retention_seconds=5, capacity=4096
+    )
+    observation = PreviewObservation.mint(
+        PreviewObservationOutcome.DENIED, None, False
+    )
+    workers = [
+        Thread(target=lambda: [observer.record(observation) for _ in range(100)])
+        for _ in range(8)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert len(observer.events) == 800
+
+
+def test_bounded_execution_holds_slot_until_timed_out_worker_terminates():
+    authority = BoundedPlannerExecutionAuthority(1)
+    started = Event()
+    release = Event()
+    finished = Event()
+
+    def operation():
+        started.set()
+        release.wait()
+        finished.set()
+        return "late"
+
+    result = authority.invoke(operation, timeout_seconds=0.001)
+    assert started.is_set()
+    assert result.state is PlannerExecutionState.TIMED_OUT
+    assert result.termination_proven is False
+    with pytest.raises(PlannerExecutionSaturated):
+        authority.invoke(lambda: "unsafe overlap", timeout_seconds=1)
+    release.set()
+    assert finished.wait(1)
+    assert authority.invoke(
+        lambda: "next", timeout_seconds=1
+    ) == PlannerExecution(
+        PlannerExecutionState.COMPLETED,
+        value="next",
+        termination_proven=True,
+    )
+
+
+def test_bounded_execution_timeout_done_success_race_returns_success():
+    class RacedFuture:
+        def __init__(self):
+            self.result_calls = 0
+
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def result(self, timeout=None):
+            self.result_calls += 1
+            if self.result_calls == 1:
+                raise control.FutureTimeoutError
+            return "completed-at-deadline"
+
+        def done(self):
+            return True
+
+        def exception(self):
+            return None
+
+    raced = RacedFuture()
+
+    class Executor:
+        def submit(self, operation):
+            del operation
+            return raced
+
+    authority = BoundedPlannerExecutionAuthority(1)
+    authority._executor = Executor()
+    result = authority.invoke(lambda: "unused", timeout_seconds=1)
+    assert result == PlannerExecution(
+        PlannerExecutionState.COMPLETED,
+        value="completed-at-deadline",
+        termination_proven=True,
+    )
+
+
+def test_bounded_execution_running_before_guard_can_timeout_without_dispatch():
+    class RunningBeforeGuardFuture:
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+        def result(self, timeout=None):
+            del timeout
+            raise control.FutureTimeoutError
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            return False
+
+    future = RunningBeforeGuardFuture()
+
+    class Executor:
+        def submit(self, operation):
+            self.guarded_operation = operation
+            return future
+
+    executor = Executor()
+    authority = BoundedPlannerExecutionAuthority(1)
+    authority._executor = executor
+    result = authority.invoke(lambda: "not-entered", timeout_seconds=1)
+    assert result == PlannerExecution(
+        PlannerExecutionState.TIMED_OUT,
+        termination_proven=False,
+        provider_dispatched=False,
+    )
+    assert callable(executor.guarded_operation)
+
+
+def test_provider_timeout_exception_from_completed_worker_is_not_runner_timeout():
+    authority = BoundedPlannerExecutionAuthority(1)
+
+    def operation():
+        raise TimeoutError("provider classified this separately")
+
+    result = authority.invoke(operation, timeout_seconds=1)
+    assert result.state is PlannerExecutionState.COMPLETED
+    assert type(result.failure) is TimeoutError
+
+
+def test_bounded_executor_enforces_four_concurrent_and_context_lifecycle():
+    release = Event()
+    four_started = Event()
+    lock = control.RLock()
+    active = 0
+    maximum = 0
+    outcomes = []
+
+    def operation():
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            if active == 4:
+                four_started.set()
+        release.wait()
+        with lock:
+            active -= 1
+        return "done"
+
+    def invoke(authority):
+        try:
+            outcomes.append(authority.invoke(operation, timeout_seconds=1))
+        except PlannerExecutionSaturated:
+            outcomes.append("saturated")
+
+    with BoundedPlannerExecutionAuthority(4) as authority:
+        running = [Thread(target=invoke, args=(authority,)) for _ in range(4)]
+        for worker in running:
+            worker.start()
+        assert four_started.wait(1)
+        saturated = [Thread(target=invoke, args=(authority,)) for _ in range(4)]
+        for worker in saturated:
+            worker.start()
+        for worker in saturated:
+            worker.join()
+        release.set()
+        for worker in running:
+            worker.join()
+    assert maximum == 4
+    assert sum(result == "saturated" for result in outcomes) == 4
+    assert sum(type(result) is PlannerExecution for result in outcomes) == 4
+    with pytest.raises(RuntimeError):
+        authority.invoke(lambda: "after-close", timeout_seconds=1)
 
 
 def test_provider_overrun_is_timeout_and_uncertain(monkeypatch):
@@ -533,82 +834,84 @@ def test_provider_overrun_is_timeout_and_uncertain(monkeypatch):
     assert captured[0]["circuit_failure"] is True
 
 
-def test_bounded_execution_returns_on_timeout_rejects_saturation_and_recovers():
-    release = Event()
-    authority = BoundedPlannerExecutionAuthority(1)
-    started = time.monotonic()
-    with pytest.raises(PlannerExecutionTimeout):
-        authority.invoke(lambda: release.wait(), timeout_seconds=0.02)
-    assert time.monotonic() - started < 0.25
-    with pytest.raises(PlannerExecutionSaturated):
-        authority.invoke(lambda: "never submitted", timeout_seconds=0.02)
-    release.set()
-    deadline = time.monotonic() + 0.5
-    while time.monotonic() < deadline:
-        try:
-            assert authority.invoke(lambda: "ok", timeout_seconds=0.05) == "ok"
-            break
-        except PlannerExecutionSaturated:
-            continue
-    else:
-        pytest.fail("late completion did not release the bounded slot")
-    with pytest.raises(TimeoutError, match="local failure"):
-        authority.invoke(
-            lambda: (_ for _ in ()).throw(TimeoutError("local failure")),
-            timeout_seconds=0.05,
-        )
-
-
-def test_timeout_late_completion_settles_exactly_once_and_never_exposes_value(
-    monkeypatch,
+@pytest.mark.parametrize("termination_proven,writes", [(False, 0), (True, 1)])
+def test_timeout_settles_only_with_authoritative_termination_proof(
+    monkeypatch, termination_proven, writes
 ):
-    release = Event()
-    planner = Planner()
+    class TimeoutExecution:
+        capacity = 4
 
-    def blocking_plan(payload, **kwargs):
-        planner.calls.append((payload, kwargs))
-        release.wait()
-        return PlannerResult({"late": "must-not-escape"}, 1, 1)
+        def invoke(self, operation, *, timeout_seconds):
+            return PlannerExecution(
+                PlannerExecutionState.TIMED_OUT,
+                termination_proven=termination_proven,
+            )
 
-    planner.plan = blocking_plan
-    authority = BoundedPlannerExecutionAuthority(4)
     plane, runtime, observer = _plane(
-        AdmissionOutcome.ADMITTED,
-        planner=planner,
-        planner_execution=authority,
+        AdmissionOutcome.ADMITTED, planner_execution=TimeoutExecution()
     )
-    original_invoke = authority.invoke
-
-    def short_invoke(operation, *, timeout_seconds):
-        return original_invoke(operation, timeout_seconds=0.02)
-
-    authority.invoke = short_invoke
     captured = []
     monkeypatch.setattr(
         control, "TerminalIntent", lambda **kwargs: captured.append(kwargs)
     )
-    try:
-        started = time.monotonic()
-        result = plane.execute(
-            _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
-        )
-        assert time.monotonic() - started < 0.25
-        assert result.status is PreviewControlStatus.UNAVAILABLE
-        assert result.value is None
-        assert len(runtime.terminal.intents) == 1
-        assert len(captured) == 1
-        assert observer.events[-1].terminal_class == "provider_timeout"
-        assert observer.events[-1].circuit_failure is True
-    finally:
-        release.set()
-    deadline = time.monotonic() + 0.5
-    while planner.calls and time.monotonic() < deadline:
-        if authority._slots.acquire(blocking=False):
-            authority._slots.release()
-            break
-    assert len(runtime.terminal.intents) == 1
-    assert len(captured) == 1
+    result = plane.execute(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert result.status is PreviewControlStatus.UNAVAILABLE
     assert result.value is None
+    assert len(runtime.terminal.intents) == writes
+    assert len(captured) == writes
+    if termination_proven:
+        assert observer.events[-1].terminal_class is PreviewTerminalClass.PROVIDER_TIMEOUT
+
+
+def test_proven_timeout_reconcile_failure_is_terminal_unavailable():
+    class TimeoutExecution:
+        capacity = 4
+
+        def invoke(self, operation, *, timeout_seconds):
+            return PlannerExecution(
+                PlannerExecutionState.TIMED_OUT,
+                termination_proven=True,
+            )
+
+    plane, runtime, _ = _plane(
+        AdmissionOutcome.ADMITTED, planner_execution=TimeoutExecution()
+    )
+    runtime.terminal.reconcile = lambda intent: (_ for _ in ()).throw(
+        RuntimeError("durable terminal unavailable")
+    )
+    result = plane.execute(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert result.reason == "terminal_unavailable"
+
+
+def test_proven_pre_dispatch_cancellation_is_not_a_circuit_failure(monkeypatch):
+    class CancelledExecution:
+        capacity = 4
+
+        def invoke(self, operation, *, timeout_seconds):
+            return PlannerExecution(
+                PlannerExecutionState.TIMED_OUT,
+                termination_proven=True,
+                provider_dispatched=False,
+            )
+
+    plane, _, observer = _plane(
+        AdmissionOutcome.ADMITTED, planner_execution=CancelledExecution()
+    )
+    captured = []
+    monkeypatch.setattr(
+        control, "TerminalIntent", lambda **kwargs: captured.append(kwargs)
+    )
+    result = plane.execute(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert result.reason == "planner_unavailable"
+    assert captured[0]["disposition"] is control.TerminalDisposition.PRE_PROVIDER_ABORT
+    assert captured[0]["circuit_failure"] is False
+    assert observer.events[-1].circuit_failure is False
 
 
 def test_saturation_is_pre_provider_abort_without_circuit(monkeypatch):
@@ -646,6 +949,50 @@ def test_total_deadline_before_dispatch_is_pre_provider_abort(monkeypatch):
     assert result.status is PreviewControlStatus.UNAVAILABLE
     assert planner.calls == []
     assert captured[0]["disposition"] is control.TerminalDisposition.PRE_PROVIDER_ABORT
+    assert captured[0]["circuit_failure"] is False
+
+
+def test_pre_dispatch_deadline_reconcile_failure_is_terminal_unavailable():
+    plane, runtime, _ = _plane(
+        AdmissionOutcome.ADMITTED,
+        monotonic=Monotonic([0, 6]),
+    )
+    runtime.terminal.reconcile = lambda intent: (_ for _ in ()).throw(
+        RuntimeError("terminal unavailable")
+    )
+    result = plane.execute(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert result.reason == "terminal_unavailable"
+
+
+def test_base_exception_from_planner_reconciles_then_propagates(monkeypatch):
+    class FatalPlannerExit(BaseException):
+        pass
+
+    class BaseExceptionExecution:
+        capacity = 4
+
+        def invoke(self, operation, *, timeout_seconds):
+            del timeout_seconds
+            return operation()
+
+    planner = Planner(FatalPlannerExit("fatal"))
+    plane, _, _ = _plane(
+        AdmissionOutcome.ADMITTED,
+        planner=planner,
+        planner_execution=BaseExceptionExecution(),
+    )
+    captured = []
+    monkeypatch.setattr(
+        control, "TerminalIntent", lambda **kwargs: captured.append(kwargs)
+    )
+    with pytest.raises(FatalPlannerExit):
+        plane.execute(
+            _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+        )
+    assert len(captured) == 1
+    assert captured[0]["disposition"] is control.TerminalDisposition.UNCERTAIN
     assert captured[0]["circuit_failure"] is False
 
 
