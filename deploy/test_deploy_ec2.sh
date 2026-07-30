@@ -606,6 +606,8 @@ case "$ALL" in
     # lease bootstrap 的重跑路徑：TTL 已啟用時不可再呼叫 update，否則 AWS
     # 會回 ValidationException。以真實狀態回應，確保 mock 不掩蓋該契約。
     echo "ENABLED" ;;
+  "dynamodb describe-continuous-backups"*)
+    echo "ENABLED" ;;
   "ssm describe-instance-information"*)
     echo "Online" ;;
   "ec2 describe-vpcs"*)
@@ -960,7 +962,10 @@ with open('$CAPTURE/remote_script.sh', 'w') as f:
   REMOTE=$(cat "$CAPTURE/remote_script.sh" 2>/dev/null || echo "")
   assert_contains "$REMOTE" 'Environment=BEDROCK_MODEL_ID=' "update-in-place: 仍保留 BEDROCK_MODEL_ID sed（既有邏輯不動）"
   assert_contains "$REMOTE" 'Environment=CACHE_BACKEND=dynamodb' "update-in-place: 補 CACHE_BACKEND"
-  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache' "update-in-place: 補 TRUSTFORGE_CACHE_TABLE"
+assert_contains "$REMOTE" 'Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache' "update-in-place: 補 TRUSTFORGE_CACHE_TABLE"
+assert_contains "$SCRIPT" 'policy-name trustforge-analysis-write-rate-limit' "所有發布：reconcile analysis-write rate-limit IAM policy"
+assert_contains "$SCRIPT" '"Action":"dynamodb:UpdateItem"' "所有發布：rate-limit 僅取得 DynamoDB UpdateItem"
+assert_contains "$SCRIPT" 'table/trustforge-connector-cache' "所有發布：rate-limit 權限限縮 connector-cache table"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger' "update-in-place: 補 TRUSTFORGE_COST_LEDGER_TABLE"
   assert_contains "$REMOTE" 'Environment=COST_LEDGER_BACKEND=dynamodb' "update-in-place: 補 COST_LEDGER_BACKEND"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb' "update-in-place: 補 shared lease backend"

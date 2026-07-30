@@ -204,6 +204,25 @@ else
   echo "[ec2] skip bootstrap (TRUSTFORGE_BOOTSTRAP=${BOOTSTRAP})"
 fi
 
+# The public multi-angle admission guard uses DynamoDB UpdateItem on the
+# connector-cache table.  Reconcile this narrow permission on every release,
+# including update-in-place runs where TRUSTFORGE_BOOTSTRAP=0; otherwise a
+# previously created instance role can drift and every cost-bearing submission
+# fails closed with HTTP 429.
+aws iam put-role-policy --role-name "$ROLE" \
+  --policy-name trustforge-analysis-write-rate-limit \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":\"dynamodb:UpdateItem\",
+     \"Resource\":\"arn:aws:dynamodb:$REGION:$ACCT:table/trustforge-connector-cache\"}
+  ]}" >/dev/null
+
+# Reconcile the atomic authority on every release. TransactionWriteItems alone
+# is insufficient: DynamoDB separately authorizes ConditionCheck subactions.
+if ! "$(dirname "$0")/setup_atomic_batch_dynamodb.sh"; then
+  echo "[ec2] ERROR: atomic multi-angle authority setup failed" >&2
+  exit 1
+fi
+
 # 2) Build content-addressed artifact + manifest --------------------------------------
 echo "[ec2] building artifact..."
 B=$(mktemp -d); ZIP="$(pwd)/build/trustforge_app.zip"; mkdir -p build
