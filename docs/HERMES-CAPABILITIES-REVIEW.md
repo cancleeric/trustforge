@@ -27,7 +27,7 @@
 | 即時分析寫入 Training JSONL | ❌ | ❌ | ❌ | 設計上不直接寫舊 training dataset |
 | Three-track learning events | ✅ | ❌ | ❌ | hook 已接線，正式旗標未設定 |
 | AGOS skill/memory lineage | ✅ | ❌ | ❌ | runtime 已接線，正式旗標未設定 |
-| Research snapshot memory | ✅ | ✅ | ✅ | 563 份，覆蓋 6 幣 |
+| Research snapshot memory | ✅ | ✅ | ✅ | 持續累積，覆蓋 6 幣 |
 | Backfill daemon | ✅ | ❌ | ❌ | 正式 service inactive，無 timer |
 | Training status API | ✅ | ✅ | ⚠️ | 正式 API 回 0，未讀到既有 2,005 筆 |
 
@@ -129,7 +129,7 @@ BackfillWorker._persist_to_training_data()
 |------|--------|------|----------|
 | `data/training/*.jsonl` | BackfillWorker／語義回填 | 舊校準訓練集 | 有歷史檔案，沒有持續新增 |
 | `TrustFeatureStore` | 即時 Analysis Flow | 線上查詢與特徵保存 | 正常寫入 |
-| Research snapshots | Hermes cycle／fetch scheduler | 跨 run 研究記憶、PIT 證據 | 正常寫入，563 份 |
+| Research snapshots | Hermes cycle／fetch scheduler | 跨 run 研究記憶、PIT 證據 | 正常寫入；初查 563 份，main 合併後複驗 569 份 |
 | Learning events | Three-track hook | 不可變 prediction／quality event | 程式已接線，生產未啟用 |
 | AGOS memory/skill/tool lineage | AGOS runtime | context、skill revision、memory retrieval、tool audit | 程式已接線，生產未啟用 |
 
