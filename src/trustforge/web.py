@@ -94,6 +94,35 @@ SWAGGER_ENABLED = os.getenv("TRUSTFORGE_SWAGGER", "0") == "1"
 # Immutable A/B releases set TRUSTFORGE_RELEASE_IDENTITY_REQUIRED=1.  main()
 # verifies and freezes this value before binding the listening socket.
 _ENDPOINT_MANIFEST_BODY: bytes | None = None
+_PREVIEW_ADMISSION_RUNTIME: object | None = None
+_PREVIEW_ADMISSION_STATUS = "disabled"
+
+
+def _initialize_preview_admission() -> None:
+    """Internal #956 handoff only; never changes health or formal analysis."""
+
+    global _PREVIEW_ADMISSION_RUNTIME, _PREVIEW_ADMISSION_STATUS
+    raw = os.getenv("TRUSTFORGE_PREVIEW_ADMISSION_ENABLED", "0")
+    _PREVIEW_ADMISSION_RUNTIME = None
+    if raw == "0":
+        _PREVIEW_ADMISSION_STATUS = "disabled"
+        return
+    if raw != "1":
+        _PREVIEW_ADMISSION_STATUS = "unavailable"
+        return
+    try:
+        from .preview_admission_deployment import (
+            initialize_preview_runtime_from_env,
+        )
+
+        readiness = initialize_preview_runtime_from_env()
+        _PREVIEW_ADMISSION_STATUS = (
+            "ready" if readiness.enabled else "unavailable"
+        )
+        if readiness.enabled:
+            _PREVIEW_ADMISSION_RUNTIME = readiness.runtime()
+    except Exception:
+        _PREVIEW_ADMISSION_STATUS = "unavailable"
 
 
 # The stdlib ThreadingHTTPServer has no worker bound: a slow SQLite read plus
@@ -8983,6 +9012,7 @@ def main():
         load_runtime_endpoint_manifest_from_env()
         or load_runtime_release_manifest_from_env()
     )
+    _initialize_preview_admission()
 
     from .ingestion.hoyabit import log_hoyabit_startup_status
 

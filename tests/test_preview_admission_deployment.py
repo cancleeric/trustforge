@@ -26,6 +26,7 @@ from trustforge.preview_admission_executor import PreviewAdmissionExecutor
 from trustforge.preview_admission_executor import (
     AwsQuotaKeyReference,
     AwsQuotaLifecycleBootstrap,
+    MIN_OVERLAP_SECONDS,
 )
 from trustforge.preview_durable_admission_gate import DurableAdmissionGate
 from trustforge.preview_lease_recovery import (
@@ -240,6 +241,101 @@ def test_lifecycle_config_mismatch_returns_before_any_aws_io(monkeypatch):
     assert result.status is PreviewDeploymentStatus.UNAVAILABLE
     assert result.reason == "lifecycle_config_mismatch"
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda client: setattr(
+            client,
+            "ttl",
+            {"TimeToLiveStatus": "DISABLED", "AttributeName": "ttl"},
+        ),
+        lambda client: client.table["SSEDescription"].update(
+            KMSMasterKeyArn="arn:wrong"
+        ),
+        lambda client: setattr(client, "tags", []),
+    ],
+)
+def test_install_lifecycle_preflights_infra_before_ssm_or_writes(
+    monkeypatch, mutate
+):
+    import boto3
+
+    client = Client()
+    mutate(client)
+    aws_calls = []
+    monkeypatch.setattr(
+        boto3,
+        "client",
+        lambda service_name, **kwargs: (
+            aws_calls.append((service_name, kwargs)) or client
+        ),
+    )
+    composed = []
+    monkeypatch.setattr(
+        PreviewAdmissionProductionRuntime,
+        "from_aws_components",
+        lambda *args, **kwargs: composed.append((args, kwargs)),
+    )
+    lifecycle = AwsQuotaLifecycleBootstrap(
+        generation=1,
+        issued=TrustedUtcInterval(1, 1),
+        activated=1,
+        current=AwsQuotaKeyReference(
+            "/trustforge/preview-admission/quota-hmac", 1, "quota-1"
+        ),
+    )
+    with pytest.raises(ValueError):
+        PreviewAdmissionRuntimeComposer.install_production_lifecycle(
+            config=_config(), lifecycle=lifecycle
+        )
+    assert [name for name, _ in aws_calls] == ["dynamodb"]
+    assert composed == []
+
+
+def test_exact_binding_supports_later_single_generations():
+    import trustforge.preview_admission_deployment as deployment
+
+    for generation in (1, 3, 4, 9):
+        lifecycle = AwsQuotaLifecycleBootstrap(
+            generation=generation,
+            issued=TrustedUtcInterval(1, 1),
+            activated=1,
+            current=AwsQuotaKeyReference(
+                "/trustforge/preview-admission/quota-hmac", 1, "quota-1"
+            ),
+        )
+        assert deployment._lifecycle_matches_config(lifecycle, _config())
+
+    overlap_config = PreviewDeploymentConfig(
+        requested=True,
+        table_name=DEFAULT_TABLE,
+        quota_key_parameter="/trustforge/preview-admission/current",
+        expected_kms_key_arn=KMS_ARN,
+        expected_table_arn=TABLE_ARN,
+        quota_key_version=2,
+        quota_key_incarnation="incarnation-2",
+        previous_quota_key_parameter="/trustforge/preview-admission/previous",
+        previous_quota_key_version=1,
+        previous_quota_key_incarnation="incarnation-1",
+    )
+    for generation in (2, 5, 8):
+        overlap = AwsQuotaLifecycleBootstrap(
+            generation=generation,
+            issued=TrustedUtcInterval(2, 2),
+            activated=2,
+            current=AwsQuotaKeyReference(
+                "/trustforge/preview-admission/current", 2, "incarnation-2"
+            ),
+            previous=AwsQuotaKeyReference(
+                "/trustforge/preview-admission/previous", 1, "incarnation-1"
+            ),
+            previous_activated=1,
+            superseded=2,
+            retire_not_before=2 + MIN_OVERLAP_SECONDS,
+        )
+        assert deployment._lifecycle_matches_config(overlap, overlap_config)
 
 
 def test_bootstrap_is_conditional_idempotent_and_never_contains_secret_bytes():
@@ -535,3 +631,30 @@ def test_production_deploy_and_admin_have_strict_preview_controls():
     assert "TableKmsKeyArn" in open(
         "deploy/preview-admission-store.yaml", encoding="utf-8"
     ).read()
+
+
+def test_web_preview_startup_is_default_off_and_fail_isolated(monkeypatch):
+    import boto3
+    import trustforge.web as web
+
+    calls = []
+    monkeypatch.delenv("TRUSTFORGE_PREVIEW_ADMISSION_ENABLED", raising=False)
+    monkeypatch.setattr(
+        boto3, "client", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    web._initialize_preview_admission()
+    assert web._PREVIEW_ADMISSION_STATUS == "disabled"
+    assert web._PREVIEW_ADMISSION_RUNTIME is None
+    assert calls == []
+
+    monkeypatch.setenv("TRUSTFORGE_PREVIEW_ADMISSION_ENABLED", "1")
+    import trustforge.preview_admission_deployment as deployment
+
+    monkeypatch.setattr(
+        deployment,
+        "initialize_preview_runtime_from_env",
+        lambda: (_ for _ in ()).throw(RuntimeError("provider detail")),
+    )
+    web._initialize_preview_admission()
+    assert web._PREVIEW_ADMISSION_STATUS == "unavailable"
+    assert web._PREVIEW_ADMISSION_RUNTIME is None

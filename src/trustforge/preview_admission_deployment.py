@@ -13,6 +13,7 @@ import re
 from typing import Callable, Protocol
 
 from trustforge.preview_admission_executor import (
+    AwsQuotaKeyReference,
     AwsQuotaLifecycleBootstrap,
     PreviewAdmissionExecutor,
 )
@@ -22,6 +23,7 @@ from trustforge.preview_lease_recovery import (
     RecoveryOutcome,
 )
 from trustforge.preview_terminal_reconcile import PreviewTerminalReconciler
+from trustforge.preview_trusted_clock import TrustedUtcInterval
 
 FEATURE_ENV = "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED"
 TABLE_ENV = "TRUSTFORGE_PREVIEW_ADMISSION_TABLE"
@@ -295,6 +297,7 @@ class PreviewAdmissionRuntimeComposer:
 
         if not config.requested or not _lifecycle_matches_config(lifecycle, config):
             raise ValueError("lifecycle config mismatch")
+        _read_only_infrastructure_checks(config, region_name=region_name)
         return PreviewAdmissionProductionRuntime.from_aws_components(
             config.table_name, lifecycle=lifecycle, region_name=region_name
         )
@@ -472,6 +475,89 @@ def read_only_preview_probe(
         )
 
 
+def initialize_preview_runtime_from_env(
+    environ: dict[str, str] | None = None,
+) -> PreviewStoreReadiness:
+    """Internal startup integration for #956; no endpoint is exposed here."""
+
+    values = os.environ if environ is None else environ
+    raw = values.get(FEATURE_ENV, "0")
+    if raw not in {"0", "1"}:
+        return PreviewStoreReadiness(
+            PreviewDeploymentStatus.UNAVAILABLE,
+            "invalid_feature_flag",
+            values.get(TABLE_ENV, DEFAULT_TABLE),
+        )
+    if raw == "0":
+        return PreviewStoreReadiness(
+            PreviewDeploymentStatus.DISABLED,
+            "feature_default_off",
+            values.get(TABLE_ENV, DEFAULT_TABLE),
+        )
+    try:
+        config = PreviewDeploymentConfig.from_env(
+            expected_kms_key_arn=values[
+                "TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN"
+            ],
+            expected_table_arn=values["TRUSTFORGE_PREVIEW_TABLE_ARN"],
+            environ=values,
+        )
+        activated = _positive_int(
+            values["TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED"]
+        )
+        previous = None
+        previous_activated = superseded = retire_not_before = None
+        if config.previous_quota_key_parameter is not None:
+            previous = AwsQuotaKeyReference(
+                config.previous_quota_key_parameter,
+                config.previous_quota_key_version,
+                config.previous_quota_key_incarnation,
+            )
+            previous_activated = _positive_int(
+                values[
+                    "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_ACTIVATED"
+                ]
+            )
+            superseded = activated
+            retire_not_before = _positive_int(
+                values[
+                    "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_RETIRE_NOT_BEFORE"
+                ]
+            )
+        lifecycle = AwsQuotaLifecycleBootstrap(
+            generation=_positive_int(
+                values["TRUSTFORGE_PREVIEW_QUOTA_LIFECYCLE_GENERATION"]
+            ),
+            issued=TrustedUtcInterval(
+                _positive_int(
+                    values["TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST"]
+                ),
+                _positive_int(
+                    values["TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST"]
+                ),
+            ),
+            activated=activated,
+            current=AwsQuotaKeyReference(
+                config.quota_key_parameter,
+                config.quota_key_version,
+                config.quota_key_incarnation,
+            ),
+            previous=previous,
+            previous_activated=previous_activated,
+            superseded=superseded,
+            retire_not_before=retire_not_before,
+        )
+        return PreviewAdmissionRuntimeComposer.evaluate_production(
+            config=config,
+            lifecycle=lifecycle,
+            region_name=values.get("AWS_REGION"),
+        )
+    except Exception:
+        return PreviewStoreReadiness(
+            PreviewDeploymentStatus.UNAVAILABLE,
+            "startup_runtime_unavailable",
+            values.get(TABLE_ENV, DEFAULT_TABLE),
+        )
 @dataclass(frozen=True, slots=True)
 class PreviewDisableObservation:
     control_state: str
@@ -621,14 +707,30 @@ def _lifecycle_matches_config(
         return False
     previous = lifecycle.previous
     if config.previous_quota_key_parameter is None:
-        return previous is None and lifecycle.generation in {1, 3}
+        return previous is None
     return (
         previous is not None
         and previous.parameter_name == config.previous_quota_key_parameter
         and previous.expected_version == config.previous_quota_key_version
         and previous.key_id == config.previous_quota_key_incarnation
-        and lifecycle.generation == 2
     )
+
+
+def _read_only_infrastructure_checks(
+    config: PreviewDeploymentConfig, *, region_name: str | None
+) -> tuple[str, ...]:
+    import boto3
+    from botocore.config import Config
+
+    client = boto3.client(
+        "dynamodb",
+        region_name=region_name,
+        config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
+    )
+    verifier = PreviewAdmissionRuntimeComposer(
+        client=client, config=config, compose=lambda: _READ_ONLY_READY
+    )
+    return verifier._verify_store()
 
 
 def _probe_authority_rows(client: object, table_name: str) -> None:
