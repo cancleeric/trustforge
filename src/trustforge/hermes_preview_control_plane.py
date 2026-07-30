@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
 import ipaddress
 import json
 import math
 import re
+from threading import BoundedSemaphore
 import uuid
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.parse import urlsplit
 
 from trustforge.preview_admission_compiler import AdmissionCompileRequest
@@ -198,7 +200,7 @@ class TrustedProxyPolicy:
     def __post_init__(self) -> None:
         try:
             peers = tuple(
-                ipaddress.ip_address(value) for value in self.trusted_peer_ips
+                _canonical_ip(value) for value in self.trusted_peer_ips
             )
         except (TypeError, ValueError):
             raise ValueError("invalid trusted proxy policy") from None
@@ -213,13 +215,13 @@ class TrustedProxyPolicy:
         canonical_client_ip: str | None,
     ) -> bytes:
         try:
-            peer = ipaddress.ip_address(peer_ip)
+            peer = _canonical_ip(peer_ip)
         except ValueError:
             raise ValueError("unsafe ingress identity") from None
         if peer not in self._peers:
             raise ValueError("unsafe ingress identity")
         try:
-            client = ipaddress.ip_address(canonical_client_ip or "")
+            client = _canonical_ip(canonical_client_ip or "")
         except ValueError:
             raise ValueError("unsafe ingress identity") from None
         return f"pap1-client-ip:{client.compressed}".encode()
@@ -350,6 +352,75 @@ class MonotonicAuthority(Protocol):
     def now(self) -> float: ...
 
 
+class PlannerExecutionTimeout(RuntimeError):
+    pass
+
+
+class PlannerExecutionSaturated(RuntimeError):
+    pass
+
+
+class PlannerExecutionAuthority(Protocol):
+    capacity: int
+
+    def invoke(
+        self, operation: Callable[[], object], *, timeout_seconds: float
+    ) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionOutcome:
+    value: object | None = None
+    failure: BaseException | None = None
+
+
+class BoundedPlannerExecutionAuthority:
+    """A fixed-capacity isolation pool; timed-out work can consume only its slot."""
+
+    def __init__(self, capacity: int) -> None:
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("invalid planner execution capacity")
+        self.capacity = capacity
+        self._slots = BoundedSemaphore(capacity)
+        self._pool = ThreadPoolExecutor(
+            max_workers=capacity,
+            thread_name_prefix="hermes-preview",
+        )
+
+    def invoke(
+        self, operation: Callable[[], object], *, timeout_seconds: float
+    ) -> object:
+        if (
+            not callable(operation)
+            or type(timeout_seconds) not in (int, float)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("invalid planner execution")
+        if not self._slots.acquire(blocking=False):
+            raise PlannerExecutionSaturated("planner execution saturated")
+        try:
+            future = self._pool.submit(self._capture, operation)
+        except BaseException:
+            self._slots.release()
+            raise
+        future.add_done_callback(lambda _: self._slots.release())
+        try:
+            outcome = future.result(timeout=float(timeout_seconds))
+        except FutureTimeoutError:
+            raise PlannerExecutionTimeout("planner execution timed out") from None
+        if outcome.failure is not None:
+            raise outcome.failure
+        return outcome.value
+
+    @staticmethod
+    def _capture(operation: Callable[[], object]) -> _ExecutionOutcome:
+        try:
+            return _ExecutionOutcome(value=operation())
+        except BaseException as exc:
+            return _ExecutionOutcome(failure=exc)
+
+
 class ZeroSensitiveObserver:
     """Accept only fixed, low-cardinality fields; never arbitrary labels."""
 
@@ -412,6 +483,7 @@ class HermesPreviewControlPlane:
         planner: HermesPlannerPort,
         topology: PreviewTopology,
         monotonic: MonotonicAuthority,
+        planner_execution: PlannerExecutionAuthority,
         observer: ZeroSensitiveObserver,
     ) -> None:
         if (
@@ -427,6 +499,8 @@ class HermesPreviewControlPlane:
             or planner.capabilities != ("plan",)
             or type(topology) is not PreviewTopology
             or not callable(getattr(monotonic, "now", None))
+            or planner_execution.capacity != policy.global_concurrency
+            or not callable(getattr(planner_execution, "invoke", None))
             or type(observer) is not ZeroSensitiveObserver
         ):
             raise ValueError("invalid preview control plane")
@@ -437,6 +511,7 @@ class HermesPreviewControlPlane:
         self._topology = topology
         self._proxy = topology.proxy_policy
         self._monotonic = monotonic
+        self._planner_execution = planner_execution
         self._observer = observer
 
     def execute(
@@ -477,12 +552,15 @@ class HermesPreviewControlPlane:
             before_dispatch + PROVIDER_TIMEOUT_SECONDS, total_deadline
         )
         try:
-            result = self._planner.plan(
-                admission.payload,
-                max_output_tokens=MAX_OUTPUT_TOKENS,
-                provider_deadline=provider_deadline,
-                total_deadline=total_deadline,
-                attempts=ATTEMPTS,
+            result = self._planner_execution.invoke(
+                lambda: self._planner.plan(
+                    admission.payload,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                    provider_deadline=provider_deadline,
+                    total_deadline=total_deadline,
+                    attempts=ATTEMPTS,
+                ),
+                timeout_seconds=provider_deadline - before_dispatch,
             )
             if type(result) is not PlannerResult:
                 terminal_class = PreviewTerminalClass.SCHEMA_FAILURE
@@ -492,6 +570,27 @@ class HermesPreviewControlPlane:
                 result = None
             else:
                 terminal_class = PreviewTerminalClass.SUCCESS
+        except PlannerExecutionSaturated:
+            if not self.reconcile(
+                admission,
+                terminal_class=PreviewTerminalClass.CLIENT_ABORT,
+                provider_dispatched=False,
+            ):
+                return PreviewExecution(
+                    PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
+                )
+            return PreviewExecution(
+                PreviewControlStatus.UNAVAILABLE, "planner_saturated"
+            )
+        except PlannerExecutionTimeout:
+            terminal_class = PreviewTerminalClass.PROVIDER_TIMEOUT
+            if not self.reconcile(admission, terminal_class=terminal_class):
+                return PreviewExecution(
+                    PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
+                )
+            return PreviewExecution(
+                PreviewControlStatus.UNAVAILABLE, "planner_unavailable"
+            )
         except PlannerPortFailure as exc:
             terminal_class = exc.terminal_class
             if not self.reconcile(admission, terminal_class=terminal_class):
@@ -702,6 +801,13 @@ def _uuid4(value: str) -> bool:
     except (TypeError, ValueError, AttributeError):
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+def _canonical_ip(value: str) -> object:
+    parsed = ipaddress.ip_address(value)
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        return parsed.ipv4_mapped
+    return parsed
 
 
 def _ceil_micro_usd(
