@@ -1,0 +1,1 @@
+{"additionalProperties":false,"properties":{"content_sha256":{"pattern":"^[0-9a-f]{64}$","type":"string"},"format":{"const":"trustforge.native-public-metadata/v1"}},"required":["format","content_sha256"],"type":"object"}
