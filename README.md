@@ -68,6 +68,77 @@ TrustForge 的差異化在中間那層 **Trust Layer（信任層）**：
 
 ---
 
+## Hermes Agent 能力總覽
+
+Hermes 不只是單次分析工具，而是一個**有界自主研究 Agent**，具備持續研究、品質自測、校準訓練、自我診斷的完整循環。
+
+### Agent 工具（14 個）
+
+| 工具 | 用途 | 模式 |
+|------|------|------|
+| `refresh_sources` | 刷新爬蟲來源到帶時戳快取 | autonomous |
+| `archive_source_snapshot` | 持久化來源文件（published_at/fetched_at/snapshot_at） | autonomous |
+| `build_snapshots` | 從快取建構每幣信任快照 | autonomous |
+| `cache_freshness_dashboard` | 快取年齡/缺口/排程健康狀態 | autonomous |
+| `measure_connector_reliability` | 每來源失敗率與七次成功閘門 | autonomous |
+| `measure_quality` | 有界離線迴歸與重播量測 | autonomous |
+| `read_snapshot` | 讀取正式 run 開始前的快照 | formal |
+| `replay_history` | 歷史決策 vs OHLCV 實際結果接合 | offline |
+| `diagnose_improvement` | QA/排程/重播證據 → 待批准實驗 | autonomous |
+| `review_upgrades` | Bedrock 對抗式審查升級候選 | autonomous |
+| `extract_claims` | Bedrock 從證據抽取結構化主張 | formal |
+| `classify_stance` | Bedrock 有界語義立場分類 | formal |
+| `assemble_report` | Bedrock 將 pipeline 產出加引文敘事化 | formal |
+| `export_deliverables` | 匯出報告/證據/JSONL 執行紀錄 | formal |
+
+### Agent 技能約束（5 條鐵律）
+
+1. **five-year-ohlcv-lineage** — 每個價格事實帶 SHA-256、覆蓋範圍與分析窗口
+2. **evidence-contract** — 每個結論連結到 source/fetched_at/content_reference/related_claim
+3. **contrarian-evidence** — 矛盾和低信任證據保持可見，不得靜默丟棄
+4. **report-contract** — 報告必含判斷、關鍵依據、校準信心、限制條件、反轉條件
+5. **bounded-self-improvement** — 診斷持久失敗，提出沙盒實驗，需人工批准才改動生產
+
+### 校準模型與生產學習機制
+
+```
+BackfillWorker（離線回填歷史日期）
+    → data/training/{COIN}.jsonl（2005 筆）
+    → enrich ground truth（T+7 OHLCV 標註方向）
+    → Isotonic Regression 訓練
+    → data/model-artifacts/calibration-model.json
+```
+
+- **模型類型**：Isotonic Regression 校準（raw confidence → calibrated confidence）
+- **訓練資料**：5 幣共 2005 筆（全部來自離線 backfill）
+- **生產即時分析不寫舊 training JSONL**；會寫 FeatureStore + Ledger
+- **Three-track learning hook 已實作但生產未啟用**，目前沒有即時 learning events
+- **AGOS skill/memory lineage 已實作但生產未啟用**
+- **重訓入口**：`scripts/retrain_calibrator.py`、CLI `trustforge train-calibration`
+- 詳細的 implemented / enabled / observed 證據見 [`docs/HERMES-CAPABILITIES-REVIEW.md`](docs/HERMES-CAPABILITIES-REVIEW.md)
+
+### 自我改善迴圈
+
+```
+measure_quality + replay_history → 量測
+    → diagnose_improvement → 診斷提案
+    → review_upgrades（Bedrock 對抗審查）
+    → 人工批准 → 生產變更
+```
+
+### 生產排程
+
+| 服務 | 說明 |
+|------|------|
+| `hermes-cycle.timer` | 每 30 分鐘自主研究循環（budget 900s） |
+| `trustforge-analysis-flow.service` | always-on 正式分析佇列 daemon |
+| `fetch_scheduler` | 平行抓取 → DynamoDB 快取 |
+
+- 生產預設 **fail-closed**；目前 `hermes-cycle.timer` 已啟用且有成功執行紀錄
+- 控制優先級：runtime stop/production guard > DynamoDB admin config > autonomy env > production default
+
+---
+
 ## ⚠️ 競賽硬約束（務必遵守）
 
 1. **僅限使用 AWS 服務提供之基礎模型** → 本專案**直連 AWS Bedrock**（`bedrock-runtime`）。
