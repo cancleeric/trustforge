@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import hashlib
@@ -106,7 +107,8 @@ class AwsSsmQuotaKeyMaterialProvider:
             or not key_id
         ):
             raise ValueError("invalid SSM quota key reference")
-        requested = f"{parameter_name}:{expected_version}"
+        normalized_name = f"/{parameter_name.lstrip('/')}"
+        requested = f"{normalized_name}:{expected_version}"
         try:
             response = self._client.get_parameter(
                 Name=requested, WithDecryption=True
@@ -121,17 +123,50 @@ class AwsSsmQuotaKeyMaterialProvider:
                 or type(metadata.get("RequestId")) is not str
                 or not metadata["RequestId"]
                 or type(parameter) is not dict
+                or not {
+                    "Name",
+                    "ARN",
+                    "Type",
+                    "Version",
+                    "Value",
+                    "Selector",
+                    "LastModifiedDate",
+                }.issubset(parameter)
                 or set(parameter)
-                != {"Name", "ARN", "Type", "Version", "Value"}
-                or parameter.get("Name") != requested
+                - {
+                    "Name",
+                    "ARN",
+                    "Type",
+                    "Version",
+                    "Value",
+                    "Selector",
+                    "LastModifiedDate",
+                    "DataType",
+                    "SourceResult",
+                }
+                or parameter.get("Name") != normalized_name
                 or parameter.get("Type") != "SecureString"
                 or parameter.get("Version") != expected_version
+                or parameter.get("Selector") != f":{expected_version}"
+                or type(parameter.get("LastModifiedDate")) is not datetime
+                or parameter["LastModifiedDate"].tzinfo is None
+                or (
+                    "DataType" in parameter
+                    and (
+                        type(parameter["DataType"]) is not str
+                        or not parameter["DataType"]
+                    )
+                )
+                or (
+                    "SourceResult" in parameter
+                    and type(parameter["SourceResult"]) is not str
+                )
                 or type(parameter.get("ARN")) is not str
                 or len(parameter["ARN"].split(":", 5)) != 6
                 or parameter["ARN"].split(":", 5)[0] != "arn"
                 or parameter["ARN"].split(":", 5)[2] != "ssm"
                 or parameter["ARN"].split(":", 5)[5]
-                != f"parameter/{requested}"
+                != f"parameter{normalized_name}"
                 or type(parameter.get("Value")) is not str
             ):
                 raise ValueError
@@ -146,8 +181,11 @@ class AwsSsmQuotaKeyMaterialProvider:
                 raise ValueError
         except Exception:
             raise ValueError("SSM quota key load failed") from None
+        modified = parameter["LastModifiedDate"].astimezone(UTC).isoformat(
+            timespec="microseconds"
+        )
         source_revision = (
-            f"aws-ssm:{parameter['ARN']}:{parameter['Version']}"
+            f"aws-ssm:{parameter['ARN']}:{parameter['Version']}:{modified}"
         )
         prior = self._revisions.get(source_revision)
         if prior is not None and not hmac.compare_digest(prior, key_bytes):
@@ -230,7 +268,7 @@ class QuotaKey:
             or len(self.key_bytes) < 32
             or type(self.source_revision) is not str
             or not self.source_revision
-            or len(self.source_revision) > 128
+            or len(self.source_revision) > 2048
             or self.source_revision != self.source_revision.strip()
             or type(self.activated) is not int
             or self.activated < 0

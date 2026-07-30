@@ -5,6 +5,9 @@ import base64
 from types import SimpleNamespace
 
 import pytest
+import boto3
+from botocore.config import Config
+from botocore.stub import Stubber
 
 from trustforge.preview_admission_compiler import (
     build_counter_specs,
@@ -79,11 +82,19 @@ class FakeSsmClient:
         requested = kwargs["Name"]
         version = int(requested.rsplit(":", 1)[1])
         parameter = {
-            "Name": requested,
-            "ARN": f"arn:aws:ssm:us-east-1:123:parameter/{requested}",
+            "Name": requested.rsplit(":", 1)[0],
+            "ARN": (
+                "arn:aws:ssm:us-east-1:123:parameter"
+                f"{requested.rsplit(':', 1)[0]}"
+            ),
             "Type": "SecureString",
             "Version": version,
             "Value": base64.b64encode(self.values[version]).decode(),
+            "Selector": f":{version}",
+            "LastModifiedDate": datetime(
+                2026, 7, version, tzinfo=UTC
+            ),
+            "DataType": "text",
         }
         if self.mutate is not None:
             parameter[self.mutate] = "wrong"
@@ -456,6 +467,53 @@ def test_ssm_loader_requires_retry_bounded_low_level_client():
     client.meta.config.retries["total_max_attempts"] = 2
     with pytest.raises(ValueError, match="retry-bounded"):
         AwsSsmQuotaKeyMaterialProvider(client)
+
+
+def test_ssm_loader_accepts_botocore_get_parameter_shape():
+    client = boto3.client(
+        "ssm",
+        region_name="us-east-1",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        config=Config(retries={"total_max_attempts": 1}),
+    )
+    modified = datetime(2026, 7, 30, 1, 2, 3, tzinfo=UTC)
+    with Stubber(client) as stubber:
+        stubber.add_response(
+            "get_parameter",
+            {
+                "Parameter": {
+                    "Name": "/trustforge/quota",
+                    "Type": "SecureString",
+                    "Value": base64.b64encode(bytes(range(32))).decode(),
+                    "Version": 1,
+                    "Selector": ":1",
+                    "SourceResult": "{}",
+                    "LastModifiedDate": modified,
+                    "ARN": (
+                        "arn:aws:ssm:us-east-1:123456789012:"
+                        "parameter/trustforge/quota"
+                    ),
+                    "DataType": "text",
+                },
+                "ResponseMetadata": {
+                    "HTTPStatusCode": 200,
+                    "RequestId": "shape-accurate",
+                },
+            },
+            {
+                "Name": "/trustforge/quota:1",
+                "WithDecryption": True,
+            },
+        )
+        loaded = AwsSsmQuotaKeyMaterialProvider(client).load(
+            parameter_name="trustforge/quota",
+            expected_version=1,
+            key_id="quota-1",
+        )
+    assert loaded.source_revision.endswith(
+        ":1:2026-07-30T01:02:03.000000+00:00"
+    )
 
 
 def test_authority_rejects_another_provider_material():

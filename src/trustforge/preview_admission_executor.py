@@ -27,6 +27,7 @@ from trustforge.quota_key_lifecycle import (
     AwsSsmQuotaKeyMaterialProvider,
     BoundAdmissionRequest,
     DurableQuotaKeyLifecycleAuthority,
+    MIN_OVERLAP_SECONDS,
     QuotaKeyLifecycle,
 )
 
@@ -135,25 +136,58 @@ _UNAVAILABLE = AdmissionExecutionResult(AdmissionOutcome.UNAVAILABLE)
 
 
 @dataclass(frozen=True, slots=True)
-class AwsQuotaLifecycleBootstrap:
-    generation: int
-    issued: TrustedUtcInterval
-    activated: int
+class AwsQuotaKeyReference:
     parameter_name: str
     expected_version: int
     key_id: str
 
     def __post_init__(self) -> None:
         if (
-            self.generation != 1
-            or type(self.issued) is not TrustedUtcInterval
-            or type(self.activated) is not int
-            or type(self.parameter_name) is not str
+            type(self.parameter_name) is not str
             or not self.parameter_name
             or type(self.expected_version) is not int
             or self.expected_version < 1
             or type(self.key_id) is not str
             or not self.key_id
+        ):
+            raise ValueError("invalid AWS quota key reference")
+
+
+@dataclass(frozen=True, slots=True)
+class AwsQuotaLifecycleBootstrap:
+    generation: int
+    issued: TrustedUtcInterval
+    activated: int
+    current: AwsQuotaKeyReference
+    previous: AwsQuotaKeyReference | None = None
+    previous_activated: int | None = None
+    superseded: int | None = None
+    retire_not_before: int | None = None
+
+    def __post_init__(self) -> None:
+        single = (
+            self.previous is None
+            and self.previous_activated is None
+            and self.superseded is None
+            and self.retire_not_before is None
+        )
+        overlap = (
+            type(self.previous) is AwsQuotaKeyReference
+            and type(self.previous_activated) is int
+            and self.superseded == self.activated
+            and type(self.retire_not_before) is int
+            and self.retire_not_before
+            >= self.activated + MIN_OVERLAP_SECONDS
+            and self.previous.expected_version
+            == self.current.expected_version - 1
+        )
+        if (
+            type(self.generation) is not int
+            or self.generation < 1
+            or type(self.issued) is not TrustedUtcInterval
+            or type(self.activated) is not int
+            or type(self.current) is not AwsQuotaKeyReference
+            or not (single or overlap)
         ):
             raise ValueError("invalid AWS quota lifecycle bootstrap")
 
@@ -313,17 +347,32 @@ class PreviewAdmissionExecutor:
             key_material_provider=provider,
         )
         loaded = provider.load(
-            parameter_name=lifecycle.parameter_name,
-            expected_version=lifecycle.expected_version,
-            key_id=lifecycle.key_id,
+            parameter_name=lifecycle.current.parameter_name,
+            expected_version=lifecycle.current.expected_version,
+            key_id=lifecycle.current.key_id,
         )
+        current = provider.bind_lifecycle(
+            loaded, activated=lifecycle.activated
+        )
+        previous = None
+        if lifecycle.previous is not None:
+            previous_loaded = provider.load(
+                parameter_name=lifecycle.previous.parameter_name,
+                expected_version=lifecycle.previous.expected_version,
+                key_id=lifecycle.previous.key_id,
+            )
+            previous = provider.bind_lifecycle(
+                previous_loaded,
+                activated=lifecycle.previous_activated,
+                superseded=lifecycle.superseded,
+                retire_not_before=lifecycle.retire_not_before,
+            )
         authority.install(
             QuotaKeyLifecycle(
                 generation=lifecycle.generation,
                 issued=lifecycle.issued,
-                current=provider.bind_lifecycle(
-                    loaded, activated=lifecycle.activated
-                ),
+                current=current,
+                previous=previous,
             )
         )
         gate = DurableAdmissionGate(

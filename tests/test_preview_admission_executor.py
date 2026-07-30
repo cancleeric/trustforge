@@ -22,6 +22,7 @@ from trustforge.preview_admission_compiler import (
 )
 from trustforge.preview_admission_executor import (
     AwsQuotaLifecycleBootstrap,
+    AwsQuotaKeyReference,
     AdmissionOutcome,
     PreviewAdmissionExecutor,
     _CONFIRMED_WRITE_REJECTION_CODES,
@@ -36,7 +37,10 @@ from trustforge.preview_trusted_clock import PreviewTrustedClock
 from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
     LIFECYCLE_CONTROL_KEY,
+    MIN_OVERLAP_SECONDS,
     QuotaKeyLifecycle,
+    _encode_metadata,
+    _lifecycle_metadata,
 )
 from tests.test_quota_key_lifecycle import _provider
 from tests.test_quota_key_lifecycle import FakeSsmClient
@@ -601,9 +605,11 @@ def test_aws_factory_composes_one_exact_retry_bounded_graph(monkeypatch):
             generation=1,
             issued=TrustedUtcInterval(now - 2, now - 1),
             activated=now - 1,
-            parameter_name="/trustforge/quota",
-            expected_version=1,
-            key_id="quota-1",
+            current=AwsQuotaKeyReference(
+                parameter_name="/trustforge/quota",
+                expected_version=1,
+                key_id="quota-1",
+            ),
         ),
         region_name="us-east-1",
     )
@@ -624,6 +630,97 @@ def test_aws_factory_composes_one_exact_retry_bounded_graph(monkeypatch):
             "WithDecryption": True,
         }
     ]
+
+
+def test_aws_factory_overlap_transition_and_single_restart(monkeypatch):
+    now = int(datetime.now(UTC).timestamp())
+
+    class TransitionClient(FakeClient):
+        def describe_table(self, **kwargs):
+            del kwargs
+            date = datetime.fromtimestamp(now, UTC).strftime(
+                "%a, %d %b %Y %H:%M:%S GMT"
+            )
+            return {
+                "ResponseMetadata": {"HTTPHeaders": {"date": date}}
+            }
+
+    dynamodb = TransitionClient(_request())
+    ssm = FakeSsmClient(
+        {1: bytes(range(32)), 2: bytes(range(1, 33))}
+    )
+
+    def client(service_name, **kwargs):
+        if service_name == "ssm":
+            ssm.meta.config = kwargs["config"]
+            return ssm
+        return dynamodb
+
+    monkeypatch.setattr(boto3, "client", client)
+
+    def reference(version):
+        return AwsQuotaKeyReference(
+            parameter_name="/trustforge/quota",
+            expected_version=version,
+            key_id=f"quota-{version}",
+        )
+
+    PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=1,
+            issued=TrustedUtcInterval(now - 6, now - 5),
+            activated=now - 5,
+            current=reference(1),
+        ),
+    )
+    overlap = PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=2,
+            issued=TrustedUtcInterval(now - 3, now - 2),
+            activated=now - 2,
+            current=reference(2),
+            previous=reference(1),
+            previous_activated=now - 5,
+            superseded=now - 2,
+            retire_not_before=now - 2 + MIN_OVERLAP_SECONDS,
+        ),
+    )
+    assert overlap._lifecycle_authority._lifecycle.previous is not None
+
+    issued = TrustedUtcInterval(now - 1, now)
+    post_retirement = QuotaKeyLifecycle(
+        generation=3,
+        issued=issued,
+        current=overlap._lifecycle_authority._lifecycle.current,
+    )
+    dynamodb.lifecycle_item = _encode_metadata(
+        _lifecycle_metadata(post_retirement)
+    )
+    restarted = PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=3,
+            issued=issued,
+            activated=now - 2,
+            current=reference(2),
+        ),
+    )
+    assert restarted._lifecycle_authority._lifecycle.generation == 3
+    assert restarted._lifecycle_authority._lifecycle.previous is None
+
+    with pytest.raises(ValueError, match="invalid AWS quota lifecycle"):
+        AwsQuotaLifecycleBootstrap(
+            generation=2,
+            issued=issued,
+            activated=now - 2,
+            current=reference(2),
+            previous=reference(2),
+            previous_activated=now - 5,
+            superseded=now - 2,
+            retire_not_before=now - 2 + MIN_OVERLAP_SECONDS,
+        )
 
 
 def test_source_has_no_model_provider_or_runtime_retry_boundary():
