@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
@@ -210,6 +211,81 @@ def test_handoff_cleanup_failure_supersedes_and_preserves_unknown_entry(tmp_path
             raise RuntimeError("original failure")
     assert unknown.exists()
     finalizer.assert_not_called()
+
+
+def test_partial_cases_cleanup_handles_real_store_witness_and_log_roots(
+    tmp_path, monkeypatch
+):
+    parent = tmp_path / "handoff"
+    generation = parent / "generation"
+    generation.mkdir(parents=True)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    generation_fd = os.open(generation, os.O_RDONLY | os.O_DIRECTORY)
+    opened = (parent_fd, generation_fd, "generation", {"mount_id": "1"})
+    original_stat = os.stat
+    original_fstat = os.fstat
+
+    def root_owned(metadata):
+        fields = list(metadata)
+        fields[4] = 0
+        fields[5] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(
+        orchestrator.os, "stat", lambda *a, **kw: root_owned(original_stat(*a, **kw))
+    )
+    monkeypatch.setattr(
+        orchestrator.os, "fstat", lambda *a, **kw: root_owned(original_fstat(*a, **kw))
+    )
+
+    def finalize(*_args):
+        assert not list(generation.iterdir())
+        os.close(generation_fd)
+        os.close(parent_fd)
+
+    with (
+        mock.patch.object(
+            orchestrator, "_validate_handoff_directory", return_value=opened
+        ),
+        mock.patch.object(
+            orchestrator, "finalize_handoff_generation", side_effect=finalize
+        ) as finalizer,
+        pytest.raises(RuntimeError, match="nested failure"),
+    ):
+        with orchestrator.handoff_session("commit") as session:
+            cases = generation / "cases"
+            cases.mkdir(mode=0o700)
+            session[4].register(
+                "cases", lambda: orchestrator.cleanup_partial_cases_tree(generation_fd)
+            )
+            store = cases / "trustforge-nf3-integrated-Ab12Cd34"
+            store.mkdir(mode=0o700)
+            state = store / "state"
+            state.write_text("partial")
+            state.chmod(0o600)
+            witness = cases / "trustforge-nf3-witness-Ef56Gh78"
+            witness.write_text("witness")
+            witness.chmod(0o600)
+            log = cases / "trustforge-nf3-integrated-Ab12Cd34.log"
+            log.write_text("log")
+            log.chmod(0o600)
+            raise RuntimeError("nested failure")
+    finalizer.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        ("case-001", "dir"),
+        ("trustforge-nf3-integrated-Ab12Cd34", "dir"),
+        ("trustforge-nf3-integrated-Ab12Cd34.log", "file"),
+        ("trustforge-nf3-witness-Ef56Gh78", "file"),
+        ("trustforge-nf3-integrated-short", None),
+        ("trustforge-nf3-witness-Ab12Cd34.log", None),
+    ],
+)
+def test_partial_cases_root_classifier_is_exact(name, kind):
+    assert orchestrator._partial_cases_root_kind(name) == kind
 
 
 def test_handoff_rejects_non_plain_destination(tmp_path):

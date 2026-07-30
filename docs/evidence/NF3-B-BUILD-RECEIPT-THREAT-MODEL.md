@@ -65,8 +65,12 @@ The handoff session registers each owned directory immediately at creation and
 runs those exact cleanups in reverse order on success, exception, or
 `SystemExit`, before artifact and lifecycle-marker removal. Partial NF1 staging
 accepts only a subset of the reviewed package topology; partial case cleanup
-accepts only harness-owned case/store root names and safe root-owned directory
-and regular-file descendants. An unknown or unsafe object stops cleanup,
+accepts only exact harness roots: case and integrated-store names must be
+directories, while integrated `.log` and witness names must be root-owned,
+single-link mode-0600 bounded regular files. Directory descendants are removed
+only after rejecting unsafe ownership, types, modes, links, and sizes; retained
+root descriptors must still match their names immediately before removal. An
+ambiguous, unknown, or unsafe object stops cleanup,
 supersedes the original failure, and preserves the generation for inspection.
 
 The accepted NF1 install is never bound directly into the nested unit. The

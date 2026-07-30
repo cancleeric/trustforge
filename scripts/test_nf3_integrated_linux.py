@@ -421,6 +421,41 @@ def _remove_registered_tree(root_fd: int) -> None:
     os.fsync(root_fd)
 
 
+def _partial_cases_root_kind(name: str) -> str | None:
+    case_number = name.removeprefix("case-")
+    if (
+        name.startswith("case-")
+        and len(case_number) == 3
+        and case_number.isascii()
+        and case_number.isdigit()
+        and 1 <= int(case_number) <= 60
+    ):
+        return "dir"
+    integrated = name.removeprefix("trustforge-nf3-integrated-")
+    if name.startswith("trustforge-nf3-integrated-"):
+        if integrated.endswith(".log"):
+            token = integrated.removesuffix(".log")
+            return (
+                "file"
+                if len(token) == 8 and token.isascii() and token.isalnum()
+                else None
+            )
+        return (
+            "dir"
+            if len(integrated) == 8 and integrated.isascii() and integrated.isalnum()
+            else None
+        )
+    witness = name.removeprefix("trustforge-nf3-witness-")
+    if (
+        name.startswith("trustforge-nf3-witness-")
+        and len(witness) == 8
+        and witness.isascii()
+        and witness.isalnum()
+    ):
+        return "file"
+    return None
+
+
 def cleanup_partial_cases_tree(generation_fd: int) -> None:
     """Remove only known harness roots from a partially populated cases tree."""
     try:
@@ -439,35 +474,57 @@ def cleanup_partial_cases_tree(generation_fd: int) -> None:
     ):
         block("partial NF3 cases directory metadata is unsafe")
     for name in os.listdir(cases_fd):
-        case_number = name.removeprefix("case-")
-        if not (
-            (
-                len(case_number) == 3
-                and case_number.isdigit()
-                and 1 <= int(case_number) <= 60
-            )
-            or name.startswith("trustforge-nf3-integrated-")
-            or name.startswith("trustforge-nf3-witness-")
-        ):
+        kind = _partial_cases_root_kind(name)
+        if kind is None:
             os.close(cases_fd)
             block(f"partial NF3 cases directory contains unknown entry: {name}")
-        child = os.open(
-            name,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-            dir_fd=cases_fd,
-        )
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        if kind == "dir":
+            flags |= os.O_DIRECTORY
+        child = os.open(name, flags, dir_fd=cases_fd)
         child_metadata = os.fstat(child)
-        if (
-            child_metadata.st_uid != 0
-            or child_metadata.st_gid != 0
-            or stat.S_IMODE(child_metadata.st_mode) & 0o022
-        ):
+        named_metadata = os.stat(name, dir_fd=cases_fd, follow_symlinks=False)
+        if _file_generation(child_metadata) != _file_generation(named_metadata):
             os.close(child)
             os.close(cases_fd)
-            block(f"partial NF3 case root is unsafe: {name}")
-        _remove_registered_tree(child)
-        os.close(child)
-        os.rmdir(name, dir_fd=cases_fd)
+            block(f"partial NF3 case root identity changed: {name}")
+        if kind == "dir":
+            if (
+                not stat.S_ISDIR(child_metadata.st_mode)
+                or child_metadata.st_uid != 0
+                or child_metadata.st_gid != 0
+                or stat.S_IMODE(child_metadata.st_mode) & 0o022
+            ):
+                os.close(child)
+                os.close(cases_fd)
+                block(f"partial NF3 case root is unsafe: {name}")
+            _remove_registered_tree(child)
+            named_metadata = os.stat(name, dir_fd=cases_fd, follow_symlinks=False)
+            if _file_generation(os.fstat(child)) != _file_generation(named_metadata):
+                os.close(child)
+                os.close(cases_fd)
+                block(f"partial NF3 case root changed during cleanup: {name}")
+            os.close(child)
+            os.rmdir(name, dir_fd=cases_fd)
+        else:
+            if (
+                not stat.S_ISREG(child_metadata.st_mode)
+                or child_metadata.st_uid != 0
+                or child_metadata.st_gid != 0
+                or child_metadata.st_nlink != 1
+                or stat.S_IMODE(child_metadata.st_mode) != 0o600
+                or child_metadata.st_size > 128 * 1024 * 1024
+            ):
+                os.close(child)
+                os.close(cases_fd)
+                block(f"partial NF3 case artifact is unsafe: {name}")
+            named_metadata = os.stat(name, dir_fd=cases_fd, follow_symlinks=False)
+            if _file_generation(os.fstat(child)) != _file_generation(named_metadata):
+                os.close(child)
+                os.close(cases_fd)
+                block(f"partial NF3 case artifact changed during cleanup: {name}")
+            os.unlink(name, dir_fd=cases_fd)
+            os.close(child)
     os.fsync(cases_fd)
     os.close(cases_fd)
     os.rmdir("cases", dir_fd=generation_fd)
