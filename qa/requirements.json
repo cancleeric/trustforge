@@ -20,7 +20,7 @@
     {"id": "CA-01", "gate": "competition", "title": "Five-coin three-question report matrix", "hard": true, "matrix": ["coin", "question_type"], "automation": ["scripts/qa_matrix.py"]},
     {"id": "CA-02", "gate": "competition", "title": "Five-coin five-angle jobs", "hard": true, "matrix": ["coin", "angle"], "automation": ["scripts/run_multi_angle_release_gate.py"]},
     {"id": "CA-03", "gate": "competition", "title": "Required source-family completeness", "hard": true, "matrix": ["coin", "source_family"], "automation": ["scripts/verify_production_analysis_report.py"]},
-    {"id": "CA-04", "gate": "competition", "title": "Manual job priority over scheduled backlog", "hard": true, "automation": ["tests/test_analysis_flow.py"]},
+    {"id": "CA-04", "gate": "competition", "title": "Manual job priority over scheduled backlog", "hard": true, "implementation_status": "planned", "automation": ["scripts/run_manual_priority_release_gate.py"]},
     {"id": "CA-05", "gate": "competition", "title": "Manual five-angle synthesis within 600 seconds", "hard": true, "automation": ["scripts/run_multi_angle_release_gate.py"]},
     {"id": "CA-06", "gate": "competition", "title": "Report evidence execution log and download", "hard": true, "automation": ["scripts/verify_production_analysis_report.py"]},
     {"id": "CA-07", "gate": "competition", "title": "Release-bound acceptance manifest", "hard": true, "automation": ["scripts/validate_qa_acceptance.py"]},
