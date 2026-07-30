@@ -13,6 +13,7 @@ import { useSearchParams } from 'react-router-dom'
 import { apiFetch, DEFAULT_TIMEOUT_MS } from '../lib/apiClient'
 import type { ApiEnvelope } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
+import { useBridgeHologram } from './BridgeHologramContext'
 
 interface WhaleHistorySummary {
   total_count: number
@@ -112,12 +113,41 @@ interface Props {
 }
 
 export default function WhaleHistoryPanel({ coin: propCoin }: Props) {
+  const { setData: setHologramData } = useBridgeHologram()
   const [searchParams] = useSearchParams()
   const coin = propCoin || searchParams.get('coin')?.toUpperCase() || COIN_POOL[0]
   const [days, setDays] = useState<DaysOption>(7)
   const [data, setData] = useState<WhaleHistoryData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setHologramData(data ? {
+      primaryLabel: data.coin,
+      primaryValue: data.summary.net_exchange_flow_usd,
+      secondaryValue: data.summary.max_single_usd,
+      total: data.summary.total_count,
+      points: data.timeline.map((bucket) => bucket.net_flow_usd),
+      status: `${data.days} DAYS · ${data.transfers.length} RETURNED`,
+      workspaceStageMetrics: [
+        { metric: data.summary.total_count.toLocaleString(), unit: '已記錄大額活動', status: 'completed' },
+        {
+          metric: data.transfers.filter((transfer) => transfer.direction.includes('exchange_')).length.toLocaleString(),
+          unit: '已分類交易所流向',
+          status: 'completed',
+        },
+        { metric: formatUsd(data.summary.net_exchange_flow_usd), unit: '交易所淨流量', status: 'completed' },
+        {
+          metric: data.transfers.length.toLocaleString(),
+          unit: '本次回傳大額明細',
+          status: 'completed',
+          facts: [{ label: '最大單筆', value: formatUsd(data.summary.max_single_usd) }],
+        },
+        { metric: data.timeline.length.toLocaleString(), unit: `${data.days} 日趨勢時間桶`, status: 'completed' },
+      ],
+    } : null)
+    return () => setHologramData(null)
+  }, [data, setHologramData])
 
   const fetchHistory = useCallback(async (c: string, d: DaysOption, signal: AbortSignal) => {
     setLoading(true)

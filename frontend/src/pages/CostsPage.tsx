@@ -88,10 +88,47 @@ export default function CostsPage() {
   const [retryNonce, setRetryNonce] = useState(0)
 
   useEffect(() => {
+    const modelDetails = data ? Object.values(data.by_model_detail) : []
+    const pageCalls = data?.runs.reduce((sum, run) => sum + run.calls.length, 0) ?? 0
+    const inputTokens = modelDetails.reduce((sum, detail) => sum + detail.tokens_in, 0)
+    const outputTokens = modelDetails.reduce((sum, detail) => sum + detail.tokens_out, 0)
     setHologramData(data ? {
       primaryValue: data.total_cost_usd,
       total: data.run_count,
       status: `${Object.keys(data.by_model).length} MODELS`,
+      workspaceStageMetrics: [
+        {
+          metric: pageCalls.toLocaleString(),
+          unit: '本頁已載入的模型呼叫',
+          status: 'completed',
+          facts: [{ label: '資料範圍', value: `${data.runs.length} 個已載入 run；不是跨 run 全量 call 數` }],
+        },
+        {
+          metric: Object.keys(data.by_model_detail).length.toLocaleString(),
+          unit: '已記錄模型',
+          status: 'completed',
+        },
+        {
+          metric: (inputTokens + outputTokens).toLocaleString(),
+          unit: '已記錄 token',
+          status: 'completed',
+          facts: [
+            { label: '輸入 token', value: inputTokens.toLocaleString() },
+            { label: '輸出 token', value: outputTokens.toLocaleString() },
+          ],
+        },
+        {
+          metric: data.run_count.toLocaleString(),
+          unit: 'append-only ledger run',
+          status: 'completed',
+          facts: [{ label: '目前頁面', value: `${data.runs.length} 個 run` }],
+        },
+        {
+          metric: formatUsd(data.total_cost_usd),
+          unit: '跨 run 已記錄 LLM 成本',
+          status: 'completed',
+        },
+      ],
     } : null)
     return () => setHologramData(null)
   }, [data, setHologramData])

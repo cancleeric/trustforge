@@ -107,7 +107,7 @@ describe('N26: zh-TW mode has no residual English strings', () => {
   })
 
   it.each(['analyze', 'compare', 'history', 'status', 'costs', 'whale'] as const)(
-    'StageBar: %s workspace stations do not open the unrelated homepage drawer',
+    'StageBar: %s workspace stations dispatch five workspace-scoped drilldown ids',
     (mode) => {
     const { coin } = galaxyHarness()
     const onSelectStage = vi.fn()
@@ -126,11 +126,12 @@ describe('N26: zh-TW mode has no residual English strings', () => {
     const stations = screen.getAllByRole('button')
     expect(stations).toHaveLength(5)
     for (const station of stations) {
-      expect(station).toBeDisabled()
-      expect(station).toHaveAccessibleName(/階段資料尚未提供，無法開啟明細/)
+      expect(station).toBeEnabled()
       fireEvent.click(station)
     }
-    expect(onSelectStage).not.toHaveBeenCalled()
+    expect(onSelectStage.mock.calls.map(([id]) => id)).toEqual([
+      `${mode}:0`, `${mode}:1`, `${mode}:2`, `${mode}:3`, `${mode}:4`,
+    ])
     },
   )
 

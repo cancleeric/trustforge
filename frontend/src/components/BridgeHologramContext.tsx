@@ -28,6 +28,13 @@ export type BridgeHologramData = {
     metric: string
     unit: string
     status: 'completed' | 'failed' | 'pending'
+    facts?: Array<{ label: string; value: string }>
+  }>
+  workspaceStageMetrics?: Array<{
+    metric: string
+    unit: string
+    status?: 'completed' | 'failed' | 'pending'
+    facts?: Array<{ label: string; value: string }>
   }>
 }
 

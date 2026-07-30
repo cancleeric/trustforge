@@ -5,3 +5,11 @@ edition = "2024"
 publish = false
 
 [dependencies]
+
+[features]
+adversarial-test-hooks = []
+
+[[bin]]
+name = "nf3-test-helper"
+path = "src/bin/nf3_test_helper.rs"
+required-features = ["adversarial-test-hooks"]
