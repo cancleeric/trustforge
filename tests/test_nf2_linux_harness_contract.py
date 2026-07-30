@@ -3,9 +3,8 @@ import inspect
 import struct
 import tempfile
 import os
+import stat
 from pathlib import Path
-
-import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/test_nf2_zero_capability_linux.py"
@@ -124,12 +123,9 @@ def test_elf_parser_accepts_static_x86_64_without_dynamic_dependencies(tmp_path)
     HARNESS.verify_static_x86_64_elf(path)
 
 
-@pytest.mark.serial
-def test_setuid_tool_mode_uses_canonical_four_digit_octal(tmp_path):
-    tool = tmp_path / "mount"
-    tool.write_bytes(b"fixture")
-    tool.chmod(0o4755)
-    assert HARNESS.canonical_mode(os.stat(tool)) == "4755"
+def test_setuid_tool_mode_uses_canonical_four_digit_octal():
+    metadata = os.stat_result((stat.S_IFREG | 0o4755, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    assert HARNESS.canonical_mode(metadata) == "4755"
 
 
 def test_self_cgroup_container_marker_is_not_hidden_by_clean_pid1():
