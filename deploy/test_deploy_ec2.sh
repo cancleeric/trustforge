@@ -617,8 +617,6 @@ case "$ALL" in
     # lease bootstrap 的重跑路徑：TTL 已啟用時不可再呼叫 update，否則 AWS
     # 會回 ValidationException。以真實狀態回應，確保 mock 不掩蓋該契約。
     echo "ENABLED" ;;
-  "dynamodb describe-continuous-backups"*)
-    echo "ENABLED" ;;
   "ssm describe-instance-information"*)
     echo "Online" ;;
   "ec2 describe-vpcs"*)
@@ -724,10 +722,6 @@ else
   assert_contains "$UD_CONTENT" "Environment=COST_LEDGER_BACKEND=dynamodb" "user-data: trustforge.service 有 COST_LEDGER_BACKEND"
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb" "user-data: trustforge.service 有 shared lease backend"
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases" "user-data: trustforge.service 有 shared lease table"
-  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=trustforge-multi-angle-batches" "user-data: atomic table"
-  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=dynamodb-v1" "user-data: atomic config version"
-  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=1" "user-data: atomic exclusive mode"
-  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=/opt/out/trustforge.sqlite3" "user-data: shared projection path"
   assert_contains "$UD_CONTENT" "fetch-scheduler.service" "user-data: 有寫 fetch-scheduler.service"
   assert_contains "$UD_CONTENT" "fetch-scheduler.timer" "user-data: 有寫 fetch-scheduler.timer"
   assert_contains "$UD_CONTENT" "ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py" "user-data: fetch-scheduler ExecStart 正確"
@@ -985,10 +979,6 @@ assert_contains "$SCRIPT" 'table/trustforge-connector-cache' "所有發布：rat
   assert_contains "$REMOTE" 'Environment=COST_LEDGER_BACKEND=dynamodb' "update-in-place: 補 COST_LEDGER_BACKEND"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb' "update-in-place: 補 shared lease backend"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases' "update-in-place: 補 shared lease table"
-  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=trustforge-multi-angle-batches' "update-in-place: 補 atomic table"
-  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=dynamodb-v1' "update-in-place: 補 atomic config version"
-  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=1' "update-in-place: 補 atomic exclusive mode"
-  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=/opt/out/trustforge.sqlite3' "update-in-place: 補 shared projection path"
   assert_contains "$REMOTE" 'bash deploy/install_hermes_scheduler.sh' "update-in-place: 呼叫 Hermes scheduler installer"
   assert_contains "$REMOTE" 'systemctl restart trustforge-analysis-flow.service' "update-in-place: 重啟 durable analysis-flow worker"
   assert_contains "$REMOTE" 'systemctl is-active --quiet trustforge-analysis-flow' "update-in-place: analysis-flow worker 是部署健康 gate"

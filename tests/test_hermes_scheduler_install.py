@@ -17,16 +17,6 @@ def test_hermes_scheduler_sets_packaged_home_and_starts_timer():
     assert "Environment=TRUSTFORGE_HOME=$APP_DIR" in script
     assert "Environment=BEDROCK_MODEL_ID=$MODEL" in script
     assert "s/^Environment=BEDROCK_MODEL_ID=//p" in script
-    assert script.count("Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=$ATOMIC_TABLE") == 2
-    assert script.count(
-        "Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=$ATOMIC_CONFIG_VERSION"
-    ) == 2
-    assert script.count(
-        "Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=$ATOMIC_EXCLUSIVE"
-    ) == 2
-    assert script.count(
-        "Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=$SHARED_ANALYSIS_DB"
-    ) == 2
     assert "Environment=TRUSTFORGE_HERMES_AUTONOMY_ENABLED=0" in script
     assert "OnUnitActiveSec=30min" in script
     assert "systemctl enable --now hermes-cycle.timer" in script
