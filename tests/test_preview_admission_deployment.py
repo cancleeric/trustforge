@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import importlib.util
 
 import pytest
 import yaml
@@ -11,6 +12,7 @@ from trustforge.preview_admission_deployment import (
     KEY_PARAMETER_ENV,
     TABLE_ENV,
     PreviewAdmissionRuntimeComposer,
+    PreviewAdmissionProductionRuntime,
     PreviewDeploymentConfig,
     PreviewDeploymentStatus,
     PreviewDisableDecision,
@@ -19,6 +21,13 @@ from trustforge.preview_admission_deployment import (
     advance_release_stage,
     evaluate_preview_disable,
 )
+from trustforge.preview_admission_executor import PreviewAdmissionExecutor
+from trustforge.preview_durable_admission_gate import DurableAdmissionGate
+from trustforge.preview_lease_recovery import (
+    PreviewAmbiguityRecovery,
+    PreviewLeaseRecovery,
+)
+from trustforge.preview_terminal_reconcile import PreviewTerminalReconciler
 
 
 TABLE_ARN = (
@@ -136,6 +145,98 @@ def test_env_flag_is_exact_default_off_and_has_no_fallback():
                 expected_table_arn=TABLE_ARN,
                 environ={**base, FEATURE_ENV: invalid},
             )
+
+
+def test_config_requires_exact_adjacent_previous_revision_and_incarnation():
+    values = {
+        FEATURE_ENV: "1",
+        KEY_PARAMETER_ENV: "/trustforge/current",
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION": "3",
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION": "incarnation-3",
+        "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER": "/trustforge/previous",
+        "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_VERSION": "2",
+        "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION": "incarnation-2",
+    }
+    config = PreviewDeploymentConfig.from_env(
+        expected_kms_key_arn=KMS_ARN,
+        expected_table_arn=TABLE_ARN,
+        environ=values,
+    )
+    assert config.quota_key_version == 3
+    assert config.previous_quota_key_version == 2
+    with pytest.raises(ValueError, match="previous quota key"):
+        PreviewDeploymentConfig.from_env(
+            expected_kms_key_arn=KMS_ARN,
+            expected_table_arn=TABLE_ARN,
+            environ={
+                **values,
+                "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION":
+                    "incarnation-3",
+            },
+        )
+
+
+def test_production_runtime_seals_one_shared_client_graph():
+    client = object()
+    table = DEFAULT_TABLE
+    clock = object()
+    gate = object.__new__(DurableAdmissionGate)
+    gate._client = client
+    gate._table = table
+    gate._trusted_clock = clock
+    lifecycle = type("Lifecycle", (), {})()
+    lifecycle._client = client
+    lifecycle._clock = clock
+    executor = object.__new__(PreviewAdmissionExecutor)
+    executor._client = client
+    executor._table_name = table
+    executor._durable_gate = gate
+    executor._lifecycle_authority = lifecycle
+    terminal = object.__new__(PreviewTerminalReconciler)
+    terminal._client = client
+    terminal._table_name = table
+    lease = object.__new__(PreviewLeaseRecovery)
+    lease._client = client
+    lease._terminal = terminal
+    ambiguity = object.__new__(PreviewAmbiguityRecovery)
+    ambiguity._client = client
+    ambiguity._terminal = terminal
+    ambiguity._gate = gate
+
+    runtime = PreviewAdmissionProductionRuntime(
+        executor, terminal, lease, ambiguity
+    )
+    assert runtime.executor._client is runtime.terminal._client
+
+    ambiguity._client = object()
+    with pytest.raises(ValueError, match="split preview authority"):
+        PreviewAdmissionProductionRuntime(executor, terminal, lease, ambiguity)
+
+
+def test_bootstrap_is_conditional_idempotent_and_never_contains_secret_bytes():
+    spec = importlib.util.spec_from_file_location(
+        "preview_bootstrap", "deploy/bootstrap_preview_admission_store.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class BootstrapClient:
+        def __init__(self):
+            self.calls = []
+
+        def put_item(self, **kwargs):
+            self.calls.append(kwargs)
+
+    client = BootstrapClient()
+    module.bootstrap(client, DEFAULT_TABLE, 123)
+    assert len(client.calls) == 2
+    assert all(
+        call["ConditionExpression"]
+        == "attribute_not_exists(pk) AND attribute_not_exists(sk)"
+        for call in client.calls
+    )
+    assert b"secret" not in repr(client.calls).encode()
 
 
 def test_ready_means_verified_store_and_composed_runtime():
@@ -283,14 +384,16 @@ def test_cloudformation_is_default_off_retained_and_least_privilege():
     class CloudFormationLoader(yaml.SafeLoader):
         pass
 
-    CloudFormationLoader.add_multi_constructor(
-        "!",
-        lambda loader, suffix, node: {
-            suffix: loader.construct_scalar(node)
-            if isinstance(node, yaml.ScalarNode)
-            else loader.construct_object(node)
-        },
-    )
+    def construct_tag(loader, suffix, node):
+        if isinstance(node, yaml.ScalarNode):
+            value = loader.construct_scalar(node)
+        elif isinstance(node, yaml.SequenceNode):
+            value = loader.construct_sequence(node)
+        else:
+            value = loader.construct_mapping(node)
+        return {suffix: value}
+
+    CloudFormationLoader.add_multi_constructor("!", construct_tag)
     with open("deploy/preview-admission-store.yaml", encoding="utf-8") as source:
         template = yaml.load(source, Loader=CloudFormationLoader)
     text = open(
@@ -326,3 +429,16 @@ def test_cloudformation_is_default_off_retained_and_least_privilege():
     assert "kms:Decrypt" in actions
     assert 'Resource: "*"' not in text
     assert "AWS::DynamoDB::Table" in text
+    assert "CurrentQuotaKeyParameterArn" in text
+    assert "PreviousQuotaKeyParameterArn" in text
+    assert "kms:EncryptionContext:PARAMETER_ARN" in text
+
+
+def test_zero_downtime_canary_inherits_exact_default_off_flag():
+    text = open("deploy/zero_downtime_restart.sh", encoding="utf-8").read()
+    assert "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0" in text
+    assert (
+        "Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED="
+        "$PREVIEW_ADMISSION_ENABLED"
+    ) in text
+    assert '!= "0"' in text and '!= "1"' in text

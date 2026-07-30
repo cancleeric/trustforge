@@ -12,10 +12,24 @@ import os
 import re
 from typing import Callable, Protocol
 
+from trustforge.preview_admission_executor import (
+    AwsQuotaLifecycleBootstrap,
+    PreviewAdmissionExecutor,
+)
+from trustforge.preview_lease_recovery import (
+    PreviewAmbiguityRecovery,
+    PreviewLeaseRecovery,
+)
+from trustforge.preview_terminal_reconcile import PreviewTerminalReconciler
 
 FEATURE_ENV = "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED"
 TABLE_ENV = "TRUSTFORGE_PREVIEW_ADMISSION_TABLE"
 KEY_PARAMETER_ENV = "TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER"
+KEY_VERSION_ENV = "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION"
+KEY_INCARNATION_ENV = "TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION"
+PREVIOUS_KEY_PARAMETER_ENV = "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER"
+PREVIOUS_KEY_VERSION_ENV = "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_VERSION"
+PREVIOUS_KEY_INCARNATION_ENV = "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION"
 DEFAULT_TABLE = "trustforge-preview-admission"
 TTL_ATTRIBUTE = "ttl"
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
@@ -42,6 +56,11 @@ class PreviewDeploymentConfig:
     quota_key_parameter: str
     expected_kms_key_arn: str
     expected_table_arn: str
+    quota_key_version: int = 1
+    quota_key_incarnation: str = "quota-1"
+    previous_quota_key_parameter: str | None = None
+    previous_quota_key_version: int | None = None
+    previous_quota_key_incarnation: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -57,8 +76,27 @@ class PreviewDeploymentConfig:
             or not self.expected_table_arn.startswith("arn:")
             or ":dynamodb:" not in self.expected_table_arn
             or not self.expected_table_arn.endswith(f":table/{self.table_name}")
+            or type(self.quota_key_version) is not int
+            or self.quota_key_version < 1
+            or type(self.quota_key_incarnation) is not str
+            or not self.quota_key_incarnation
         ):
             raise ValueError("invalid preview deployment config")
+        previous = (
+            self.previous_quota_key_parameter,
+            self.previous_quota_key_version,
+            self.previous_quota_key_incarnation,
+        )
+        if any(value is not None for value in previous) and not (
+            type(previous[0]) is str
+            and _PARAMETER_RE.fullmatch(previous[0])
+            and type(previous[1]) is int
+            and previous[1] + 1 == self.quota_key_version
+            and type(previous[2]) is str
+            and bool(previous[2])
+            and previous[2] != self.quota_key_incarnation
+        ):
+            raise ValueError("invalid previous quota key")
 
     @classmethod
     def from_env(
@@ -80,6 +118,17 @@ class PreviewDeploymentConfig:
             ),
             expected_kms_key_arn=expected_kms_key_arn,
             expected_table_arn=expected_table_arn,
+            quota_key_version=_positive_int(values.get(KEY_VERSION_ENV, "1")),
+            quota_key_incarnation=values.get(KEY_INCARNATION_ENV, "quota-1"),
+            previous_quota_key_parameter=values.get(PREVIOUS_KEY_PARAMETER_ENV),
+            previous_quota_key_version=(
+                _positive_int(values[PREVIOUS_KEY_VERSION_ENV])
+                if PREVIOUS_KEY_VERSION_ENV in values
+                else None
+            ),
+            previous_quota_key_incarnation=values.get(
+                PREVIOUS_KEY_INCARNATION_ENV
+            ),
         )
 
 
@@ -111,6 +160,65 @@ class PreviewStoreReadiness:
         if not self.enabled:
             raise ValueError("preview admission runtime unavailable")
         return self._runtime
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewAdmissionProductionRuntime:
+    """One composition-integrity graph shared by all preview authorities."""
+
+    executor: PreviewAdmissionExecutor
+    terminal: PreviewTerminalReconciler
+    lease_recovery: PreviewLeaseRecovery
+    ambiguity_recovery: PreviewAmbiguityRecovery
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.executor) is not PreviewAdmissionExecutor
+            or type(self.terminal) is not PreviewTerminalReconciler
+            or type(self.lease_recovery) is not PreviewLeaseRecovery
+            or type(self.ambiguity_recovery) is not PreviewAmbiguityRecovery
+        ):
+            raise ValueError("invalid production preview runtime")
+        client = self.executor._client
+        table = self.executor._table_name
+        clock = self.executor._durable_gate._trusted_clock
+        if (
+            self.executor._durable_gate._client is not client
+            or self.executor._lifecycle_authority._client is not client
+            or self.executor._lifecycle_authority._clock is not clock
+            or self.terminal._client is not client
+            or self.terminal._table_name != table
+            or self.lease_recovery._client is not client
+            or self.lease_recovery._terminal is not self.terminal
+            or self.ambiguity_recovery._client is not client
+            or self.ambiguity_recovery._terminal is not self.terminal
+            or self.ambiguity_recovery._gate is not self.executor._durable_gate
+        ):
+            raise ValueError("split preview authority graph")
+
+    @classmethod
+    def from_aws_components(
+        cls,
+        table_name: str,
+        *,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+    ) -> "PreviewAdmissionProductionRuntime":
+        """Use the executor's attempts=1 clients and share every authority."""
+
+        executor = PreviewAdmissionExecutor.from_aws_components(
+            table_name, lifecycle=lifecycle, region_name=region_name
+        )
+        client = executor._client
+        terminal = PreviewTerminalReconciler(client, table_name)
+        return cls(
+            executor=executor,
+            terminal=terminal,
+            lease_recovery=PreviewLeaseRecovery(client, table_name, terminal),
+            ambiguity_recovery=PreviewAmbiguityRecovery(
+                client, table_name, terminal, executor._durable_gate
+            ),
+        )
 
 
 class PreviewAdmissionRuntimeComposer:
@@ -166,6 +274,60 @@ class PreviewAdmissionRuntimeComposer:
             checks,
             runtime,
         )
+
+    @classmethod
+    def evaluate_production(
+        cls,
+        *,
+        config: PreviewDeploymentConfig,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+    ) -> PreviewStoreReadiness:
+        """Compose the sealed #991/#992/#993 graph; off performs zero AWS I/O."""
+
+        if not config.requested:
+            return PreviewStoreReadiness(
+                PreviewDeploymentStatus.DISABLED,
+                "feature_default_off",
+                config.table_name,
+            )
+        try:
+            runtime = PreviewAdmissionProductionRuntime.from_aws_components(
+                config.table_name,
+                lifecycle=lifecycle,
+                region_name=region_name,
+            )
+            verifier = cls(
+                client=runtime.executor._client,
+                config=config,
+                compose=lambda: runtime,
+            )
+            result = verifier.evaluate()
+            if not result.enabled:
+                raise ValueError("production runtime unavailable")
+            # These properties are backed by the same exact client and validate
+            # control/lifecycle on construction; clock refresh is an explicit
+            # authenticated, low-cardinality readiness sample.
+            runtime.executor._durable_gate._trusted_clock.refresh()
+            runtime.lease_recovery._read_watermark()
+            if (
+                not runtime.executor._durable_gate.ready
+                or runtime.executor._lifecycle_authority._lifecycle is None
+            ):
+                raise ValueError("authority rows unavailable")
+            return PreviewStoreReadiness(
+                PreviewDeploymentStatus.READY,
+                "production_runtime_ready",
+                config.table_name,
+                result.checks + ("control", "watermark", "lifecycle", "clock"),
+                runtime,
+            )
+        except Exception:
+            return PreviewStoreReadiness(
+                PreviewDeploymentStatus.UNAVAILABLE,
+                "production_runtime_not_ready",
+                config.table_name,
+            )
 
     def _verify_store(self) -> tuple[str, ...]:
         table_response = self._client.describe_table(
@@ -273,6 +435,46 @@ def evaluate_preview_disable(
     return PreviewDisableDecision(True, "disable_safe_retain_state")
 
 
+def bounded_admin_recover_and_disable_check(
+    runtime: PreviewAdmissionProductionRuntime,
+    *,
+    required_shard: int,
+) -> PreviewDisableDecision:
+    """Run only bounded #993 recovery, then strongly re-observe disable proof."""
+
+    if (
+        type(runtime) is not PreviewAdmissionProductionRuntime
+        or type(required_shard) is not int
+        or required_shard < 0
+    ):
+        return PreviewDisableDecision(False, "malformed_admin_request")
+    try:
+        clock = runtime.executor._durable_gate._trusted_clock
+        interval = clock.refresh()
+        gate = runtime.executor._durable_gate
+        if not gate.ready and not runtime.executor.recover_pending(
+            runtime.ambiguity_recovery
+        ):
+            return PreviewDisableDecision(False, "pending_admission")
+        runtime.lease_recovery.run(interval)
+        watermark = runtime.lease_recovery._read_watermark()
+        control = gate._control
+        lifecycle = runtime.executor._lifecycle_authority._lifecycle
+        if control is None or lifecycle is None:
+            raise ValueError("authority unavailable")
+        return evaluate_preview_disable(
+            PreviewDisableObservation(
+                control_state=control.state.value,
+                pending_binding=control.binding is not None,
+                recovery_shard=watermark.shard,
+                required_shard=required_shard,
+                lifecycle_mode=lifecycle.mode.value,
+            )
+        )
+    except Exception:
+        return PreviewDisableDecision(False, "admin_probe_unavailable")
+
+
 def advance_release_stage(
     current: PreviewReleaseStage,
     target: PreviewReleaseStage,
@@ -316,3 +518,12 @@ def _exact_payload(response: object, name: str) -> object:
     ):
         raise ValueError("unconfirmed AWS response")
     return response[name]
+
+
+def _positive_int(value: object) -> int:
+    if type(value) is not str or not value.isascii() or not value.isdigit():
+        raise ValueError("expected positive integer")
+    result = int(value)
+    if result < 1:
+        raise ValueError("expected positive integer")
+    return result

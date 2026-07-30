@@ -33,6 +33,7 @@ PRIMARY_PORT="${1:-8080}"
 BACKUP_PORT="${2:-8081}"
 HEALTH_TIMEOUT="${TRUSTFORGE_HEALTH_TIMEOUT:-30}"
 HEALTH_INTERVAL="${TRUSTFORGE_HEALTH_INTERVAL:-1}"
+PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
 CANARY_UNIT="trustforge-canary-$$"
 MODEL_ID="${BEDROCK_MODEL_ID-}"
 if [ -z "$MODEL_ID" ] && [ -r /etc/systemd/system/trustforge.service ]; then
@@ -40,6 +41,10 @@ if [ -z "$MODEL_ID" ] && [ -r /etc/systemd/system/trustforge.service ]; then
 fi
 if [ -n "$MODEL_ID" ] && ! [[ "$MODEL_ID" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "[zero-downtime] ERROR: BEDROCK_MODEL_ID contains invalid characters" >&2
+  exit 1
+fi
+if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
+  echo "[zero-downtime] ERROR: preview admission flag must be exactly 0 or 1" >&2
   exit 1
 fi
 
@@ -79,6 +84,7 @@ systemd-run --unit="$CANARY_UNIT" \
   --property="Environment=CACHE_BACKEND=${CACHE_BACKEND:-dynamodb}" \
   --property="Environment=TRUSTFORGE_CACHE_TABLE=${TRUSTFORGE_CACHE_TABLE:-trustforge-connector-cache}" \
   --property="Environment=TRUSTFORGE_COST_LEDGER_TABLE=${TRUSTFORGE_COST_LEDGER_TABLE:-trustforge-cost-ledger}" \
+  --property="Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=$PREVIEW_ADMISSION_ENABLED" \
   --property="Environment=COST_LEDGER_BACKEND=${COST_LEDGER_BACKEND:-dynamodb}" \
   --property="Environment=BEDROCK_MODEL_ID=${MODEL_ID}" \
   --property="Type=exec" \

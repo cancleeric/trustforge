@@ -4,8 +4,11 @@ Description: Dedicated default-off TrustForge paid-preview admission store.
 Parameters:
   RuntimeRoleName:
     Type: String
-  QuotaKeyParameterArn:
+  CurrentQuotaKeyParameterArn:
     Type: String
+  PreviousQuotaKeyParameterArn:
+    Type: String
+    Default: ""
   QuotaKeyKmsKeyArn:
     Type: String
   PreviewEnabled:
@@ -68,7 +71,9 @@ Resources:
           - Sid: ExactQuotaKeyRevision
             Effect: Allow
             Action: ssm:GetParameter
-            Resource: !Ref QuotaKeyParameterArn
+            Resource:
+              - !Ref CurrentQuotaKeyParameterArn
+              - !If [HasPreviousQuotaKey, !Ref PreviousQuotaKeyParameterArn, !Ref "AWS::NoValue"]
           - Sid: ExactQuotaKeyDecrypt
             Effect: Allow
             Action: kms:Decrypt
@@ -76,6 +81,13 @@ Resources:
             Condition:
               StringEquals:
                 kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+              ForAnyValue:StringEquals:
+                kms:EncryptionContext:PARAMETER_ARN:
+                  - !Ref CurrentQuotaKeyParameterArn
+                  - !If [HasPreviousQuotaKey, !Ref PreviousQuotaKeyParameterArn, !Ref "AWS::NoValue"]
+
+Conditions:
+  HasPreviousQuotaKey: !Not [!Equals [!Ref PreviousQuotaKeyParameterArn, ""]]
 
 Outputs:
   PreviewAdmissionTableName:

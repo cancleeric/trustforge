@@ -7,15 +7,21 @@ defaults to `0`; the formal service remains isolated.
 ## Provision and verify
 
 1. Deploy `deploy/preview-admission-store.yaml` with an exact runtime role,
-   one exact versioned SecureString parameter ARN, and its exact KMS key ARN.
+   exact current and optional previous versioned SecureString parameter ARNs,
+   and their exact KMS key ARN.
 2. Confirm the dedicated table is `ACTIVE`, `PAY_PER_REQUEST`, has only string
    `pk`/`sk`, KMS encryption, TTL on `ttl`, PITR enabled, and the
    `TrustForgeComponent=preview-admission` tag.
-3. Bootstrap the fixed OPEN admission control row, recovery watermark, and
-   lifecycle metadata through reviewed one-shot operations. Never infer missing
-   control rows in application code.
+3. Run `python deploy/bootstrap_preview_admission_store.py --table
+   trustforge-preview-admission --initial-shard EPOCH_MINUTE`. It conditionally
+   creates only the fixed OPEN control and recovery watermark, accepts an
+   existing row only when it matches exactly, and never writes secret bytes.
+   The sealed runtime conditionally installs lifecycle metadata from exact SSM
+   `name:version` references. Never infer missing control rows.
 4. Run runtime readiness with the feature still off. Missing/malformed
    table/TTL/PITR/KMS/tag/key/lifecycle/clock evidence must remain unavailable.
+   `deploy/preview_admission_smoke.py` must first report `off` with the flag
+   absent, then report `ready` in dark mode before canary traffic is admitted.
 
 ## Canary
 
