@@ -5,13 +5,30 @@ set -euo pipefail
 APP_DIR="${TRUSTFORGE_APP_DIR:-/opt/trustforge}"
 REGION="${REGION:-ap-southeast-2}"
 UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+PRIMARY_UNIT="$UNIT_DIR/trustforge.service"
+
+primary_env() {
+  sed -n "s/^Environment=$1=//p" "$PRIMARY_UNIT" 2>/dev/null | tail -n 1
+}
+
 MODEL="${BEDROCK_MODEL_ID:-}"
-if [[ -z "$MODEL" && -f "$UNIT_DIR/trustforge.service" ]]; then
+if [[ -z "$MODEL" && -f "$PRIMARY_UNIT" ]]; then
   MODEL="$(sed -n 's/^Environment=BEDROCK_MODEL_ID=//p' \
-    "$UNIT_DIR/trustforge.service" | tail -n 1)"
+    "$PRIMARY_UNIT" | tail -n 1)"
 fi
+ATOMIC_TABLE="${TRUSTFORGE_ATOMIC_BATCH_TABLE:-$(primary_env TRUSTFORGE_ATOMIC_BATCH_TABLE)}"
+ATOMIC_CONFIG_VERSION="${TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION:-$(primary_env TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION)}"
+ATOMIC_EXCLUSIVE="${TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE:-$(primary_env TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE)}"
+SHARED_ANALYSIS_DB="${TRUSTFORGE_SHARED_ANALYSIS_DB_PATH:-$(primary_env TRUSTFORGE_SHARED_ANALYSIS_DB_PATH)}"
 if [[ -n "$MODEL" && ! "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "invalid BEDROCK_MODEL_ID in primary service contract" >&2
+  exit 2
+fi
+if [[ ! "$ATOMIC_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]] \
+  || [[ ! "$ATOMIC_CONFIG_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || [[ "$ATOMIC_EXCLUSIVE" != "1" ]] \
+  || [[ ! "$SHARED_ANALYSIS_DB" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  echo "atomic authority runtime contract missing or invalid" >&2
   exit 2
 fi
 
@@ -27,6 +44,10 @@ WorkingDirectory=$APP_DIR
 Environment=TRUSTFORGE_HOME=$APP_DIR
 Environment=AWS_REGION=$REGION
 Environment=BEDROCK_MODEL_ID=$MODEL
+Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=$ATOMIC_TABLE
+Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=$ATOMIC_CONFIG_VERSION
+Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=$ATOMIC_EXCLUSIVE
+Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=$SHARED_ANALYSIS_DB
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
@@ -68,6 +89,11 @@ Type=simple
 WorkingDirectory=$APP_DIR
 Environment=TRUSTFORGE_HOME=$APP_DIR
 Environment=AWS_REGION=$REGION
+Environment=BEDROCK_MODEL_ID=$MODEL
+Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=$ATOMIC_TABLE
+Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=$ATOMIC_CONFIG_VERSION
+Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=$ATOMIC_EXCLUSIVE
+Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=$SHARED_ANALYSIS_DB
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
