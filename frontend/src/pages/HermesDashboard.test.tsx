@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getAnalysisQuestionContext, registerAnalysisQuestion } from '../lib/endpoints'
@@ -72,6 +72,14 @@ function LocaleSwitcher() {
 describe('HermesDashboard workspace navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(registerAnalysisQuestion).mockResolvedValue({
+      ok: true,
+      data: { question_id: 'test-question', job_id: null, state: 'queued', origin: 'manual' },
+    })
+    vi.mocked(getAnalysisQuestionContext).mockResolvedValue({
+      ok: true,
+      data: { query: '', matches: [], conversation: [], retrieval: 'test' },
+    })
     vi.stubGlobal('matchMedia', vi.fn(() => ({
       matches: false,
       media: '(max-width: 560px)',
@@ -248,13 +256,20 @@ describe('HermesDashboard workspace navigation', () => {
     await waitFor(() => expect(screen.getByLabelText('location')).toHaveTextContent('type=hypothesis'))
   })
 
-  it('N2: submit button leaves its loading label once the embedded AnalyzePage settles into an error (not just success)', { timeout: 60000 }, async () => {
+  it('N2: submit button leaves its loading label once the embedded AnalyzePage settles into an error (not just success)', async () => {
     // registerAnalysisQuestion resolves `ok:true` but without `job_id`
     // (see mock above) — AnalyzePage treats that as a failure and settles
     // into its error state. Before the fix, the left-rail submit button's
     // `phase` only reset to 'ready' when AnalyzePage produced *successful*
     // telemetry, so it stayed stuck on the loading label ("Hermes 自動分析中…")
     // forever on this error path.
+    type RegistrationResult = Awaited<ReturnType<typeof registerAnalysisQuestion>>
+    let settleRegistration!: (value: RegistrationResult) => void
+    const registrationSettled = new Promise<RegistrationResult>((resolve) => {
+      settleRegistration = resolve
+    })
+    vi.mocked(registerAnalysisQuestion).mockReturnValueOnce(registrationSettled)
+
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
@@ -263,7 +278,15 @@ describe('HermesDashboard workspace navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
     expect(registerAnalysisQuestion).toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Hermes 自動分析中…' })).toBeDisabled()
 
+    await act(async () => {
+      settleRegistration({
+        ok: true,
+        data: { question_id: 'test-question', job_id: null, state: 'queued', origin: 'manual' },
+      })
+      await registrationSettled
+    })
     await waitFor(() => {
       const submit = screen.getByRole('button', { name: /立即重新分析/ })
       expect(submit).not.toBeDisabled()
