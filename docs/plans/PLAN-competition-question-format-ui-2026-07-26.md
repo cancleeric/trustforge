@@ -1,5 +1,12 @@
 # PLAN — 比賽官方題型 UI 對齊
 
+> **已取代（2026-07-30）**：本計畫源自已關閉的 #935，所提「主要 UI
+> 改成官方三題型／三選一」不再是現行產品契約。權威現況改見
+> `docs/plans/ISSUE-937-UI-CONTRACT-TRUTH-2026-07-29.md`：官方「多源整合、
+> 假設驗證、比較分析」只作 release/E2E 驗證案例，不是 Hermes UI、client
+> validation 或 API input whitelist。使用者入口必須接受任意自然語言，
+> mixed/unknown intent 亦納入驗證。下文僅保留為歷史決策紀錄，不應據此實作。
+
 > 日期：2026-07-26  
 > 目標分支：`develop`  
 > 範圍：TrustForge 前端分析入口與少量後端 mode mapping；不變更核心 Trust Layer 演算法。  

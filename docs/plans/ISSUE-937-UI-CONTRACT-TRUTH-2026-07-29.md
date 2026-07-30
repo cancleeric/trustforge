@@ -4,25 +4,28 @@
 
 狀態：現況稽核，供 CEO Gate A 審查；本文件本身不代表 Gate A 通過
 
-基準：`origin/develop` (`ef0261a0`)
+基準：`origin/develop` (`41d1bb2e`)
 
 ## 1. 目的與誠實邊界
 
 本文件只記錄目前程式碼、API、型別與測試已經支持的事實，以及 UI/UX
 後續工作必須補齊的缺口。它不是未來 schema 的承諾，也不得被用來宣稱
-尚未實作的 Hermes intent preview、穩定 claim identity、正式 run
-idempotency receipt、公開 log policy 或完整競賽包已存在。
+尚未實作的 Hermes intent-planning API/provider integration、穩定 claim
+identity、正式 run idempotency receipt、公開 log policy 或完整競賽包已存在。
 
 官方「多源整合、假設驗證、比較分析」三種題型只作競賽驗證案例，不是
-Hermes 可接受問題的白名單。使用者輸入應維持任意自然語言；但是「自由文字可
-輸入」不等於後端已存在任意／混合 intent 的結構化 contract。
+Hermes UI、輸入或 API 可接受問題的白名單。使用者輸入應維持任意自然語言；
+不得以 selector、client validation 或 server validation 將輸入限縮為三題型。
+但是「自由文字可輸入」不等於後端已存在任意／混合 intent 的結構化 contract。
+本段取代已關閉 #935 所依據的舊三題型 UI 計畫。
 
 ## CEO Gate A decisions
 
 以下方向已決，不再列為 unresolved：
 
-- Intent preview：#955（C03A contract）→ #956（implementation）→
-  #939（UI）。
+- Intent preview：#955（C03A contract）→ #956（control-plane/provider/API
+  integration）→ #939（UI）。#956 的 durable admission control-plane 基礎元件
+  已分批落地，但不等於可供 UI 呼叫的 planning endpoint 已存在。
 - Formal run identity/fresh rerun：#957（C04A contract）→
   #958（implementation）→ #940（UI）。
 - Claim identity/schema：#959（contract）→ #960（implementation）→
@@ -38,9 +41,9 @@ Hermes 可接受問題的白名單。使用者輸入應維持任意自然語言�
 
 | 領域 | Current truth | 不可宣稱 | Gap owner / follow-up |
 |---|---|---|---|
-| 任意自然語言問題 | `QueryConsole` 的 textarea 接受自由文字，送出 `question`；UI 已移除三題型 selector，並明示三種只是範例（`frontend/src/components/QueryConsole.tsx:80-104,152-160`; `frontend/src/lib/endpoints.ts:120-130`）。 | 不可宣稱 Hermes 已回傳任意 intent taxonomy 或 combined-intent plan。 | #955 → #956 → #939。 |
-| intent preview | 正式 UI flow 的 registration body 只有 `coin/mode/question/locale`，receipt 只有 `question_id/job_id/state/origin`，沒有 preview endpoint 或 payload（`frontend/src/lib/endpoints.ts:104-130`）。 | 不可用前端猜測文字冒充模型理解結果。 | #955 → #956 → #939。 |
-| question type / combined intent | 後端 `QuestionType` 仍只有 `multi_source/hypothesis/comparison`（`src/trustforge/schema.py:26-29`）；手動 flow 的 mode 映射只產生這些 enum（`src/trustforge/analysis_flow.py:55-62`）。 | 不可宣稱後端已有 `combined` enum，亦不可把三 enum 當使用者輸入限制。 | #955 → #956 → #939；comparison 仍是獨立雙資產流程。 |
+| 任意自然語言問題 | `QueryConsole` 的 textarea 接受自由文字並送出 `q`；元件已移除三題型 selector，註解明載官方三種只是範例（`frontend/src/components/QueryConsole.tsx:64-84,152-160`）。正式 registration 再送出 `question`（`frontend/src/lib/endpoints.ts:104-130`）。 | 不可宣稱 Hermes 已回傳任意 intent taxonomy 或 combined-intent plan；不可把官方三案例變成 UI/input whitelist。 | #955 → #956 → #939；#953 驗證官方案例與 mixed/unknown。 |
+| intent preview | 正式 UI flow 的 registration body 仍只有 `coin/mode/question/locale`，receipt 仍只有 `question_id/job_id/state/origin`（`frontend/src/lib/endpoints.ts:104-130`），沒有 UI 可呼叫的 planning endpoint/payload。另一方面，trusted clock、admission compiler/executor、durable gate、terminal reconcile、lease recovery 已是實際 control-plane 元件（`src/trustforge/preview_trusted_clock.py`; `preview_admission_compiler.py`; `preview_admission_executor.py`; `preview_durable_admission_gate.py`; `preview_terminal_reconcile.py`; `preview_lease_recovery.py`）。 | 不可把 control-plane primitives 說成完整 Hermes preview API/provider integration，也不可用前端猜測文字冒充模型理解結果。 | #955、#956 仍 OPEN；#967/#973/#983/#991/#992 與其 merged implementation PR 已完成基礎切片；#939 仍依賴可消費的 server contract。 |
+| question type / combined intent | 後端 `QuestionType` 仍只有 `multi_source/hypothesis/comparison`（`src/trustforge/schema.py:26-29`）；手動 flow 的 mode 映射仍只產生這些 enum（`src/trustforge/analysis_flow.py:68`）。 | 不可宣稱後端已有 `combined` enum，亦不可把三 enum 當使用者輸入限制。 | #955 → #956 → #939；comparison 仍是獨立雙資產流程。 |
 | 手動正式 flow 的內容去重 | UI 真正 POST `/api/analysis-question`，handler 呼叫 `AnalysisFlow.submit_manual`（`frontend/src/pages/AnalyzePage.tsx:281-297`; `src/trustforge/web.py:6611-6632`）。`submit_manual` 對 canonical coin/mode/question 加檔案鎖，並在 300 秒內重用 queued/running/completed manual job（`src/trustforge/analysis_flow.py:72-105,506-559`）。 | 不可稱為 client idempotency key、exactly-once 或「每次按重新分析必定 fresh run」。 | #957 → #958 → #940。 |
 | direct `/api/analyze` 去重 | 另一條 direct endpoint 有 in-flight single-flight 與跨實例 lease；完成後不保留結果給後續新請求（`src/trustforge/web.py:4366-4384,4400-4412,4631-4671`）。 | 不可把它描述成 `AnalyzePage` 手動 job flow 的主契約。 | 保留既有 direct API contract；C04A/B 必須分開建模。 |
 | 手動 job reconnect | 手動 job id 寫入 `sessionStorage`，以 coin/mode/question 為 key；reload 可接回 job（`frontend/src/pages/AnalyzePage.tsx:38-59,248-257,294-297`）。URL job 會驗證請求是否相符（`frontend/src/pages/AnalyzePage.tsx:28-36,230-233`）。 | 不可宣稱跨瀏覽器、跨裝置或 session 結束後仍可恢復。 | #957 → #958 → #940。 |
@@ -57,21 +60,30 @@ Hermes 可接受問題的白名單。使用者輸入應維持任意自然語言�
 2. 現行 UI URL/report path 仍保留 `type`，但 manual registration 真正送的是
    `mode`；server 再把 fundamentals/catalyst 映射為 hypothesis，其餘既有
    focus 映射為 multi_source（`frontend/src/lib/endpoints.ts:120-130`;
-   `src/trustforge/analysis_flow.py:55-62`）。
+   `src/trustforge/analysis_flow.py:68`）。
 3. comparison 需要 `coin`、`coin2`、`q`，並使用不同 response shape
    （`frontend/src/lib/endpoints.ts:276-297`;
    `frontend/src/lib/types.ts:585-620`）。
-4. 官方三種範例必須納入 release verification，但不得成為 composer 的
-   whitelist 或三選一阻擋。
+4. 官方三種範例必須納入 release verification，但不得成為 composer、
+   client validation 或 API input validation 的 whitelist／三選一阻擋；
+   mixed/unknown 自然語言問題同屬 #953 驗證範圍。
 
 ### 3.2 尚未存在
 
-- 沒有 `POST /api/intent-preview` 或同等 endpoint。
+- 沒有供現行 UI 呼叫的 `POST /api/intent-preview` 或同等 planning endpoint。
 - 沒有 server-returned `detected_intents[]`、`combined`、工具計畫、資料需求、
   澄清問題或 preview confidence。
 - 沒有證據顯示一個 query 可在 API 層同時帶多個 `QuestionType`。
 
-因此 #955 應先固定 contract、#956 實作後，#939 UI 才可明標
+目前已存在的 preview control-plane 基礎不是零：trusted AWS interval clock、
+strict admission snapshot/action compiler、atomic admission executor、durable
+admission gate、terminal reconcile 與 expired-lease recovery 已由
+#967/#973/#983/#991/#992 及其 implementation PR 落地。這些模組負責
+fail-closed cost/concurrency admission；`preview_terminal_reconcile.py` 也明示
+本身沒有 provider integration。它們沒有改變上述 UI/API 缺口。
+
+因此 #955 應先固定 contract，#956 完成剩餘 provider/API integration 後，
+#939 UI 才可明標
 「系統理解／可修改」；API 不可用
 前端 keyword mapping 冒充 Hermes 的 server-side 判讀。preview 不可成為
 正式分析的必要阻擋；preview 失敗時仍應容許提交原始自然語言問題，由正式
@@ -313,8 +325,10 @@ certification）。官方案例與 mixed/unknown 自動 E2E 在 #953，不得只
 
 1. #937 固定 truth/baseline；只有 CEO 可宣告 Gate A。
 2. #938（C02A App Shell）→ #947（C02B mobile navigation）。
-3. #955（C03A contract）→ #956（implementation）→ #939（UI）；
-   #939 同時依賴 #938。
+3. #955（C03A contract，OPEN）→ #956（control-plane/provider/API
+   integration，OPEN）→ #939（UI，OPEN）；#939 同時依賴 #938。#956 的
+   #967/#973/#983/#991/#992 基礎切片已 CLOSED 且 implementation PR 已
+   MERGED，但不得據此把 #955/#956/#939 標成完成。
 4. #957（C04A contract）→ #958（implementation）→ #940（UI）；
    #940 同時依賴 #939。
 5. #959（claim contract）→ #960（implementation）→ #941（C05A shared
@@ -353,6 +367,8 @@ certification）。官方案例與 mixed/unknown 自動 E2E 在 #953，不得只
    audit artifact 是否需另開 issue。
 
 上述 contract/implementation 未落地前，下游 UI 不可把方向決策冒充成已完成能力。
+截至本基準，#955–#960 與 #939–#960 的本文件主要下游 issues 仍為 OPEN；
+本文件只記錄已查證的子切片狀態，不替 GitHub issue 作結案判定。
 
 ## 13. #937 acceptance checklist
 
