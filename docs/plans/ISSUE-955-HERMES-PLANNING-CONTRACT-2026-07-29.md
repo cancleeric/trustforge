@@ -2,9 +2,9 @@
 
 日期：2026-07-29
 Owner：gray（CPO）
-審查：CEO、harper（CISO）、`/codex-review`
-狀態：harper 最終 **APPROVED**；adversarial `/codex-review` 最終 **PASS**；
-CEO Gate A **APPROVED**
+審查：待本 PR 的 CEO、harper（CISO）與 adversarial reviewer 新審
+狀態：依目前 `origin/develop` 與 tracker 重整中；舊 commit 的 disposition
+不沿用為本次變更的 commit-bound 核准
 
 ## 1. 目的與非目標
 
@@ -107,10 +107,28 @@ backend 錯誤時 fallback 至 process-local
 （`src/trustforge/budget_counter.py:34-36,62-67`;
 `src/trustforge/budget_guard.py:555-595`）。
 
-該 fallback 對付費公開 preview 不足：多 instance 會各自放行。#967 必須建立
-preview 專屬 versioned atomic store/API，#956 再以它組裝 control plane；共享
-limiter、budget、concurrency、clock 或 price policy 任一不可用時直接 503，
-**不得**呼叫現有 process-local fallback。
+該 fallback 對付費公開 preview 不足：多 instance 會各自放行。preview
+專屬 durable admission foundation 已拆分落地，而不是由單一 #967 擁有整套
+store：
+
+- #967／PR #977：fail-closed trusted AWS interval clock
+  （`preview_trusted_clock.py`）；
+- #972／PR #982：versioned DynamoDB schema 與 circuit CAS primitives
+  （`preview_admission_store.py`）；
+- #973：strict admission snapshot/action compiler
+  （`preview_admission_compiler.py`）；
+- #983：atomic admission executor
+  （`preview_admission_executor.py`）；
+- #991：atomic terminal reconcile 與 concurrency release
+  （`preview_terminal_reconcile.py`）；
+- #992：expired lease recovery、crash recovery 與 ambiguous latch resolution
+  （`preview_lease_recovery.py`，並接入 durable admission gate/executor）。
+
+上述 issues 均已 closed，對應元件與測試已在目前基底；這代表 durable store
+foundation 已完成，不代表 #956 的完整 control-plane orchestration、#964
+endpoint/provider adapter 或 #939 UI 已完成。#956 應組裝並驗證這些既有元件；
+共享 limiter、budget、concurrency、clock、circuit、reconcile/recovery 或 price
+policy 任一不可用時直接 503，**不得**呼叫現有 process-local fallback。
 
 ## 3. HTTP contract
 
@@ -547,9 +565,15 @@ preview client 應有 6 秒 contract 對應的獨立 timeout。
 ## 9. Issue 切分與依賴
 
 ```text
-#955 approved contract
-  └─ #967 atomic preview admission store (8–12h)
-       └─ #956 Hermes preview security/cost control plane (8–12h)
+#955 contract refresh（本 PR 待新審）
+  └─ durable admission foundation（已落地）
+       ├─ #967 / PR #977 trusted interval clock
+       ├─ #972 / PR #982 DynamoDB schema + circuit CAS
+       ├─ #973 admission snapshot/action compiler
+       ├─ #983 atomic admission executor
+       ├─ #991 terminal reconcile + concurrency release
+       └─ #992 lease/crash/ambiguous-latch recovery
+         └─ #956 Hermes preview security/cost control plane (open, 8–12h)
             └─ #964 strict endpoint + typed client (8–12h)
                  └─ #939 arbitrary-natural-language preview/composer UI (8–12h)
 
@@ -559,12 +583,18 @@ preview client 應有 6 秒 contract 對應的獨立 timeout。
        └─ #953 official + mixed/unknown E2E
 ```
 
-- #967：擁有 concrete versioned DynamoDB schema、`TransactWrite` atomic
-  admission/reconcile、reservation/concurrency/half-open leases、UTC bucket keys
-  與 trusted AWS HTTPS Date clock-health authority（8–12h）。
-- #956：依賴 #967，只做 preview control-plane orchestration、trusted ingress
-  assertions、zero-capture instrumentation hooks 與 formal resource isolation。
-  安全/成本敏感，開始前需 harper 對本文件第二次書面 disposition。
+- #967（closed；PR #977 merged）：只擁有 trusted AWS HTTPS Date
+  interval clock-health authority；不擁有 DynamoDB schema、admission、
+  reconcile 或 recovery 整套 store。
+- #972（closed；PR #982 merged）：擁有 versioned DynamoDB schema 與 circuit
+  CAS primitives；不等同完整 atomic admission lifecycle。
+- #973、#983、#991、#992（均 closed）：分別擁有 compiler、executor、
+  terminal reconcile/release 與 lease/crash recovery。這些已落地元件共同構成
+  #956 可用的 durable admission foundation。
+- #956（open）：依賴上述完整 foundation，只做 preview control-plane
+  orchestration、trusted ingress assertions、zero-capture instrumentation hooks
+  與 formal resource isolation。安全/成本敏感，合併前需 harper 對本 PR
+  commit-bound 文件與實作重新書面 disposition。
 - #964：只做 strict route/provider adapter/projector/OpenAPI/typed client；
   依賴 #956 merged，安全/成本敏感。
 - #939：只做 composer 與 planning states；同時仍依賴 app shell/mobile 前置
@@ -602,7 +632,11 @@ preview client 應有 6 秒 contract 對應的獨立 timeout。
   符合第 5 節，reserve/reconcile 跨 instance 原子。
 - [ ] full provider payload 由 allowed-model 精確 tokenizer 計數；>2,048
   固定 503、零截斷、零 provider call，formal submit 仍可用。
-- [ ] #967 單一 transaction 原子包含 circuit condition/half-open lease、
+- [x] #967 trusted interval clock、#972 schema/circuit primitives、#973
+  compiler、#983 executor、#991 terminal reconcile/release 與 #992
+  lease/crash recovery 均已分工落地；不得把其中任一 issue 描述成整套 store。
+- [ ] 由 #956 組裝既有 admission foundation，驗證單一 transaction 原子包含
+  circuit condition/half-open lease、
   request count、identity/global concurrency、token/USD reserve；拒絕無 partial
   state/quota。reconcile matrix 全部以 reservation ID idempotent，concurrency
   始終 finally/TTL release，reconcile failure 鎖閉 preview。
@@ -638,7 +672,8 @@ preview client 應有 6 秒 contract 對應的獨立 timeout。
 - [ ] 所有 response 為 private/no-store、無 ETag，SW/CDN 不保存。
 - [ ] 400/429/503/504 envelope 固定且不洩漏；preview failure 不阻擋另一個
   valid formal submit。
-- [ ] #955 → #967 → #956 → #964 → #939（preview/composer）及
+- [ ] #955 refresh → 已落地 #967/#972/#973/#983/#991/#992 foundation →
+  #956 → #964 → #939（preview/composer）及
   #965 → #966 → #939 formal release claim / #953 E2E 的依賴與
   reviewer/security gates 記錄一致。
 
@@ -671,7 +706,8 @@ preview client 應有 6 秒 contract 對應的獨立 timeout。
    RFC binary canonicalization、IPv4-mapped collapse、raw-IP zero persistence、
    current/previous exact dual-write 與 purpose-separated observability、production
    enablement assertion、missing/wildcard/non-HTTPS Origin、cross-origin/CSRF。
-8. #967 distributed store tests：versioned DynamoDB schema 與 `TransactWrite`
+8. Durable admission integration tests（由 #956 消費既有
+   #967/#972/#973/#983/#991/#992 元件）：versioned DynamoDB schema 與 `TransactWrite`
    對 circuit/half-open、request count、identity/global concurrency、token/USD 的
    單一 atomic admission；跨 instance race/partial failure 全有或全無、拒絕
    無 partial quota。逐列驗證 reconcile matrix、reservation-id idempotency、
@@ -709,18 +745,19 @@ preview client 應有 6 秒 contract 對應的獨立 timeout。
     429/503/504 fallback UI contract。
 
 每個 implementation PR 必須指定 reviewer；merge 前跑 repository local
-pre-push、eye scan（涉及 UI 時）、harper 第二次安全/成本審查及
-`/codex-review`。只有 CEO 親自驗證真實 branch 行為後才能回報完成。
+pre-push、eye scan（涉及 UI 時）、harper 當前 commit-bound 安全/成本審查及
+adversarial review。只有 CEO 親自驗證真實 branch 行為後才能回報完成。
 
 ## 12. Gate disposition
 
-本稿已完成安全、對抗審與 CEO commit-bound Gate A 驗證。
+本次 refresh 改變 ownership、完成狀態與依賴敘述，因此先前 commit 的
+security、adversarial 與 CEO disposition 只保留為歷史背景，不是本 PR 的
+commit-bound 核准。
 
-- gray：文件作者，自查後提交 CEO。
-- CEO：Gate A `APPROVED`；已核對真實 source、scope、數值、dependency 與
-  新檔 whitespace。
-- harper：最終 disposition `APPROVED`。
-- `/codex-review`：最終 disposition `PASS`。
+- 文件 refresh：已依目前 source 與 tracker 核對。
+- CEO Gate A：待本 PR 新審。
+- harper security/cost disposition：待本 PR 新審。
+- adversarial disposition：待本 PR 新審。
 
-Review record（2026-07-29）：harper CISO 已核准最終安全/成本合約；
-adversarial `/codex-review` 已通過；CEO 已完成最終 commit-bound 文件簽核。
+在三項當前 commit-bound disposition 留下可驗證紀錄前，不得將本稿標示為
+`APPROVED`、`PASS` 或已完成最終簽核。
