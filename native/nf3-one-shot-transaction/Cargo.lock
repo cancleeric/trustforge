@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "trustforge-nf2-zero-capability-broker"
+version = "0.1.0"
+
+[[package]]
 name = "trustforge-nf3-one-shot-transaction"
 version = "0.1.0"
+dependencies = [
+ "trustforge-nf2-zero-capability-broker",
+]

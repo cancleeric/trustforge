@@ -30,10 +30,18 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod build_receipt;
+mod foundation;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod integration;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod ledger;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
 mod sha256;
+pub use foundation::{BuildIdentity, accepted_build_identity, accepted_foundation_sha256};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use integration::{IntegratedError, IntegratedRunner};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use ledger::{Binding, ClaimSession, LedgerStore, Request, State};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

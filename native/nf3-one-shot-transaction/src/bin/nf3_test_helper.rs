@@ -2,7 +2,9 @@
 compile_error!("nf3-test-helper requires Linux x86_64");
 
 use std::path::Path;
-use trustforge_nf3_one_shot_transaction::{LedgerStore, Request};
+use trustforge_nf3_one_shot_transaction::{
+    IntegratedRunner, LedgerStore, Request, accepted_build_identity,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -30,6 +32,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(_) => Err("store unexpectedly opened".into()),
             Err(_) => Ok(()),
         };
+    }
+    if command == "integrated" {
+        let [_, _, _, tx, deadline] = args.as_slice() else {
+            return Err("usage: nf3-test-helper integrated ROOT TX_HEX DEADLINE_NS".into());
+        };
+        let runner = IntegratedRunner::open_for_test(Path::new(root))?;
+        let binding = runner.execute(tx, deadline.parse()?)?;
+        let executor = accepted_build_identity()?;
+        let store_id = std::fs::read_to_string(Path::new(root).join("store-id"))?;
+        let mut records = std::fs::read_dir(Path::new(root).join("heads"))?
+            .map(|entry| entry.map(|value| value.file_name()))
+            .collect::<Result<Vec<_>, _>>()?;
+        records.sort();
+        let terminal_head = records
+            .iter()
+            .filter_map(|name| name.to_str())
+            .rfind(|name| name.ends_with(".record"))
+            .ok_or("terminal head absent")?;
+        println!(
+            "INTEGRATED_COMMITTED transaction={} request={} store={} terminal_head={} foundation={} boot={} deadline={} executor_profile={} executor_source={} executor_rlib={} executor_profile_receipt={}",
+            binding.transaction_id,
+            binding.request_sha256,
+            store_id.trim_end(),
+            terminal_head,
+            binding.foundation_sha256,
+            binding.boot_id,
+            binding.deadline_boottime_ns,
+            executor.profile,
+            executor.linked_source_sha256,
+            executor.linked_rlib_sha256,
+            executor.profile_receipt_sha256,
+        );
+        return Ok(());
     }
     let store = LedgerStore::open_for_test(Path::new(root))?;
     let [_, _, _, tx, tag, deadline] = args.as_slice() else {

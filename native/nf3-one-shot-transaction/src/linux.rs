@@ -15,6 +15,7 @@ const O_CLOEXEC: u64 = 0o2000000;
 const O_DIRECTORY: u64 = 0o200000;
 const O_NOFOLLOW: u64 = 0o400000;
 const O_NONBLOCK: u64 = 0o4000;
+const O_APPEND: u64 = 0o2000;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
@@ -84,6 +85,33 @@ impl Vfs {
 }
 
 impl Dir {
+    pub(crate) fn append_witness(&self, name: &str, frame: &[u8]) -> Result<(), Error> {
+        if frame.len() > MAX_PAYLOAD {
+            return Err(Error::UnsafeObject("witness frame bound"));
+        }
+        let name = checked_name(name)?;
+        let fd = sys::openat2(
+            &self.fd,
+            name.as_c_str(),
+            O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW,
+            0,
+        )?;
+        let opened = verify_file(&fd, self.uid, Some(0o600), None)?;
+        let named = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if identity(&opened) != identity(&named) {
+            return Err(Error::IdentityChanged);
+        }
+        sys::flock_ex(&fd)?;
+        write_loop(&fd, frame)?;
+        sys::fdatasync(&fd)?;
+        let after = sys::fstat(&fd)?;
+        let renamed = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if identity(&after) != identity(&renamed) {
+            return Err(Error::IdentityChanged);
+        }
+        Ok(())
+    }
+
     pub(crate) fn safe_names(&self) -> Result<Vec<String>, Error> {
         let first = self.scan_names_once()?;
         let second = self.scan_names_once()?;
@@ -271,12 +299,25 @@ impl Dir {
     }
 
     pub fn read(&self, name: &str, max: usize) -> Result<Vec<u8>, Error> {
+        self.read_checked(name, max, false)
+    }
+    pub(crate) fn read_readonly(&self, name: &str, max: usize) -> Result<Vec<u8>, Error> {
+        self.read_checked(name, max, true)
+    }
+    fn read_checked(&self, name: &str, max: usize, readonly: bool) -> Result<Vec<u8>, Error> {
         if max > MAX_PAYLOAD {
             return Err(Error::UnsafeObject("payload bound exceeds cap"));
         }
         let name = checked_name(name)?;
         let fd = self.open_verified(name.as_c_str(), Some(max))?;
         let before = sys::fstat(&fd)?;
+        let named_before = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if generation(&before) != generation(&named_before) {
+            return Err(Error::IdentityChanged);
+        }
+        if readonly && !matches!(before.mode & 0o777, 0o400 | 0o444) {
+            return Err(Error::UnsafeObject("read-only file mode"));
+        }
         let capacity = max
             .checked_add(1)
             .ok_or(Error::UnsafeObject("payload bound overflow"))?;
@@ -303,7 +344,10 @@ impl Dir {
             return Err(Error::UnsafeObject("file exceeds bound"));
         }
         let after = sys::fstat(&fd)?;
-        if identity(&before) != identity(&after) {
+        let named_after = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if generation(&before) != generation(&after)
+            || generation(&after) != generation(&named_after)
+        {
             return Err(Error::IdentityChanged);
         }
         Ok(bytes)

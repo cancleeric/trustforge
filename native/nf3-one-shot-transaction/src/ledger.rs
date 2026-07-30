@@ -56,6 +56,10 @@ pub struct ClaimSession<'a> {
 }
 
 impl LedgerStore {
+    pub(crate) fn store_id(&self) -> &str {
+        &self.store_id
+    }
+
     pub fn provision(store_id: &str) -> Result<Self, Error> {
         Self::provision_at(Path::new(PRODUCTION_ROOT), store_id)
     }
