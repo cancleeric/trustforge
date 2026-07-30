@@ -80,6 +80,30 @@ describe('TrainingStatusCard', () => {
     expect(screen.queryByText(/TimeoutError|HTTP|⚠/)).not.toBeInTheDocument()
   })
 
+  it('renders a fail-closed read-error state instead of zero for an invalid production path', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(503, {
+        ok: false,
+        error: {
+          code: 'training_data_unavailable',
+          message: '訓練資料目錄不存在或無法讀取',
+        },
+      })),
+    )
+
+    render(<HermesI18nProvider><TrainingStatusCard /></HermesI18nProvider>)
+
+    const message = await screen.findByText('⚠ 資料讀取異常')
+    expect(message).toHaveAttribute(
+      'data-training-status-diagnostic',
+      'training_data_unavailable: HTTP 503',
+    )
+    expect(screen.getByLabelText('Status: 停止')).toBeInTheDocument()
+    expect(screen.queryByText('總筆數')).not.toBeInTheDocument()
+    expect(screen.queryByText('0')).not.toBeInTheDocument()
+  })
+
   it('keeps refresh 404 fail-soft without rendering transient HTTP copy', async () => {
     const intervalHandlers: TimerHandler[] = []
     vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {

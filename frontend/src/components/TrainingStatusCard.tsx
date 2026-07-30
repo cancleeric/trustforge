@@ -67,10 +67,18 @@ export default function TrainingStatusCard() {
           setAvailability({ kind: 'not_enabled', diagnostic: 'HTTP 404' })
           return
         }
+        let code = ''
+        try {
+          const envelope = await resp.json()
+          code = typeof envelope?.error?.code === 'string' ? envelope.error.code : ''
+        } catch {
+          // The HTTP status remains the fail-closed diagnostic.
+        }
+        setData(null)
         setAvailability({
           kind: 'error',
-          message: `HTTP ${resp.status}`,
-          diagnostic: `HTTP ${resp.status}`,
+          message: code === 'training_data_unavailable' ? t('trainingDataReadError') : `HTTP ${resp.status}`,
+          diagnostic: code ? `${code}: HTTP ${resp.status}` : `HTTP ${resp.status}`,
         })
         return
       }
@@ -80,6 +88,7 @@ export default function TrainingStatusCard() {
         setAvailability({ kind: 'ready' })
       } else {
         const message = envelope.error?.message ?? 'Unknown error'
+        setData(null)
         setAvailability({
           kind: 'error',
           message,
@@ -91,9 +100,10 @@ export default function TrainingStatusCard() {
         err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
           ? err.message
           : 'Fetch failed'
+      setData(null)
       setAvailability({ kind: 'unavailable', diagnostic })
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void fetchStatus()

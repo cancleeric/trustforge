@@ -5946,13 +5946,11 @@ def _handle_api_training_status() -> tuple[int, str]:
     """
     import sqlite3
 
-    configured_training_dir = os.getenv("TRUSTFORGE_TRAINING_DATA_DIR", "").strip()
-    training_data_dir = (
-        Path(configured_training_dir)
-        if configured_training_dir
-        else Path(__file__).resolve().parents[2] / "data" / "training"
-    )
-    if configured_training_dir and not training_data_dir.is_absolute():
+    from .training_data import resolve_training_data_dir
+
+    try:
+        training_data_dir = resolve_training_data_dir()
+    except ValueError:
         return 503, _json_envelope_err(
             "training_data_unavailable", "訓練資料目錄設定無效"
         )

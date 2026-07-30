@@ -229,6 +229,7 @@ def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
         ),
     )
     monkeypatch.setattr(train, "discard_frontend_snapshot", lambda *args: None)
+    monkeypatch.setattr(train, "verify_training_data_reconciliation", lambda instance: 2005)
 
     result = train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
 
@@ -241,7 +242,25 @@ def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
         "git_sha": "a" * 40,
         "artifact_digest": "b" * 64,
         "frontend_asset": "assets/index-release.js",
+        "training_records": 2005,
     }
+
+
+def test_training_data_reconciliation_requires_api_and_filesystem_parity(monkeypatch):
+    monkeypatch.setattr(
+        train,
+        "run_ssm",
+        lambda instance, commands: 'diagnostic\n{"training_records": 2005}',
+    )
+
+    assert train.verify_training_data_reconciliation("i-production") == 2005
+
+
+def test_training_data_reconciliation_rejects_missing_evidence(monkeypatch):
+    monkeypatch.setattr(train, "run_ssm", lambda instance, commands: "not-json")
+
+    with pytest.raises(RuntimeError, match="evidence is invalid"):
+        train.verify_training_data_reconciliation("i-production")
 
 
 def test_production_deploy_stops_before_frontend_when_backend_identity_mismatches(monkeypatch, tmp_path):
@@ -578,6 +597,7 @@ def test_execute_records_combined_production_deploy_result(monkeypatch, tmp_path
         "git_sha": "b" * 40,
         "artifact_digest": "e" * 64,
         "frontend_asset": "assets/index-release.js",
+        "training_records": 2005,
     }
     monkeypatch.setattr(train, "deploy_production", lambda *args: deployed)
 
@@ -627,6 +647,7 @@ def test_execute_does_not_noop_when_public_frontend_is_stale(monkeypatch, tmp_pa
         "git_sha": "a" * 40,
         "artifact_digest": "d" * 64,
         "frontend_asset": "assets/index-release.js",
+        "training_records": 2005,
     }
     deploy_calls = []
     monkeypatch.setattr(
@@ -670,6 +691,8 @@ def test_execute_does_not_noop_when_public_frontend_is_stale(monkeypatch, tmp_pa
     assert recorded[-1]["post_deploy_verification"] == {
         "runtime": "passed",
         "frontend": "passed",
+        "training_data_reconciliation": "passed",
+        "training_records": 2005,
         "verified_main_sha": "a" * 40,
         "frontend_asset": "assets/index-release.js",
     }

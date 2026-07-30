@@ -38,6 +38,7 @@ from .ingestion.cache import (
 from .ingestion.prices import Bar, load_ohlcv
 from .replay import source_snapshot_backfill_key, SOURCE_SNAPSHOT_HISTORY_TTL_SECONDS
 from .schema import COIN_POOL, iso_utc
+from .training_data import resolve_training_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,10 @@ def _write_anomaly(anomaly: dict[str, Any]) -> None:
         logger.warning("Failed to write anomaly report: %s", exc)
 
 
-def _check_batch_health(results: list["BackfillDayResult"]) -> list[dict[str, Any]]:
+def _check_batch_health(
+    results: list["BackfillDayResult"],
+    training_data_dir: Path | None = None,
+) -> list[dict[str, Any]]:
     """檢查一個 batch 的健康狀態，回傳所有偵測到的異常。
 
     檢查項目：
@@ -108,7 +112,9 @@ def _check_batch_health(results: list["BackfillDayResult"]) -> list[dict[str, An
         directions: list[str] = []
         for r in completed:
             # 讀 training data 中對應的紀錄
-            training_dir = _root() / "data" / "training"
+            training_dir = training_data_dir or resolve_training_data_dir(
+                default=_root() / "data" / "training"
+            )
             jsonl_path = training_dir / f"{r.coin.upper()}.jsonl"
             if jsonl_path.is_file():
                 try:
@@ -364,7 +370,12 @@ class BackfillWorker:
         self.data_dir = Path(data_dir) if data_dir else (
             default_data_dir if default_data_dir.exists() else repo_data_dir
         )
-        self.training_data_dir = Path(training_data_dir) if training_data_dir else None
+        self.training_data_dir = (
+            Path(training_data_dir)
+            if training_data_dir
+            else resolve_training_data_dir(default=_root() / "data" / "training")
+        )
+        self._explicit_training_data_dir = training_data_dir is not None
         self.coins = [c.upper() for c in (coins or list(COIN_POOL))]
         self.start_date = start_date or "2021-07-01"
         self.end_date = end_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -491,7 +502,7 @@ class BackfillWorker:
 
         # Issue #355: batch 結束後自動健康檢查
         if results:
-            _check_batch_health(results)
+            _check_batch_health(results, self.training_data_dir)
 
         return results
 
@@ -982,11 +993,11 @@ class BackfillWorker:
             "document_count": len(snapshot.get("sources", [])),
         }
 
-        training_dir = self.training_data_dir or (_root() / "data" / "training")
+        training_dir = self.training_data_dir
         training_dir.mkdir(parents=True, exist_ok=True)
         output_path = (
             training_dir / f"{coin.lower()}-backfill.jsonl"
-            if self.training_data_dir
+            if self._explicit_training_data_dir
             else training_dir / f"{coin.upper()}.jsonl"
         )
 
