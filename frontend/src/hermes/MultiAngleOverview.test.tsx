@@ -316,7 +316,7 @@ describe('MultiAngleOverview', () => {
 
   // T18: Loading state
   it('shows loading state initially', () => {
-    mockFetchMultiAngleReport.mockImplementation(() => new Promise(() => {}))
+    mockFetchMultiAngleReport.mockImplementation(() => new Promise(() => { }))
     renderWithProvider(<MultiAngleOverview coin="BTC" />)
     expect(screen.getByText(/五角度綜合分析|Multi-angle/)).toBeInTheDocument()
   })
@@ -415,7 +415,7 @@ describe('MultiAngleOverview', () => {
   })
 
   it('prevents rapid double submission before React disables the button', async () => {
-    mockSubmitMultiAngle.mockImplementation(() => new Promise(() => {}))
+    mockSubmitMultiAngle.mockImplementation(() => new Promise(() => { }))
     renderWithProvider(<MultiAngleOverview coin="BTC" />)
     const button = await screen.findByRole('button', { name: /五角度綜合分析/ })
 
@@ -446,5 +446,41 @@ describe('MultiAngleOverview', () => {
     expect(screen.getByText('ETH report')).toBeInTheDocument()
     expect(screen.queryByText('BTC report')).not.toBeInTheDocument()
     expect(mockGetAnalysisJob).not.toHaveBeenCalledWith('btc-job', expect.anything())
+  })
+})
+
+
+describe('MultiAngleOverview compatibility dimensions', () => {
+  it('renders a legacy payload without separated dimension arrays', async () => {
+    mockFetchMultiAngleReport.mockResolvedValue({ multi_angle: makeReport() })
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+
+    expect(await screen.findByText('方向分歧')).toBeInTheDocument()
+    expect(screen.getByText('完整度差距')).toBeInTheDocument()
+    expect(screen.getByText('證據重疊')).toBeInTheDocument()
+  })
+
+  it('localizes separated dimension panels in English', async () => {
+    document.cookie = 'trustforge_hermes_locale=en'
+    mockFetchMultiAngleReport.mockResolvedValue({ multi_angle: makeReport() })
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+
+    expect(await screen.findByText('Direction divergences')).toBeInTheDocument()
+    expect(screen.getByText('Completeness gaps')).toBeInTheDocument()
+    expect(screen.getByText('Evidence overlaps')).toBeInTheDocument()
+  })
+
+  it('classifies legacy evidence overlap separately from direction divergence', async () => {
+    mockFetchMultiAngleReport.mockResolvedValue({
+      multi_angle: makeReport({
+        conflicts: [
+          { angle_a: 'risk', angle_b: 'news', conflict_type: 'evidence_overlap', detail: {}, summary: 'shared' },
+        ],
+      }),
+    })
+    renderWithProvider(<MultiAngleOverview coin="BTC" />)
+
+    expect(await screen.findByText('0 個角度配對')).toBeInTheDocument()
+    expect(screen.getByText('1 個來源重疊配對')).toBeInTheDocument()
   })
 })

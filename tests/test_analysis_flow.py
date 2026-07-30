@@ -890,9 +890,12 @@ class _FakeLiveBedrockClient:
 
     def __init__(self, offline: bool = False):
         self.offline = offline
+        self.last_claim_extraction_model_invoked = not offline
         self.config = type("Cfg", (), {"model_id": _PRICED_MODEL_ID if not offline else None})()
 
-    def extract_claims_with_llm(self, docs, log=None):
+    def extract_claims_with_llm(self, docs, log=None, *, mode=None, question=None):
+        self.mode = mode
+        self.question = question
         if not self.offline and log is not None:
             log.record_llm_cost(self.config.model_id, tokens_in=100, tokens_out=50, cost_usd=0.01)
         return []
@@ -902,7 +905,12 @@ def _claim_extraction_package() -> dict:
     return {
         "docs": _docs(),
         "log": ExecutionLog(run_id="test-run"),
-        "job": {"question": "BTC 近期風險？", "coin": "BTC", "question_type": "multi_source"},
+        "job": {
+            "mode": "risk",
+            "question": "BTC 近期風險？",
+            "coin": "BTC",
+            "question_type": "multi_source",
+        },
     }
 
 
@@ -1133,3 +1141,25 @@ def test_bedrock_live_attempt_releases_reservation_even_when_ledger_accounting_r
     assert released.get("amount") is not None
     # append_run 丟例外 → 記帳走 unledgered fallback，仍算進今日已花費。
     assert budget_guard.daily_cost_usd() == pytest.approx(0.01)
+
+
+def test_claim_extraction_live_receipt_commits_exact_mode_and_question(tmp_path, monkeypatch):
+    """The real live-stage contract forwards semantic context and persists proof."""
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+
+    package = AnalysisFlow(tmp_path / "flow.sqlite3")._stage_claim_extraction(
+        _claim_extraction_package()
+    )
+
+    assert package["client"].mode == "risk"
+    assert package["client"].question == "BTC 近期風險？"
+    receipt = package["claim_extraction_context"]
+    assert receipt["mode"] == "risk"
+    assert receipt["model_invoked"] is True
+    event = next(
+        item for item in package["log"].events
+        if item["tool"] == "bedrock.claim_extraction_context"
+    )
+    assert all(event["params"].get(key) == value for key, value in receipt.items())

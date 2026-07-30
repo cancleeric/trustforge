@@ -1403,3 +1403,50 @@ def test_get_ledger_summary_new_factory_gets_fresh_value_after_old_factory_gc(mo
     assert out_new["total_cost_usd"] == 222.0, (
         "新工廠必須拿到自己的新摘要，不該吃到舊工廠殘留的快取值"
     )
+
+
+def test_claim_extraction_prompt_includes_exact_multi_angle_context(monkeypatch):
+    """Semantic branching context must be inside the actual Bedrock user prompt."""
+    client = BedrockClient(BedrockConfig(model_id="test-model"), offline=False)
+
+    def fake_complete(*, system: str, prompt: str) -> LLMResult:
+        prompt_capture["value"] = prompt
+        return LLMResult(
+            text='[{"claim":"BTC 風險升高","claim_type":"inference","direction":"bearish","source_doc_id":"doc-1"}]',
+            input_tokens=1,
+            output_tokens=1,
+            model_id="test-model",
+        )
+
+    prompt_capture: dict[str, str] = {}
+    monkeypatch.setattr(client, "complete", fake_complete)
+    docs = [Document(
+        id="doc-1", kind="news", source="test", text="BTC 風險升高。",
+        url="https://example.test", ts=0, meta={},
+    )]
+
+    claims = client.extract_claims_with_llm(
+        docs, mode="risk", question="BTC 近期有哪些風險？"
+    )
+
+    assert claims
+    assert "模式：risk" in prompt_capture["value"]
+    assert "問題：BTC 近期有哪些風險？" in prompt_capture["value"]
+
+
+def test_claim_extraction_failed_provider_does_not_claim_model_invocation(monkeypatch):
+    """Regex fallback after a provider failure is not evidence of prompt acceptance."""
+    client = BedrockClient(BedrockConfig(model_id="test-model"), offline=False)
+    monkeypatch.setattr(
+        client,
+        "complete",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("Bedrock unavailable")),
+    )
+    docs = [Document(
+        id="doc-1", kind="news", source="test", text="BTC 風險升高。",
+        url="https://example.test", ts=0, meta={},
+    )]
+
+    client.extract_claims_with_llm(docs, mode="risk", question="BTC 近期有哪些風險？")
+
+    assert client.last_claim_extraction_model_invoked is False
