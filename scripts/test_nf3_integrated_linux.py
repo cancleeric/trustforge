@@ -121,12 +121,17 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
-def _file_generation(metadata: os.stat_result) -> tuple[int, int, int, int]:
+def _file_generation(metadata: os.stat_result) -> tuple[int, ...]:
     return (
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
         metadata.st_dev,
         metadata.st_ino,
-        metadata.st_size,
-        metadata.st_ctime_ns,
     )
 
 
@@ -158,7 +163,7 @@ def stage_handoff_file(
     *,
     expected_sha256: str,
     executable: bool = False,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, ...]:
     """Copy one verified generation into the host-visible handoff."""
     if "/" in destination or destination in ("", ".", ".."):
         raise ValueError("handoff destination must be one plain filename")
@@ -172,7 +177,7 @@ def stage_handoff_file(
             not stat.S_ISREG(before.st_mode)
             or before.st_uid != 0
             or before.st_gid != 0
-            or before.st_nlink != 1
+            or before.st_nlink < 1
             or before.st_size <= 0
             or before.st_size > 128 * 1024 * 1024
             or stat.S_IMODE(before.st_mode) & 0o022
@@ -222,7 +227,7 @@ def stage_handoff_file(
 
 
 def cleanup_handoff_file(
-    handoff_fd: int, destination: str, generation: tuple[int, int, int, int]
+    handoff_fd: int, destination: str, generation: tuple[int, ...]
 ) -> None:
     """Remove only the exact file generation created by this process."""
     metadata = os.stat(destination, dir_fd=handoff_fd, follow_symlinks=False)
@@ -819,7 +824,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="trustforge-nf3-b-") as raw:
         scratch = Path(raw)
         handoff_fd = _validate_handoff_directory()
-        handoff_generations: dict[str, tuple[int, int, int, int]] = {}
+        handoff_generations: dict[str, tuple[int, ...]] = {}
         toolchain = verified_rust_toolchain(repo, scratch / "toolchain-environment")
         source_a = copy_reviewed_build_inputs(repo, scratch / "source-a")
         source_b = copy_reviewed_build_inputs(repo, scratch / "different-source-b")

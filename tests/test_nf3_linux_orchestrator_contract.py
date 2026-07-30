@@ -107,6 +107,40 @@ def test_handoff_rejects_non_plain_destination(tmp_path):
         )
 
 
+def test_handoff_source_generation_binds_all_security_metadata():
+    metadata = SimpleNamespace(
+        st_mode=0o100755,
+        st_uid=0,
+        st_gid=0,
+        st_nlink=2,
+        st_size=4096,
+        st_mtime_ns=11,
+        st_ctime_ns=12,
+        st_dev=13,
+        st_ino=14,
+    )
+    assert orchestrator._file_generation(metadata) == (
+        0o100755,
+        0,
+        0,
+        2,
+        4096,
+        11,
+        12,
+        13,
+        14,
+    )
+
+
+def test_handoff_source_allows_cargo_hardlinks_but_destination_requires_one_link():
+    value = source()
+    staging = value[value.index("def stage_handoff_file(") :]
+    staging = staging[: staging.index("def cleanup_handoff_file(")]
+    assert "before.st_nlink < 1" in staging
+    assert "before.st_nlink != 1" not in staging
+    assert "staged.st_nlink != 1" in staging
+
+
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
     test_invocation = value[
