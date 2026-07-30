@@ -653,23 +653,27 @@ def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> di
             raise RuntimeError("production active SHA does not match the verified main SHA")
         verify_runtime_identity(deployed_digest)
         frontend_instance = production_instance()
-        (
-            previous_frontend_target,
-            previous_nginx_target,
-            frontend_snapshot,
-        ) = capture_frontend_state(
-            frontend_instance,
-            main_sha,
-        )
-        subprocess.run(
-            ["/bin/zsh", "-lc", "bash deploy/deploy_frontend_nginx.sh"],
-            cwd=main_tree,
-            env=dict(env, VITE_GIT_SHA=main_sha),
-            check=True,
-        )
-        frontend_asset = verify_frontend_identity(main_sha)
+        try:
+            frontend_asset = verify_frontend_identity(main_sha)
+        except (RuntimeError, subprocess.CalledProcessError):
+            (
+                previous_frontend_target,
+                previous_nginx_target,
+                frontend_snapshot,
+            ) = capture_frontend_state(
+                frontend_instance,
+                main_sha,
+            )
+            subprocess.run(
+                ["/bin/zsh", "-lc", "bash deploy/deploy_frontend_nginx.sh"],
+                cwd=main_tree,
+                env=dict(env, VITE_GIT_SHA=main_sha),
+                check=True,
+            )
+            frontend_asset = verify_frontend_identity(main_sha)
         training_records = verify_training_data_reconciliation(frontend_instance)
-        discard_frontend_snapshot(frontend_instance, frontend_snapshot)
+        if frontend_snapshot:
+            discard_frontend_snapshot(frontend_instance, frontend_snapshot)
     except Exception as deploy_error:
         rollback_errors = []
         if (
