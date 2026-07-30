@@ -476,6 +476,10 @@ def _closed_tree_names(root_fd: int, prefix: tuple[str, ...] = ()) -> set[str]:
     return names
 
 
+def _accepted_nf1_source_modes(canonical_mode: int) -> frozenset[int]:
+    return frozenset((canonical_mode, canonical_mode | stat.S_IWUSR))
+
+
 def stage_nf1_install(
     generation_fd: int, source: Path, archive: Path
 ) -> dict[str, tuple[str, str, int, int]]:
@@ -549,17 +553,17 @@ def stage_nf1_install(
             if metadata.st_uid != 0 or metadata.st_gid != 0:
                 block("NF1 accepted install ownership is unsafe")
             if kind == "dir":
-                if (
-                    not stat.S_ISDIR(metadata.st_mode)
-                    or stat.S_IMODE(metadata.st_mode) != 0o555
-                ):
+                if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(
+                    metadata.st_mode
+                ) not in _accepted_nf1_source_modes(0o555):
                     block("NF1 accepted install directory metadata is unsafe")
                 os.close(source_object)
                 continue
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_nlink != 1
-                or stat.S_IMODE(metadata.st_mode) != mode
+                or stat.S_IMODE(metadata.st_mode)
+                not in _accepted_nf1_source_modes(mode)
                 or metadata.st_size != size
             ):
                 block("NF1 accepted install file metadata is unsafe")

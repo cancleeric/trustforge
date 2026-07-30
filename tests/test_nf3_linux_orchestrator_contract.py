@@ -263,6 +263,17 @@ def test_nf1_nested_bind_uses_atomic_closed_set_staging_not_raw_install():
     assert "cleanup_nf1_install(handoff_fd, staged_nf1_expected)" in integrated
 
 
+def test_nf1_source_allows_only_canonical_or_owner_write_modes():
+    assert orchestrator._accepted_nf1_source_modes(0o444) == {0o444, 0o644}
+    assert orchestrator._accepted_nf1_source_modes(0o555) == {0o555, 0o755}
+    assert 0o664 not in orchestrator._accepted_nf1_source_modes(0o444)
+    assert 0o775 not in orchestrator._accepted_nf1_source_modes(0o555)
+    value = source()
+    staging = value[value.index("def stage_nf1_install(") :]
+    staging = staging[: staging.index("def cleanup_nf1_install(")]
+    assert "os.fchmod(destination, mode)" in staging
+
+
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
     normalized = "".join(value.split())

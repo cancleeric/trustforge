@@ -64,10 +64,13 @@ and then removes the verified case tree before terminal generation cleanup.
 
 The accepted NF1 install is never bound directly into the nested unit. The
 orchestrator validates the archive as a closed set, opens install components
-without following symlinks, requires root ownership, single-link regular files,
-directory/runtime mode `0555` and data mode `0444`, and cross-checks every file
-against its archive payload. It rechecks all retained source generations,
-fsyncs a private temporary tree, and atomically publishes
+without following symlinks, requires root ownership and single-link regular
+files, and cross-checks every file against its archive payload. The trusted
+provisioning source may have either canonical modes or only the owner-write bit
+added (`0555`/`0755` for directories and runtime; `0444`/`0644` for data);
+group/other write is forbidden. It rechecks all retained source generations,
+then stages strict canonical `0555`/`0444` modes, fsyncs a private temporary
+tree, and atomically publishes
 `<generation>/nf1-install`. Only that staged tree is bound read-only. After the
 matrix, exact closed-set cleanup removes it; unknown objects or source
 generation changes prevent PASS, while the external accepted install remains
