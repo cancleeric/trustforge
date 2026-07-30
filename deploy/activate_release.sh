@@ -47,6 +47,58 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
 fi
 
 MODEL_RECONCILE_COMMAND="true"
+TRAINING_DATA_DIR="${TRUSTFORGE_TRAINING_DATA_DIR:-/opt/trustforge/data/training}"
+if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  echo "[activate] ERROR: TRUSTFORGE_TRAINING_DATA_DIR must be an absolute safe path" >&2
+  exit 2
+fi
+TRAINING_RECONCILE_COMMAND="if grep -q '^Environment=TRUSTFORGE_TRAINING_DATA_DIR=' /etc/systemd/system/trustforge.service; then sed -i 's|^Environment=TRUSTFORGE_TRAINING_DATA_DIR=.*|Environment=TRUSTFORGE_TRAINING_DATA_DIR=${TRAINING_DATA_DIR}|' /etc/systemd/system/trustforge.service; else sed -i '/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_TRAINING_DATA_DIR=${TRAINING_DATA_DIR}' /etc/systemd/system/trustforge.service; fi"
+PREVIEW_READINESS_COMMAND="bash deploy/preview_admission_release_gate.sh"
+PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
+PREVIEW_ENV_KEYS=(
+  TRUSTFORGE_PREVIEW_ADMISSION_ENABLED
+  TRUSTFORGE_PREVIEW_ADMISSION_TABLE TRUSTFORGE_PREVIEW_TABLE_ARN
+  TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_VERSION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_QUOTA_LIFECYCLE_GENERATION
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_RETIRE_NOT_BEFORE
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD
+  TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD
+)
+export TRUSTFORGE_PREVIEW_ADMISSION_ENABLED="$PREVIEW_ADMISSION_ENABLED"
+if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
+  echo "[activate] ERROR: preview admission flag must be exactly 0 or 1" >&2
+  exit 2
+fi
+if [ "$PREVIEW_ADMISSION_ENABLED" = "1" ] && {
+  [ "${TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS-}" != "8000" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS-}" != "51200" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD-}" != "50000" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD-}" != "500000" ];
+}; then
+  echo "[activate] ERROR: preview cost cap contract missing or invalid" >&2
+  exit 2
+fi
+PREVIEW_RECONCILE_COMMAND="bash deploy/reconcile_preview_service_env.sh"
+for key in "${PREVIEW_ENV_KEYS[@]}"; do
+  value="${!key-}"
+  if [ -n "$value" ] && ! [[ "$value" =~ ^[A-Za-z0-9_./:-]+$ ]]; then
+    echo "[activate] ERROR: invalid preview deployment value" >&2
+    exit 2
+  fi
+  if [ -n "$value" ]; then
+    PREVIEW_RECONCILE_COMMAND="${PREVIEW_RECONCILE_COMMAND} ${key}=${value}"
+  fi
+done
 if [ -n "$MODEL" ]; then
   MODEL_RECONCILE_COMMAND="if grep -q '^Environment=BEDROCK_MODEL_ID=' /etc/systemd/system/trustforge.service; then sed -i 's|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID=${MODEL}|' /etc/systemd/system/trustforge.service; else sed -i '/^Environment=PYTHONPATH=/a Environment=BEDROCK_MODEL_ID=${MODEL}' /etc/systemd/system/trustforge.service; fi"
 fi
@@ -352,7 +404,7 @@ echo "[activate] preflight passed"
 # Step 1.5: Ensure the target runtime satisfies pyproject requires-python.
 echo "[activate] Step 1.5: ensuring Python 3.11 runtime..."
 PCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","dnf install -y python3.11 python3.11-pip","/usr/bin/python3.11 -m pip install '\''boto3>=1.34'\'' '\''certifi>=2024.2.2'\'' '\''cryptography>=44,<50'\'' '\''portalocker>=3,<4'\'' '\''pypdf>=5,<7'\''","sed -i \"s|^ExecStart=/usr/bin/python3 -m trustforge.web$|ExecStart=/usr/bin/python3.11 -m trustforge.web|\" /etc/systemd/system/trustforge.service","grep -q TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH /etc/systemd/system/trustforge.service || sed -i \"/Environment=COST_LEDGER_BACKEND/a Environment=TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH=/opt/trustforge/manifest.json\\nEnvironment=TRUSTFORGE_RUNTIME_RELEASE_ARTIFACT_PATH=/opt/trustforge/app.zip\" /etc/systemd/system/trustforge.service","for unit in fetch-scheduler.service hermes-cycle.service trustforge-analysis-flow.service; do if [ -f /etc/systemd/system/$unit ]; then sed -i \"s|/usr/bin/python3 |/usr/bin/python3.11 |g\" /etc/systemd/system/$unit; fi; done","systemctl daemon-reload","/usr/bin/python3.11 -c \"import boto3, certifi, cryptography, enum, portalocker, pypdf; assert hasattr(enum, '\''StrEnum'\'')\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","dnf install -y python3.11 python3.11-pip","/usr/bin/python3.11 -m pip install '\''boto3>=1.34'\'' '\''certifi>=2024.2.2'\'' '\''cryptography>=44,<50'\'' '\''jsonschema>=4.23,<5'\'' '\''portalocker>=3,<4'\'' '\''pypdf>=5,<7'\''","sed -i \"s|^ExecStart=/usr/bin/python3 -m trustforge.web$|ExecStart=/usr/bin/python3.11 -m trustforge.web|\" /etc/systemd/system/trustforge.service","grep -q TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH /etc/systemd/system/trustforge.service || sed -i \"/Environment=COST_LEDGER_BACKEND/a Environment=TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH=/opt/trustforge/manifest.json\\nEnvironment=TRUSTFORGE_RUNTIME_RELEASE_ARTIFACT_PATH=/opt/trustforge/app.zip\" /etc/systemd/system/trustforge.service","for unit in fetch-scheduler.service hermes-cycle.service trustforge-analysis-flow.service; do if [ -f /etc/systemd/system/$unit ]; then sed -i \"s|/usr/bin/python3 |/usr/bin/python3.11 |g\" /etc/systemd/system/$unit; fi; done","systemctl daemon-reload","/usr/bin/python3.11 -c \"import boto3, certifi, cryptography, enum, jsonschema, portalocker, pypdf; assert hasattr(enum, '\''StrEnum'\'')\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$PCMDID" ] || [ "$PCMDID" = "None" ]; then
   echo "[activate] ERROR: Python 3.11 migration send-command failed" >&2
@@ -430,7 +482,7 @@ echo "[activate] artifact verified"
 # Step 5: Restart service (zero-downtime)
 echo "[activate] Step 5: restarting service..."
 RCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","echo \"[activate] service restarted\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","'"$TRAINING_RECONCILE_COMMAND"'","'"$PREVIEW_RECONCILE_COMMAND"'","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$RCMDID" ] || [ "$RCMDID" = "None" ]; then
   echo "[activate] ERROR: restart send-command failed" >&2

@@ -14,10 +14,30 @@ CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
 COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
 LEASE_BACKEND="${TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND:-dynamodb}"
 LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
+TRAINING_DATA_DIR="${TRUSTFORGE_TRAINING_DATA_DIR:-/opt/trustforge/data/training}"
 ATOMIC_TABLE="${TRUSTFORGE_ATOMIC_BATCH_TABLE:-trustforge-multi-angle-batches}"
 ATOMIC_CONFIG_VERSION="${TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION:-dynamodb-v1}"
 ATOMIC_EXCLUSIVE="${TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE:-1}"
 SHARED_ANALYSIS_DB="${TRUSTFORGE_SHARED_ANALYSIS_DB_PATH:-/opt/out/trustforge.sqlite3}"
+PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
+PREVIEW_ENV_KEYS=(
+  TRUSTFORGE_PREVIEW_ADMISSION_TABLE TRUSTFORGE_PREVIEW_TABLE_ARN
+  TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_VERSION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_QUOTA_LIFECYCLE_GENERATION
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_RETIRE_NOT_BEFORE
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD
+  TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD
+)
 
 if [ -n "$TOKEN_SSM_PREFIX" ] && ! [[ "$TOKEN_SSM_PREFIX" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
   echo "[ec2] ERROR: TRUSTFORGE_TOKEN_SSM_PREFIX contains invalid characters" >&2
@@ -31,6 +51,10 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "[ec2] ERROR: BEDROCK_MODEL_ID contains invalid characters" >&2
   exit 1
 fi
+if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  echo "[ec2] ERROR: TRUSTFORGE_TRAINING_DATA_DIR must be an absolute safe path" >&2
+  exit 1
+fi
 if [[ ! "$ATOMIC_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]] \
   || [[ ! "$ATOMIC_CONFIG_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] \
   || [[ "$ATOMIC_EXCLUSIVE" != "1" ]] \
@@ -38,8 +62,33 @@ if [[ ! "$ATOMIC_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]] \
   echo "[ec2] ERROR: invalid atomic authority runtime contract" >&2
   exit 1
 fi
+if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
+  echo "[ec2] ERROR: preview admission flag must be exactly 0 or 1" >&2
+  exit 1
+fi
+if [ "$PREVIEW_ADMISSION_ENABLED" = "1" ] && {
+  [ "${TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS-}" != "8000" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS-}" != "51200" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD-}" != "50000" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD-}" != "500000" ];
+}; then
+  echo "[ec2] ERROR: preview cost cap contract missing or invalid" >&2
+  exit 1
+fi
+for key in "${PREVIEW_ENV_KEYS[@]}"; do
+  value="${!key-}"
+  if [ -n "$value" ] && ! [[ "$value" =~ ^[A-Za-z0-9_./:-]+$ ]]; then
+    echo "[ec2] ERROR: invalid preview deployment value" >&2
+    exit 1
+  fi
+done
 
 EXTRA_UNIT_ENV=""
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_TRAINING_DATA_DIR=${TRAINING_DATA_DIR}\n"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=${ATOMIC_TABLE}\n"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=${ATOMIC_CONFIG_VERSION}\n"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=${ATOMIC_EXCLUSIVE}\n"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=${SHARED_ANALYSIS_DB}\n"
 [ -n "$DAILY_CAP" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=${DAILY_CAP}\n"
 [ -n "$TOKEN_SSM_PREFIX" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX}\n"
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_GUARD_BACKEND=${BUDGET_BACKEND}\n"
@@ -47,10 +96,11 @@ EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_COUNTER_TABLE=${C
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_CW_METRICS=${CW_METRICS}\n"
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=${LEASE_BACKEND}\n"
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_LEASE_TABLE=${LEASE_TABLE}\n"
-EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=${ATOMIC_TABLE}\n"
-EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=${ATOMIC_CONFIG_VERSION}\n"
-EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=${ATOMIC_EXCLUSIVE}\n"
-EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=${SHARED_ANALYSIS_DB}\n"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=${PREVIEW_ADMISSION_ENABLED}\n"
+for key in "${PREVIEW_ENV_KEYS[@]}"; do
+  value="${!key-}"
+  [ -n "$value" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=${key}=${value}\n"
+done
 
 ssm_env_cmd() {
   local key="$1" val="$2"
@@ -62,6 +112,10 @@ ssm_env_cmd() {
 }
 
 UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")$(ssm_env_cmd TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND "$LEASE_BACKEND")$(ssm_env_cmd TRUSTFORGE_LEASE_TABLE "$LEASE_TABLE")$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_TABLE "$ATOMIC_TABLE")$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION "$ATOMIC_CONFIG_VERSION")$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE "$ATOMIC_EXCLUSIVE")$(ssm_env_cmd TRUSTFORGE_SHARED_ANALYSIS_DB_PATH "$SHARED_ANALYSIS_DB")"
+UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd TRUSTFORGE_PREVIEW_ADMISSION_ENABLED "$PREVIEW_ADMISSION_ENABLED")"
+for key in "${PREVIEW_ENV_KEYS[@]}"; do
+  UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd "$key" "${!key-}")"
+done
 
 poll_ssm_terminal_status() {
   local cmdid="$1" iid="$2" max_wait="${3:-180}" interval="${4:-5}"
@@ -131,6 +185,19 @@ verify_web_healthz() {
   echo "[ec2] web healthz passed"
 }
 
+verify_preview_admission() {
+  local iid="$1" cmdid status
+  cmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript \
+    --parameters commands='["set -e","cd /opt/trustforge","bash deploy/preview_admission_release_gate.sh"]' \
+    --query 'Command.CommandId' --output text)
+  status=$(poll_ssm_terminal_status "$cmdid" "$iid" 120 5) || true
+  if [ "$status" != "Success" ]; then
+    echo "[ec2] preview admission readiness failed" >&2
+    return 1
+  fi
+}
+
 # 0) Discover existing instances (same as before) -------------------------------------
 if ! MATCHES=$(aws ec2 describe-instances --region "$REGION" \
   --filters Name=tag:Name,Values=trustforge-demo \
@@ -142,6 +209,10 @@ fi
 MATCH_COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
 
 ACCT=$(aws sts get-caller-identity --query Account --output text)
+PREVIEW_CURRENT_PARAMETER="${TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER:-/trustforge/preview-admission/quota-hmac}"
+PREVIEW_PREVIOUS_PARAMETER="${TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER:-/trustforge/preview-admission/__none__}"
+PREVIEW_CURRENT_PARAMETER_ARN="arn:aws:ssm:$REGION:$ACCT:parameter${PREVIEW_CURRENT_PARAMETER}"
+PREVIEW_PREVIOUS_PARAMETER_ARN="arn:aws:ssm:$REGION:$ACCT:parameter${PREVIEW_PREVIOUS_PARAMETER}"
 BUCKET="trustforge-deploy-${ACCT}"
 ROLE=trustforge-ec2
 SG=trustforge-ec2-sg
@@ -179,7 +250,8 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
     {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"},
     {\"Effect\":\"Allow\",\"Action\":[\"ssm:GetParameter\",\"ssm:GetParametersByPath\",\"ssm:DeleteParameter\"],\"Resource\":[\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy\",\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"]},
     {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/runtime/*\"},
-    {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}}
+    {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}},
+    {\"Effect\":\"Deny\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"ArnLike\":{\"kms:EncryptionContext:PARAMETER_ARN\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/preview-admission/*\"},\"ArnNotEquals\":{\"kms:EncryptionContext:PARAMETER_ARN\":[\"$PREVIEW_CURRENT_PARAMETER_ARN\",\"$PREVIEW_PREVIOUS_PARAMETER_ARN\"]}}}
   ]}" >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-cloudwatch \
@@ -217,25 +289,6 @@ if ! aws dynamodb describe-table --region "$REGION" --table-name "$BG_TABLE" >/d
 fi
 else
   echo "[ec2] skip bootstrap (TRUSTFORGE_BOOTSTRAP=${BOOTSTRAP})"
-fi
-
-# The public multi-angle admission guard uses DynamoDB UpdateItem on the
-# connector-cache table.  Reconcile this narrow permission on every release,
-# including update-in-place runs where TRUSTFORGE_BOOTSTRAP=0; otherwise a
-# previously created instance role can drift and every cost-bearing submission
-# fails closed with HTTP 429.
-aws iam put-role-policy --role-name "$ROLE" \
-  --policy-name trustforge-analysis-write-rate-limit \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
-    {\"Effect\":\"Allow\",\"Action\":\"dynamodb:UpdateItem\",
-     \"Resource\":\"arn:aws:dynamodb:$REGION:$ACCT:table/trustforge-connector-cache\"}
-  ]}" >/dev/null
-
-# Reconcile the atomic authority on every release. TransactionWriteItems alone
-# is insufficient: DynamoDB separately authorizes ConditionCheck subactions.
-if ! "$(dirname "$0")/setup_atomic_batch_dynamodb.sh"; then
-  echo "[ec2] ERROR: atomic multi-angle authority setup failed" >&2
-  exit 1
 fi
 
 # 2) Build content-addressed artifact + manifest --------------------------------------
@@ -388,7 +441,7 @@ cat > "$UD" <<EOF
 #!/bin/bash
 set -x
 dnf install -y python3.11 python3.11-pip unzip >/var/log/tf-setup.log 2>&1
-python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'cryptography>=44,<50' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
+python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'cryptography>=44,<50' 'jsonschema>=4.23,<5' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
 mkdir -p /opt/trustforge && cd /opt/trustforge
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}artifact.zip ./app.zip --region ${REGION} >>/var/log/tf-setup.log 2>&1
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}manifest.json ./manifest.json --region ${REGION} >>/var/log/tf-setup.log 2>&1
@@ -458,6 +511,7 @@ for _i in $(seq 1 60); do
 done
 
 verify_web_healthz "$IID"
+verify_preview_admission "$IID"
 verify_fetch_scheduler "$IID"
 
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \

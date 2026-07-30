@@ -4,11 +4,12 @@ import hashlib
 import json
 import os
 import runpy
+import sqlite3
 import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ from trustforge.agent.shadow_contracts import (
     policy_digest as shadow_policy_digest,
     to_dict,
 )
+import trustforge.agent.shadow_evidence_store as evidence_store_module
 import trustforge.asset_intrinsic_promotion_receipt as receipt_module
 from trustforge.asset_intrinsic_promotion import load_intrinsic_promotion_policy
 from trustforge.asset_intrinsic_promotion_dataset import (
@@ -329,12 +331,34 @@ def test_two_workers_converge_on_one_signed_winner(tmp_path):
     assert len(first_ledger.read()) == 1
 
 
-def test_canonical_store_to_dataset_to_evaluator_to_signed_ledger(tmp_path):
+def test_canonical_store_to_dataset_to_evaluator_to_signed_ledger(
+    tmp_path, monkeypatch
+):
     helpers = runpy.run_path("tests/test_asset_intrinsic_promotion_dataset.py")
-    observed_at = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    run_started = datetime.now(timezone.utc)
+    observed_at = run_started - timedelta(hours=1)
+    pit_cutoff = run_started + timedelta(days=1)
+    pit_cutoff_text = pit_cutoff.isoformat().replace("+00:00", "Z")
     identity = helpers["_identity"]()
+    real_connect = sqlite3.connect
+
+    def fixed_clock_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.create_function(
+            "strftime",
+            2,
+            lambda fmt, value: (
+                "2026-07-20T13:00:00.000Z"
+                if fmt == "%Y-%m-%dT%H:%M:%fZ" and value == "now"
+                else None
+            ),
+        )
+        return connection
+
+    monkeypatch.setattr(evidence_store_module.sqlite3, "connect", fixed_clock_connect)
+    store_path = tmp_path / "shadow" / "shadow.sqlite3"
     store = helpers["_store"](
-        tmp_path / "shadow" / "shadow.sqlite3",
+        store_path,
         [helpers["_observation"]("BTC", observed_at, request="receipt-e2e")],
     )
 
@@ -343,7 +367,7 @@ def test_canonical_store_to_dataset_to_evaluator_to_signed_ledger(tmp_path):
             store,
             identity,
             load_policy(),
-            pit_cutoff="2026-08-01T00:00:00Z",
+            pit_cutoff=pit_cutoff_text,
             stale_after_days=30,
         )
 
@@ -356,11 +380,11 @@ def test_canonical_store_to_dataset_to_evaluator_to_signed_ledger(tmp_path):
             artifact_digest=identity.candidate_artifact_digest,
             release_id="release:test@1",
         ),
-        pit_cutoff="2026-08-01T00:00:00Z",
+        pit_cutoff=pit_cutoff_text,
         policy=load_intrinsic_promotion_policy(),
         benchmark_manifest_digest=BENCHMARK,
         dataset_loader=canonical_loader,
-        now=lambda: datetime(2026, 8, 1, 1, tzinfo=timezone.utc),
+        now=lambda: pit_cutoff + timedelta(hours=1),
     )
     assert event["kind"] == EVENT_KIND, (
         event["failure_stage"],

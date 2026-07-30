@@ -10,10 +10,8 @@ import html
 import json
 from urllib.parse import urlencode
 
-import pytest
-
 from trustforge import lambda_handler, web
-from trustforge.comparison_contract import ComparisonRunResult
+from trustforge.comparison_contract import ComparisonReport, ComparisonRunResult
 from trustforge.schema import Evidence, QuestionType
 
 
@@ -260,3 +258,69 @@ def test_lambda_analyze_json_comparison_excludes_author(monkeypatch):
     )
     assert all("author" not in ev for ev in payload["evidence_a"])
     assert all("author" not in ev for ev in payload["evidence_b"])
+
+
+def test_lambda_comparison_nested_reports_reject_authority_material(monkeypatch):
+    report_a, evidence_a, log = _authored_single("BTC", "lambda nested leak a")
+    report_b, evidence_b, _ = _authored_single("ETH", "lambda nested leak b")
+    report_a.asset_intrinsic_assessment = {
+        "mode": "official",
+        "metadata": {
+            "raw-receipt": "SECRET",
+            "authorityAlias": {"private_key": "SECRET"},
+        },
+    }
+    report_a.asset_intrinsic_official_state = {
+        "state": "official",
+        "reason": "REPORT_LEVEL_SECRET",
+    }
+    report_a.risk_notices = [
+        {
+            "code": "forged",
+            "severity": "warning",
+            "message": "officialState.rawReceipt=NESTED_SECRET",
+        }
+    ]
+    comparison = ComparisonReport(
+        coin_a="BTC",
+        coin_b="ETH",
+        query="lambda nested leak",
+        conclusion="insufficient data",
+        supporting_report_a=report_a,
+        supporting_report_b=report_b,
+    )
+
+    def fake_do_comparison(qs, client_ip=""):
+        return ComparisonRunResult(
+            report_a=report_a,
+            evidence_a=evidence_a,
+            report_b=report_b,
+            evidence_b=evidence_b,
+            comparison=comparison,
+            log=log,
+        )
+
+    monkeypatch.setattr(web, "_do_comparison", fake_do_comparison)
+    response = lambda_handler.handler(
+        _event(
+            "/analyze.json",
+            {
+                "coin": "BTC",
+                "coin2": "ETH",
+                "type": "comparison",
+                "q": "lambda nested leak",
+            },
+        )
+    )
+
+    assert response["statusCode"] == 200
+    assert "SECRET" not in response["body"]
+    assert "NESTED_SECRET" not in response["body"]
+    payload = json.loads(response["body"])
+    nested = payload["comparison_report"]["supporting_report_a"]
+    assert "asset_intrinsic_official_state" not in payload["report_a"]
+    assert "asset_intrinsic_official_state" not in nested
+    assert nested["asset_intrinsic_assessment"]["mode"] == "shadow"
+    assert nested["confidence"] == report_a.confidence
+    assert nested["direction"] == report_a.direction
+    assert nested["decision_state"] == report_a.decision_state

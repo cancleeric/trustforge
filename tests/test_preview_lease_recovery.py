@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import uuid
 import threading
+import time
+from email.utils import formatdate
 from concurrent.futures import ThreadPoolExecutor
 
 import boto3
@@ -28,6 +30,7 @@ from trustforge.preview_lease_recovery import (
     PreviewLeaseRecovery,
     RecoveryOutcome,
     _ddb_map,
+    _decode_reservation,
 )
 from trustforge.preview_durable_admission_gate import (
     DurableAdmissionGate,
@@ -42,6 +45,12 @@ from trustforge.preview_terminal_reconcile import (
     TerminalOutcome,
 )
 from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
+from trustforge.quota_key_lifecycle import (
+    DurableQuotaKeyLifecycleAuthority,
+    LIFECYCLE_CONTROL_KEY,
+    QuotaKeyLifecycle,
+)
+from tests.test_quota_key_lifecycle import _provider
 from tests.test_preview_terminal_reconcile import (
     _admit,
     _create,
@@ -70,6 +79,9 @@ def _handle() -> AdmissionHandle:
         1,
         1,
         1,
+        1,
+        1,
+        None,
     )
 
 
@@ -110,8 +122,19 @@ class Client:
         self.puts = []
         self.reservation = None
         self.admission_control = _control_item(GateState.OPEN, 0, 0, None)
+        self.lifecycle_item = None
+
+    def describe_table(self, **kwargs):
+        del kwargs
+        return {
+            "ResponseMetadata": {
+                "HTTPHeaders": {"date": formatdate(time.time(), usegmt=True)}
+            }
+        }
 
     def get_item(self, **kwargs):
+        if kwargs["Key"] == LIFECYCLE_CONTROL_KEY:
+            return {} if self.lifecycle_item is None else {"Item": self.lifecycle_item}
         if kwargs["Key"]["pk"]["S"] == CONTROL_PK:
             return {"Item": self.item}
         if kwargs["Key"]["pk"]["S"] == "PAP#1#CONTROL":
@@ -123,6 +146,9 @@ class Client:
         return {"Items": []}
 
     def put_item(self, **kwargs):
+        if kwargs.get("Item", {}).get("sk") == LIFECYCLE_CONTROL_KEY["sk"]:
+            self.lifecycle_item = kwargs["Item"]
+            return {}
         self.puts.append(kwargs)
         self.item = kwargs["Item"]
         return {
@@ -149,6 +175,41 @@ class Client:
                 }
             }
         raise AssertionError("unexpected D1 write")
+
+
+def _durable_lifecycle(client):
+    clock = PreviewTrustedClock(dynamodb_client=client, table_name="preview-store")
+    now = clock.refresh()
+    second = int(now.earliest)
+    provider = _provider({1: bytes(range(32))})
+    authority = DurableQuotaKeyLifecycleAuthority(
+        clock,
+        dynamodb_client=client,
+        table_name="preview-store",
+        key_material_provider=provider,
+    )
+    authority.install(
+        QuotaKeyLifecycle(
+            1,
+            TrustedUtcInterval(second - 10, second - 9),
+            provider.bind_lifecycle(
+                provider.load(
+                parameter_name="/trustforge/quota",
+                expected_version=1,
+                key_id="quota-1",
+                ),
+                activated=second - 5,
+            ),
+        )
+    )
+    return authority
+
+
+def _bind(authority, request):
+    snapshot = authority.snapshot()
+    return authority.bind_admission(
+        request, authority.derive(snapshot, b"lease-recovery-test")
+    )
 
 
 def _terminal(client: Client) -> PreviewTerminalReconciler:
@@ -277,6 +338,95 @@ def test_exact_terminal_row_is_checkpointed_without_second_d1():
     assert result.outcome is RecoveryOutcome.PROGRESSED
     assert result.candidates == 1
     assert terminal.intents == []
+
+
+def _terminal_reservation_item(circuit_failure=...):
+    handle = _handle()
+    item = {
+        key: value for key, value in asdict(handle).items() if value is not None
+    }
+    item.update(
+        {
+            "pk": f"PAP#1#RESERVATION#{handle.expiry_shard:010d}",
+            "sk": f"ID#{handle.reservation_id}",
+            "kind": "preview_reservation",
+            "status": "terminal",
+            "version": 1,
+            "ttl": handle.created_upper + RETENTION_SECONDS,
+            "terminal_disposition": "uncertain",
+        }
+    )
+    if circuit_failure is not ...:
+        item["circuit_failure"] = circuit_failure
+    return item
+
+
+@pytest.mark.parametrize(
+    "circuit_failure,accepted",
+    [
+        (..., True),
+        (0, True),
+        (1, False),
+        (False, False),
+        (True, False),
+        ("0", False),
+        ("1", False),
+        (2, False),
+    ],
+)
+def test_terminal_circuit_failure_decoder_requires_canonical_int_schema(
+    circuit_failure, accepted
+):
+    item = _terminal_reservation_item(circuit_failure)
+    if accepted:
+        reservation = _decode_reservation(item)
+        assert reservation.disposition is TerminalDisposition.UNCERTAIN
+    else:
+        with pytest.raises(ValueError):
+            _decode_reservation(item)
+
+
+@pytest.mark.parametrize(
+    "circuit_failure,expected",
+    [
+        (..., RecoveryOutcome.PROGRESSED),
+        (0, RecoveryOutcome.PROGRESSED),
+        (1, RecoveryOutcome.UNAVAILABLE),
+        (False, RecoveryOutcome.UNAVAILABLE),
+        (True, RecoveryOutcome.UNAVAILABLE),
+        ("0", RecoveryOutcome.UNAVAILABLE),
+        ("1", RecoveryOutcome.UNAVAILABLE),
+        (2, RecoveryOutcome.UNAVAILABLE),
+    ],
+)
+def test_terminal_circuit_failure_schema_controls_recovery_checkpoint(
+    circuit_failure, expected
+):
+    handle = _handle()
+    client = Client(handle.expiry_shard)
+    returned = False
+    item = _terminal_reservation_item(circuit_failure)
+
+    def query(**kwargs):
+        nonlocal returned
+        del kwargs
+        if returned:
+            return {"Items": []}
+        returned = True
+        return {"Items": [_ddb_map(item)]}
+
+    client.query = query
+    terminal = _exact_terminal(client)
+    result = PreviewLeaseRecovery(client, "preview-store", terminal).run(
+        TrustedUtcInterval(
+            handle.expiry_shard * 60 + 60,
+            handle.expiry_shard * 60 + 61,
+        )
+    )
+    assert result.outcome is expected
+    assert terminal.intents == []
+    if expected is RecoveryOutcome.UNAVAILABLE:
+        assert client.puts == []
 
 
 def test_conflicting_terminal_row_blocks_watermark():
@@ -704,7 +854,16 @@ def test_midpage_deadline_checkpoints_exact_item_and_next_run_resumes():
         }
 
     client.query = query
-    ticks = iter([0, 0, 0, 0, 2])
+    deadline_reached = threading.Event()
+    real_transact_write_items = client.transact_write_items
+
+    def checkpoint_then_advance_clock(**kwargs):
+        response = real_transact_write_items(**kwargs)
+        if client.item.get("last_sk", {}).get("S") == f"ID#{handles[1].reservation_id}":
+            deadline_reached.set()
+        return response
+
+    client.transact_write_items = checkpoint_then_advance_clock
     interval = TrustedUtcInterval(
         base.expiry_shard * 60 + 60, base.expiry_shard * 60 + 61
     )
@@ -712,9 +871,10 @@ def test_midpage_deadline_checkpoints_exact_item_and_next_run_resumes():
         client,
         "preview-store",
         _terminal(client),
-        monotonic_clock=lambda: next(ticks),
+        monotonic_clock=lambda: 2 if deadline_reached.is_set() else 0,
         deadline_seconds=1,
     ).run(interval)
+    assert deadline_reached.is_set()
     assert first.outcome is RecoveryOutcome.PROGRESSED
     assert first.candidates == 2
     assert client.item["last_sk"]["S"] == f"ID#{handles[1].reservation_id}"
@@ -798,11 +958,12 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate(restart):
     gate = DurableAdmissionGate(
         client, "preview-store", trusted_clock=clock
     )
+    authority = _durable_lifecycle(client)
     executor = PreviewAdmissionExecutor(
-        client, "preview-store", durable_gate=gate
+        client, "preview-store", durable_gate=gate, lifecycle_authority=authority
     )
     first_request = _request()
-    first = executor.execute(first_request)
+    first = executor.execute(_bind(authority, first_request))
     assert first.outcome.value == "unavailable"
     assert executor.latched_closed is True
     assert client.write_calls == 1
@@ -820,13 +981,17 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate(restart):
             client, "preview-store", trusted_clock=replacement_clock
         )
         executor = PreviewAdmissionExecutor(
-            client, "preview-store", durable_gate=gate
+            client,
+            "preview-store",
+            durable_gate=gate,
+            lifecycle_authority=authority,
         )
         assert executor._ambiguity is None
 
     # While closed, execute performs zero DynamoDB I/O.
+    blocked = _bind(authority, _request())
     calls_before = dict(client.calls)
-    assert executor.execute(_request()).outcome.value == "unavailable"
+    assert executor.execute(blocked).outcome.value == "unavailable"
     assert client.calls == calls_before
 
     terminal = PreviewTerminalReconciler(client, "preview-store")
@@ -847,8 +1012,11 @@ def test_real_executor_latch_present_expired_d1_unlocks_sealed_gate(restart):
     )
     resolve_thread.start()
     assert client.terminal_read_entered.wait(timeout=5)
+    following_bound = _bind(authority, _request())
     execute_thread = threading.Thread(
-        target=lambda: results.setdefault("following", executor.execute(_request()))
+        target=lambda: results.setdefault(
+            "following", executor.execute(following_bound)
+        )
     )
     execute_thread.start()
     assert execute_thread.is_alive()
@@ -874,8 +1042,9 @@ def test_public_resolver_boolean_cannot_forge_unlatch():
     gate = DurableAdmissionGate(
         client, "preview-store", trusted_clock=clock
     )
+    authority = _durable_lifecycle(client)
     executor = PreviewAdmissionExecutor(
-        client, "preview-store", durable_gate=gate
+        client, "preview-store", durable_gate=gate, lifecycle_authority=authority
     )
     ambiguity = AdmissionAmbiguity(
         handle,

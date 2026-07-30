@@ -43,6 +43,21 @@ CONFIDENCE_GAP_THRESHOLD: float = 0.3
 
 # 證據獨立性警示門檻：所有角度共用來源比例超過此值視為獨立性不足
 EVIDENCE_OVERLAP_WARNING_THRESHOLD: float = 0.7
+NO_INDEPENDENT_CORROBORATION = "沒有獨立交叉佐證；重複來源不可視為驗證。"
+
+# 每個欄位都是可追溯市場判讀的一部分；完整度衡量資料可用性，而非來源獨立性。
+_COMPLETENESS_FIELDS: tuple[tuple[str, float], ...] = (
+    ("direction", 0.15),
+    ("calibrated_confidence", 0.15),
+    ("decision_state", 0.10),
+    ("key_basis", 0.15),
+    ("market_judgment", 0.10),
+    ("evidence", 0.10),
+    ("evidence_sources", 0.10),
+    ("snapshot_id", 0.05),
+    ("job_id", 0.05),
+    ("question", 0.05),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,11 +82,19 @@ class AngleResult:
     snapshot_id: str                    # 追溯用
     job_id: str | None = None           # 追溯用
     question: str = ""                  # 同 snapshot 明細導覽用
+    completeness: float = 0.0           # 可用 report/evidence 欄位比例
+    missing_fields: list[str] = field(default_factory=list)
+
+    @property
+    def mode(self) -> str:
+        """`angle` 是既有名稱；mode 是 pipeline provenance 的明確別名。"""
+        return self.angle
 
     def to_dict(self) -> dict[str, Any]:
         """序列化為 JSON-safe dict。"""
         return {
             "angle": self.angle,
+            "mode": self.mode,
             "qtype": self.qtype.value,
             "direction": self.direction,
             "calibrated_confidence": self.calibrated_confidence,
@@ -83,6 +106,8 @@ class AngleResult:
             "snapshot_id": self.snapshot_id,
             "job_id": self.job_id,
             "question": self.question,
+            "completeness": self.completeness,
+            "missing_fields": self.missing_fields,
         }
 
 
@@ -125,6 +150,9 @@ class MultiAngleReport:
     evidence_independence: float        # 獨立來源比例 0.0 ~ 1.0
     decision_state: str = "normal"      # normal | partial_abstain | full_abstain
     limits: list[str] = field(default_factory=list)
+    direction_divergences: list[AngleConflict] = field(default_factory=list)
+    completeness_gaps: list[AngleConflict] = field(default_factory=list)
+    evidence_overlaps: list[AngleConflict] = field(default_factory=list)
     generated_at: str = ""
 
     def __post_init__(self):
@@ -140,6 +168,9 @@ class MultiAngleReport:
             "decision_state": self.decision_state,
             "consensus_confidence": self.consensus_confidence,
             "conflicts": [c.to_dict() for c in self.conflicts],
+            "direction_divergences": [c.to_dict() for c in self.direction_divergences],
+            "completeness_gaps": [c.to_dict() for c in self.completeness_gaps],
+            "evidence_overlaps": [c.to_dict() for c in self.evidence_overlaps],
             "agreement_matrix": self.agreement_matrix,
             "synthesis_summary": self.synthesis_summary,
             "evidence_independence": self.evidence_independence,
@@ -203,6 +234,16 @@ def angle_result_from_payload(mode: str, payload_json: str, *,
         confidence = 0.0
     confidence = min(1.0, max(0.0, confidence))
 
+    completeness, missing_fields = _assess_completeness(
+        report=report,
+        key_basis=key_basis,
+        evidence_list=evidence_list,
+        evidence_sources=evidence_sources,
+        snapshot_id=data.get("snapshot_id", ""),
+        job_id=job_id,
+        question=question,
+    )
+
     return AngleResult(
         angle=mode,
         qtype=qtype,
@@ -216,12 +257,45 @@ def angle_result_from_payload(mode: str, payload_json: str, *,
         snapshot_id=data.get("snapshot_id", ""),
         job_id=job_id,
         question=question,
+        completeness=completeness,
+        missing_fields=missing_fields,
     )
 
 
 # ---------------------------------------------------------------------------
 # 工具函式
 # ---------------------------------------------------------------------------
+
+def _assess_completeness(
+    *,
+    report: dict[str, Any],
+    key_basis: list[str],
+    evidence_list: list[Any],
+    evidence_sources: set[str],
+    snapshot_id: Any,
+    job_id: str | None,
+    question: str,
+) -> tuple[float, list[str]]:
+    """Measure usable, attributable fields; never use source overlap as coverage."""
+    present = {
+        "direction": report.get("direction") in {"偏多", "偏空", "中性", "不明"},
+        "calibrated_confidence": (
+            isinstance(report.get("calibrated_confidence"), (int, float))
+            and math.isfinite(float(report["calibrated_confidence"]))
+        ),
+        "decision_state": report.get("decision_state") in {"normal", "low_confidence", "abstain"},
+        "key_basis": bool(key_basis),
+        "market_judgment": bool(str(report.get("market_judgment", "")).strip()),
+        "evidence": bool(evidence_list),
+        "evidence_sources": bool(evidence_sources),
+        "snapshot_id": bool(str(snapshot_id or "").strip()),
+        "job_id": bool(job_id),
+        "question": bool(question.strip()),
+    }
+    missing = [name for name, _weight in _COMPLETENESS_FIELDS if not present[name]]
+    score = sum(weight for name, weight in _COMPLETENESS_FIELDS if present[name])
+    return round(score, 4), missing
+
 
 def _is_opposing(d1: str, d2: str) -> bool:
     """判斷兩個方向是否相反（偏多 vs 偏空）。"""
@@ -336,7 +410,7 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
         ):
             overlap = (len(left & right) / len(left | right)) if (left | right) else 1.0
             overlaps.append(overlap)
-            if overlap > EVIDENCE_OVERLAP_WARNING_THRESHOLD:
+            if overlap > 0:
                 conflicts.append(AngleConflict(
                     angle_a=left_angle.angle,
                     angle_b=right_angle.angle,
@@ -354,7 +428,9 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
         evidence_independence = 0.0
 
     limits: list[str] = []
-    if evidence_independence < (1.0 - EVIDENCE_OVERLAP_WARNING_THRESHOLD):
+    if evidence_independence == 0.0:
+        limits.append(f"五角度證據獨立性為 0%；{NO_INDEPENDENT_CORROBORATION}")
+    elif evidence_independence < (1.0 - EVIDENCE_OVERLAP_WARNING_THRESHOLD):
         limits.append(
             f"五角度證據獨立性偏低（{evidence_independence:.0%}），"
             f"多數角度引用相同來源，交叉佐證力有限。"
@@ -377,6 +453,23 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
     synthesis_summary = _build_synthesis_summary(
         consensus, consensus_confidence, active, abstained, conflicts, evidence_independence,
     )
+    # These dimensions are deliberately exposed separately. `conflicts` remains
+    # a legacy aggregate only; it must never be used as a divergence counter.
+    direction_divergences = [
+        item for item in conflicts if item.conflict_type == "direction_divergence"
+    ]
+    evidence_overlaps = [
+        item for item in conflicts if item.conflict_type == "evidence_overlap"
+    ]
+    completeness_gaps: list[AngleConflict] = []
+    for angle in angles:
+        if angle.completeness < 1.0:
+            completeness_gaps.append(AngleConflict(
+                angle_a=angle.angle, angle_b=angle.angle,
+                conflict_type="completeness_gap",
+                detail={"completeness": angle.completeness, "missing_fields": angle.missing_fields},
+                summary=f"{MODE_LABELS.get(angle.angle, angle.angle)}資料完整度 {angle.completeness:.0%}。",
+            ))
 
     return MultiAngleReport(
         coin=coin,
@@ -388,6 +481,9 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
         agreement_matrix=agreement_matrix,
         synthesis_summary=synthesis_summary,
         evidence_independence=evidence_independence,
+        direction_divergences=direction_divergences,
+        completeness_gaps=completeness_gaps,
+        evidence_overlaps=evidence_overlaps,
         decision_state="partial_abstain" if abstained else "normal",
         limits=limits,
     )
@@ -407,10 +503,16 @@ def _full_abstain_report(angles: list[AngleResult], coin: str, snapshot_id: str)
         consensus_confidence=0.0,
         conflicts=[],
         agreement_matrix=_build_agreement_matrix(angles),
-        synthesis_summary="五角度均因資料不足棄權，無法產出綜合結論。",
+        synthesis_summary=(
+            "五角度均因資料不足棄權，無法產出綜合結論。"
+            f"{NO_INDEPENDENT_CORROBORATION}"
+        ),
         evidence_independence=0.0,
         decision_state="full_abstain",
-        limits=["所有分析角度均因證據不足而棄權，目前無法給出任何方向性結論。"],
+        limits=[
+            "所有分析角度均因證據不足而棄權，目前無法給出任何方向性結論。",
+            NO_INDEPENDENT_CORROBORATION,
+        ],
     )
 
 
@@ -513,6 +615,8 @@ def _build_synthesis_summary(
 
     # 證據獨立性
     parts.append(f"。證據獨立性 {evidence_independence:.0%}。")
+    if evidence_independence == 0:
+        parts.append(NO_INDEPENDENT_CORROBORATION)
 
     # abstain 角度
     if abstained:
@@ -538,6 +642,7 @@ _NARRATION_TEMPLATE = """{coin} 的五角度綜合分析結構化結果：
 共識：{consensus}
 加權信心：{consensus_confidence:.2f}
 證據獨立性：{evidence_independence:.0%}
+獨立交叉佐證：{independence_statement}
 
 角度結果：
 {angles_summary}
@@ -549,6 +654,14 @@ _NARRATION_TEMPLATE = """{coin} 的五角度綜合分析結構化結果：
 {limits}
 
 請用 2-3 句話摘要上述結果，語氣中性專業。不可添加任何原始資料中沒有的判斷。"""
+
+
+def narration_fallback(report: MultiAngleReport) -> str:
+    """Return a deterministic fallback that cannot hide a zero-independence limit."""
+    text = report.synthesis_summary
+    if report.evidence_independence == 0 and "沒有獨立交叉佐證" not in text:
+        return f"{text} {NO_INDEPENDENT_CORROBORATION}"
+    return text
 
 
 def narrate_synthesis(
@@ -569,11 +682,11 @@ def narrate_synthesis(
     from .admin_config import multi_angle_narration_enabled_resolved
     enabled, _ = multi_angle_narration_enabled_resolved()
     if not enabled:
-        return report.synthesis_summary
+        return narration_fallback(report)
 
     # 離線直接降級
     if getattr(client, "offline", True):
-        return report.synthesis_summary
+        return narration_fallback(report)
 
     # 組裝 prompt
     angles_summary = "\n".join(
@@ -590,6 +703,10 @@ def narrate_synthesis(
         consensus=report.consensus,
         consensus_confidence=report.consensus_confidence,
         evidence_independence=report.evidence_independence,
+        independence_statement=(
+            "沒有獨立交叉佐證；重複來源不可視為驗證。"
+            if report.evidence_independence == 0 else "可依結構化來源集合判讀。"
+        ),
         angles_summary=angles_summary,
         conflicts_summary=conflicts_summary,
         limits=limits_text,
@@ -614,7 +731,12 @@ def narrate_synthesis(
         )
     narration = result.text.strip() if hasattr(result, "text") else str(result).strip()
     if narration and len(narration) > 10:
+        # A generated rewrite may not erase the deterministic limitation: with
+        # no independent sources, only text that explicitly preserves that
+        # fact is publishable. Otherwise fail closed to the program summary.
+        if report.evidence_independence == 0 and "沒有獨立交叉佐證" not in narration:
+            return narration_fallback(report)
         return narration
 
     # 降級
-    return report.synthesis_summary
+    return narration_fallback(report)

@@ -800,6 +800,26 @@
   overflow: hidden;
 }
 
+.hermes-workspace-stage-drilldown{display:flex;flex-direction:column;background:rgba(8,14,22,.96);border:1px solid var(--color-hermes-bd2);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:hermes-panel-in .22s ease-out}
+.hermes-workspace-stage-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--color-hermes-bd)}
+.hermes-workspace-stage-header>div{display:grid;gap:4px}
+.hermes-workspace-stage-header small{font-size:9px;letter-spacing:1.2px;color:var(--color-hermes-cyan)}
+.hermes-workspace-stage-header strong{font-size:14px;color:var(--color-hermes-tx)}
+.hermes-workspace-stage-header button{background:transparent;border:1px solid var(--color-hermes-bd2);border-radius:5px;color:var(--color-hermes-tx2);font-size:10px;padding:4px 9px;cursor:pointer}
+.hermes-workspace-stage-body{display:grid;gap:14px;overflow:auto;padding:16px 18px}
+.hermes-workspace-stage-body>section{padding:10px 12px;border-left:2px solid;background:rgba(4,10,17,.72)}
+.hermes-workspace-stage-body small{font-size:9px;letter-spacing:1px;color:var(--color-hermes-tx2)}
+.hermes-workspace-stage-body p{margin:5px 0 0;font-size:11.5px;line-height:1.65;color:var(--color-hermes-tx)}
+.hermes-workspace-stage-metric{display:grid;gap:5px;padding:12px;border:1px solid var(--color-hermes-bd2);background:var(--color-hermes-inset)}
+.hermes-workspace-stage-metric strong{font-size:22px;color:var(--color-hermes-cyan)}
+.hermes-workspace-stage-metric span{font-size:11px;color:var(--color-hermes-tx2)}
+.hermes-workspace-stage-body dl{display:grid;gap:6px;margin:0}
+.hermes-workspace-stage-body dl div{display:flex;gap:12px;padding:7px 9px;border-bottom:1px solid var(--color-hermes-bd)}
+.hermes-workspace-stage-body dt{min-width:110px;color:var(--color-hermes-tx3);font-size:10px}
+.hermes-workspace-stage-body dd{margin:0;color:var(--color-hermes-tx);font-size:10.5px;overflow-wrap:anywhere}
+.hermes-workspace-stage-missing{padding:14px;border:1px solid rgba(232,179,77,.45);background:rgba(232,179,77,.07)}
+.hermes-workspace-stage-missing strong{font-size:11px;color:var(--color-hermes-amber)}
+
 /* 主艦橋內嵌工作台：所有分析資料留在首頁，不再跳離星系艙。 */
 .hermes-module-deck {
   position: absolute;
@@ -1290,6 +1310,16 @@
 .hermes-energy-station.is-selected::after {
   opacity: 1;
   box-shadow: inset 0 0 18px color-mix(in srgb, var(--station-color) 10%, transparent);
+}
+
+.hermes-energy-station:disabled {
+  cursor: not-allowed;
+  opacity: .72;
+}
+
+.hermes-energy-station:disabled::after {
+  opacity: 0;
+  box-shadow: none;
 }
 
 .hermes-energy-index {
@@ -2620,6 +2650,61 @@
   display: none !important;
 }
 
+/* FPS / adaptive-quality HUD: the energy deck owns the bottom
+   `--hermes-bottom` pixels, so the meter sits immediately above that reserved
+   region instead of using an unrelated inline `bottom:8`. */
+.hermes-fps-meter {
+  position: fixed;
+  bottom: calc(var(--hermes-bottom) + 12px);
+  /* The desktop rail is an opaque layer above the workspace.  Anchoring this
+     HUD to the viewport's left edge put almost the entire badge underneath
+     that rail (only its bottom/left border remained visible).  Share the
+     layout's rail variable so the complete FPS + adaptive-quality badge sits
+     immediately inside the visible bridge workspace. */
+  left: max(calc(var(--hermes-rail) + 12px), env(safe-area-inset-left));
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid rgba(77, 216, 224, .28);
+  border-radius: 4px;
+  background: rgba(2, 4, 10, .9);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .32);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: .5px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.hermes-fps-value {
+  min-width: 28px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.hermes-fps-unit {
+  color: rgba(255, 255, 255, .5);
+}
+
+.hermes-fps-separator {
+  width: 1px;
+  height: 14px;
+  background: rgba(255, 255, 255, .15);
+}
+
+.hermes-fps-quality {
+  font-weight: 600;
+}
+
+.hermes-fps-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
 @media (max-width:900px) {
   .hermes-frame {
     --hermes-rail: clamp(190px, 34vw, 250px);
@@ -2837,6 +2922,42 @@
     --hermes-topbar-wrapped: 40px;
     --hermes-rail-strip: 45px;
     --hermes-tagline: calc(var(--hermes-topbar-wrapped) + var(--hermes-rail-strip));
+  }
+
+  /* The mobile left rail is absent, so collapse the HUD into a status badge.
+     Keep it above both the energy deck and the mobile divergence card. */
+  .hermes-fps-meter {
+    bottom: calc(var(--hermes-bottom) + 112px);
+    left: max(6px, env(safe-area-inset-left));
+    gap: 4px;
+    min-width: 0;
+    padding: 3px 6px;
+    border-radius: 999px;
+    background: rgba(2, 4, 10, .94);
+    font-size: 9px;
+  }
+
+  .hermes-fps-value {
+    min-width: 20px;
+    font-size: 11px;
+  }
+
+  .hermes-fps-separator {
+    display: none;
+  }
+
+  .hermes-fps-quality {
+    font-size: 0;
+  }
+
+  .hermes-fps-quality::after {
+    content: attr(data-short);
+    font-size: 9px;
+  }
+
+  .hermes-fps-dot {
+    width: 5px;
+    height: 5px;
   }
 
   /* N70：這裡原本是 `[data-region='left-rail'] { display:none !important }`。

@@ -146,6 +146,47 @@ def test_gate_rejects_non_uv_interpreter_below_home(tmp_path):
         )
 
 
+def test_gate_resolves_only_active_rust_toolchain_below_rustup_root(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    rustup = home / ".cargo/bin/rustup"
+    cargo = home / ".rustup/toolchains/stable-test/bin/cargo"
+    rustc = cargo.parent / "rustc"
+    rustup.parent.mkdir(parents=True)
+    rustup.write_bytes(b"rustup")
+    cargo.parent.mkdir(parents=True)
+    cargo.write_bytes(b"cargo")
+    rustc.write_bytes(b"rustc")
+
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=f"{cargo}\n"),
+    )
+
+    assert train._trusted_rust_toolchain(home) == cargo.parent.parent
+
+
+def test_gate_rejects_rustup_cargo_outside_toolchain_root(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    rustup = home / ".cargo/bin/rustup"
+    cargo = home / "untrusted/bin/cargo"
+    rustup.parent.mkdir(parents=True)
+    rustup.write_bytes(b"rustup")
+    cargo.parent.mkdir(parents=True)
+    cargo.write_bytes(b"cargo")
+
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=f"{cargo}\n"),
+    )
+
+    with pytest.raises(RuntimeError, match="outside the trusted toolchain root"):
+        train._trusted_rust_toolchain(home)
+
+
 def test_frontend_identity_requires_release_sha_and_question_picker(monkeypatch):
     expected_sha = "abcdef1234567890abcdef1234567890abcdef12"
     responses = iter(
@@ -217,7 +258,17 @@ def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
         lambda digest: {"digest": digest, "version": "v0.27.4"},
     )
     monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
-    monkeypatch.setattr(train, "verify_frontend_identity", lambda sha: "assets/index-release.js")
+    frontend_checks = iter(
+        [RuntimeError("stale frontend"), "assets/index-release.js"]
+    )
+
+    def verify_frontend(sha):
+        result = next(frontend_checks)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(train, "verify_frontend_identity", verify_frontend)
     monkeypatch.setattr(train, "production_instance", lambda: "i-production")
     monkeypatch.setattr(
         train,
@@ -229,6 +280,7 @@ def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
         ),
     )
     monkeypatch.setattr(train, "discard_frontend_snapshot", lambda *args: None)
+    monkeypatch.setattr(train, "verify_training_data_reconciliation", lambda instance: 2005)
 
     result = train.deploy_production(tmp_path, "a" * 40, "release/auto-20260729")
 
@@ -241,7 +293,72 @@ def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
         "git_sha": "a" * 40,
         "artifact_digest": "b" * 64,
         "frontend_asset": "assets/index-release.js",
+        "training_records": 2005,
     }
+
+
+def test_production_deploy_skips_current_frontend_mutation(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_subprocess_run(command, **kwargs):
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr(train.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(train, "production_identity", lambda: ("a" * 40, "b" * 64))
+    monkeypatch.setattr(
+        train,
+        "capture_active_pointer",
+        lambda digest: {"digest": digest, "version": "v0.27.36"},
+    )
+    monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
+    monkeypatch.setattr(
+        train,
+        "verify_frontend_identity",
+        lambda sha: "assets/index-current.js",
+    )
+    monkeypatch.setattr(train, "production_instance", lambda: "i-production")
+    monkeypatch.setattr(
+        train,
+        "capture_frontend_state",
+        lambda *args: pytest.fail("current frontend must not be snapshotted"),
+    )
+    monkeypatch.setattr(
+        train,
+        "verify_training_data_reconciliation",
+        lambda instance: 2005,
+    )
+
+    result = train.deploy_production(
+        tmp_path, "a" * 40, "release/auto-20260730"
+    )
+
+    assert [call[0][-1] for call in calls] == [
+        "TRUSTFORGE_BOOTSTRAP=0 bash deploy/deploy_ec2.sh"
+    ]
+    assert result["frontend_asset"] == "assets/index-current.js"
+    assert result["training_records"] == 2005
+
+
+def test_training_data_reconciliation_requires_api_and_filesystem_parity(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        train,
+        "run_ssm",
+        lambda instance, commands: calls.append(commands) or 'diagnostic\n{"training_records": 2005}',
+    )
+
+    assert train.verify_training_data_reconciliation("i-production") == 2005
+    assert "systemctl', 'show', 'trustforge.service'" in "\n".join(calls[0])
+    assert "TRUSTFORGE_TRAINING_DATA_DIR=" in "\n".join(calls[0])
+    assert "scan_training_data(resolve_training_data_dir())" in "\n".join(calls[0])
+    assert "json.loads(line)" not in "\n".join(calls[0])
+
+
+def test_training_data_reconciliation_rejects_missing_evidence(monkeypatch):
+    monkeypatch.setattr(train, "run_ssm", lambda instance, commands: "not-json")
+
+    with pytest.raises(RuntimeError, match="evidence is invalid"):
+        train.verify_training_data_reconciliation("i-production")
 
 
 def test_production_deploy_stops_before_frontend_when_backend_identity_mismatches(monkeypatch, tmp_path):
@@ -327,6 +444,11 @@ def test_production_deploy_restores_backend_when_frontend_fails(monkeypatch, tmp
         lambda digest: {"digest": digest, "version": "v0.27.4"},
     )
     monkeypatch.setattr(train, "verify_runtime_identity", lambda digest: None)
+    monkeypatch.setattr(
+        train,
+        "verify_frontend_identity",
+        lambda sha: (_ for _ in ()).throw(RuntimeError("stale frontend")),
+    )
     monkeypatch.setattr(train, "production_instance", lambda: "i-production")
     monkeypatch.setattr(
         train,
@@ -578,6 +700,7 @@ def test_execute_records_combined_production_deploy_result(monkeypatch, tmp_path
         "git_sha": "b" * 40,
         "artifact_digest": "e" * 64,
         "frontend_asset": "assets/index-release.js",
+        "training_records": 2005,
     }
     monkeypatch.setattr(train, "deploy_production", lambda *args: deployed)
 
@@ -627,6 +750,7 @@ def test_execute_does_not_noop_when_public_frontend_is_stale(monkeypatch, tmp_pa
         "git_sha": "a" * 40,
         "artifact_digest": "d" * 64,
         "frontend_asset": "assets/index-release.js",
+        "training_records": 2005,
     }
     deploy_calls = []
     monkeypatch.setattr(
@@ -670,6 +794,8 @@ def test_execute_does_not_noop_when_public_frontend_is_stale(monkeypatch, tmp_pa
     assert recorded[-1]["post_deploy_verification"] == {
         "runtime": "passed",
         "frontend": "passed",
+        "training_data_reconciliation": "passed",
+        "training_records": 2005,
         "verified_main_sha": "a" * 40,
         "frontend_asset": "assets/index-release.js",
     }

@@ -466,14 +466,17 @@ with open(path) as f:
 problems = []
 ssm_stmts = []
 kms_stmt = None
+kms_preview_deny = None
 for stmt in doc.get("Statement", []):
     actions = stmt.get("Action", [])
     if isinstance(actions, str):
         actions = [actions]
     if "ssm:GetParameter" in actions:
         ssm_stmts.append(stmt)
-    if "kms:Decrypt" in actions:
+    if "kms:Decrypt" in actions and stmt.get("Effect") == "Allow":
         kms_stmt = stmt
+    if "kms:Decrypt" in actions and stmt.get("Effect") == "Deny":
+        kms_preview_deny = stmt
 if len(ssm_stmts) != 2:
     problems.append("ssm:GetParameter statement 數量應為 2，實際為:" + str(len(ssm_stmts)))
 else:
@@ -507,6 +510,14 @@ else:
     via = (kms_stmt.get("Condition", {}).get("StringEquals", {}).get("kms:ViaService"))
     if via != "ssm.ap-southeast-2.amazonaws.com":
         problems.append("kms:Decrypt 缺 ViaService=ssm.<region> 條件:" + str(via))
+if kms_preview_deny is None:
+    problems.append("缺 preview-admission encryption-context explicit deny boundary")
+else:
+    condition = kms_preview_deny.get("Condition", {})
+    if "kms:EncryptionContext:PARAMETER_ARN" not in condition.get("ArnLike", {}):
+        problems.append("preview KMS deny 缺 PARAMETER_ARN ArnLike")
+    if "kms:EncryptionContext:PARAMETER_ARN" not in condition.get("ArnNotEquals", {}):
+        problems.append("preview KMS deny 缺 exact current/previous exceptions")
 print("MATCH" if not problems else "MISMATCH:" + "|".join(problems))
 PYEOF
 )

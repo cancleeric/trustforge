@@ -1,0 +1,171 @@
+{
+  "binding": {
+    "exact_commit_review": "required in external PR reviewer attestation; never self-attested by this receipt",
+    "issue": 1088,
+    "status": "PROVISIONING_REVIEWED"
+  },
+  "collection": {
+    "commands": [
+      "systemd-run --wait --pipe --collect --unit=trustforge-nf2-acceptance.service /opt/trustforge/native-foundation/provisioning/receipts/nf2-host-probe.sh",
+      "hostname",
+      "uname -r",
+      "cat /proc/sys/kernel/random/boot_id",
+      "cat /proc/{1,self}/cgroup",
+      "cat /proc/self/mountinfo",
+      "readlink /proc/{1,self}/ns/{mnt,pid,cgroup,user}",
+      "grep '^NSpid:' /proc/self/status",
+      "cat /proc/self/uid_map"
+    ],
+    "finished_at_utc": "2026-07-30T07:48:08Z",
+    "probe_log_sha256": "13f4073198ae0574794ce059a1f98e0544773f05b5999e340d21146838df952b",
+    "probe_script_metadata": "root:root mode=0500 inode=263987 size=725 mtime=1785397688; identical before and after execution",
+    "probe_script_sha256": "e0efd77c5671f4cf862667b5b2d172d29b9a48bd4a55189b5bf4fb4320570f42",
+    "started_at_utc": "2026-07-30T07:48:08Z"
+  },
+  "host": {
+    "architecture": "x86_64",
+    "boot_id": "656c474c-c33e-4197-b138-e730699f18a1",
+    "container_evidence": {
+      "dockerenv_absent": true,
+      "namespace_inodes": {
+        "cgroup": 4026531835,
+        "mnt": 4026531832,
+        "pid": 4026531836,
+        "user": 4026531837
+      },
+      "native_ext4_root_mount": true,
+      "nspid_depth": 1,
+      "pid1_cgroup": "0::/init.scope",
+      "pid1_cgroup_container_markers_absent": true,
+      "self_cgroup": "0::/system.slice/trustforge-nf2-acceptance.service",
+      "self_cgroup_container_markers_absent": true,
+      "systemd_container_marker_absent": true,
+      "uid_map": "0 0 4294967295"
+    },
+    "hostname": "imac",
+    "kernel_release": "7.0.0-28-generic",
+    "operating_system": "Linux",
+    "pid1": "systemd",
+    "virtualization": "physical"
+  },
+  "receipt_schema": "trustforge.nf2-linux-host-receipt/v1",
+  "rust": {
+    "commit_hash": "ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96",
+    "installer_sha256": "4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10",
+    "installer_source": "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init",
+    "rust_lld_collected_at_utc": "2026-07-30T08:01:33Z",
+    "rust_lld_version": "LLD 22.1.2 (/checkout/src/llvm-project/llvm 1cb4e3833c1919c2e6fb579a23ac0e2b22587b7e) (compatible with GNU linkers)",
+    "release": "1.96.0"
+  },
+  "tools": [
+    {
+      "configured": "/usr/bin/git",
+      "gid": 0,
+      "label": "git",
+      "mode": "0755",
+      "resolved": "/usr/bin/git",
+      "sha256": "2a8c18fbf43da9f692d75474c72bea9dfd796c260b0f3dfe456376abc3bbd668",
+      "uid": 0
+    },
+    {
+      "configured": "/root/.cargo/bin/rustup",
+      "gid": 0,
+      "label": "rustup",
+      "mode": "0755",
+      "resolved": "/root/.cargo/bin/rustup",
+      "sha256": "4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10",
+      "uid": 0
+    },
+    {
+      "configured": "rustup:1.96.0-x86_64-unknown-linux-gnu:rustc",
+      "gid": 0,
+      "label": "rustc",
+      "mode": "0755",
+      "resolved": "/root/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/rustc",
+      "sha256": "ba4b837efb6612dfa8d941c5a72b8a50d1d03a0f36216743b173949aa8d9eb75",
+      "uid": 0
+    },
+    {
+      "configured": "rustup:1.96.0-x86_64-unknown-linux-gnu:cargo",
+      "gid": 0,
+      "label": "cargo",
+      "mode": "0755",
+      "resolved": "/root/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+      "sha256": "f30f9fd1b1d0b8fd10dc33219eb4cd4bec3543f40e434ac71f5a03fd0359063f",
+      "uid": 0
+    },
+    {
+      "configured": "/root/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld",
+      "gid": 0,
+      "label": "rust-lld",
+      "mode": "0755",
+      "resolved": "/root/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld",
+      "sha256": "d9e01686cf6c278090dd461f9f033e49252829e1388cfa88c9643579701d8c39",
+      "size": 11604688,
+      "uid": 0
+    },
+    {
+      "configured": "/usr/bin/unshare",
+      "gid": 0,
+      "label": "unshare",
+      "mode": "0755",
+      "resolved": "/usr/bin/unshare",
+      "sha256": "51bcc77ba5db162c80028f861f0a2770d728c1de80773816d863f28d7a817adb",
+      "uid": 0
+    },
+    {
+      "configured": "/usr/bin/mount",
+      "gid": 0,
+      "label": "mount",
+      "mode": "4755",
+      "resolved": "/usr/bin/mount",
+      "sha256": "ac5aa68d34add5a33ae81ac3a971aea677c4032d768aab5a3c4c2707f728885e",
+      "uid": 0
+    },
+    {
+      "configured": "/usr/bin/bash",
+      "gid": 0,
+      "label": "shell",
+      "mode": "0755",
+      "resolved": "/usr/bin/bash",
+      "sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
+      "uid": 0
+    },
+    {
+      "configured": "/usr/bin/sleep",
+      "gid": 0,
+      "label": "sleep",
+      "mode": "0755",
+      "resolved": "/usr/bin/sleep",
+      "sha256": "06d3927480c7554337818dbf5d91d78689bc8321237280e3d452028d5d1c3f43",
+      "uid": 0
+    },
+    {
+      "configured": "/usr/bin/mv",
+      "gid": 0,
+      "label": "mv",
+      "mode": "0755",
+      "resolved": "/usr/bin/mv",
+      "sha256": "31be03602835c3a6d9b0b11ab1fe52e99bfe91638a3f3b151a8bb0d9d1998b41",
+      "uid": 0
+    },
+    {
+      "configured": "/usr/bin/ln",
+      "gid": 0,
+      "label": "ln",
+      "mode": "0755",
+      "resolved": "/usr/bin/ln",
+      "sha256": "d9140e7c9ef59c2396e188da35f74872fb670d5dd0c2894a679d6a606f66c5ac",
+      "uid": 0
+    },
+    {
+      "configured": "/usr/bin/touch",
+      "gid": 0,
+      "label": "touch",
+      "mode": "0755",
+      "resolved": "/usr/bin/touch",
+      "sha256": "f0959a197fb4b1cb944948ee05bd7858304df6ca7a9afebc34dbb00f108a3cd1",
+      "uid": 0
+    }
+  ]
+}

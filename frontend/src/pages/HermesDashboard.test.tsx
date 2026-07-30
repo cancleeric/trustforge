@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getAnalysisQuestionContext, registerAnalysisQuestion } from '../lib/endpoints'
@@ -9,6 +9,23 @@ import type { CrossSourceSignal } from '../lib/types'
 import HermesRightRail from '../hermes/HermesRightRail'
 import { HermesI18nProvider, useHermesI18n } from '../hermes/hermesI18n'
 import HermesDashboard from './HermesDashboard'
+
+function dashboardFormalReceipt() {
+  return {
+    schema_version: 'formal-run-receipt/v1' as const,
+    receipt_id: 'frc_test-question',
+    question_id: 'test-question',
+    job_id: 'test-job',
+    result_id: 'result_test-job',
+    state: 'accepted' as const,
+    origin: 'manual' as const,
+    disposition: 'created' as const,
+    locale: 'zh-Hant' as const,
+    created_at: '2026-07-30T08:00:00Z',
+    expires_at: null,
+    fingerprint_version: 'analysis-question/v1' as const,
+  }
+}
 
 vi.mock('../lib/endpoints', () => ({
   getOverview: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
@@ -29,13 +46,35 @@ vi.mock('../lib/endpoints', () => ({
   getAnalysisQuestionContext: vi.fn().mockResolvedValue({ ok: true, data: { query: '', matches: [], conversation: [], retrieval: 'test' } }),
   getHermesUpgrades: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'no_request', message: 'no request' } }),
-  registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { accepted: true } }),
+  currentNarrativeLocale: vi.fn(() => 'zh-Hant'),
+  registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: dashboardFormalReceipt() }),
+  getAnalysisJob: vi.fn().mockResolvedValue({
+    ok: true,
+    data: {
+      job_id: 'test-job',
+      state: 'failed',
+      current_stage: 'source_ingestion',
+      coin: 'BTC',
+      mode: 'risk',
+      question: '分析BTC近期市場狀況，整合多源資料',
+      error: 'test failure',
+      origin: 'manual',
+      priority: 0,
+      queue_position: null,
+      result: null,
+    },
+  }),
   getWhaleSummary: vi.fn().mockResolvedValue({ ok: true, data: { coin: 'BTC', period_hours: 24, total_count: 0, total_usd: 0, net_exchange_flow_usd: 0, exchange_inflow_usd: 0, exchange_outflow_usd: 0, max_single_usd: 0, whale_transfer_count: 0, exchange_inflow_count: 0, exchange_outflow_count: 0 } }),
 }))
 
 function DashboardHistoryControls() {
   const navigate = useNavigate()
-  return <button onClick={() => navigate('/?qa=1&coin=SOL')}>plain entry</button>
+  return (
+    <>
+      <button onClick={() => navigate('/?qa=1&coin=SOL')}>plain entry</button>
+      <button onClick={() => navigate('/?qa=1&workspace=compare')}>compare entry</button>
+    </>
+  )
 }
 
 function LocationProbe() {
@@ -72,6 +111,14 @@ function LocaleSwitcher() {
 describe('HermesDashboard workspace navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(registerAnalysisQuestion).mockResolvedValue({
+      ok: true,
+      data: dashboardFormalReceipt(),
+    })
+    vi.mocked(getAnalysisQuestionContext).mockResolvedValue({
+      ok: true,
+      data: { query: '', matches: [], conversation: [], retrieval: 'test' },
+    })
     vi.stubGlobal('matchMedia', vi.fn(() => ({
       matches: false,
       media: '(max-width: 560px)',
@@ -101,6 +148,26 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.getByRole('region', { name: 'analyze workspace' })).toBeInTheDocument()
     expect(registerAnalysisQuestion).not.toHaveBeenCalled()
   }, 15_000)
+
+  it('closes an open homepage drilldown when switching workspaces and exposes workspace details', async () => {
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+        <DashboardHistoryControls />
+      </MemoryRouter>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /來源掃描/ }))
+    expect(screen.getByRole('dialog', { name: /Bitcoin — 來源掃描/ })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('compare entry'))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    const marketA = screen.getByRole('button', { name: '市場 A' })
+    expect(marketA).toBeEnabled()
+    fireEvent.click(marketA)
+    expect(screen.getByRole('dialog', { name: '市場 A' })).toHaveTextContent('尚無可驗證階段資料')
+  })
 
   it('renders only the dashboard composer when Analyze is embedded on desktop', () => {
     render(
@@ -248,13 +315,20 @@ describe('HermesDashboard workspace navigation', () => {
     await waitFor(() => expect(screen.getByLabelText('location')).toHaveTextContent('type=hypothesis'))
   })
 
-  it('N2: submit button leaves its loading label once the embedded AnalyzePage settles into an error (not just success)', { timeout: 60000 }, async () => {
+  it('N2: submit button leaves its loading label once the embedded AnalyzePage settles into an error (not just success)', async () => {
     // registerAnalysisQuestion resolves `ok:true` but without `job_id`
     // (see mock above) — AnalyzePage treats that as a failure and settles
     // into its error state. Before the fix, the left-rail submit button's
     // `phase` only reset to 'ready' when AnalyzePage produced *successful*
     // telemetry, so it stayed stuck on the loading label ("Hermes 自動分析中…")
     // forever on this error path.
+    type RegistrationResult = Awaited<ReturnType<typeof registerAnalysisQuestion>>
+    let settleRegistration!: (value: RegistrationResult) => void
+    const registrationSettled = new Promise<RegistrationResult>((resolve) => {
+      settleRegistration = resolve
+    })
+    vi.mocked(registerAnalysisQuestion).mockReturnValueOnce(registrationSettled)
+
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
@@ -263,7 +337,15 @@ describe('HermesDashboard workspace navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
     expect(registerAnalysisQuestion).toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Hermes 自動分析中…' })).toBeDisabled()
 
+    await act(async () => {
+      settleRegistration({
+        ok: true,
+        data: dashboardFormalReceipt(),
+      })
+      await registrationSettled
+    })
     await waitFor(() => {
       const submit = screen.getByRole('button', { name: /立即重新分析/ })
       expect(submit).not.toBeDisabled()

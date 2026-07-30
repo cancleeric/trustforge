@@ -1,0 +1,21 @@
+[package]
+name = "trustforge-nf2-zero-capability-broker"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+
+[features]
+adversarial-test-hooks = []
+
+[[bin]]
+name = "nf2-second-exec-fixture"
+path = "src/bin/nf2_second_exec_fixture.rs"
+required-features = ["adversarial-test-hooks"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = "symbols"

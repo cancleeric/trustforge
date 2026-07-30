@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 
 const host = '127.0.0.1'
@@ -10,10 +13,24 @@ const viewports = [
   { name: 'mobile', width: 390, height: 844 },
   { name: 'desktop', width: 1440, height: 900 },
 ]
-const panelScenarios = ['shadow', 'official', 'long', 'malformed']
+const panelScenarios = ['shadow', 'official-forgery', 'long', 'malformed']
 const locales = ['zh-TW', 'en']
 const failures = []
 const evidence = []
+const repositoryRoot = new URL('../../', import.meta.url)
+const git = (...args) => execFileSync(
+  'git',
+  args,
+  { cwd: repositoryRoot, encoding: 'utf8' },
+).trim()
+const scriptSha256 = createHash('sha256')
+  .update(await readFile(fileURLToPath(import.meta.url)))
+  .digest('hex')
+const binding = {
+  head: git('rev-parse', 'HEAD'),
+  tree: git('rev-parse', 'HEAD^{tree}'),
+  script_sha256: scriptSha256,
+}
 
 const vite = spawn(
   process.platform === 'win32' ? 'npm.cmd' : 'npm',
@@ -29,7 +46,7 @@ try {
     for (const locale of locales) {
       for (const viewport of viewports) {
         for (const scenario of panelScenarios) {
-          for (const zoom of scenario === 'shadow' ? [1, 2] : [1]) {
+          for (const zoom of [1, 2]) {
             const context = await browser.newContext({
               viewport,
               locale: locale === 'zh-TW' ? 'zh-TW' : 'en-US',
@@ -53,7 +70,13 @@ try {
               failures.push(`${label}: horizontal overflow ${geometry.scrollWidth}>${geometry.innerWidth}`)
             }
             if (scenario === 'shadow' && geometry.mode !== 'shadow') failures.push(`${label}: shadow panel missing`)
-            if (scenario === 'official' && geometry.mode !== 'official') failures.push(`${label}: official panel missing`)
+            if (scenario === 'official-forgery') {
+              if (geometry.mode !== null) failures.push(`${label}: forged official rendered mode=${geometry.mode}`)
+              if (!/資產結構資料格式不相容|Asset Structure payload is incompatible/.test(geometry.bodyText)) {
+                failures.push(`${label}: forged official did not fail closed`)
+              }
+              if (/OFFICIAL[／ /]/.test(geometry.bodyText)) failures.push(`${label}: forged official badge rendered`)
+            }
             if (scenario === 'malformed' && !/資產結構資料格式不相容|Asset Structure payload is incompatible/.test(geometry.bodyText)) {
               failures.push(`${label}: fail-closed error copy missing`)
             }
@@ -73,7 +96,33 @@ try {
   vite.kill('SIGTERM')
 }
 
-await writeFile(new URL('matrix.json', outputDir), `${JSON.stringify({ failures, evidence }, null, 2)}\n`)
+const matrixPayload = { binding, failures, evidence }
+const matrixSha256 = createHash('sha256')
+  .update(JSON.stringify(matrixPayload))
+  .digest('hex')
+const matrixDocument = {
+  ...matrixPayload,
+  binding: { ...binding, matrix_sha256: matrixSha256 },
+}
+const matrixPath = new URL('matrix.json', outputDir)
+await writeFile(matrixPath, `${JSON.stringify(matrixDocument, null, 2)}\n`)
+const persisted = JSON.parse(await readFile(matrixPath, 'utf8'))
+const { matrix_sha256: persistedDigest, ...persistedBinding } = persisted.binding
+const verifiedDigest = createHash('sha256')
+  .update(JSON.stringify({
+    binding: persistedBinding,
+    failures: persisted.failures,
+    evidence: persisted.evidence,
+  }))
+  .digest('hex')
+if (
+  persistedDigest !== verifiedDigest
+  || persistedBinding.head !== binding.head
+  || persistedBinding.tree !== binding.tree
+  || persistedBinding.script_sha256 !== binding.script_sha256
+) {
+  failures.push('Eye evidence binding verification failed')
+}
 if (failures.length) {
   console.error(failures.map((failure) => `- ${failure}`).join('\n'))
   process.exit(1)

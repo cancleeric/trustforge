@@ -106,6 +106,76 @@ describe('N26: zh-TW mode has no residual English strings', () => {
     expect(screen.getByText('持續運作')).toBeInTheDocument()
   })
 
+  it.each(['analyze', 'compare', 'history', 'status', 'costs', 'whale'] as const)(
+    'StageBar: %s workspace stations dispatch five workspace-scoped drilldown ids',
+    (mode) => {
+    const { coin } = galaxyHarness()
+    const onSelectStage = vi.fn()
+    render(
+      <HermesI18nProvider>
+        <StageBar
+          mode={mode}
+          selCoin={coin}
+          derivation={deriveSelected(coin)}
+          selectedStage={null}
+          onSelectStage={onSelectStage}
+        />
+      </HermesI18nProvider>,
+    )
+
+    const stations = screen.getAllByRole('button')
+    expect(stations).toHaveLength(5)
+    for (const station of stations) {
+      expect(station).toBeEnabled()
+      fireEvent.click(station)
+    }
+    expect(onSelectStage.mock.calls.map(([id]) => id)).toEqual([
+      `${mode}:0`, `${mode}:1`, `${mode}:2`, `${mode}:3`, `${mode}:4`,
+    ])
+    },
+  )
+
+  it('StageBar: homepage energy stations dispatch five distinct drilldown ids', () => {
+    const { coin } = galaxyHarness()
+    const onSelectStage = vi.fn()
+    render(
+      <HermesI18nProvider>
+        <StageBar
+          selCoin={coin}
+          derivation={deriveSelected(coin)}
+          selectedStage={null}
+          onSelectStage={onSelectStage}
+        />
+      </HermesI18nProvider>,
+    )
+
+    for (const station of screen.getAllByRole('button')) fireEvent.click(station)
+    expect(onSelectStage.mock.calls.map(([stage]) => stage)).toEqual([
+      'scan',
+      'filter',
+      'crossverify',
+      'manipulation',
+      'composite',
+    ])
+  })
+
+  it('StageDrilldown: title stays aligned with the evidence semantics', () => {
+    const { coin } = galaxyHarness()
+    render(
+      <HermesI18nProvider>
+        <StageDrilldown
+          selCoin={coin}
+          derivation={deriveSelected(coin)}
+          selectedStage="filter"
+          onClose={vi.fn()}
+        />
+      </HermesI18nProvider>,
+    )
+
+    expect(screen.getByRole('dialog', { name: `${coin.full} — 可信過濾` })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: `${coin.full} — 主張抽取` })).not.toBeInTheDocument()
+  })
+
   it('HermesRightRail: CONTINUOUS ENGINE / RUNNING / "<mode> · <state>" are localized under zh-TW', () => {
     const { coin } = galaxyHarness()
     const derivation = deriveSelected(coin)
@@ -260,9 +330,14 @@ describe('N17: en mode has no residual Chinese aria-labels (beyond the locked He
       json: async () => ({
         ok: true,
         data: {
-          training_data: { total_records: 10, has_direction: 5, direction_ratio: 0.5, per_coin: {} },
+          training_data: {
+            total_records: 10,
+            has_direction: 5,
+            direction_ratio: 0.5,
+            per_coin: { BTC: { total: 10, has_direction: 5 } },
+          },
           backfill: null,
-          upgrade_threshold: { target: 100, current: 10, met: false, pct: 10 },
+          upgrade_threshold: { target: 100, current: 5, met: false, pct: 5 },
         },
       }),
     }) as unknown as typeof fetch)

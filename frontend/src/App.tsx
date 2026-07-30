@@ -15,6 +15,7 @@ import AssetContextLookupPage from './pages/AssetContextLookupPage'
 import EcoLinkPage from './pages/EcoLinkPage'
 import PeerMetricsPage from './pages/PeerMetricsPage'
 import NotificationsPage from './pages/NotificationsPage'
+import PlanningPage from './pages/PlanningPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { HermesI18nProvider } from './hermes/hermesI18n'
 
@@ -35,6 +36,7 @@ function RoutedContent() {
         {/* 舊首頁（HomePage）已由旗艦 / 取代，redirect 避免重複入口。 */}
         <Route path="/home" element={<Navigate to="/" replace />} />
         <Route path="/analyze" element={<AnalyzePage />} />
+        <Route path="/plan" element={<PlanningPage />} />
         <Route path="/compare" element={<ComparePage />} />
         <Route path="/status" element={<StatusPage />} />
         <Route path="/costs" element={<CostsPage />} />

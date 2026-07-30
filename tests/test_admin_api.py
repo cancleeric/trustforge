@@ -401,6 +401,7 @@ def test_constant_time_compare_uses_fixed_length_digest():
 # ---------------------------------------------------------------------------
 
 def test_get_config_shape_and_layers(admin_enabled, monkeypatch):
+    monkeypatch.delenv("TRUSTFORGE_DISABLE_ADMIN_CONFIG", raising=False)
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "2.5")
     monkeypatch.setenv("BEDROCK_MODEL_ID", "anthropic.claude-test")
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
@@ -1106,16 +1107,44 @@ def test_upgrade_activation_endpoint_is_authenticated_and_explicit(admin_enabled
 def test_manual_analysis_question_is_allowed_when_hermes_autonomy_disabled(monkeypatch):
     monkeypatch.setattr(hermes, "autonomy_enabled", lambda: (False, "config"))
     monkeypatch.setattr(web, "_check_status_rate_limit", lambda *args, **kwargs: None)
-    class Flow:
-        def __enter__(self): return self
-        def __exit__(self, *_args): return None
-        def submit_manual(self, *_args, **_kwargs): return "question-1", "flow-1"
-    monkeypatch.setattr(analysis_flow, "AnalysisFlow", Flow)
+    monkeypatch.setattr(
+        web, "_formal_scope_cookie", lambda _headers: ("browser:test-scope", None)
+    )
+    class Coordinator:
+        def submit(self, **kwargs):
+            kwargs["admit_owner"]()
+            from trustforge.formal_run_coordinator import FormalRunOutcome
+            return FormalRunOutcome(202, {
+                "schema_version": "formal-run-receipt/v1",
+                "receipt_id": "frc_1",
+                "question_id": "question-1",
+                "job_id": "flow-1",
+                "result_id": "result-1",
+                "state": "accepted",
+                "origin": "manual",
+                "disposition": "created",
+                "locale": "zh-Hant",
+                "created_at": "2026-07-30T00:00:00Z",
+                "expires_at": None,
+                "fingerprint_version": "analysis-question/v1",
+            })
+    monkeypatch.setattr(
+        "trustforge.formal_run_runtime.formal_run_coordinator",
+        lambda: Coordinator(),
+    )
     code, body, _ = _request(
         "POST",
         "/api/analysis-question",
-        body=json.dumps({"coin": "BTC", "mode": "risk", "question": "test"}),
+        headers={"Idempotency-Key": "tf1.202607.CQkJCQkJCQkJCQkJCQkJCQ"},
+        body=json.dumps({
+            "coin": "BTC",
+            "mode": "risk",
+            "question": "test",
+            "locale": "zh-Hant",
+            "fresh": False,
+        }),
     )
     payload = json.loads(body)
     assert code == 202
-    assert payload["data"] == {"question_id": "question-1", "job_id": "flow-1", "state": "queued", "origin": "manual"}
+    assert payload["data"]["job_id"] == "flow-1"
+    assert payload["data"]["state"] == "accepted"
