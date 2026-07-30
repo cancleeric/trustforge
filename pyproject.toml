@@ -12,6 +12,7 @@ dependencies = [
     "certifi>=2024.2.2",  # 外部 HTTPS connector 的可攜式 CA trust store
     "portalocker>=3,<4",  # macOS/Linux/Windows cross-process store locks
     "cryptography>=44,<50",  # Ed25519 endpoint-manifest verification (#733)
+    "jsonschema>=4.23,<5",  # Training/analysis JSON contracts are validated at web startup
     # issue #721：FSC VASP 登記業者名單只以 PDF 發布（無 API、無表格頁）。
     # 該 PDF 用 Type0/CIDFontType2 字型並把 ToUnicode CMap 放在壓縮物件流裡，
     # 手寫解析不可行。pypdf 是純 Python、無 C 相依，可直接在生產基底
@@ -30,6 +31,7 @@ dev = [
     "moto[dynamodb]>=5",
     "pytest-cov>=5",
     "pytest-xdist>=3,<4",
+    "pytest-timeout>=2,<3",
     "jsonschema>=4,<5",
     "PyYAML>=6,<7",
 ]
@@ -52,6 +54,7 @@ testpaths = ["tests"]
 #   放在 addopts 會讓單一測試檔也吃閥值（跑子集時全倉 9%→白爆）。
 #   本機跑子集時仍可加 --no-cov 加速。
 addopts = "--cov=trustforge --cov=trustforge_core"
+timeout = 120
 # Suppress benign GC-timing ResourceWarnings from sqlite3 connections.  All
 # sqlite-backed stores (SourceEventArchive, TrustFeatureStore,
 # SQLiteCacheBackend, AnalysisFlow) define close()+__del__, but Python's

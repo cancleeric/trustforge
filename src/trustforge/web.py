@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import collections
+import base64
 import copy
 import dataclasses
 import hashlib
@@ -42,12 +43,14 @@ import logging
 import math
 import os
 import re
+import secrets
 import sys
 import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -99,6 +102,62 @@ SWAGGER_ENABLED = os.getenv("TRUSTFORGE_SWAGGER", "0") == "1"
 # Immutable A/B releases set TRUSTFORGE_RELEASE_IDENTITY_REQUIRED=1.  main()
 # verifies and freezes this value before binding the listening socket.
 _ENDPOINT_MANIFEST_BODY: bytes | None = None
+_PREVIEW_ADMISSION_RUNTIME: object | None = None
+_PREVIEW_ADMISSION_STATUS = "disabled"
+_ANALYSIS_PLAN_RUNTIME: object | None = None
+
+
+def _initialize_preview_admission() -> None:
+    """Internal #956 handoff only; never changes health or formal analysis."""
+
+    global _PREVIEW_ADMISSION_RUNTIME, _PREVIEW_ADMISSION_STATUS
+    configure_analysis_plan_runtime(None)
+    raw = os.getenv("TRUSTFORGE_PREVIEW_ADMISSION_ENABLED", "0")
+    _PREVIEW_ADMISSION_RUNTIME = None
+    if raw == "0":
+        _PREVIEW_ADMISSION_STATUS = "disabled"
+        return
+    if raw != "1":
+        _PREVIEW_ADMISSION_STATUS = "unavailable"
+        return
+    try:
+        from .preview_admission_deployment import (
+            initialize_preview_runtime_from_env,
+        )
+
+        readiness = initialize_preview_runtime_from_env()
+        _PREVIEW_ADMISSION_STATUS = (
+            "ready" if readiness.enabled else "unavailable"
+        )
+        if readiness.enabled:
+            _PREVIEW_ADMISSION_RUNTIME = readiness.runtime()
+            plan_enabled = os.getenv("TRUSTFORGE_ANALYSIS_PLAN_ENABLED", "0")
+            if plan_enabled not in {"0", "1"}:
+                raise ValueError("invalid analysis plan feature flag")
+            if plan_enabled == "1":
+                from .analysis_plan import (
+                    initialize_analysis_plan_runtime_from_env,
+                )
+
+                configure_analysis_plan_runtime(
+                    initialize_analysis_plan_runtime_from_env(
+                        _PREVIEW_ADMISSION_RUNTIME
+                    )
+                )
+    except Exception:
+        _PREVIEW_ADMISSION_STATUS = "unavailable"
+
+
+def configure_analysis_plan_runtime(runtime: object | None) -> None:
+    """Install the strictly composed preview runtime during trusted startup."""
+
+    global _ANALYSIS_PLAN_RUNTIME
+    if runtime is not None:
+        from .analysis_plan import AnalysisPlanRuntime
+
+        if type(runtime) is not AnalysisPlanRuntime:
+            raise ValueError("invalid analysis plan runtime")
+    _ANALYSIS_PLAN_RUNTIME = runtime
 
 
 # The stdlib ThreadingHTTPServer has no worker bound: a slow SQLite read plus
@@ -1189,9 +1248,9 @@ def _conf_gauge(
 ) -> str:
     """資訊完整度視覺化：SVG 弧形 gauge（270° 弧）+ 大字標籤。
 
-    #101 主角數字統一：`decision_state` 為 abstain/low_confidence 時主角＝
-    校準後資訊完整度（`calibrated_confidence`）；normal 時主角＝裸均值信任分
-    （`raw_confidence`，等同 `report.confidence`／後端 `trust_score` 語意）。
+    主儀表固定呈現校準後資訊完整度（`calibrated_confidence`），避免 normal
+    狀態改顯裸均值信任分時，使用者把原始證據分誤認為最終校準結果。
+    裸均值信任分只保留在旁邊的具名明細。
     `raw_confidence` 預設 `None`（＝沿用 `calibrated_confidence`），
     `decision_state` 預設 `"normal"`——向後相容既有只傳 2 個位置參數的呼叫端
     （如既有測試 `web._conf_gauge(0.91, "高信心")`），渲染結果與改動前完全一致。
@@ -1199,8 +1258,7 @@ def _conf_gauge(
     raw = calibrated_confidence if raw_confidence is None else raw_confidence
     # #1 修復：缺失/未知 decision_state 一律先正規化為 normal。
     decision_state = _normalize_decision_state(decision_state)
-    is_low_info = decision_state in ("abstain", "low_confidence")
-    hero = calibrated_confidence if is_low_info else raw
+    hero = calibrated_confidence
     pct = max(0.0, min(1.0, hero))
     # #2 修復：配色改走集中的 `_decision_color`（state-aware），不再只按
     # 數值門檻分桶，跟 React `ConfidenceGauge.bucketColor` 同一套規則。
@@ -1231,7 +1289,7 @@ def _conf_gauge(
         f'<div>'
         f'<div class="tf-conf-big" style="color:{color}">{html.escape(label)}</div>'
         f'<div style="font-size:.85rem;color:var(--tf-muted)">'
-        f'資訊完整度（校準後） {calibrated_confidence:.2f}｜裸均值信任分 {raw:.2f}</div>'
+        f'校準後資訊完整度 {calibrated_confidence:.2f}｜原始信任分 {raw:.2f}</div>'
         f'</div>'
         f'</div>'
     )
@@ -3452,9 +3510,7 @@ def _render_report(
     # （confidence_label() 已含三態），避免弱證據 abstain 時裸 confidence
     # （supporting 均值恆為 0 或 >=0.5）讓信心欄仍顯示「中/高」，跟
     # market_judgment 的「資料不足、暫不判斷」矛盾。
-    # #101 主角數字統一：多傳 raw_confidence/decision_state，讓 _conf_gauge
-    # 依 decision_state 切換主角（abstain/low_confidence→資訊完整度，
-    # normal→裸均值信任分），跟 React 端 ConfidenceGauge 同一套規則。
+    # 主儀表固定使用校準後資訊完整度；raw confidence 僅作具名明細。
     conf_html = _conf_gauge(
         report.calibrated_confidence,
         report.confidence_label(),
@@ -3658,10 +3714,8 @@ def _render_comparison(
     dir_b = report_b.direction or report_b._direction_label()
 
     def _cmp_conf(calibrated: float, raw: float, decision_state: str, label: str) -> str:
-        """#101 主角數字統一：abstain/low_confidence 態主角＝校準後資訊完整度，
-        normal 態主角＝裸均值信任分（`raw`，等同 `report.confidence`），跟
-        `_conf_gauge`／React `ConfidenceGauge`/`OverviewCard` 同一套規則。
-        副標一律雙數字並列並各自掛標籤。
+        """主數字固定呈現校準後資訊完整度，裸均值信任分只作具名明細，
+        跟 `_conf_gauge`／React `ConfidenceGauge` 同一套語意。
 
         #1／#2 修復：`decision_state` 先正規化（缺失/未知→normal），配色改走
         跟 `_conf_gauge` 共用的 `_decision_color`（state-aware：abstain=紅、
@@ -3670,8 +3724,7 @@ def _render_comparison(
         份報告 0.40 在 React 顯琥珀、SSR 卻顯紅）。
         """
         decision_state = _normalize_decision_state(decision_state)
-        is_low_info = decision_state in ("abstain", "low_confidence")
-        hero = calibrated if is_low_info else raw
+        hero = calibrated
         pct = max(0, min(100, int(hero * 100)))
         color = _decision_color(decision_state, hero)
         return (
@@ -3681,7 +3734,7 @@ def _render_comparison(
             f'<div class="tf-bar" style="width:{pct}%;background:{color}"></div>'
             f"</div>"
             f'<div style="font-size:.75rem;color:var(--tf-muted2);margin-top:2px">'
-            f'資訊完整度（校準後） {calibrated:.2f}｜裸均值信任分 {raw:.2f}</div>'
+            f'校準後資訊完整度 {calibrated:.2f}｜原始信任分 {raw:.2f}</div>'
         )
 
     src_a = len({ev.source for ev in evidence_a})
@@ -5918,45 +5971,30 @@ def _handle_api_training_status() -> tuple[int, str]:
     """
     import sqlite3
 
-    training_data_dir = Path(__file__).resolve().parents[2] / "data" / "training"
+    from .training_data import (
+        TrainingDataUnavailable,
+        resolve_training_data_dir,
+        scan_training_data,
+    )
+
+    try:
+        training_data_dir = resolve_training_data_dir()
+    except ValueError:
+        return 503, _json_envelope_err(
+            "training_data_unavailable", "訓練資料目錄設定無效"
+        )
     backfill_db_path = Path(__file__).resolve().parents[2] / "out" / "trustforge-backfill.sqlite3"
 
     # --- 訓練資料統計 ---
-    total_records = 0
-    has_direction_count = 0
-    per_coin: dict[str, dict[str, int]] = {}
-
-    if training_data_dir.is_dir():
-        for jsonl_file in sorted(training_data_dir.glob("*.jsonl")):
-            coin_name = jsonl_file.stem.upper()
-            coin_total = 0
-            coin_direction = 0
-            try:
-                with open(jsonl_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-                        coin_total += 1
-                        direction = record.get("direction")
-                        if (
-                            direction is not None
-                            and direction != ""
-                            and direction != "不明"
-                        ):
-                            coin_direction += 1
-            except OSError:
-                continue
-            total_records += coin_total
-            has_direction_count += coin_direction
-            per_coin[coin_name] = {
-                "total": coin_total,
-                "has_direction": coin_direction,
-            }
+    try:
+        scan = scan_training_data(training_data_dir)
+    except TrainingDataUnavailable:
+        return 503, _json_envelope_err(
+            "training_data_unavailable", "訓練資料不存在、無法讀取或格式無效"
+        )
+    total_records = scan.total_records
+    has_direction_count = scan.has_direction
+    per_coin = scan.per_coin
 
     direction_ratio = round(has_direction_count / total_records, 4) if total_records > 0 else 0.0
 
@@ -6811,35 +6849,202 @@ def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_memory_unavailable", "Hermes 題目記憶暫時無法讀取")
 
 
+def _formal_scope_keys() -> tuple[str, dict[str, bytes]]:
+    from .runtime_control import is_production_environment
+
+    active = os.getenv("TRUSTFORGE_FORMAL_SCOPE_ACTIVE_KEY_ID", "scope-v1").strip()
+    raw = os.getenv("TRUSTFORGE_FORMAL_SCOPE_SECRETS", "").strip()
+    try:
+        configured = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("formal scope keyring is invalid") from exc
+    if not configured and not is_production_environment():
+        fallback = os.getenv("TRUSTFORGE_FORMAL_CALLER_SECRET", "")
+        configured = {active: fallback}
+    if (
+        not isinstance(configured, dict)
+        or active not in configured
+        or any(
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or len(value.encode()) < 32
+            for key, value in configured.items()
+        )
+    ):
+        raise RuntimeError("formal scope keyring is unavailable")
+    return active, {key: value.encode() for key, value in configured.items()}
+
+
+def _formal_scope_cookie(headers) -> tuple[str | None, str | None]:
+    """Validate the stable anonymous browser scope or issue it before acquire."""
+    from .runtime_control import is_production_environment
+
+    active, keys = _formal_scope_keys()
+    production = is_production_environment()
+    cookie_name = "__Host-tf_formal_scope" if production else "tf_formal_scope"
+    jar = SimpleCookie()
+    try:
+        jar.load(headers.get("Cookie", ""))
+    except Exception:
+        jar = SimpleCookie()
+    morsel = jar.get(cookie_name)
+    if morsel is not None:
+        parts = morsel.value.split(".")
+        if len(parts) == 4 and parts[0] == "tfcs1" and parts[1] in keys:
+            key_id, random_value, supplied = parts[1], parts[2], parts[3]
+            expected = hmac.new(
+                keys[key_id],
+                f"tfcs1\0{key_id}\0{random_value}".encode(),
+                hashlib.sha256,
+            ).digest()
+            try:
+                decoded = base64.urlsafe_b64decode(supplied + "=" * (-len(supplied) % 4))
+                random_bytes = base64.urlsafe_b64decode(
+                    random_value + "=" * (-len(random_value) % 4)
+                )
+            except ValueError:
+                decoded, random_bytes = b"", b""
+            if len(random_bytes) == 16 and hmac.compare_digest(decoded, expected):
+                # Signing-key rotation must not change the logical caller.
+                return f"browser:{random_value}", None
+    random_value = base64.urlsafe_b64encode(secrets.token_bytes(16)).decode().rstrip("=")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(
+            keys[active],
+            f"tfcs1\0{active}\0{random_value}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode().rstrip("=")
+    value = f"tfcs1.{active}.{random_value}.{signature}"
+    attributes = (
+        f"{cookie_name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"
+    )
+    if production:
+        attributes += "; Secure"
+    return None, attributes
+
+
+def _handle_api_formal_analysis_question(
+    headers, rfile, client_ip: str = ""
+) -> tuple[int, str, dict[str, str]]:
+    """Create a formal manual intent without doing provider work inline."""
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error[0], error[1], {}
+    assert payload is not None
+    if set(payload) != {"coin", "mode", "question", "locale", "fresh"}:
+        return (
+            400,
+            _json_envelope_err(
+                "bad_request", "只接受且必須提供 coin、mode、question、locale、fresh"
+            ),
+            {},
+    )
+    try:
+        get_all = getattr(headers, "get_all", None)
+        key_values = (
+            get_all("Idempotency-Key", [])
+            if callable(get_all)
+            else ([headers["Idempotency-Key"]] if "Idempotency-Key" in headers else [])
+        )
+        from .formal_run_idempotency import (
+            BadIdempotencyKey,
+            FormalRunIdempotencyError,
+        )
+        from .formal_run_runtime import formal_run_coordinator
+
+        caller_scope, set_cookie = _formal_scope_cookie(headers)
+        if caller_scope is None:
+            return (
+                428,
+                _json_envelope_err(
+                    "caller_scope_required",
+                    "瀏覽器識別已建立，請使用相同 Idempotency-Key 重試",
+                ),
+                {"Set-Cookie": set_cookie},
+            )
+
+        outcome = formal_run_coordinator().submit(
+            idempotency_keys=key_values,
+            caller_scope=caller_scope,
+            coin=payload["coin"],
+            mode=payload["mode"],
+            question=payload["question"],
+            locale=payload["locale"],
+            fresh=payload["fresh"],
+            admit_owner=lambda: _check_status_rate_limit(
+                client_ip, "analysis-write"
+            ),
+        )
+        response_headers = dict(outcome.replay_headers or {})
+        if outcome.replayed:
+            response_headers["Idempotency-Replayed"] = "true"
+        body = (
+            _json_envelope_ok(outcome.body)
+            if outcome.status < 400
+            else json.dumps(outcome.body, ensure_ascii=False, separators=(",", ":"))
+        )
+        return outcome.status, body, response_headers
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc)), {}
+    except ValueError as exc:
+        return 400, _json_envelope_err("bad_request", str(exc)), {}
+    except BadIdempotencyKey as exc:
+        return 400, _json_envelope_err("bad_request", str(exc)), {}
+    except FormalRunIdempotencyError as exc:
+        return 503, _json_envelope_err(exc.code, "正式分析服務暫時無法使用"), {}
+    except Exception:
+        logging.exception("TrustForge /api/analysis-question error")
+        return (
+            503,
+            _json_envelope_err("idempotency_unavailable", "正式分析服務暫時無法使用"),
+            {},
+        )
+
+
 def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[int, str]:
-    """Create a high-priority manual analysis job, independent of scheduling."""
+    """Legacy direct helper retained for non-HTTP compatibility tests.
+
+    The public ``do_POST`` route uses the strict formal handler above.
+    """
     payload, error = _read_admin_put_body(headers, rfile)
     if error is not None:
         return error
     assert payload is not None
     if set(payload) - {"coin", "mode", "question", "locale"}:
-        return 400, _json_envelope_err("bad_request", "只接受 coin、mode、question、locale")
+        return 400, _json_envelope_err(
+            "bad_request", "只接受 coin、mode、question、locale"
+        )
     try:
         _check_status_rate_limit(client_ip, "analysis-write")
         from .agent.narrative_locale import normalize_locale
         from .analysis_flow import AnalysisFlow
-        # N11：語系是展示層選項，不是驗證輸入——非法/未知值一律 fallback 成
-        # 預設中文（`normalize_locale` 不 raise），絕不因語系值回 400/500。
+
         locale = normalize_locale(payload.get("locale"))
         with AnalysisFlow() as flow:
             question_id, job_id = flow.submit_manual(
-                str(payload.get("coin", "")), str(payload.get("mode", "")), str(payload.get("question", "")),
+                str(payload.get("coin", "")),
+                str(payload.get("mode", "")),
+                str(payload.get("question", "")),
                 locale=locale,
             )
-        return 202, _json_envelope_ok({"question_id": question_id, "job_id": job_id,
-                                       "state": "queued" if job_id else "registered", "origin": "manual"})
+        return 202, _json_envelope_ok(
+            {
+                "question_id": question_id,
+                "job_id": job_id,
+                "state": "queued" if job_id else "registered",
+                "origin": "manual",
+            }
+        )
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     except ValueError as exc:
         return 400, _json_envelope_err("bad_request", str(exc))
     except Exception:
-        logging.exception("TrustForge /api/analysis-question error")
-        return 502, _json_envelope_err("analysis_queue_unavailable", "分析排程暫時無法寫入")
+        logging.exception("TrustForge /api/analysis-question compatibility helper error")
+        return 502, _json_envelope_err(
+            "analysis_queue_unavailable", "分析排程暫時無法寫入"
+        )
 
 
 def _handle_api_analysis_comparison_question(headers, rfile, client_ip: str = "") -> tuple[int, str]:
@@ -8218,6 +8423,134 @@ def _read_admin_put_body(headers, rfile) -> tuple[dict | None, tuple[int, str] |
     return payload, None
 
 
+_ANALYSIS_PLAN_MAX_BODY_BYTES = 16 * 1024
+_ANALYSIS_PLAN_ERROR_COPY = {
+    400: (
+        "invalid_plan_request",
+        "請檢查問題、語系與資產提示格式。",
+        False,
+    ),
+    429: (
+        "plan_rate_limited",
+        "規劃請求過於頻繁。你可以返回編輯，或稍後再試。",
+        True,
+    ),
+    503: (
+        "plan_temporarily_unavailable",
+        "Hermes 規劃暫時不可用。你可以返回編輯。",
+        True,
+    ),
+    504: (
+        "plan_timeout",
+        "Hermes 規劃逾時。你可以返回編輯。",
+        True,
+    ),
+}
+
+
+def _analysis_plan_error(status: int) -> str:
+    code, message, retryable = _ANALYSIS_PLAN_ERROR_COPY[status]
+    return json.dumps(
+        {
+            "ok": False,
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _read_analysis_plan_body(headers, rfile):
+    ctype = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    raw_length = (headers.get("Content-Length") or "").strip()
+    if ctype != "application/json" or not raw_length.isascii() or not raw_length.isdigit():
+        return None
+    length = int(raw_length)
+    if not 1 <= length <= _ANALYSIS_PLAN_MAX_BODY_BYTES:
+        return None
+    raw = rfile.read(length)
+    if len(raw) != length:
+        return None
+
+    def strict_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError
+            value[key] = item
+        return value
+
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=strict_pairs,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if type(payload) is not dict or set(payload) - {
+        "question",
+        "locale",
+        "asset_hints",
+        "client_request_id",
+    }:
+        return None
+    if not {"question", "locale"} <= set(payload):
+        return None
+    try:
+        from .hermes_preview_control_plane import PreviewRequest
+
+        hints = payload.get("asset_hints", [])
+        if type(hints) is not list:
+            raise ValueError
+        return PreviewRequest(
+            question=payload["question"],
+            locale=payload["locale"],
+            asset_hints=tuple(hints),
+            client_request_id=payload.get("client_request_id"),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _handle_api_analysis_plan(headers, rfile, peer_ip: str) -> tuple[int, str]:
+    """Strict, no-cache plan preview; it never creates a formal analysis job."""
+
+    runtime = _ANALYSIS_PLAN_RUNTIME
+    if runtime is None:
+        return 503, _analysis_plan_error(503)
+    # Origin is a mandatory exact release-policy value.  Absence is not
+    # interpreted as same-origin because this is a paid public write.
+    origin = headers.get("Origin")
+    allowed_origin = runtime.control_plane._topology.allowed_origin
+    if type(origin) is not str or origin != allowed_origin:
+        return 400, _analysis_plan_error(400)
+    request = _read_analysis_plan_body(headers, rfile)
+    if request is None:
+        return 400, _analysis_plan_error(400)
+    canonical_client_ip = headers.get("X-Real-IP")
+    result = runtime.execute(
+        request,
+        peer_ip=peer_ip,
+        canonical_client_ip=canonical_client_ip,
+    )
+    if result.status.value == "admitted":
+        return 200, json.dumps(
+            {"ok": True, "data": result.value},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    if result.status.value == "denied":
+        return 429, _analysis_plan_error(429)
+    if result.reason == "planner_timeout":
+        return 504, _analysis_plan_error(504)
+    return 503, _analysis_plan_error(503)
+
+
 _ADMIN_PUT_ALLOWED_FIELDS = frozenset(
     {
         "daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled",
@@ -9157,8 +9490,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, _json_envelope_err("not_found", "無此管理端點"),
                               "application/json; charset=utf-8")
         if u.path == "/api/analysis-question":
-            code, body = _handle_api_analysis_question(getattr(self, "headers", {}), self.rfile, client_ip)
-            return self._send(code, body, "application/json; charset=utf-8")
+            code, body, replay_headers = _handle_api_formal_analysis_question(
+                getattr(self, "headers", {}), self.rfile, client_ip
+            )
+            return self._send(
+                code,
+                body,
+                "application/json; charset=utf-8",
+                extra_headers=replay_headers,
+            )
+        if u.path == "/api/analysis-plan":
+            code, body = _handle_api_analysis_plan(
+                getattr(self, "headers", {}), self.rfile, self.client_address[0]
+            )
+            return self._send(
+                code,
+                body,
+                "application/json; charset=utf-8",
+                extra_headers={
+                    "Cache-Control": "private, no-store",
+                    "Vary": "Origin",
+                },
+            )
         if u.path == "/api/analysis-comparison-question":
             code, body = _handle_api_analysis_comparison_question(getattr(self, "headers", {}), self.rfile, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
@@ -9178,6 +9531,7 @@ def main():
         load_runtime_endpoint_manifest_from_env()
         or load_runtime_release_manifest_from_env()
     )
+    _initialize_preview_admission()
 
     from .ingestion.hoyabit import log_hoyabit_startup_status
 

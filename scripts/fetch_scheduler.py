@@ -1090,12 +1090,10 @@ def _render_overview_html(snapshots: list[dict]) -> str:
         )
         decision_state = e(decision_state_norm)
         generated_at = e(str(snap.get("generated_at", "")))
-        # #101 主角數字統一：abstain/low_confidence 態主角＝校準後資訊完整度，
-        # normal 態主角＝裸均值信任分（`trust`），跟 `web.py::_conf_gauge`／
-        # React `OverviewCard`/`ConfidenceGauge` 同一套規則。
-        is_low_info = decision_state_norm in ("abstain", "low_confidence")
-        hero_value = calibrated if is_low_info else trust
-        hero_label = "資訊完整度（校準後）" if is_low_info else "信任分"
+        # 主數字固定呈現校準後資訊完整度；裸均值信任分只作具名明細，
+        # 避免 normal 狀態把原始證據分誤讀成最終校準結果。
+        hero_value = calibrated
+        hero_label = "資訊完整度（校準後）"
         href = _overview_card_href(coin_raw)
         tag_open = (
             f'<a class="tf-overview-card" href="{href}" '
@@ -1129,7 +1127,7 @@ def _render_overview_html(snapshots: list[dict]) -> str:
             f'<div style="font-size:.85rem;color:var(--tf-muted);pointer-events:none">'
             f'{hero_label} {hero_value:.2f} · {direction}</div>'
             f'<div style="font-size:.75rem;color:var(--tf-muted2);pointer-events:none">'
-            f'資訊完整度（校準後） {calibrated:.2f}｜裸均值信任分 {trust:.2f} · {decision_state}</div>'
+            f'校準後資訊完整度 {calibrated:.2f}｜原始信任分 {trust:.2f} · {decision_state}</div>'
             f'<div style="font-size:.7rem;color:var(--tf-muted2);pointer-events:none">'
             f'{generated_at}</div>'
             + tag_close

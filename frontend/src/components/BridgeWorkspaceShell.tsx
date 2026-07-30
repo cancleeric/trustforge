@@ -5,6 +5,7 @@ import { useHermesI18n } from '../hermes/hermesI18n'
 import { BridgeHologramProvider, type BridgeHologramData } from './BridgeHologramContext'
 
 const WORKSPACES: Record<string, { code: string; zh: string; en: string; channel: string }> = {
+  '/plan': { code: 'PLN-00', zh: '分析規劃台', en: 'PLANNING STATION', channel: 'PREVIEW' },
   '/analyze': { code: 'ANL-01', zh: '分析作戰台', en: 'ANALYSIS STATION', channel: 'EVIDENCE' },
   '/compare': { code: 'CMP-02', zh: '平行比較台', en: 'PARALLEL COMPARE', channel: 'CROSS-VERIFY' },
   '/history': { code: 'HST-03', zh: '歷史回放台', en: 'HISTORY REPLAY', channel: 'TIMELINE' },

@@ -30,11 +30,62 @@ import math
 import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from . import admin_config
 from .budget_counter import BudgetBackendError, DynamoDBBudgetCounter
 from .ledger import PRICING, Ledger, get_ledger
+
+
+class _UnifiedBudgetLease(float):
+    """Float-compatible legacy lease carrying its durable token authority."""
+
+    def __new__(cls, amount, reservation, authority):
+        value = super().__new__(cls, amount)
+        value.reservation = reservation
+        value.authority = authority
+        return value
+
+
+def _formal_shared_budget_authority():
+    """Return the authority shared by formal and legacy admissions, if configured."""
+    from .runtime_control import is_production_environment
+
+    environment = os.getenv("TRUSTFORGE_ENV", "").strip().lower()
+    sqlite_path = os.getenv("TRUSTFORGE_FORMAL_BUDGET_SQLITE_PATH", "").strip()
+    table = os.getenv("TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE", "").strip()
+    if environment in {"test", "development"} and sqlite_path:
+        from .formal_budget_reservation import SqliteFormalBudgetAuthority
+
+        return SqliteFormalBudgetAuthority(sqlite_path, environment=environment)
+    if is_production_environment():
+        region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        if not table or not region:
+            raise BudgetBackendError(
+                "production unified formal budget authority is not configured"
+            )
+        import boto3
+
+        from .formal_budget_reservation import DynamoDbFormalBudgetAuthority
+
+        return DynamoDbFormalBudgetAuthority(
+            boto3.client("dynamodb", region_name=region), table_name=table
+        )
+    return None
+
+
+def reservation_is_durable_shared(reservation: float | None) -> bool:
+    """Whether a legacy-compatible lease is backed by durable shared authority."""
+    return isinstance(reservation, _UnifiedBudgetLease)
+
+
+def mark_reservation_accounting_uncertain(reservation: float | None) -> None:
+    """Persist missing-usage disposition while deliberately retaining capacity."""
+    if not isinstance(reservation, _UnifiedBudgetLease):
+        return
+    reservation.authority.mark_uncertain(reservation.reservation)
 
 # stance model 未設定 `BEDROCK_HAIKU_MODEL_ID` 時的預設值，必須跟
 # `bedrock.BedrockConfig.stance_model_id` 的預設值逐字一致——這裡刻意不透過
@@ -257,6 +308,32 @@ def daily_cost_usd(
             # 強制離線(不花 Bedrock、安全)。
             raise ValueError(f"non-finite/negative ledger cost: {val!r}")
         total += val
+    return round(total + _UNLEDGERED_SPEND.total(), 6)
+
+
+def daily_nonformal_cost_usd(
+    ledger: Ledger | None = None, *, now_fn=time.time, day: str | None = None
+) -> float:
+    """Today's spend not already represented by formal budget settlement."""
+    if ledger is None:
+        ledger = get_ledger()
+    if day is None:
+        day = datetime.fromtimestamp(now_fn(), tz=timezone.utc).date().isoformat()
+    total = 0.0
+    for rec in ledger.read_all():
+        if str(rec.get("ts", ""))[:10] != day:
+            continue
+        if rec.get("accounting_authority") == "formal":
+            continue
+        try:
+            value = float(rec.get("total_cost_usd", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"non-finite/negative ledger cost: {value!r}")
+        total += value
+    # Unledgered usage has no trustworthy authority provenance. Count it
+    # conservatively so an outage can only close admission, never open it.
     return round(total + _UNLEDGERED_SPEND.total(), 6)
 
 
@@ -629,6 +706,35 @@ def try_reserve_request_budget(
     """
     if atomic_batch_exclusive_enabled():
         return None
+    try:
+        shared_authority = _formal_shared_budget_authority()
+    except Exception:
+        _log.exception(
+            "[budget_guard] production unified authority unavailable; fail-closed"
+        )
+        return None
+    if shared_authority is not None:
+        cap = daily_cap_usd()
+        cost = request_max_cost_usd()
+        if cap <= 0 or cost <= 0:
+            return None
+        try:
+            reservation = shared_authority.reserve(
+                reservation_id=f"legacy-{uuid.uuid4().hex}",
+                spent=Decimal(str(daily_nonformal_cost_usd(ledger, now_fn=now_fn))),
+                cost=Decimal(str(cost)),
+                cap=Decimal(str(cap)),
+                now=datetime.fromtimestamp(now_fn(), tz=timezone.utc),
+            )
+        except Exception:
+            _log.exception(
+                "[budget_guard] unified formal/legacy authority unavailable; "
+                "fail-closed"
+            )
+            return None
+        if reservation is None:
+            return None
+        return _UnifiedBudgetLease(cost, reservation, shared_authority)
     backend_name = backend or budget_reservation_backend()
     counter = _budget_counter_backend(backend_name)
     if counter is None:
@@ -702,6 +808,9 @@ def release_request_budget(
     DynamoDB 後端不可用只記 error、不 fallback local，保留 shared
     reservation 等待 reconcile。省略參數維持既有呼叫相容。
     """
+    if isinstance(amount, _UnifiedBudgetLease):
+        amount.authority.release(amount.reservation)
+        return
     backend_name = backend or budget_reservation_backend()
     counter = _budget_counter_backend(backend_name)
     if counter is None or amount is None:

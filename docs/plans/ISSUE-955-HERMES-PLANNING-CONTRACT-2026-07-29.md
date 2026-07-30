@@ -319,6 +319,14 @@ schema/config）須在呼叫前以 exact allowed-model tokenizer 計數。若超
 `plan_temporarily_unavailable`。raw request 本身仍是 formal-valid，故不是
 400，亦不得阻擋 formal submit。
 
+實作註記（#964）：exact tokenizer 使用 Bedrock `CountTokens`。為避免任何
+remote operation 發生在 durable admission 前，admission 先以 2,048 input +
+512 output 的最壞 token/USD 原子保留；admitted 後才在同一 bounded deadline
+內以 eventual `Converse` 的完全相同 token-bearing messages 呼叫 CountTokens。
+CountTokens 是 non-inference operation，不產生 model output；超限或失敗時
+Converse inference 呼叫數必須為零，request count 已消耗，token/USD 依
+pre-inference disposition reconcile。
+
 所有回應：
 
 ```http

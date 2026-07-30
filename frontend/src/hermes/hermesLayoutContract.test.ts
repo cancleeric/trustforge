@@ -450,15 +450,19 @@ describe('N80 窄螢幕頂欄不得把語言切換鈕擠出視窗', () => {
     expect(bar).toContain("aria-label={t('telemetry')}")
   })
 
-  it('N82：FPS/畫質 HUD 必須藏在 ?fps=1 後面，不常駐在使用者畫面上', () => {
+  it('FPS/畫質 HUD 常駐，且定位由 energy-deck 變數與 mobile compact contract 控制', () => {
     const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
 
-    // 它是 position:fixed / z-index 9999 的左下角浮層，常駐時會壓在能量列的
-    // 站點編號上（430x932 實測「60 FPS」壓「01」12x12px），而且「60 FPS · HIGH」
-    // 是給我們自己看的效能數字，不是使用者要的資訊。
-    expect(dashboard).toContain("searchParams.get('fps') === '1' && <FpsMeter")
-    // 不能改用 qaMode 當開關：探針帶著 ?qa=1 進來，那等於完全沒關。
-    expect(dashboard).not.toMatch(/qaMode\s*&&\s*<FpsMeter/)
+    expect(dashboard).toContain('<FpsMeter')
+    expect(dashboard).toContain('fps={fps}')
+    expect(dashboard).toContain('quality={quality}')
+    expect(dashboard).toContain('measuring={measuring}')
+    expect(dashboard).not.toMatch(/searchParams\.get\('fps'\).*FpsMeter/)
+    expect(css).toMatch(/\.hermes-fps-meter\s*\{[^}]*bottom:\s*calc\(var\(--hermes-bottom\) \+ 12px\)/s)
+    expect(css).toMatch(/\.hermes-fps-meter\s*\{[^}]*left:\s*max\(calc\(var\(--hermes-rail\) \+ 12px\),\s*env\(safe-area-inset-left\)\)/s)
+    expect(css).toMatch(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{[^}]*bottom:\s*calc\(var\(--hermes-bottom\) \+ 112px\)/)
+    expect(css).toMatch(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{[^}]*left:\s*max\(6px,\s*env\(safe-area-inset-left\)\)/)
+    expect(css).toMatch(/\.hermes-fps-quality::after\s*\{[^}]*content:\s*attr\(data-short\)/s)
   })
 
 })

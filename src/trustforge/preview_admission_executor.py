@@ -11,7 +11,6 @@ from typing import Protocol
 
 from trustforge.preview_admission_compiler import (
     AdmissionCompileDenied,
-    AdmissionCompileRequest,
     AdmissionDeniedReason,
     AdmissionHandle,
     build_transact_get_request,
@@ -24,6 +23,13 @@ from trustforge.preview_durable_admission_gate import (
     append_quarantine_action,
 )
 from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
+from trustforge.quota_key_lifecycle import (
+    AwsSsmQuotaKeyMaterialProvider,
+    BoundAdmissionRequest,
+    DurableQuotaKeyLifecycleAuthority,
+    MIN_OVERLAP_SECONDS,
+    QuotaKeyLifecycle,
+)
 
 
 class DynamoAdmissionClient(Protocol):
@@ -128,6 +134,63 @@ class AdmissionExecutionResult:
 
 _UNAVAILABLE = AdmissionExecutionResult(AdmissionOutcome.UNAVAILABLE)
 
+
+@dataclass(frozen=True, slots=True)
+class AwsQuotaKeyReference:
+    parameter_name: str
+    expected_version: int
+    key_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.parameter_name) is not str
+            or not self.parameter_name
+            or type(self.expected_version) is not int
+            or self.expected_version < 1
+            or type(self.key_id) is not str
+            or not self.key_id
+        ):
+            raise ValueError("invalid AWS quota key reference")
+
+
+@dataclass(frozen=True, slots=True)
+class AwsQuotaLifecycleBootstrap:
+    generation: int
+    issued: TrustedUtcInterval
+    activated: int
+    current: AwsQuotaKeyReference
+    previous: AwsQuotaKeyReference | None = None
+    previous_activated: int | None = None
+    superseded: int | None = None
+    retire_not_before: int | None = None
+
+    def __post_init__(self) -> None:
+        single = (
+            self.previous is None
+            and self.previous_activated is None
+            and self.superseded is None
+            and self.retire_not_before is None
+        )
+        overlap = (
+            type(self.previous) is AwsQuotaKeyReference
+            and type(self.previous_activated) is int
+            and self.superseded == self.activated
+            and type(self.retire_not_before) is int
+            and self.retire_not_before
+            >= self.activated + MIN_OVERLAP_SECONDS
+            and self.previous.expected_version
+            == self.current.expected_version - 1
+        )
+        if (
+            type(self.generation) is not int
+            or self.generation < 1
+            or type(self.issued) is not TrustedUtcInterval
+            or type(self.activated) is not int
+            or type(self.current) is not AwsQuotaKeyReference
+            or not (single or overlap)
+        ):
+            raise ValueError("invalid AWS quota lifecycle bootstrap")
+
 # These service responses establish that the requested transaction was rejected.
 # Everything else after dispatch has an unknown commit disposition and poisons the
 # executor instance until lifecycle recovery exists (#974).
@@ -155,6 +218,7 @@ class PreviewAdmissionExecutor:
         table_name: str,
         *,
         durable_gate: DurableAdmissionGate,
+        lifecycle_authority: DurableQuotaKeyLifecycleAuthority,
     ) -> None:
         if not callable(getattr(client, "transact_get_items", None)) or not callable(
             getattr(client, "transact_write_items", None)
@@ -173,6 +237,13 @@ class PreviewAdmissionExecutor:
         ):
             raise ValueError("invalid durable admission gate")
         self._durable_gate = durable_gate
+        if (
+            type(lifecycle_authority) is not DurableQuotaKeyLifecycleAuthority
+            or lifecycle_authority._client is not client
+            or lifecycle_authority._table != table_name
+        ):
+            raise ValueError("invalid quota lifecycle authority")
+        self._lifecycle_authority = lifecycle_authority
         self._ambiguity: AdmissionAmbiguity | None = None
 
     @property
@@ -229,37 +300,123 @@ class PreviewAdmissionExecutor:
             return True
 
     @classmethod
-    def from_boto3(cls, table_name: str, *, region_name: str | None = None) -> "PreviewAdmissionExecutor":
-        """Create a low-level client whose SDK performs exactly one attempt."""
+    def from_boto3(
+        cls,
+        table_name: str,
+        *,
+        lifecycle_authority: DurableQuotaKeyLifecycleAuthority,
+        region_name: str | None = None,
+    ) -> "PreviewAdmissionExecutor":
+        """Reject construction that could split durable authority."""
 
+        del table_name, lifecycle_authority, region_name
+        raise ValueError(
+            "construct with one exact client, table, gate, and lifecycle authority"
+        )
+
+    @classmethod
+    def from_aws_components(
+        cls,
+        table_name: str,
+        *,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+        _attach_only: bool = False,
+    ) -> "PreviewAdmissionExecutor":
+        """Compose one exact retry-bounded DynamoDB/SSM authority graph."""
+
+        if type(lifecycle) is not AwsQuotaLifecycleBootstrap:
+            raise ValueError("AWS lifecycle bootstrap required")
         import boto3
         from botocore.config import Config
 
-        client = boto3.client(
-            "dynamodb",
-            region_name=region_name,
-            config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
+        config = Config(
+            retries={"total_max_attempts": 1, "mode": "standard"}
+        )
+        dynamodb = boto3.client(
+            "dynamodb", region_name=region_name, config=config
+        )
+        ssm = boto3.client("ssm", region_name=region_name, config=config)
+        clock = PreviewTrustedClock(
+            dynamodb_client=dynamodb, table_name=table_name
+        )
+        provider = AwsSsmQuotaKeyMaterialProvider(ssm)
+        authority = DurableQuotaKeyLifecycleAuthority(
+            clock,
+            dynamodb_client=dynamodb,
+            table_name=table_name,
+            key_material_provider=provider,
+        )
+        loaded = provider.load(
+            parameter_name=lifecycle.current.parameter_name,
+            expected_version=lifecycle.current.expected_version,
+            key_id=lifecycle.current.key_id,
+        )
+        current = provider.bind_lifecycle(
+            loaded, activated=lifecycle.activated
+        )
+        previous = None
+        if lifecycle.previous is not None:
+            previous_loaded = provider.load(
+                parameter_name=lifecycle.previous.parameter_name,
+                expected_version=lifecycle.previous.expected_version,
+                key_id=lifecycle.previous.key_id,
+            )
+            previous = provider.bind_lifecycle(
+                previous_loaded,
+                activated=lifecycle.previous_activated,
+                superseded=lifecycle.superseded,
+                retire_not_before=lifecycle.retire_not_before,
+            )
+        materialized = QuotaKeyLifecycle(
+            generation=lifecycle.generation,
+            issued=lifecycle.issued,
+            current=current,
+            previous=previous,
+        )
+        if _attach_only:
+            authority.attach_existing(materialized)
+        else:
+            authority.install(materialized)
+        gate = DurableAdmissionGate(
+            dynamodb,
+            table_name,
+            trusted_clock=clock,
         )
         return cls(
-            client,
+            dynamodb,
             table_name,
-            durable_gate=DurableAdmissionGate(
-                client,
-                table_name,
-                trusted_clock=PreviewTrustedClock(
-                    dynamodb_client=client,
-                    table_name=table_name,
-                ),
-            ),
+            durable_gate=gate,
+            lifecycle_authority=authority,
         )
 
-    def execute(self, request: AdmissionCompileRequest) -> AdmissionExecutionResult:
+    @classmethod
+    def from_aws_components_attach_only(
+        cls,
+        table_name: str,
+        *,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+    ) -> "PreviewAdmissionExecutor":
+        return cls.from_aws_components(
+            table_name,
+            lifecycle=lifecycle,
+            region_name=region_name,
+            _attach_only=True,
+        )
+
+    def execute(self, bound: BoundAdmissionRequest) -> AdmissionExecutionResult:
+        if type(bound) is not BoundAdmissionRequest:
+            return _UNAVAILABLE
         # A latched instance must perform zero further DynamoDB I/O. A concurrent
         # execution may finish its read, but the second check under the write gate
         # prevents its write from crossing an ambiguous predecessor.
         with self._write_gate:
             if self._latched_closed or not self._durable_gate.ready:
                 return _UNAVAILABLE
+        request = self._lifecycle_authority.validate_admission(bound)
+        if request is None:
+            return _UNAVAILABLE
 
         try:
             read_request = build_transact_get_request(request, self._table_name)
@@ -289,6 +446,12 @@ class PreviewAdmissionExecutor:
         with self._write_gate:
             if self._latched_closed or not self._durable_gate.ready:
                 return _UNAVAILABLE
+            # The read/compile phase is deliberately outside this lock. Revalidate
+            # immediately before any durable mutation so rotation or snapshot
+            # expiry cannot cross the transaction boundary.
+            request = self._lifecycle_authority.validate_admission(bound)
+            if request is None:
+                return _UNAVAILABLE
             binding = self._durable_gate.begin(
                 plan,
                 dispatch_lower=plan.handle.created_lower,
@@ -301,6 +464,15 @@ class PreviewAdmissionExecutor:
                 write_request = append_quarantine_action(
                     plan, self._durable_gate, binding
                 )
+                condition = self._lifecycle_authority.admission_condition(bound)
+                actions = write_request.get("TransactItems")
+                if (
+                    condition is None
+                    or type(actions) is not list
+                    or len(actions) >= 100
+                ):
+                    raise ValueError("lifecycle condition unavailable")
+                actions.append(condition)
             except ValueError:
                 self._latched_closed = True
                 return _UNAVAILABLE

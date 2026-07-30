@@ -57,7 +57,13 @@ export default function HermesModuleDeck({
           <span className="module-holo-beam" />
           <span className="module-holo-ring module-holo-ring-a" />
           <span className="module-holo-ring module-holo-ring-b" />
-          <span className="module-holo-core">{module === 'costs' ? `$${(data?.primaryValue ?? 0).toFixed(4)}` : data?.primaryValue != null ? `${Math.round(data.primaryValue * 100)}%` : module.slice(0, 3).toUpperCase()}</span>
+          <span className="module-holo-core">{module === 'costs'
+            ? `$${(data?.primaryValue ?? 0).toFixed(4)}`
+            : module === 'whale' && data?.primaryValue != null
+              ? formatCompactUsd(data.primaryValue)
+              : data?.primaryValue != null
+                ? `${Math.round(data.primaryValue * 100)}%`
+                : module.slice(0, 3).toUpperCase()}</span>
           <span className="module-holo-caption">{data?.primaryLabel || module.toUpperCase()} · {data?.total ?? 0} SIGNALS</span>
         </div>
         <div className="hermes-module-deck-scroll">
@@ -66,4 +72,13 @@ export default function HermesModuleDeck({
       </section>
     </BridgeHologramProvider>
   )
+}
+
+function formatCompactUsd(value: number): string {
+  const absolute = Math.abs(value)
+  const sign = value < 0 ? '-' : ''
+  if (absolute >= 1_000_000_000) return `${sign}$${(absolute / 1_000_000_000).toFixed(1)}B`
+  if (absolute >= 1_000_000) return `${sign}$${(absolute / 1_000_000).toFixed(1)}M`
+  if (absolute >= 1_000) return `${sign}$${(absolute / 1_000).toFixed(0)}K`
+  return `${sign}$${absolute.toFixed(0)}`
 }

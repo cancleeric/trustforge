@@ -15,6 +15,8 @@ export interface AngleResult {
   snapshot_id: string
   job_id: string | null
   question: string
+  completeness?: number
+  missing_fields?: string[]
 }
 
 export interface AngleConflict {
@@ -33,12 +35,32 @@ export interface MultiAngleReport {
   decision_state: 'normal' | 'partial_abstain' | 'full_abstain'
   consensus_confidence: number
   conflicts: AngleConflict[]
+  /** Legacy aggregate; use the three independent fields for presentation. */
+  direction_divergences?: AngleConflict[]
+  completeness_gaps?: AngleConflict[]
+  evidence_overlaps?: AngleConflict[]
   agreement_matrix: Record<string, Record<string, string>>
   synthesis_summary: string
   evidence_independence: number
   limits: string[]
   generated_at: string
   narration?: string
+}
+
+/**
+ * Normalise pre-separated API payloads without duplicating categories supplied
+ * by a current backend. This keeps persisted reports renderable across deploys.
+ */
+export function normalizeMultiAngleReport(report: MultiAngleReport): MultiAngleReport {
+  const conflicts = Array.isArray(report.conflicts) ? report.conflicts : []
+  const classified = (type: string) => conflicts.filter((item) => item.conflict_type === type)
+  return {
+    ...report,
+    conflicts,
+    direction_divergences: report.direction_divergences ?? classified('direction_divergence'),
+    completeness_gaps: report.completeness_gaps ?? classified('completeness_gap'),
+    evidence_overlaps: report.evidence_overlaps ?? classified('evidence_overlap'),
+  }
 }
 
 export interface MultiAngleSubmitResponse {
@@ -90,7 +112,11 @@ export async function fetchMultiAngleReport(
   const params = new URLSearchParams({ coin })
   if (snapshotId) params.set('snapshot_id', snapshotId)
   const res = await fetch(`/api/multi-angle?${params}`, { signal })
-  return decodeEnvelope<{ multi_angle: MultiAngleReport | null; message?: string }>(res)
+  const data = await decodeEnvelope<{ multi_angle: MultiAngleReport | null; message?: string }>(res)
+  return {
+    ...data,
+    multi_angle: data.multi_angle ? normalizeMultiAngleReport(data.multi_angle) : null,
+  }
 }
 
 export async function submitMultiAngle(

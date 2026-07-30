@@ -9,7 +9,11 @@ import { jobStateLabel, useHermesI18n } from './hermesI18n'
 import type { MessageKey } from './hermesI18n'
 import ConflictBadge from './ConflictBadge'
 import type { AngleResult, MultiAngleReport } from '../lib/multiAngleEndpoints'
-import { fetchMultiAngleReport, submitMultiAngle } from '../lib/multiAngleEndpoints'
+import {
+  fetchMultiAngleReport,
+  normalizeMultiAngleReport,
+  submitMultiAngle,
+} from '../lib/multiAngleEndpoints'
 import { getAnalysisJob } from '../lib/endpoints'
 import AnalysisReportView from '../components/AnalysisReportView'
 import type { AnalyzeData } from '../lib/types'
@@ -112,7 +116,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     try {
       const result = await fetchMultiAngleReport(coin, snapshotId, controller.current.signal)
       if (requestGeneration !== generation.current) return
-      setReport(result.multi_angle)
+      setReport(result.multi_angle ? normalizeMultiAngleReport(result.multi_angle) : null)
     } catch (reason) {
       if (requestGeneration !== generation.current) return
       setError(reason instanceof Error ? reason.message : t('maErrorLoad'))
@@ -165,7 +169,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
           const data = await fetchMultiAngleReport(coin, result.snapshot_id, controller.current.signal)
           if (requestGeneration !== generation.current) return
           if (data.multi_angle) {
-            setReport(data.multi_angle)
+            setReport(normalizeMultiAngleReport(data.multi_angle))
             setSubmitting(false)
             setSubmittedResult(null)
             submitLock.current = false
@@ -263,8 +267,15 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     )
   }
 
-  const consensusKey = CONSENSUS_KEY_MAP[report.consensus]
-  const consensusLabel = consensusKey ? t(consensusKey as MessageKey) : report.consensus
+  const normalizedReport = normalizeMultiAngleReport(report)
+  const directionDivergences = normalizedReport.direction_divergences ?? []
+  const completenessGaps = normalizedReport.completeness_gaps ?? []
+  const evidenceOverlaps = normalizedReport.evidence_overlaps ?? []
+  const displayConflicts = normalizedReport.conflicts.filter(
+    (conflict) => conflict.conflict_type === 'direction_divergence' || conflict.conflict_type === 'confidence_gap',
+  )
+  const consensusKey = CONSENSUS_KEY_MAP[normalizedReport.consensus]
+  const consensusLabel = consensusKey ? t(consensusKey as MessageKey) : normalizedReport.consensus
 
   return (
     <section aria-label={t('maTitle')} className="rounded-xl border border-gray-700 p-4">
@@ -288,9 +299,9 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
         <span className="text-sm text-gray-300">
           {t('maIndependence')} {(report.evidence_independence * 100).toFixed(0)}%
         </span>
-        {report.conflicts.length > 0 && (
+        {directionDivergences.length > 0 && (
           <span className="text-sm text-orange-400">
-            {report.conflicts.length} {t('maConflict')}
+            {directionDivergences.length} {t('maConflict')}
           </span>
         )}
       </div>
@@ -331,7 +342,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
                   {(() => { const dsKey = DECISION_STATE_KEY[angle.decision_state]; return dsKey ? t(dsKey as MessageKey) : angle.decision_state })()}
                 </td>
                 <td className="py-2 px-2">
-                  <ConflictBadge conflicts={report.conflicts} currentAngle={angle.angle} />
+                  <ConflictBadge conflicts={displayConflicts} currentAngle={angle.angle} />
                 </td>
               </tr>
             ))}
@@ -365,10 +376,29 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
                 {t('maInfoCompleteness')} {angle.calibrated_confidence.toFixed(2)}
               </div>
             )}
-            <ConflictBadge conflicts={report.conflicts} currentAngle={angle.angle} />
+            <ConflictBadge conflicts={displayConflicts} currentAngle={angle.angle} />
           </div>
         ))}
       </div>
+
+      {/* Independent synthesis dimensions: do not collapse source overlap into divergence. */}
+      <div className="mt-4 grid gap-3 md:grid-cols-3 text-sm">
+        <div className="rounded-lg border border-orange-900/60 p-3">
+          <strong>{t('maDirectionDivergences')}</strong>
+          <p className="text-gray-400">{t('maDirectionDivergenceCount', { count: directionDivergences.length })}</p>
+        </div>
+        <div className="rounded-lg border border-yellow-900/60 p-3">
+          <strong>{t('maCompletenessGaps')}</strong>
+          <p className="text-gray-400">{t('maCompletenessGapCount', { count: completenessGaps.length })}</p>
+        </div>
+        <div className="rounded-lg border border-blue-900/60 p-3">
+          <strong>{t('maEvidenceOverlaps')}</strong>
+          <p className="text-gray-400">{t('maEvidenceOverlapCount', { count: evidenceOverlaps.length })}</p>
+        </div>
+      </div>
+      {report.evidence_independence === 0 && (
+        <p className="mt-3 text-sm text-orange-300">{t('maNoIndependentCorroboration')}</p>
+      )}
 
       {/* Limits */}
       {report.limits.length > 0 && (

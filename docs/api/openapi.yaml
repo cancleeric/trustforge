@@ -138,6 +138,52 @@ tags:
       405——連端點存在性都不暴露。
 
 paths:
+  /api/analysis-plan:
+    post:
+      tags: [analysis]
+      operationId: previewAnalysisPlan
+      summary: Hermes 意圖與資料需求規劃預覽（不建立正式工作）
+      description: |
+        僅產生 advisory plan；不建立 analysis job、receipt、dedup lock，
+        也不授權或執行任何工具。需要 exact release Origin，回應禁止快取。
+        Durable admission 先按 2,048 input + 512 output tokens 的最壞情況
+        原子保留；通過後才呼叫 Bedrock CountTokens（non-inference）精確計算
+        與 eventual Converse 完全相同的 messages。CountTokens 超過 2,048
+        或不可用時不呼叫 Converse，安全回 503。
+      parameters:
+        - in: header
+          name: Origin
+          required: true
+          schema:
+            type: string
+            format: uri
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalysisPlanRequest"
+      responses:
+        "200":
+          description: Strict Hermes planning projection
+          headers:
+            Cache-Control:
+              schema: {const: "private, no-store"}
+            Vary:
+              schema: {const: Origin}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisPlanSuccessEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidPlanRequest"
+        "429":
+          $ref: "#/components/responses/PlanRateLimited"
+        "503":
+          $ref: "#/components/responses/PlanUnavailable"
+        "504":
+          $ref: "#/components/responses/PlanTimeout"
+
   /api/health:
     get:
       tags: [meta]
@@ -1360,33 +1406,63 @@ paths:
     post:
       tags: [analysis]
       operationId: registerAnalysisQuestion
-      summary: 建立高優先手動分析工作
+      summary: 冪等建立高優先手動分析工作
       description: |
-        建立新的不可變資料 snapshot 與高優先工作。此路徑不受 Hermes
-        自動排程開關影響，但仍受來源、Bedrock 與每日成本護欄約束；請求
-        本身不等待分析完成，使用 analysis-job 追蹤結果。
+        `Idempotency-Key` 是正式執行 authority；同 caller、同 key、同
+        fingerprint 重播完全相同的 durable receipt，且不建立第二個 job
+        或費用。相同 key 配不同 payload 回 409。`fresh=true` 只略過
+        300 秒內容重用，仍受全部安全、成本與併發護欄，且必須由新 key
+        表達新的使用者意圖。請求本身不等待分析完成，使用
+        `/api/analysis-job` 追蹤結果。
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          description: |
+            `tf1.<UTC YYYYMM>.<22-char unpadded base64url>`；random 部分必須
+            由 128-bit CSPRNG 產生。重複 header、逗號合併、控制字元、
+            外圍空白與非 canonical 值均為 400。
+          schema:
+            type: string
+            pattern: "^tf1\\.[0-9]{6}\\.[A-Za-z0-9_-]{22}$"
+            minLength: 33
+            maxLength: 33
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [coin, mode, question]
-              properties:
-                coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
-                mode: {type: string, enum: [risk, sentiment, fundamentals, news, catalyst]}
-                question: {type: string, minLength: 1, maxLength: 1000}
+              $ref: "#/components/schemas/FormalRunRequest"
       responses:
         "202":
-          description: 題目已登記並排程
+          description: 已接受的新執行或 immutable receipt replay
+          headers:
+            Idempotency-Replayed:
+              description: 只有相同 key/fingerprint 重播時為 `true`
+              schema: {type: string, const: "true"}
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/OkEnvelope"
+                $ref: "#/components/schemas/FormalRunSuccessEnvelope"
         "400":
-          $ref: "#/components/responses/BadRequest"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
+          description: 缺少或不合法的 key/body；任何 chargeable side effect 前失敗
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FormalRunErrorEnvelope"}
+        "409":
+          description: key conflict、執行中、epoch/tombstone unavailable 或無法本地重語系化
+          headers:
+            Retry-After:
+              description: "`idempotency_request_in_progress` 才提供的整數秒數"
+              schema: {type: integer, minimum: 1, maximum: 3600}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FormalRunErrorEnvelope"}
+        "503":
+          description: shared idempotency authority、trusted clock 或 policy unavailable
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FormalRunErrorEnvelope"}
 
   /api/analysis-question-context:
     get:
@@ -2319,6 +2395,210 @@ paths:
 
 components:
   schemas:
+    FormalRunRequest:
+      type: object
+      additionalProperties: false
+      required: [coin, mode, question]
+      properties:
+        coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        mode: {type: string, enum: [risk, sentiment, fundamentals, news, catalyst]}
+        question: {type: string, minLength: 1, maxLength: 1000}
+        locale: {type: string, enum: [zh-Hant, en], default: zh-Hant}
+        fresh:
+          type: boolean
+          default: false
+          description: true 建立新執行；不得沿用先前意圖的 Idempotency-Key
+    FormalRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [schema_version, receipt_id, question_id, job_id, result_id, state, origin, disposition, locale, created_at, expires_at, fingerprint_version]
+      properties:
+        schema_version: {type: string, const: formal-run-receipt/v1}
+        receipt_id: {type: string, minLength: 1, maxLength: 200}
+        question_id: {type: string, minLength: 1, maxLength: 200}
+        job_id: {type: string, minLength: 1, maxLength: 200}
+        result_id:
+          oneOf:
+            - {type: string, minLength: 1, maxLength: 200}
+            - {type: "null"}
+          description: execution_uncertain 在結果尚未協調完成時為 null
+        state: {type: string, enum: [accepted, execution_uncertain]}
+        origin: {type: string, const: manual}
+        disposition: {type: string, enum: [created, reused, relocalized, fresh-created]}
+        locale: {type: string, enum: [zh-Hant, en]}
+        created_at: {type: string, format: date-time}
+        expires_at:
+          type: ["null"]
+          description: 非 terminal receipt 不得過期
+        fingerprint_version: {type: string, const: analysis-question/v1}
+    FormalRunSuccessEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: {const: true}
+        data: {$ref: "#/components/schemas/FormalRunReceipt"}
+    FormalRunErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, error]
+      properties:
+        ok: {const: false}
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [bad_request, idempotency_conflict, idempotency_request_in_progress, idempotency_key_unavailable, relocalization_unavailable, idempotency_unavailable]
+            message:
+              type: string
+              description: 固定安全訊息；不得揭露原始 key、payload、receipt 或 caller
+    AnalysisPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [question, locale]
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        locale:
+          type: string
+          enum: [zh-TW, en]
+        asset_hints:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 16
+            pattern: "^[A-Z0-9][A-Z0-9._:-]{0,15}$"
+        client_request_id:
+          type: string
+          format: uuid
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    AnalysisPlanSuccessEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: {const: true}
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/AnalysisPlanReady"
+            - $ref: "#/components/schemas/AnalysisPlanNeedsClarification"
+          discriminator:
+            propertyName: outcome
+    AnalysisPlanReady:
+      type: object
+      additionalProperties: false
+      required: [outcome, detected_assets, intent_shape, intents, source_classes, strategy_summary, clarifications, warnings, confidence, provenance]
+      properties:
+            outcome: {const: ready}
+            detected_assets: {$ref: "#/components/schemas/AnalysisPlanAssets"}
+            intent_shape: {$ref: "#/components/schemas/AnalysisPlanIntentShape"}
+            intents: {$ref: "#/components/schemas/AnalysisPlanIntents"}
+            source_classes: {$ref: "#/components/schemas/AnalysisPlanSourceClasses"}
+            strategy_summary: {type: string, minLength: 1, maxLength: 600}
+            clarifications: {$ref: "#/components/schemas/AnalysisPlanClarifications"}
+            warnings: {$ref: "#/components/schemas/AnalysisPlanWarnings"}
+            confidence: {$ref: "#/components/schemas/AnalysisPlanConfidence"}
+            provenance: {$ref: "#/components/schemas/AnalysisPlanProvenance"}
+    AnalysisPlanNeedsClarification:
+      type: object
+      additionalProperties: false
+      required: [outcome, detected_assets, intent_shape, intents, source_classes, strategy_summary, clarifications, warnings, confidence, provenance]
+      properties:
+            outcome: {const: needs_clarification}
+            detected_assets: {$ref: "#/components/schemas/AnalysisPlanAssets"}
+            intent_shape: {$ref: "#/components/schemas/AnalysisPlanIntentShape"}
+            intents: {$ref: "#/components/schemas/AnalysisPlanIntents"}
+            source_classes: {$ref: "#/components/schemas/AnalysisPlanSourceClasses"}
+            strategy_summary: {type: string, minLength: 1, maxLength: 600}
+            clarifications:
+              allOf:
+                - $ref: "#/components/schemas/AnalysisPlanClarifications"
+                - minItems: 1
+            warnings: {$ref: "#/components/schemas/AnalysisPlanWarnings"}
+            confidence: {$ref: "#/components/schemas/AnalysisPlanConfidence"}
+            provenance: {$ref: "#/components/schemas/AnalysisPlanProvenance"}
+    AnalysisPlanAssets:
+      type: array
+      maxItems: 8
+      uniqueItems: true
+      items: {type: string, pattern: "^[A-Z0-9][A-Z0-9._:-]{0,15}$"}
+    AnalysisPlanIntentShape:
+      type: string
+      enum: [single, multiple, unknown]
+    AnalysisPlanIntents:
+      type: array
+      maxItems: 8
+      items:
+        type: object
+        additionalProperties: false
+        required: [label, rationale]
+        properties:
+          label: {type: string, minLength: 1, maxLength: 64}
+          rationale: {type: string, minLength: 1, maxLength: 240}
+    AnalysisPlanSourceClasses:
+      type: array
+      maxItems: 12
+      uniqueItems: true
+      items:
+        type: string
+        enum: [market_price, derivatives, on_chain, news, social, regulatory, macroeconomic, project_primary, exchange, security_incident, governance, research]
+    AnalysisPlanClarifications:
+      type: array
+      maxItems: 3
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, question, options]
+        properties:
+          id: {type: string, minLength: 1, maxLength: 32, pattern: "^[A-Za-z0-9._-]+$"}
+          question: {type: string, minLength: 1, maxLength: 240}
+          options:
+            type: array
+            maxItems: 6
+            items: {type: string, minLength: 1, maxLength: 80}
+    AnalysisPlanWarnings:
+      type: array
+      maxItems: 8
+      items: {type: string, minLength: 1, maxLength: 160}
+    AnalysisPlanConfidence:
+      type: object
+      additionalProperties: false
+      required: [level, rationale]
+      properties:
+        level: {type: string, enum: [low, medium, high]}
+        rationale: {type: string, minLength: 1, maxLength: 160}
+    AnalysisPlanProvenance:
+      type: object
+      additionalProperties: false
+      required: [planner, provider, policy_version]
+      properties:
+        planner: {const: hermes}
+        provider: {const: aws-bedrock}
+        policy_version: {type: string, minLength: 1, maxLength: 32, pattern: "^[A-Za-z0-9._-]+$"}
+    AnalysisPlanErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, error]
+      properties:
+        ok: {const: false}
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, retryable]
+          properties:
+            code:
+              type: string
+              enum: [invalid_plan_request, plan_rate_limited, plan_temporarily_unavailable, plan_timeout]
+            message: {type: string}
+            retryable: {type: boolean}
     OkEnvelope:
       type: object
       required: [ok, data]
@@ -3306,6 +3586,26 @@ components:
           description: 可能缺席，語意同 `OverviewCoinSnapshot.manip_score_mean`
 
   responses:
+    InvalidPlanRequest:
+      description: Strict request/origin validation failed
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
+    PlanRateLimited:
+      description: Independent planning quota denied
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
+    PlanUnavailable:
+      description: Planner, policy, schema, circuit, or shared authority unavailable
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
+    PlanTimeout:
+      description: Single provider attempt exceeded its deadline
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
     RateLimited:
       description: |
         per-IP 滑動視窗超過門檻（見本文件頂部「Rate limit 語意」），無

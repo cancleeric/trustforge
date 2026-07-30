@@ -317,6 +317,113 @@ def test_manual_job_precedes_waiting_scheduled_work_and_records_origin(tmp_path,
     flow.stop()
 
 
+def test_manual_question_does_not_consume_scheduled_active_quota(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    for index in range(20):
+        flow.register_question(
+            "BTC", "risk", f"scheduled question {index}", enqueue=False
+        )
+
+    with pytest.raises(ValueError, match="active question limit reached"):
+        flow.register_question("BTC", "risk", "scheduled question 21", enqueue=False)
+
+    _, manual = flow.submit_manual("BTC", "risk", "manual release canary")
+    assert manual is not None
+    active = flow._conn().execute(
+        "SELECT count(*) FROM analysis_questions "
+        "WHERE coin='BTC' AND mode='risk' AND active=1"
+    ).fetchone()[0]
+    assert active == 20
+    assert flow._conn().execute(
+        "SELECT active FROM analysis_questions "
+        "WHERE coin='BTC' AND mode='risk' AND question='manual release canary'"
+    ).fetchone()[0] == 0
+    flow.stop()
+
+
+def test_inactive_manual_question_cannot_bypass_full_scheduled_quota(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    manual_question = "manual question later requested as scheduled"
+    flow.submit_manual("BTC", "risk", manual_question)
+    for index in range(20):
+        flow.register_question(
+            "BTC", "risk", f"scheduled activation guard {index}", enqueue=False
+        )
+
+    with pytest.raises(ValueError, match="active question limit reached"):
+        flow.register_question("BTC", "risk", manual_question, enqueue=False)
+    flow.stop()
+
+
+def test_manual_collision_does_not_deactivate_scheduled_question(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    question = "shared scheduled and manual question"
+    flow.register_question("BTC", "risk", question, enqueue=False)
+
+    _, manual = flow.submit_manual("BTC", "risk", question)
+
+    assert manual is not None
+    assert flow._conn().execute(
+        "SELECT active FROM analysis_questions "
+        "WHERE coin='BTC' AND mode='risk' AND question=?",
+        (question,),
+    ).fetchone()[0] == 1
+    for index in range(19):
+        flow.register_question(
+            "BTC", "risk", f"other scheduled collision guard {index}", enqueue=False
+        )
+    with pytest.raises(ValueError, match="active question limit reached"):
+        flow.register_question(
+            "BTC", "risk", "scheduled quota must still be full", enqueue=False
+        )
+    flow.stop()
+
+
+def test_release_canary_prefix_is_reserved_for_manual_verifier(tmp_path):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    for question in (
+        "Production release canary scheduled collision",
+        "production release canary lowercase collision",
+    ):
+        with pytest.raises(
+            ValueError, match="production release canary prefix is reserved"
+        ):
+            flow.register_question("BTC", "risk", question, enqueue=False)
+    flow.stop()
+
+
+def test_legacy_active_manual_questions_do_not_exhaust_scheduled_quota(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    for index in range(20):
+        flow.submit_manual("BTC", "risk", f"Production release canary legacy-{index}")
+    # Reproduce rows created by the old implementation without mutating any
+    # production data: historical manual-only questions were incorrectly active.
+    flow._conn().execute(
+        "UPDATE analysis_questions SET active=1 WHERE coin='BTC' AND mode='risk'"
+    )
+
+    _, scheduled = flow.register_question(
+        "BTC", "risk", "new scheduled question after legacy canaries"
+    )
+
+    assert scheduled is not None
+    next_snapshot = flow.create_snapshot("BTC")
+    flow.enqueue_matrix(next_snapshot)
+    assert flow._conn().execute(
+        "SELECT count(*) FROM analysis_jobs "
+        "WHERE origin='scheduled' AND question LIKE 'Production release canary %'"
+    ).fetchone()[0] == 0
+    flow.stop()
+
+
 def test_manual_priority_is_preserved_at_later_stage_boundaries(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
     flow = AnalysisFlow(tmp_path / "flow.sqlite3")
@@ -890,9 +997,12 @@ class _FakeLiveBedrockClient:
 
     def __init__(self, offline: bool = False):
         self.offline = offline
+        self.last_claim_extraction_model_invoked = not offline
         self.config = type("Cfg", (), {"model_id": _PRICED_MODEL_ID if not offline else None})()
 
-    def extract_claims_with_llm(self, docs, log=None):
+    def extract_claims_with_llm(self, docs, log=None, *, mode=None, question=None):
+        self.mode = mode
+        self.question = question
         if not self.offline and log is not None:
             log.record_llm_cost(self.config.model_id, tokens_in=100, tokens_out=50, cost_usd=0.01)
         return []
@@ -902,7 +1012,12 @@ def _claim_extraction_package() -> dict:
     return {
         "docs": _docs(),
         "log": ExecutionLog(run_id="test-run"),
-        "job": {"question": "BTC 近期風險？", "coin": "BTC", "question_type": "multi_source"},
+        "job": {
+            "mode": "risk",
+            "question": "BTC 近期風險？",
+            "coin": "BTC",
+            "question_type": "multi_source",
+        },
     }
 
 
@@ -1133,3 +1248,25 @@ def test_bedrock_live_attempt_releases_reservation_even_when_ledger_accounting_r
     assert released.get("amount") is not None
     # append_run 丟例外 → 記帳走 unledgered fallback，仍算進今日已花費。
     assert budget_guard.daily_cost_usd() == pytest.approx(0.01)
+
+
+def test_claim_extraction_live_receipt_commits_exact_mode_and_question(tmp_path, monkeypatch):
+    """The real live-stage contract forwards semantic context and persists proof."""
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+
+    package = AnalysisFlow(tmp_path / "flow.sqlite3")._stage_claim_extraction(
+        _claim_extraction_package()
+    )
+
+    assert package["client"].mode == "risk"
+    assert package["client"].question == "BTC 近期風險？"
+    receipt = package["claim_extraction_context"]
+    assert receipt["mode"] == "risk"
+    assert receipt["model_invoked"] is True
+    event = next(
+        item for item in package["log"].events
+        if item["tool"] == "bedrock.claim_extraction_context"
+    )
+    assert all(event["params"].get(key) == value for key, value in receipt.items())

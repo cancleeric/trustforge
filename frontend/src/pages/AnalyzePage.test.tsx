@@ -21,7 +21,8 @@ vi.mock('../components/AnalysisReportView', () => ({
 
 vi.mock('../lib/endpoints', () => ({
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'timeout', message: 'timeout' } }),
-  registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { question_id: 'question-1', job_id: 'flow-1', state: 'queued', origin: 'manual' } }),
+  currentNarrativeLocale: vi.fn(() => 'zh-Hant'),
+  registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: formalReceipt() }),
   getAnalysisJob: vi.fn().mockResolvedValue({ ok: true, data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null } }),
 }))
 
@@ -65,6 +66,23 @@ function analysisResult(coin: string, runId: string): AnalyzeData {
   } as unknown as AnalyzeData
 }
 
+function formalReceipt(questionId = 'question-1', jobId = 'flow-1') {
+  return {
+    schema_version: 'formal-run-receipt/v1' as const,
+    receipt_id: `frc_${questionId}`,
+    question_id: questionId,
+    job_id: jobId,
+    result_id: `result_${jobId}`,
+    state: 'accepted' as const,
+    origin: 'manual' as const,
+    disposition: 'created' as const,
+    locale: 'zh-Hant' as const,
+    created_at: '2026-07-30T08:00:00Z',
+    expires_at: null,
+    fingerprint_version: 'analysis-question/v1' as const,
+  }
+}
+
 describe('AnalyzePage manual execution', () => {
   beforeEach(() => {
     vi.useRealTimers()
@@ -88,7 +106,11 @@ describe('AnalyzePage manual execution', () => {
     renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
 
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledWith(
-      'BTC', 'risk', '分析BTC近期市場狀況', expect.any(AbortSignal),
+      'BTC', 'risk', '分析BTC近期市場狀況',
+      expect.stringMatching(/^tf1\.\d{6}\.[A-Za-z0-9_-]{22}$/),
+      false,
+      expect.any(AbortSignal),
+      'zh-Hant',
     ))
     await waitFor(() => expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal)))
     expect(getAnalyze).not.toHaveBeenCalled()
@@ -143,7 +165,7 @@ describe('AnalyzePage manual execution', () => {
     try {
       vi.mocked(registerAnalysisQuestion)
         .mockResolvedValueOnce({ ok: false, error: { code: 'server_busy', message: '伺服器忙碌' } })
-        .mockResolvedValueOnce({ ok: true, data: { question_id: 'question-2', job_id: 'flow-2', state: 'queued', origin: 'manual' } })
+        .mockResolvedValueOnce({ ok: true, data: formalReceipt('question-2', 'flow-2') })
       vi.mocked(getAnalysisJob).mockResolvedValue({
         ok: true,
         data: {
@@ -168,7 +190,7 @@ describe('AnalyzePage manual execution', () => {
         ok: true,
         data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null },
       })
-      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: { question_id: 'question-1', job_id: 'flow-1', state: 'queued', origin: 'manual' } })
+      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: formalReceipt() })
     }
   })
 
@@ -198,7 +220,7 @@ describe('AnalyzePage manual execution', () => {
       // the retry button must actually be able to re-submit and succeed once the
       // backend recovers — not just be decorative.
       vi.mocked(registerAnalysisQuestion).mockResolvedValueOnce({
-        ok: true, data: { question_id: 'question-recovered', job_id: 'flow-recovered', state: 'queued', origin: 'manual' },
+        ok: true, data: formalReceipt('question-recovered', 'flow-recovered'),
       })
       vi.mocked(getAnalysisJob).mockResolvedValue({
         ok: true,
@@ -212,6 +234,9 @@ describe('AnalyzePage manual execution', () => {
       await act(async () => { await vi.runAllTimersAsync() })
 
       expect(registerAnalysisQuestion).toHaveBeenCalledTimes(7)
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[6][3])
+        .toBe(vi.mocked(registerAnalysisQuestion).mock.calls[0][3])
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[6][4]).toBe(false)
       expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC')
     } finally {
       vi.useRealTimers()
@@ -219,7 +244,7 @@ describe('AnalyzePage manual execution', () => {
         ok: true,
         data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null },
       })
-      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: { question_id: 'question-1', job_id: 'flow-1', state: 'queued', origin: 'manual' } })
+      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: formalReceipt() })
     }
   })
 
@@ -232,6 +257,64 @@ describe('AnalyzePage manual execution', () => {
 
     fireEvent.click(submit)
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
+    const first = vi.mocked(registerAnalysisQuestion).mock.calls[0]
+    const second = vi.mocked(registerAnalysisQuestion).mock.calls[1]
+    expect(first[4]).toBe(false)
+    expect(second[4]).toBe(true)
+    expect(second[3]).not.toBe(first[3])
+  })
+
+  it('reuses one formal key across bounded transport retries', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(registerAnalysisQuestion)
+        .mockResolvedValueOnce({ ok: false, error: { code: 'server_busy', message: 'busy' } })
+        .mockResolvedValueOnce({ ok: true, data: formalReceipt() })
+
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=retry-key')
+      await act(async () => { await vi.advanceTimersByTimeAsync(2100) })
+
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2)
+      const first = vi.mocked(registerAnalysisQuestion).mock.calls[0]
+      const retry = vi.mocked(registerAnalysisQuestion).mock.calls[1]
+      expect(retry[3]).toBe(first[3])
+      expect(retry[4]).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('resumes an unresolved explicit fresh intent after reload with the same key and fresh flag', async () => {
+    try {
+      const path = '/analyze?coin=BTC&type=multi_source&mode=risk&q=fresh-reload'
+      vi.mocked(registerAnalysisQuestion)
+        .mockResolvedValueOnce({ ok: true, data: formalReceipt('old', 'old-job') })
+        .mockResolvedValue({ ok: false, error: { code: 'timeout', message: 'response lost' } })
+      vi.mocked(getAnalysisJob).mockResolvedValueOnce({
+        ok: true,
+        data: { job_id: 'old-job', state: 'failed', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: 'fresh-reload', error: 'old failed', origin: 'manual', priority: 0, queue_position: null, result: null },
+      })
+
+      const firstView = renderAnalyze(path)
+      await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+      fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
+      const freshCall = vi.mocked(registerAnalysisQuestion).mock.calls[1]
+      expect(freshCall[4]).toBe(true)
+      firstView.unmount()
+
+      renderAnalyze(path)
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(3))
+      const resumed = vi.mocked(registerAnalysisQuestion).mock.calls[2]
+      expect(resumed[3]).toBe(freshCall[3])
+      expect(resumed[4]).toBe(true)
+    } finally {
+      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: formalReceipt() })
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null },
+      })
+    }
   })
 
   it('does not register processed URLs again on browser back or forward', async () => {

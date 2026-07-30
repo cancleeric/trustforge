@@ -179,7 +179,7 @@ def _isolate_rate_limit_store(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_admin_config_cache():
+def _isolate_admin_config_cache(monkeypatch):
     """admin console PR-1：`admin_config` 的 process 內 TTL 快取
     （`_cache`）是模組級全域狀態，跨測試共用同一份記憶體。比照
     `_isolate_budget_reservation` 慣例，每個測試前後都清空，避免某個測試
@@ -187,6 +187,9 @@ def _isolate_admin_config_cache():
     from trustforge.admin_config import _reset_admin_config_cache_for_tests
     from trustforge.web import _reset_admin_cfg_fail_window_for_tests
 
+    # 本機 pre-push 為避免誤觸 DynamoDB 會帶入此旗標；測試本身仍應透過
+    # monkeypatch/mock 明確控制 config layer，不能被外部 shell env 改寫斷言。
+    monkeypatch.delenv("TRUSTFORGE_DISABLE_ADMIN_CONFIG", raising=False)
     _reset_admin_config_cache_for_tests()
     _reset_admin_cfg_fail_window_for_tests()
     yield

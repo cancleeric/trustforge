@@ -3,6 +3,8 @@ import { modeLabel, useHermesI18n } from './hermesI18n'
 import type { HermesWorkspaceModule } from './HermesModuleDeck'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import type { AnalysisFlowData } from '../lib/endpoints'
+import { moduleStageLabels } from './stagePresentation'
+import { workspaceStageId } from './workspaceStageDetails'
 
 interface StageBarProps {
   selCoin: GalaxyCoin
@@ -17,21 +19,7 @@ interface StageBarProps {
 
 export default function StageBar({ selCoin, derivation, selectedStage, onSelectStage, mode = null, telemetry = null, activity, flow }: StageBarProps) {
   const { locale, t } = useHermesI18n()
-  const moduleLabels: Record<HermesWorkspaceModule, [string, string, string, string, string]> = locale === 'zh-TW' ? {
-    analyze: ['來源蒐集', '主張抽取', '信任推理', '證據綁定', '報告交付'],
-    compare: ['市場 A', '市場 B', '基準正規化', '差異向量', '比較結論'],
-    history: ['歷史封存', '時間切片', '每日回放', '結果回標', '校準趨勢'],
-    status: ['來源連線', '快取狀態', '資料鮮度', '異常告警', '系統健康'],
-    costs: ['呼叫收集', '模型分組', 'Token 計量', '帳本封存', '累計成本'],
-    whale: ['鯨魚偵測', '交易所流向', '淨流入出', '大額明細', '趨勢總覽'],
-  } : {
-    analyze: ['SOURCE INTAKE', 'CLAIM EXTRACTION', 'TRUST REASONING', 'EVIDENCE BINDING', 'REPORT DELIVERY'],
-    compare: ['MARKET A', 'MARKET B', 'NORMALIZE', 'DELTA VECTOR', 'VERDICT'],
-    history: ['ARCHIVE', 'TIME SLICE', 'DAILY REPLAY', 'OUTCOME LABEL', 'CALIBRATION'],
-    status: ['UPLINK', 'CACHE', 'FRESHNESS', 'ALERTS', 'HEALTH'],
-    costs: ['CALLS', 'MODELS', 'TOKENS', 'LEDGER', 'TOTAL COST'],
-    whale: ['WHALE DETECT', 'EXCHANGE FLOW', 'NET FLOW', 'LARGE TX', 'TREND'],
-  }
+  const moduleLabels = moduleStageLabels(locale)
   const liveFlow = !telemetry?.runId && flow?.stages.some((stage) => stage.current || stage.queued > 0)
   const engineStages = mode === 'analyze' && liveFlow ? flow?.stages.map((stage) => ({
     id: stage.id,
@@ -74,13 +62,15 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
       </div>
       <div className="hermes-energy-nodes">
         {stages.map((stage, index) => {
-          const selected = selectedStage === stage.id
+          const stageSelectionId = mode ? workspaceStageId(mode, index) : stage.id
+          const selected = selectedStage === stageSelectionId
           return (
             <button
               type="button"
               key={stage.id}
               aria-pressed={selected}
-              onClick={() => onSelectStage(stage.id)}
+              aria-label={stage.label}
+              onClick={() => onSelectStage(stageSelectionId)}
               className={`hermes-energy-station${selected ? ' is-selected' : ''}`}
               style={{ '--station-color': stage.color } as React.CSSProperties}
             >

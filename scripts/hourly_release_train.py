@@ -156,6 +156,7 @@ def gate(worktree: Path) -> None:
         hook.chmod(0o500)
         command = [str(hook)]
         sandbox = Path("/usr/bin/sandbox-exec")
+        rust_toolchain = _trusted_rust_toolchain(Path.home())
         if sys.platform == "darwin":
             if not sandbox.is_file():
                 raise RuntimeError("trusted gate sandbox is unavailable")
@@ -163,6 +164,8 @@ def gate(worktree: Path) -> None:
             profile = (
                 f'(version 1)(allow default)(deny file-read* (subpath "{home}"))'
                 f'(deny file-write* (subpath "{home}"))'
+                f'(allow file-read* (subpath "{rust_toolchain}"))'
+                f'(allow process-exec (subpath "{rust_toolchain}"))'
                 '(deny process-exec (literal "/usr/bin/security"))'
             )
             command = [str(sandbox), "-p", profile, str(hook)]
@@ -172,7 +175,33 @@ def gate(worktree: Path) -> None:
                 env.pop(key)
         env["TRUSTFORGE_GATE_SANDBOX"] = "1"
         env["HOME"] = str(sandbox_root)
+        env["CARGO_HOME"] = str(sandbox_root / ".cargo")
+        env["RUSTC"] = str(rust_toolchain / "bin" / "rustc")
+        env["PATH"] = f"{rust_toolchain / 'bin'}:{env.get('PATH', '')}"
         subprocess.run(command, cwd=sandbox_root, env=env, check=True)
+
+
+def _trusted_rust_toolchain(home: Path) -> Path:
+    """Resolve only the active Rust toolchain, never Cargo credentials/caches."""
+    home = home.resolve()
+    rustup = home / ".cargo" / "bin" / "rustup"
+    if not rustup.is_file():
+        raise RuntimeError("trusted Rust toolchain is unavailable")
+    result = subprocess.run(
+        [str(rustup), "which", "cargo"],
+        text=True,
+        check=True,
+        capture_output=True,
+    )
+    cargo = Path(result.stdout.strip()).resolve(strict=True)
+    toolchains = (home / ".rustup" / "toolchains").resolve()
+    if not cargo.is_relative_to(toolchains) or cargo.name != "cargo":
+        raise RuntimeError("rustup resolved cargo outside the trusted toolchain root")
+    toolchain = cargo.parent.parent
+    rustc = toolchain / "bin" / "rustc"
+    if not rustc.is_file():
+        raise RuntimeError("trusted Rust compiler is unavailable")
+    return toolchain
 
 
 def _localize_gate_interpreter(
@@ -504,6 +533,39 @@ def discard_frontend_snapshot(instance: str, snapshot: str) -> None:
     run_ssm(instance, [f"rm -f {snapshot}"])
 
 
+def verify_training_data_reconciliation(instance: str) -> int:
+    """Fail deployment when the API silently diverges from production JSONL."""
+    output = run_ssm(
+        instance,
+        [
+            "python3.11 - <<'PY'",
+            "import json, os, pathlib, shlex, subprocess, sys, urllib.request",
+            "unit_env = subprocess.check_output(['systemctl', 'show', 'trustforge.service', '--property=Environment', '--value'], text=True)",
+            "configured = [item.split('=', 1)[1] for item in shlex.split(unit_env) if item.startswith('TRUSTFORGE_TRAINING_DATA_DIR=')]",
+            "if len(configured) != 1: raise SystemExit('training data path missing from systemd environment')",
+            "os.environ['TRUSTFORGE_TRAINING_DATA_DIR'] = configured[0]",
+            "sys.path.insert(0, '/opt/trustforge/src')",
+            "from trustforge.training_data import resolve_training_data_dir, scan_training_data",
+            "actual = scan_training_data(resolve_training_data_dir()).total_records",
+            "with urllib.request.urlopen('http://localhost/api/training-status', timeout=10) as response:",
+            "    payload = json.load(response)",
+            "api_total = payload.get('data', {}).get('training_data', {}).get('total_records')",
+            "if not isinstance(api_total, int) or api_total != actual or actual <= 0:",
+            "    raise SystemExit(f'training data reconciliation failed: api={api_total!r} actual={actual}')",
+            "print(json.dumps({'training_records': actual}))",
+            "PY",
+        ],
+    )
+    try:
+        result = json.loads(output.splitlines()[-1])
+        count = result["training_records"]
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("training data reconciliation evidence is invalid") from exc
+    if not isinstance(count, int) or count <= 0:
+        raise RuntimeError("training data reconciliation returned no records")
+    return count
+
+
 def restore_backend(
     main_tree: Path,
     expected_sha: str,
@@ -591,22 +653,27 @@ def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> di
             raise RuntimeError("production active SHA does not match the verified main SHA")
         verify_runtime_identity(deployed_digest)
         frontend_instance = production_instance()
-        (
-            previous_frontend_target,
-            previous_nginx_target,
-            frontend_snapshot,
-        ) = capture_frontend_state(
-            frontend_instance,
-            main_sha,
-        )
-        subprocess.run(
-            ["/bin/zsh", "-lc", "bash deploy/deploy_frontend_nginx.sh"],
-            cwd=main_tree,
-            env=dict(env, VITE_GIT_SHA=main_sha),
-            check=True,
-        )
-        frontend_asset = verify_frontend_identity(main_sha)
-        discard_frontend_snapshot(frontend_instance, frontend_snapshot)
+        try:
+            frontend_asset = verify_frontend_identity(main_sha)
+        except (RuntimeError, subprocess.CalledProcessError):
+            (
+                previous_frontend_target,
+                previous_nginx_target,
+                frontend_snapshot,
+            ) = capture_frontend_state(
+                frontend_instance,
+                main_sha,
+            )
+            subprocess.run(
+                ["/bin/zsh", "-lc", "bash deploy/deploy_frontend_nginx.sh"],
+                cwd=main_tree,
+                env=dict(env, VITE_GIT_SHA=main_sha),
+                check=True,
+            )
+            frontend_asset = verify_frontend_identity(main_sha)
+        training_records = verify_training_data_reconciliation(frontend_instance)
+        if frontend_snapshot:
+            discard_frontend_snapshot(frontend_instance, frontend_snapshot)
     except Exception as deploy_error:
         rollback_errors = []
         if (
@@ -637,6 +704,7 @@ def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> di
         "git_sha": deployed_sha,
         "artifact_digest": deployed_digest,
         "frontend_asset": frontend_asset,
+        "training_records": training_records,
     }
 
 
@@ -756,6 +824,8 @@ def execute(args: argparse.Namespace) -> Path:
                     receipt["post_deploy_verification"] = {
                         "runtime": "passed",
                         "frontend": "passed",
+                        "training_data_reconciliation": "passed",
+                        "training_records": deployed["training_records"],
                         "verified_main_sha": main_sha,
                         "frontend_asset": deployed["frontend_asset"],
                     }

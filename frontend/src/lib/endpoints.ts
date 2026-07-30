@@ -35,6 +35,7 @@ import type {
   OverviewData,
   StatusData,
 } from './types'
+import { isFormalRunReceipt, type FormalRunReceipt } from './formalRun'
 
 /**
  * `signal` 建議由呼叫端的 React effect 傳入（effect cleanup 時
@@ -103,7 +104,7 @@ export function getAnalysisSnapshot(coin: string, mode: string, signal?: AbortSi
   })
 }
 
-export interface AnalysisQuestionReceipt { question_id: string; job_id: string | null; state: string; origin: 'manual' }
+export type AnalysisQuestionReceipt = FormalRunReceipt
 
 /** Narrative locale contract of `POST /api/analysis-question` (N11). */
 export type NarrativeLocale = 'zh-Hant' | 'en'
@@ -119,16 +120,31 @@ export function currentNarrativeLocale(): NarrativeLocale {
   return saved === 'en' ? 'en' : 'zh-Hant'
 }
 
-export function registerAnalysisQuestion(coin: string, mode: string, question: string, signal?: AbortSignal, locale?: NarrativeLocale): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
-  const valid = (value: unknown): value is AnalysisQuestionReceipt => !!value && typeof value === 'object' &&
-    typeof (value as AnalysisQuestionReceipt).question_id === 'string' &&
-    ((value as AnalysisQuestionReceipt).job_id === null || typeof (value as AnalysisQuestionReceipt).job_id === 'string') &&
-    typeof (value as AnalysisQuestionReceipt).state === 'string' &&
-    (value as AnalysisQuestionReceipt).origin === 'manual'
-  return apiFetch('/api/analysis-question', undefined, valid, {
+export function registerAnalysisQuestion(
+  coin: string,
+  mode: string,
+  question: string,
+  idempotencyKey: string,
+  fresh: boolean,
+  signal?: AbortSignal,
+  locale?: NarrativeLocale,
+): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
+  const options = {
     signal, method: 'POST',
-    jsonBody: { coin, mode, question, locale: locale ?? currentNarrativeLocale() },
+    headers: { 'Idempotency-Key': idempotencyKey },
+    jsonBody: { coin, mode, question, locale: locale ?? currentNarrativeLocale(), fresh },
     timeoutMs: REGISTER_TIMEOUT_MS,
+  } as const
+  const submit = () => apiFetch('/api/analysis-question', undefined, isFormalRunReceipt, options)
+  return submit().then((result) => {
+    // The first 428 installs/refreshes an HttpOnly caller-scope cookie. The
+    // browser persists it from the response; replay the byte-identical intent
+    // once with the same formal key. A second challenge is surfaced instead
+    // of becoming an unbounded retry loop.
+    if (!result.ok && result.error.code === 'caller_scope_required' && !signal?.aborted) {
+      return submit()
+    }
+    return result
   })
 }
 
@@ -261,16 +277,80 @@ export interface TrainingStatusData {
   backfill: { mode: string; is_running: boolean; completed: number; total: number; progress_pct: number } | null
   upgrade_threshold: { target: number; current: number; met: boolean; pct: number }
 }
-export function getTrainingStatus(signal?: AbortSignal): Promise<ApiEnvelope<TrainingStatusData>> {
-  const valid = (value: unknown): value is TrainingStatusData => {
-    if (!value || typeof value !== 'object') return false
-    const data = value as TrainingStatusData
-    return typeof data.training_data === 'object' && data.training_data !== null &&
-      typeof data.training_data.total_records === 'number' &&
-      typeof data.upgrade_threshold === 'object' && data.upgrade_threshold !== null &&
-      typeof data.upgrade_threshold.target === 'number'
+const isNonNegativeInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+const isFiniteRange = (value: unknown, minimum: number, maximum: number): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum
+const isWithinReportedPrecision = (
+  reported: number,
+  exact: number,
+  halfUnit: number,
+): boolean =>
+  Math.abs(reported - exact) <=
+    halfUnit + Number.EPSILON * Math.max(1, Math.abs(reported), Math.abs(exact))
+
+export function isTrainingStatusData(value: unknown): value is TrainingStatusData {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const data = value as TrainingStatusData
+  const training = data.training_data
+  const threshold = data.upgrade_threshold
+  if (!training || typeof training !== 'object' || Array.isArray(training) ||
+      !isNonNegativeInteger(training.total_records) ||
+      !isNonNegativeInteger(training.has_direction) ||
+      training.has_direction > training.total_records ||
+      !isFiniteRange(training.direction_ratio, 0, 1) ||
+      !training.per_coin || typeof training.per_coin !== 'object' || Array.isArray(training.per_coin) ||
+      !threshold || typeof threshold !== 'object' || Array.isArray(threshold) ||
+      !isNonNegativeInteger(threshold.target) || threshold.target === 0 ||
+      !isNonNegativeInteger(threshold.current) ||
+      typeof threshold.met !== 'boolean' ||
+      !isFiniteRange(threshold.pct, 0, Number.MAX_VALUE) ||
+      threshold.current !== training.has_direction ||
+      threshold.met !== (threshold.current >= threshold.target) ||
+      !isWithinReportedPrecision(
+        training.direction_ratio,
+        training.total_records === 0
+          ? 0
+          : training.has_direction / training.total_records,
+        0.00005,
+      ) ||
+      !isWithinReportedPrecision(
+        threshold.pct,
+        threshold.current / threshold.target * 100,
+        0.05,
+      )) {
+    return false
   }
-  return apiFetch<TrainingStatusData>('/api/training-status', undefined, valid, {
+  let perCoinTotal = 0
+  let perCoinDirection = 0
+  for (const [coin, stat] of Object.entries(training.per_coin)) {
+    if (!coin || !stat || typeof stat !== 'object' || Array.isArray(stat) ||
+        !isNonNegativeInteger(stat.total) ||
+        !isNonNegativeInteger(stat.has_direction) ||
+        stat.has_direction > stat.total) {
+      return false
+    }
+    perCoinTotal += stat.total
+    perCoinDirection += stat.has_direction
+    if (!Number.isSafeInteger(perCoinTotal) || !Number.isSafeInteger(perCoinDirection)) return false
+  }
+  if (perCoinTotal !== training.total_records || perCoinDirection !== training.has_direction) return false
+  if (data.backfill !== null) {
+    const backfill = data.backfill
+    if (!backfill || typeof backfill !== 'object' || Array.isArray(backfill) ||
+        typeof backfill.mode !== 'string' || backfill.mode.length === 0 ||
+        typeof backfill.is_running !== 'boolean' ||
+        !isNonNegativeInteger(backfill.completed) ||
+        !isNonNegativeInteger(backfill.total) ||
+        backfill.completed > backfill.total ||
+        !isFiniteRange(backfill.progress_pct, 0, 100)) {
+      return false
+    }
+  }
+  return true
+}
+export function getTrainingStatus(signal?: AbortSignal): Promise<ApiEnvelope<TrainingStatusData>> {
+  return apiFetch<TrainingStatusData>('/api/training-status', undefined, isTrainingStatusData, {
     signal, timeoutMs: DEFAULT_TIMEOUT_MS,
   })
 }

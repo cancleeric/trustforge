@@ -1072,7 +1072,10 @@ def test_provision_worker_failure_keeps_parent_identity_and_cleans_up(
 def test_near_limit_pipe_credential_real_subprocess_does_not_hang(tmp_path):
     root = tmp_path / "ledger-root"
     root.mkdir(mode=0o750)
-    (root / "coordination.lock").touch(mode=0o600)
+    root.chmod(0o750)
+    coordination_lock = root / "coordination.lock"
+    coordination_lock.touch(mode=0o600)
+    coordination_lock.chmod(0o600)
     verification_keys = {
         f"key-{index:03d}": bytes([index % 256]) * 32
         for index in range(240)
