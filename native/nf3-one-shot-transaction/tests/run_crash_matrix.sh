@@ -93,8 +93,12 @@ run_error_case() {
     "$helper" "$command" "$root" \
     1111111111111111111111111111111111111111111111111111111111111111 \
     logical-request "$deadline" >"$log" 2>&1; then
-    echo "$error_kind injection unexpectedly succeeded: $artifact/$stage" >&2
-    exit 1
+    # Abandon terminalizes from Drop, whose public contract is best-effort and
+    # therefore may return success while latching/persisting poison.
+    if [ "$artifact" != TOMBSTONE ]; then
+      echo "$error_kind injection unexpectedly succeeded: $artifact/$stage" >&2
+      exit 1
+    fi
   fi
   assert_no_retry "$root"
   echo "PASS $error_kind $artifact $stage root=$root log=$log"
