@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import builtins
 from pathlib import Path
 
 from trustforge import web
@@ -52,6 +53,29 @@ def test_training_status_missing_configured_directory_fails_visibly(
 
 def test_training_status_rejects_relative_configured_directory(monkeypatch) -> None:
     monkeypatch.setenv("TRUSTFORGE_TRAINING_DATA_DIR", "data/training")
+
+    status, body = web._handle_api_training_status()
+
+    assert status == 503
+    assert _payload(body)["error"]["code"] == "training_data_unavailable"
+
+
+def test_training_status_unreadable_file_fails_instead_of_returning_partial_count(
+    monkeypatch, tmp_path: Path
+) -> None:
+    training_dir = tmp_path / "training"
+    training_dir.mkdir()
+    blocked = training_dir / "btc.jsonl"
+    blocked.write_text('{"direction":"bullish"}\n', encoding="utf-8")
+    monkeypatch.setenv("TRUSTFORGE_TRAINING_DATA_DIR", str(training_dir))
+    real_open = builtins.open
+
+    def guarded_open(path, *args, **kwargs):
+        if Path(path) == blocked:
+            raise PermissionError("test unreadable file")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
 
     status, body = web._handle_api_training_status()
 

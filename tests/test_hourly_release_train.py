@@ -247,13 +247,16 @@ def test_production_deploy_includes_backend_and_frontend(monkeypatch, tmp_path):
 
 
 def test_training_data_reconciliation_requires_api_and_filesystem_parity(monkeypatch):
+    calls = []
     monkeypatch.setattr(
         train,
         "run_ssm",
-        lambda instance, commands: 'diagnostic\n{"training_records": 2005}',
+        lambda instance, commands: calls.append(commands) or 'diagnostic\n{"training_records": 2005}',
     )
 
     assert train.verify_training_data_reconciliation("i-production") == 2005
+    assert "systemctl', 'show', 'trustforge.service'" in "\n".join(calls[0])
+    assert "TRUSTFORGE_TRAINING_DATA_DIR=" in "\n".join(calls[0])
 
 
 def test_training_data_reconciliation_rejects_missing_evidence(monkeypatch):

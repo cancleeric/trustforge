@@ -5965,37 +5965,44 @@ def _handle_api_training_status() -> tuple[int, str]:
     has_direction_count = 0
     per_coin: dict[str, dict[str, int]] = {}
 
-    if training_data_dir.is_dir():
-        for jsonl_file in sorted(training_data_dir.glob("*.jsonl")):
-            coin_name = jsonl_file.stem.upper()
-            coin_total = 0
-            coin_direction = 0
-            try:
-                with open(jsonl_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-                        coin_total += 1
-                        direction = record.get("direction")
-                        if (
-                            direction is not None
-                            and direction != ""
-                            and direction != "不明"
-                        ):
-                            coin_direction += 1
-            except OSError:
-                continue
-            total_records += coin_total
-            has_direction_count += coin_direction
-            per_coin[coin_name] = {
-                "total": coin_total,
-                "has_direction": coin_direction,
-            }
+    try:
+        jsonl_files = sorted(training_data_dir.glob("*.jsonl"))
+    except OSError:
+        return 503, _json_envelope_err(
+            "training_data_unavailable", "訓練資料目錄無法讀取"
+        )
+    for jsonl_file in jsonl_files:
+        coin_name = jsonl_file.stem.upper()
+        coin_total = 0
+        coin_direction = 0
+        try:
+            with open(jsonl_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    coin_total += 1
+                    direction = record.get("direction")
+                    if (
+                        direction is not None
+                        and direction != ""
+                        and direction != "不明"
+                    ):
+                        coin_direction += 1
+        except OSError:
+            return 503, _json_envelope_err(
+                "training_data_unavailable", "訓練資料檔案無法讀取"
+            )
+        total_records += coin_total
+        has_direction_count += coin_direction
+        per_coin[coin_name] = {
+            "total": coin_total,
+            "has_direction": coin_direction,
+        }
 
     direction_ratio = round(has_direction_count / total_records, 4) if total_records > 0 else 0.0
 

@@ -510,8 +510,11 @@ def verify_training_data_reconciliation(instance: str) -> int:
         instance,
         [
             "python3.11 - <<'PY'",
-            "import json, os, pathlib, urllib.request",
-            "root = pathlib.Path(os.environ.get('TRUSTFORGE_TRAINING_DATA_DIR', '/opt/trustforge/data/training'))",
+            "import json, pathlib, shlex, subprocess, urllib.request",
+            "unit_env = subprocess.check_output(['systemctl', 'show', 'trustforge.service', '--property=Environment', '--value'], text=True)",
+            "configured = [item.split('=', 1)[1] for item in shlex.split(unit_env) if item.startswith('TRUSTFORGE_TRAINING_DATA_DIR=')]",
+            "if len(configured) != 1: raise SystemExit('training data path missing from systemd environment')",
+            "root = pathlib.Path(configured[0])",
             "if not root.is_absolute() or not root.is_dir(): raise SystemExit('training data path unavailable')",
             "actual = 0",
             "for path in sorted(root.glob('*.jsonl')):",
