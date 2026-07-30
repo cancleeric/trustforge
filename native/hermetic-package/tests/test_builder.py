@@ -165,6 +165,10 @@ def test_authority_value_is_rejected() -> None:
         "release PASS",
         "eligibility",
         "release_eligibility",
+        "privateKey",
+        "keyId",
+        "rawPublicKey",
+        "releaseEligibility",
         "trust-anchor",
     ):
         with pytest.raises(MODULE.BuildBlocked, match="value"):
@@ -273,6 +277,14 @@ def test_two_independent_clean_clones_are_byte_identical(tmp_path: Path) -> None
     assert manifest["runtime_closure"]["dt_needed"] == []
     assert manifest["build"]["argv"][0] == "cargo"
     assert manifest["environment"]["HOME"] == "isolated:non-user-empty-home"
+    malformed = copy.deepcopy(manifest)
+    malformed["toolchain"]["cargo"].pop("sha256")
+    with pytest.raises(MODULE.BuildBlocked, match="cargo schema"):
+        MODULE._validate_manifest_shape(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["package_entries"].append(malformed["package_entries"][0])
+    with pytest.raises(MODULE.BuildBlocked, match="cardinality"):
+        MODULE._validate_manifest_shape(malformed)
 
 
 def test_concurrent_source_change_blocks_at_end(
@@ -344,6 +356,41 @@ def test_aba_mutation_of_original_inputs_cannot_change_snapshot_build(
 
     monkeypatch.setattr(MODULE, "_run", aba_after_compile)
     assert MODULE.build(source, tmp_path / "aba") == baseline
+
+
+def test_tool_path_swap_restore_cannot_change_sealed_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source_repo(tmp_path)
+    original_resolve = MODULE._resolve_tool
+    discovered_cargo = tmp_path / "discovered-cargo"
+    shutil.copy2(original_resolve("cargo"), discovered_cargo)
+
+    def resolve(name: str, *, sysroot=None):
+        if name == "cargo":
+            return discovered_cargo
+        return original_resolve(name, sysroot=sysroot)
+
+    original_run = MODULE._run
+    swapped = False
+
+    def swap_restore(argv, *, cwd, env=None):
+        nonlocal swapped
+        if len(argv) > 1 and argv[1] == "build" and not swapped:
+            swapped = True
+            original = discovered_cargo.read_bytes()
+            discovered_cargo.write_bytes(b"attacker transient tool")
+            try:
+                return original_run(argv, cwd=cwd, env=env)
+            finally:
+                discovered_cargo.write_bytes(original)
+                discovered_cargo.chmod(0o755)
+        return original_run(argv, cwd=cwd, env=env)
+
+    monkeypatch.setattr(MODULE, "_resolve_tool", resolve)
+    monkeypatch.setattr(MODULE, "_run", swap_restore)
+    result = MODULE.build(source, tmp_path / "output")
+    assert len(result["runtime_sha256"]) == 64
 
 
 @pytest.mark.parametrize(

@@ -68,8 +68,17 @@ Every tool and closure is rehashed after the build.
 
 The same lock binds the resolved Python executable, the isolated imported
 stdlib/module files, recursively discoverable host dylib/framework files,
-unresolved system dependency names and the host dyld shared-cache map. The
-builder runtime closure is also recomputed at the end boundary.
+unresolved system dependency names, the actual root-owned dyld cache/subcache
+content digests, cache UUID, embedded code-directory digests and the host dyld
+shared-cache map. The builder runtime closure is also recomputed at the end
+boundary.
+
+This is deliberately a host-specific repository lock. Any Python, Rust,
+macOS/kernel or dyld-cache update returns `BLOCK` until the complete new lock
+is independently reviewed and committed; automatic lock refresh is forbidden.
+Cargo, rustc, rustup, rust-lld and the Rust sysroot are copied into a sealed
+snapshot and the build executes those copied bytes, so a swap/restore of the
+discovery pathname cannot change the running tools.
 
 ## Reproducibility and negative evidence
 

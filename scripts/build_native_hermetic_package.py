@@ -47,6 +47,24 @@ FORBIDDEN_AUTHORITY_VALUE = re.compile(
     r"raw_public_key|signer|trust[-_ ]?anchor|verdict|pass|eligibility|eligible|"
     r"release_eligibility|publication_authority)(?:[^a-z0-9]|$)"
 )
+FORBIDDEN_AUTHORITY_ALIASES = frozenset(
+    {
+        "actor",
+        "key",
+        "key_id",
+        "private_key",
+        "raw_key",
+        "raw_public_key",
+        "signer",
+        "trust_anchor",
+        "verdict",
+        "pass",
+        "eligibility",
+        "eligible",
+        "release_eligibility",
+        "publication_authority",
+    }
+)
 ALLOWED_MANIFEST_KEYS = frozenset(
     {
         "schema",
@@ -81,6 +99,10 @@ ALLOWED_MANIFEST_KEYS = frozenset(
         "python_entries",
         "dynamic_dependencies",
         "dyld_cache_map",
+        "dyld_cache",
+        "dyld_subcache",
+        "uuid",
+        "code_directory_sha256",
         "os_build",
         "kernel",
         "environment",
@@ -112,6 +134,7 @@ ALLOWED_MANIFEST_KEYS = frozenset(
         "WRAPPER_AND_AMBIENT_KNOBS",
     }
 )
+_DYLD_CACHE_DIGEST_CACHE: dict[tuple[str, int, int, int], str] = {}
 
 
 class BuildBlocked(RuntimeError):
@@ -156,6 +179,12 @@ def _canonical_json(value: Any) -> bytes:
 
 
 def _reject_authority_metadata(value: Any) -> None:
+    def aliases(text: str) -> bool:
+        snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+        snake = re.sub(r"[^a-zA-Z0-9]+", "_", snake).casefold().strip("_")
+        padded = f"_{snake}_"
+        return any(f"_{term}_" in padded for term in FORBIDDEN_AUTHORITY_ALIASES)
+
     if isinstance(value, dict):
         for key, child in value.items():
             normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
@@ -165,18 +194,38 @@ def _reject_authority_metadata(value: Any) -> None:
                 in {
                     re.sub(r"[^a-z0-9]", "", item) for item in FORBIDDEN_AUTHORITY_NAMES
                 }
-                or FORBIDDEN_AUTHORITY_VALUE.search(key)
+                or aliases(key)
             ):
                 raise BuildBlocked(f"authority metadata is forbidden: {key}")
             _reject_authority_metadata(child)
     elif isinstance(value, list):
         for child in value:
             _reject_authority_metadata(child)
-    elif isinstance(value, str) and FORBIDDEN_AUTHORITY_VALUE.search(value):
+    elif isinstance(value, str) and (
+        FORBIDDEN_AUTHORITY_VALUE.search(value) or aliases(value)
+    ):
         raise BuildBlocked("authority metadata value is forbidden")
 
 
 def _validate_manifest_shape(value: dict[str, Any]) -> None:
+    def exact(record: Any, keys: set[str], label: str) -> dict[str, Any]:
+        if not isinstance(record, dict) or set(record) != keys:
+            raise BuildBlocked(f"{label} schema is not exact")
+        return record
+
+    def digest_entries(entries: Any, label: str) -> None:
+        if not isinstance(entries, list) or not entries:
+            raise BuildBlocked(f"{label} cardinality is invalid")
+        for entry in entries:
+            exact(entry, {"path", "mode", "size", "sha256"}, label)
+            if (
+                not isinstance(entry["path"], str)
+                or not isinstance(entry["mode"], str)
+                or not isinstance(entry["size"], int)
+                or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+            ):
+                raise BuildBlocked(f"{label} field type is invalid")
+
     if set(value) != {
         "schema",
         "vcs",
@@ -195,6 +244,88 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
         raise BuildBlocked("provenance schema enum is invalid")
     if set(value["vcs"]) != {"commit", "tree"}:
         raise BuildBlocked("VCS schema is not exact")
+    if not all(
+        isinstance(value["vcs"][field], str)
+        and re.fullmatch(r"[0-9a-f]{40}", value["vcs"][field])
+        for field in ("commit", "tree")
+    ):
+        raise BuildBlocked("VCS field type is invalid")
+    digest_entries(value["sources"], "source entry")
+    cargo_resolution = exact(
+        value["cargo_resolution"],
+        {"packages", "third_party_dependencies", "vendor_entries"},
+        "Cargo resolution",
+    )
+    if (
+        not isinstance(cargo_resolution["packages"], list)
+        or len(cargo_resolution["packages"]) != 1
+    ):
+        raise BuildBlocked("Cargo package cardinality is invalid")
+    if cargo_resolution["third_party_dependencies"] != []:
+        if cargo_resolution["vendor_entries"] == []:
+            raise BuildBlocked("third-party Cargo closure lacks vendor entries")
+    generated = exact(
+        value["generated"], {"recipe", "path", "sha256", "size"}, "generated"
+    )
+    if not isinstance(generated["size"], int) or not re.fullmatch(
+        r"[0-9a-f]{64}", generated["sha256"]
+    ):
+        raise BuildBlocked("generated field type is invalid")
+    toolchain = value["toolchain"]
+    exact(
+        toolchain,
+        {
+            "target",
+            "rustc",
+            "cargo",
+            "linker",
+            "rustup",
+            "target_libdir_entries",
+            "host_sysroot_entries",
+            "host_platform",
+        },
+        "toolchain",
+    )
+    if toolchain["target"] != TARGET:
+        raise BuildBlocked("toolchain target enum is invalid")
+    for name in ("rustc", "cargo", "linker", "rustup"):
+        record = exact(toolchain[name], {"name", "size", "sha256", "version"}, name)
+        if record["name"] != ("rust-lld" if name == "linker" else name):
+            raise BuildBlocked(f"{name} enum is invalid")
+    digest_entries(toolchain["target_libdir_entries"], "target sysroot")
+    digest_entries(toolchain["host_sysroot_entries"], "host sysroot")
+    exact(toolchain["host_platform"], {"os_build", "kernel"}, "host platform")
+    runtime = exact(
+        value["builder_runtime"],
+        {
+            "python_entries",
+            "dynamic_dependencies",
+            "dyld_cache_map",
+            "dyld_cache",
+            "dyld_subcache",
+        },
+        "builder runtime",
+    )
+    digest_entries(runtime["python_entries"], "Python runtime")
+    if not isinstance(runtime["dynamic_dependencies"], list) or not all(
+        isinstance(item, str) for item in runtime["dynamic_dependencies"]
+    ):
+        raise BuildBlocked("dynamic dependency schema is invalid")
+    exact(
+        runtime["dyld_cache_map"],
+        {"path", "mode", "size", "sha256"},
+        "dyld cache map",
+    )
+    exact(
+        runtime["dyld_cache"],
+        {"path", "mode", "size", "sha256", "uuid", "code_directory_sha256"},
+        "dyld cache",
+    )
+    exact(
+        runtime["dyld_subcache"],
+        {"path", "mode", "size", "sha256", "code_directory_sha256"},
+        "dyld subcache",
+    )
     if set(value["build"]) != {
         "argv",
         "offline",
@@ -235,6 +366,18 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
     }
     if set(value["environment"]) != expected_environment:
         raise BuildBlocked("environment allowlist schema is not exact")
+    if (
+        not isinstance(value["package_entries"], list)
+        or len(value["package_entries"]) != 5
+    ):
+        raise BuildBlocked("package entry cardinality is invalid")
+    for entry in value["package_entries"]:
+        expected = (
+            {"path", "type", "mode"}
+            if entry.get("type") == "directory"
+            else {"path", "type", "mode", "size", "sha256"}
+        )
+        exact(entry, expected, "package entry")
 
 
 def _git_identity(source_root: Path) -> dict[str, str]:
@@ -437,10 +580,49 @@ def _builder_runtime(source_root: Path) -> dict[str, Any]:
     )
     if not dyld_map.is_file():
         raise BuildBlocked("host dyld shared-cache map is unavailable")
+    dyld_cache = dyld_map.with_name("dyld_shared_cache_arm64e")
+    dyld_subcache = dyld_map.with_name("dyld_shared_cache_arm64e.01")
+
+    def sealed_cache_record(path: Path) -> dict[str, Any]:
+        info = path.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise BuildBlocked("dyld shared-cache file is not root-owned immutable")
+        cache_key = (str(path), info.st_ino, info.st_size, info.st_mtime_ns)
+        digest = _DYLD_CACHE_DIGEST_CACHE.get(cache_key)
+        if digest is None:
+            digest = _digest(path)
+            _DYLD_CACHE_DIGEST_CACHE[cache_key] = digest
+        signature_result = subprocess.run(
+            ["/usr/bin/codesign", "-d", "--verbose=4", str(path)],
+            cwd=source_root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if signature_result.returncode:
+            raise BuildBlocked("dyld shared-cache code signature is unverifiable")
+        signature = signature_result.stdout + signature_result.stderr
+        match = re.search(r"CandidateCDHashFull sha256=([0-9a-f]{64})", signature)
+        if match is None:
+            raise BuildBlocked("dyld shared-cache code-directory digest is absent")
+        record = _entry(path, path.parent)
+        record["code_directory_sha256"] = match.group(1)
+        return record
+
+    main_cache = sealed_cache_record(dyld_cache)
+    with dyld_cache.open("rb") as stream:
+        stream.seek(88)
+        cache_uuid = stream.read(16)
+    if len(cache_uuid) != 16:
+        raise BuildBlocked("dyld shared-cache UUID is unavailable")
+    main_cache["uuid"] = cache_uuid.hex()
     return {
         "python_entries": entries,
         "dynamic_dependencies": sorted(dependencies),
         "dyld_cache_map": _entry(dyld_map, dyld_map.parent),
+        "dyld_cache": main_cache,
+        "dyld_subcache": sealed_cache_record(dyld_subcache),
     }
 
 
@@ -563,6 +745,11 @@ def _validate_toolchain_lock(
         "builder_python_entries_sha256",
         "builder_dynamic_dependencies_sha256",
         "builder_dyld_cache_map_sha256",
+        "builder_dyld_cache_sha256",
+        "builder_dyld_cache_subcache_sha256",
+        "builder_dyld_cache_uuid",
+        "builder_dyld_cache_cdhash",
+        "builder_dyld_cache_subcache_cdhash",
     }
     if set(lock) != expected_keys:
         raise BuildBlocked("toolchain lock schema is not exact")
@@ -590,6 +777,17 @@ def _validate_toolchain_lock(
             _canonical_json(builder_runtime["dynamic_dependencies"])
         ).hexdigest(),
         "builder_dyld_cache_map_sha256": builder_runtime["dyld_cache_map"]["sha256"],
+        "builder_dyld_cache_sha256": builder_runtime["dyld_cache"]["sha256"],
+        "builder_dyld_cache_subcache_sha256": builder_runtime["dyld_subcache"][
+            "sha256"
+        ],
+        "builder_dyld_cache_uuid": builder_runtime["dyld_cache"]["uuid"],
+        "builder_dyld_cache_cdhash": builder_runtime["dyld_cache"][
+            "code_directory_sha256"
+        ],
+        "builder_dyld_cache_subcache_cdhash": builder_runtime["dyld_subcache"][
+            "code_directory_sha256"
+        ],
     }
     if lock != observed:
         raise BuildBlocked(
@@ -669,8 +867,34 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         "rust-lld",
         sysroot=Path(_run([str(rustc), "--print", "sysroot"], cwd=source_root)),
     )
+    rustup = _resolve_tool("rustup")
     output_dir.mkdir(parents=True, exist_ok=False)
     _reject_ancestor_cargo_config(output_dir)
+    original_sysroot = Path(
+        _run([str(rustc), "--print", "sysroot"], cwd=source_root)
+    ).resolve()
+    tool_snapshot = output_dir / ".tool-input"
+    (tool_snapshot / "bin").mkdir(parents=True)
+    shutil.copy2(cargo, tool_snapshot / "bin/cargo")
+    shutil.copy2(rustc, tool_snapshot / "bin/rustc")
+    shutil.copy2(rustup, tool_snapshot / "bin/rustup")
+    shutil.copytree(original_sysroot / "lib", tool_snapshot / "lib")
+    snapshot_host_entries = [
+        _entry(path, tool_snapshot) for path in _regular_files(tool_snapshot / "lib")
+    ]
+    if snapshot_host_entries != toolchain["host_sysroot_entries"]:
+        raise BuildBlocked("sealed toolchain snapshot differs from locked host closure")
+    cargo = tool_snapshot / "bin/cargo"
+    rustc = tool_snapshot / "bin/rustc"
+    linker = tool_snapshot / "lib/rustlib/aarch64-apple-darwin/bin/rust-lld"
+    for logical, path in (
+        ("cargo", cargo),
+        ("rustc", rustc),
+        ("rustup", tool_snapshot / "bin/rustup"),
+        ("linker", linker),
+    ):
+        if _digest(path) != toolchain[logical]["sha256"]:
+            raise BuildBlocked(f"sealed {logical} snapshot digest mismatch")
     build_crate = output_dir / ".build-input"
     shutil.copytree(crate, build_crate)
     builder_snapshot = output_dir / ".builder-input.py"
@@ -844,6 +1068,7 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     }
     shutil.rmtree(build_crate)
     builder_snapshot.unlink()
+    shutil.rmtree(tool_snapshot)
     (output_dir / "native-hermetic-digests.json").write_bytes(_canonical_json(result))
     return result
 
