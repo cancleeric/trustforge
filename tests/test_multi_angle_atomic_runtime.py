@@ -742,7 +742,9 @@ def test_atomic_claim_extraction_caps_prompt_documents(tmp_path, monkeypatch):
         def __init__(self, *, offline):
             self.offline = offline
 
-        def extract_claims_with_llm(self, docs, log=None):
+        def extract_claims_with_llm(
+            self, docs, log=None, *, mode=None, question=None,
+        ):
             observed.append(list(docs))
             return []
 

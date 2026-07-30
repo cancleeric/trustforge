@@ -607,3 +607,71 @@ class TestNarrateSynthesis:
         # Structural fields unchanged
         assert report.consensus == original_consensus
         assert report.conflicts == original_conflicts
+
+
+def test_full_payload_completeness_is_independent_of_source_overlap():
+    payload = {
+        "report": {
+            "question_type": "multi_source",
+            "direction": "偏多",
+            "calibrated_confidence": 0.7,
+            "decision_state": "normal",
+            "market_judgment": "資料完整的判斷",
+            "key_basis": [{"claim": "依據"}],
+        },
+        "evidence": [{"source": "one"}],
+        "snapshot_id": "snap-complete",
+    }
+    result = angle_result_from_payload(
+        "risk", payload, job_id="job-complete", question="完整度問題"
+    )
+
+    assert result.completeness == 1.0
+    assert result.missing_fields == []
+
+
+def test_report_and_evidence_existence_do_not_imply_full_completeness():
+    result = angle_result_from_payload(
+        "risk", {"report": {"direction": "偏多"}, "evidence": [{"source": "one"}]},
+        question="",
+    )
+
+    assert result.completeness < 1.0
+    assert "market_judgment" in result.missing_fields
+    assert "question" in result.missing_fields
+
+
+def test_same_source_all_five_exposes_all_overlap_pairs_without_divergence():
+    report = synthesize_angles(
+        _five_angles(evidence_sources={"shared"}), "BTC", "snap-shared"
+    )
+
+    assert len(report.evidence_overlaps) == 10
+    assert report.direction_divergences == []
+    assert "沒有獨立交叉佐證" in report.synthesis_summary
+
+
+def test_zero_independence_narration_fallbacks_preserve_required_limit(monkeypatch):
+    from trustforge.multi_angle import narrate_synthesis
+
+    report = synthesize_angles(
+        _five_angles(evidence_sources={"shared"}), "BTC", "snap-narration-zero"
+    )
+
+    monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "0")
+    assert "沒有獨立交叉佐證" in narrate_synthesis(report, client=None)
+
+    monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "1")
+
+    class OfflineClient:
+        offline = True
+
+    assert "沒有獨立交叉佐證" in narrate_synthesis(report, client=OfflineClient())
+
+    class InvalidNarration:
+        offline = False
+
+        def complete(self, system, prompt):
+            return type("Result", (), {"text": "模型摘要未提及限制"})()
+
+    assert "沒有獨立交叉佐證" in narrate_synthesis(report, client=InvalidNarration())
