@@ -9,6 +9,11 @@ publish = false
 [features]
 adversarial-test-hooks = []
 
+[[bin]]
+name = "nf2-second-exec-fixture"
+path = "src/bin/nf2_second_exec_fixture.rs"
+required-features = ["adversarial-test-hooks"]
+
 [profile.release]
 codegen-units = 1
 lto = true
