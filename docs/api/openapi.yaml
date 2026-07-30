@@ -1917,6 +1917,61 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Envelope"
+  /api/admin/whale-alert:
+    get:
+      tags: [admin]
+      operationId: getWhaleAlertCredentialStatus
+      summary: 讀取 Whale Alert API key 的遮罩狀態
+      security:
+        - AdminToken: []
+      responses:
+        "200":
+          description: 僅回傳 configured、source、last_verified_at，永不回傳明文
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          description: 管理 token 缺少或無效
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+    post:
+      tags: [admin]
+      operationId: updateWhaleAlertCredential
+      summary: 安全寫入、清除或驗證 Whale Alert API key
+      security:
+        - AdminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [action, api_key]
+                  properties:
+                    action: {type: string, const: set}
+                    api_key: {type: string, minLength: 16, maxLength: 512}
+                - type: object
+                  additionalProperties: false
+                  required: [action]
+                  properties:
+                    action: {type: string, enum: [clear, test]}
+      responses:
+        "200":
+          description: 遮罩後的新狀態；明文 key 永不回傳
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: 管理 token 缺少或無效
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/admin/config:
     get:
       tags: [admin]

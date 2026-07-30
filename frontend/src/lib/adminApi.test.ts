@@ -11,9 +11,11 @@ import {
   getAdminAudit,
   getAdminBackendProviders,
   getAdminConfig,
+  getWhaleAlertCredentialStatus,
   putAdminConfig,
   setAdminBackendProvider,
   setAllAdminBackendProviders,
+  updateWhaleAlertCredential,
 } from './endpoints'
 import type { AdminConfigData } from './types'
 
@@ -83,6 +85,52 @@ function validBackendProvidersData() {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('Whale Alert Admin API', () => {
+  it('keeps the key in a no-store authenticated POST body and never in the URL', async () => {
+    const key = 'write-only-whale-key-123456'
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        ok: true,
+        data: { configured: true, source: 'ssm', last_verified_at: null },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await updateWhaleAlertCredential('admin-token', 'set', key)
+
+    expect(result.ok).toBe(true)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('/api/admin/whale-alert')
+    expect(String(url)).not.toContain(key)
+    expect(init.cache).toBe('no-store')
+    expect(init.headers).toMatchObject({ 'X-Admin-Token': 'admin-token' })
+    expect(init.body).toBe(JSON.stringify({ action: 'set', api_key: key }))
+    expect(JSON.stringify(result)).not.toContain(key)
+  })
+
+  it('rejects a response that attempts to return the plaintext field', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          ok: true,
+          data: {
+            configured: true,
+            source: 'ssm',
+            last_verified_at: null,
+            api_key: 'must-not-be-accepted',
+          },
+        }),
+      ),
+    )
+
+    const result = await getWhaleAlertCredentialStatus('admin-token')
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
 })
 
 describe('admin endpoints — 請求形狀（token 走 header、PUT 帶 CAS body）', () => {

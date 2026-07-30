@@ -47,6 +47,7 @@ import type {
   TrustRadar,
   TrustRadarDimension,
 } from './types'
+import type { WhaleAlertCredentialStatus } from './types'
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -654,6 +655,24 @@ export function isAdminAuditData(value: unknown): value is AdminAuditData {
     typeof value.limit === 'number' &&
     Array.isArray(value.records) &&
     value.records.every(isAdminAuditRecord)
+  )
+}
+
+export function isWhaleAlertCredentialStatus(
+  value: unknown,
+): value is WhaleAlertCredentialStatus {
+  return (
+    isPlainObject(value) &&
+    Object.keys(value).length === 3 &&
+    Object.keys(value).every((key) =>
+      ['configured', 'source', 'last_verified_at'].includes(key),
+    ) &&
+    typeof value.configured === 'boolean' &&
+    ['ssm', 'file', 'environment', 'unconfigured', 'unavailable'].includes(
+      String(value.source),
+    ) &&
+    (value.last_verified_at === null ||
+      typeof value.last_verified_at === 'string')
   )
 }
 

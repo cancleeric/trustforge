@@ -8,6 +8,7 @@ REGION="${REGION:-ap-southeast-2}"
 NAME=trustforge
 MODEL="${BEDROCK_MODEL_ID-}"
 TOKEN_SSM_PREFIX="${TRUSTFORGE_TOKEN_SSM_PREFIX-}"
+WHALE_ALERT_SSM_PARAMETER="${TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER:-/trustforge/production/whale-alert-api-key}"
 DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
 BUDGET_BACKEND="${TRUSTFORGE_BUDGET_GUARD_BACKEND:-dynamodb}"
 CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
@@ -17,6 +18,10 @@ LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
 
 if [ -n "$TOKEN_SSM_PREFIX" ] && ! [[ "$TOKEN_SSM_PREFIX" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
   echo "[ec2] ERROR: TRUSTFORGE_TOKEN_SSM_PREFIX contains invalid characters" >&2
+  exit 1
+fi
+if ! [[ "$WHALE_ALERT_SSM_PARAMETER" =~ ^/[A-Za-z0-9_./-]{1,255}$ ]]; then
+  echo "[ec2] ERROR: TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER is invalid" >&2
   exit 1
 fi
 if [ -n "$DAILY_CAP" ] && ! [[ "$DAILY_CAP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
@@ -29,6 +34,7 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
 fi
 
 EXTRA_UNIT_ENV=""
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER=${WHALE_ALERT_SSM_PARAMETER}\n"
 [ -n "$DAILY_CAP" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=${DAILY_CAP}\n"
 [ -n "$TOKEN_SSM_PREFIX" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX}\n"
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_GUARD_BACKEND=${BUDGET_BACKEND}\n"
@@ -167,7 +173,10 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
     {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}}
   ]}" >/dev/null
 
-aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-cloudwatch \
+  REGION="$REGION" TRUSTFORGE_EC2_ROLE="$ROLE" \
+    TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER="$WHALE_ALERT_SSM_PARAMETER" \
+    ./deploy/setup_whale_alert_ssm.sh
+  aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-cloudwatch \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[\"Effect\":\"Allow\",\"Action\":\"cloudwatch:PutMetricData\",\"Resource\":\"*\"]}" >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-dynamodb \

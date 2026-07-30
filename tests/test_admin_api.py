@@ -136,6 +136,92 @@ def _request(
     return captured[0], h.wfile.getvalue().decode("utf-8"), sent_headers
 
 
+def test_whale_alert_admin_status_is_authenticated_and_masked(
+    admin_enabled, monkeypatch
+):
+    monkeypatch.setattr(
+        web.whale_alert_secret,
+        "status",
+        lambda: web.whale_alert_secret.SecretStatus(True, "ssm", None),
+    )
+
+    denied, _, _ = _request("GET", "/api/admin/whale-alert")
+    status, body, headers = _request(
+        "GET", "/api/admin/whale-alert", token=admin_enabled
+    )
+
+    assert denied == 401
+    assert status == 200
+    assert headers["Cache-Control"] == "no-store"
+    assert json.loads(body)["data"] == {
+        "configured": True,
+        "source": "ssm",
+        "last_verified_at": None,
+    }
+
+
+def test_whale_alert_admin_set_is_write_only(admin_enabled, monkeypatch):
+    secret = "write-only-whale-key-123456"
+    observed = []
+
+    def fake_put(value):
+        observed.append(value)
+        return web.whale_alert_secret.SecretStatus(True, "ssm", None)
+
+    monkeypatch.setattr(web.whale_alert_secret, "put_api_key", fake_put)
+    status, body, _ = _request(
+        "POST",
+        "/api/admin/whale-alert",
+        token=admin_enabled,
+        body=json.dumps({"action": "set", "api_key": secret}),
+    )
+
+    assert status == 200
+    assert observed == [secret]
+    assert secret not in body
+
+
+@pytest.mark.parametrize("action", ["clear", "test"])
+def test_whale_alert_admin_clear_and_test(admin_enabled, monkeypatch, action):
+    called = []
+    result = web.whale_alert_secret.SecretStatus(
+        action == "test", "ssm" if action == "test" else "unconfigured", None
+    )
+    monkeypatch.setattr(
+        web.whale_alert_secret,
+        "clear_api_key",
+        lambda: called.append("clear") or result,
+    )
+    monkeypatch.setattr(
+        web.whale_alert_secret,
+        "verify_connection",
+        lambda: called.append("test") or result,
+    )
+
+    status, body, _ = _request(
+        "POST",
+        "/api/admin/whale-alert",
+        token=admin_enabled,
+        body=json.dumps({"action": action}),
+    )
+
+    assert status == 200
+    assert called == [action]
+    assert "api_key" not in body
+
+
+def test_whale_alert_admin_rejects_non_string_action(admin_enabled):
+    status, body, _ = _request(
+        "POST",
+        "/api/admin/whale-alert",
+        token=admin_enabled,
+        body=json.dumps({"action": ["set"], "api_key": "not-used-key-123456"}),
+    )
+
+    assert status == 400
+    assert json.loads(body)["error"]["code"] == "bad_request"
+
+
 def _put_config(
     payload_json: str,
     *,
