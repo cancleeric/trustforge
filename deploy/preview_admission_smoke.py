@@ -5,17 +5,6 @@ from __future__ import annotations
 
 import os
 
-from trustforge.preview_admission_deployment import (
-    PreviewAdmissionRuntimeComposer,
-    PreviewDeploymentConfig,
-)
-from trustforge.preview_admission_executor import (
-    AwsQuotaKeyReference,
-    AwsQuotaLifecycleBootstrap,
-)
-from trustforge.preview_trusted_clock import TrustedUtcInterval
-
-
 def _integer(name: str) -> int:
     value = os.environ.get(name, "")
     if not value.isascii() or not value.isdigit():
@@ -24,13 +13,31 @@ def _integer(name: str) -> int:
 
 
 def main() -> int:
-    config = PreviewDeploymentConfig.from_env(
-        expected_kms_key_arn=os.environ["TRUSTFORGE_PREVIEW_KMS_KEY_ARN"],
-        expected_table_arn=os.environ["TRUSTFORGE_PREVIEW_TABLE_ARN"],
-    )
-    if not config.requested:
+    raw_flag = os.environ.get("TRUSTFORGE_PREVIEW_ADMISSION_ENABLED", "0")
+    if raw_flag not in {"0", "1"}:
+        print("preview_admission_smoke=invalid_flag")
+        return 2
+    if raw_flag == "0":
         print("preview_admission_smoke=off")
         return 0
+    # Keep imports below the off return: disabled smoke has no AWS/composition
+    # import, no required deployment variables, and no provider I/O.
+    from trustforge.preview_admission_deployment import (
+        PreviewAdmissionRuntimeComposer,
+        PreviewDeploymentConfig,
+    )
+    from trustforge.preview_admission_executor import (
+        AwsQuotaKeyReference,
+        AwsQuotaLifecycleBootstrap,
+    )
+    from trustforge.preview_trusted_clock import TrustedUtcInterval
+
+    config = PreviewDeploymentConfig.from_env(
+        expected_kms_key_arn=os.environ[
+            "TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN"
+        ],
+        expected_table_arn=os.environ["TRUSTFORGE_PREVIEW_TABLE_ARN"],
+    )
     activated = _integer("TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED")
     previous = None
     previous_activated = superseded = retire_not_before = None

@@ -19,6 +19,7 @@ from trustforge.preview_admission_executor import (
 from trustforge.preview_lease_recovery import (
     PreviewAmbiguityRecovery,
     PreviewLeaseRecovery,
+    RecoveryOutcome,
 )
 from trustforge.preview_terminal_reconcile import PreviewTerminalReconciler
 
@@ -34,6 +35,7 @@ DEFAULT_TABLE = "trustforge-preview-admission"
 TTL_ATTRIBUTE = "ttl"
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
 _PARAMETER_RE = re.compile(r"^/[A-Za-z0-9_.\-/]{1,1010}$")
+_READ_ONLY_READY = object()
 
 
 class PreviewDeploymentStatus(StrEnum):
@@ -69,6 +71,9 @@ class PreviewDeploymentConfig:
             or not _TABLE_RE.fullmatch(self.table_name)
             or type(self.quota_key_parameter) is not str
             or not _PARAMETER_RE.fullmatch(self.quota_key_parameter)
+            or not self.quota_key_parameter.startswith(
+                "/trustforge/preview-admission/"
+            )
             or type(self.expected_kms_key_arn) is not str
             or not self.expected_kms_key_arn.startswith("arn:")
             or ":kms:" not in self.expected_kms_key_arn
@@ -90,6 +95,7 @@ class PreviewDeploymentConfig:
         if any(value is not None for value in previous) and not (
             type(previous[0]) is str
             and _PARAMETER_RE.fullmatch(previous[0])
+            and previous[0].startswith("/trustforge/preview-admission/")
             and type(previous[1]) is int
             and previous[1] + 1 == self.quota_key_version
             and type(previous[2]) is str
@@ -114,7 +120,7 @@ class PreviewDeploymentConfig:
             requested=raw == "1",
             table_name=values.get(TABLE_ENV, DEFAULT_TABLE),
             quota_key_parameter=values.get(
-                KEY_PARAMETER_ENV, "/trustforge/runtime/preview/quota-hmac"
+                KEY_PARAMETER_ENV, "/trustforge/preview-admission/quota-hmac"
             ),
             expected_kms_key_arn=expected_kms_key_arn,
             expected_table_arn=expected_table_arn,
@@ -140,6 +146,8 @@ class PreviewDeploymentClient(Protocol):
     def describe_continuous_backups(self, **kwargs: object) -> object: ...
 
     def list_tags_of_resource(self, **kwargs: object) -> object: ...
+
+    def transact_get_items(self, **kwargs: object) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +284,22 @@ class PreviewAdmissionRuntimeComposer:
         )
 
     @classmethod
+    def install_production_lifecycle(
+        cls,
+        *,
+        config: PreviewDeploymentConfig,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+    ) -> PreviewAdmissionProductionRuntime:
+        """Explicit admin-only #993 install/attach path."""
+
+        if not config.requested or not _lifecycle_matches_config(lifecycle, config):
+            raise ValueError("lifecycle config mismatch")
+        return PreviewAdmissionProductionRuntime.from_aws_components(
+            config.table_name, lifecycle=lifecycle, region_name=region_name
+        )
+
+    @classmethod
     def evaluate_production(
         cls,
         *,
@@ -291,20 +315,35 @@ class PreviewAdmissionRuntimeComposer:
                 "feature_default_off",
                 config.table_name,
             )
+        if not _lifecycle_matches_config(lifecycle, config):
+            return PreviewStoreReadiness(
+                PreviewDeploymentStatus.UNAVAILABLE,
+                "lifecycle_config_mismatch",
+                config.table_name,
+            )
         try:
+            import boto3
+            from botocore.config import Config
+
+            probe_client = boto3.client(
+                "dynamodb",
+                region_name=region_name,
+                config=Config(
+                    retries={"total_max_attempts": 1, "mode": "standard"}
+                ),
+            )
+            verifier = cls(
+                client=probe_client,
+                config=config,
+                compose=lambda: _READ_ONLY_READY,
+            )
+            checks = verifier._verify_store()
+            _probe_authority_rows(probe_client, config.table_name)
             runtime = PreviewAdmissionProductionRuntime.from_aws_components(
                 config.table_name,
                 lifecycle=lifecycle,
                 region_name=region_name,
             )
-            verifier = cls(
-                client=runtime.executor._client,
-                config=config,
-                compose=lambda: runtime,
-            )
-            result = verifier.evaluate()
-            if not result.enabled:
-                raise ValueError("production runtime unavailable")
             # These properties are backed by the same exact client and validate
             # control/lifecycle on construction; clock refresh is an explicit
             # authenticated, low-cardinality readiness sample.
@@ -319,7 +358,7 @@ class PreviewAdmissionRuntimeComposer:
                 PreviewDeploymentStatus.READY,
                 "production_runtime_ready",
                 config.table_name,
-                result.checks + ("control", "watermark", "lifecycle", "clock"),
+                checks + ("control", "watermark", "lifecycle", "clock"),
                 runtime,
             )
         except Exception:
@@ -393,6 +432,46 @@ class PreviewAdmissionRuntimeComposer:
         return ("table", "kms", "ttl", "pitr", "dedicated")
 
 
+def read_only_preview_probe(
+    config: PreviewDeploymentConfig, *, region_name: str | None = None
+) -> PreviewStoreReadiness:
+    """Infrastructure and authority rows only; never loads keys or writes."""
+
+    if type(config) is not PreviewDeploymentConfig or not config.requested:
+        return PreviewStoreReadiness(
+            PreviewDeploymentStatus.DISABLED,
+            "feature_default_off",
+            getattr(config, "table_name", DEFAULT_TABLE),
+        )
+    try:
+        import boto3
+        from botocore.config import Config
+
+        client = boto3.client(
+            "dynamodb",
+            region_name=region_name,
+            config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
+        )
+        verifier = PreviewAdmissionRuntimeComposer(
+            client=client, config=config, compose=lambda: _READ_ONLY_READY
+        )
+        checks = verifier._verify_store()
+        _probe_authority_rows(client, config.table_name)
+        return PreviewStoreReadiness(
+            PreviewDeploymentStatus.READY,
+            "read_only_ready",
+            config.table_name,
+            checks + ("control", "watermark", "lifecycle"),
+            _READ_ONLY_READY,
+        )
+    except Exception:
+        return PreviewStoreReadiness(
+            PreviewDeploymentStatus.UNAVAILABLE,
+            "read_only_unavailable",
+            config.table_name,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PreviewDisableObservation:
     control_state: str
@@ -451,24 +530,27 @@ def bounded_admin_recover_and_disable_check(
     try:
         clock = runtime.executor._durable_gate._trusted_clock
         interval = clock.refresh()
+        if required_shard < int(interval.latest // 60):
+            return PreviewDisableDecision(False, "required_shard_too_low")
         gate = runtime.executor._durable_gate
         if not gate.ready and not runtime.executor.recover_pending(
             runtime.ambiguity_recovery
         ):
             return PreviewDisableDecision(False, "pending_admission")
-        runtime.lease_recovery.run(interval)
-        watermark = runtime.lease_recovery._read_watermark()
-        control = gate._control
-        lifecycle = runtime.executor._lifecycle_authority._lifecycle
-        if control is None or lifecycle is None:
-            raise ValueError("authority unavailable")
+        recovery = runtime.lease_recovery.run(interval)
+        if recovery.outcome is RecoveryOutcome.UNAVAILABLE:
+            return PreviewDisableDecision(False, "recovery_unavailable")
+        rows = _strong_authority_snapshot(
+            runtime.executor._client, runtime.executor._table_name
+        )
+        control, watermark, lifecycle = rows
         return evaluate_preview_disable(
             PreviewDisableObservation(
-                control_state=control.state.value,
-                pending_binding=control.binding is not None,
-                recovery_shard=watermark.shard,
+                control_state=_ddb_s(control, "state"),
+                pending_binding=_ddb_s(control, "state") != "open",
+                recovery_shard=_ddb_n(watermark, "shard"),
                 required_shard=required_shard,
-                lifecycle_mode=lifecycle.mode.value,
+                lifecycle_mode=_ddb_s(lifecycle, "mode"),
             )
         )
     except Exception:
@@ -494,12 +576,8 @@ def advance_release_stage(
         if current is not PreviewReleaseStage.CANARY or canary_verified is not True:
             raise ValueError("enable requires verified canary")
     elif target is PreviewReleaseStage.DISABLED:
-        if (
-            current not in {PreviewReleaseStage.CANARY, PreviewReleaseStage.ENABLED}
-            or type(disable_decision) is not PreviewDisableDecision
-            or not disable_decision.safe_to_disable
-        ):
-            raise ValueError("rollback requires converged recovery")
+        if current not in {PreviewReleaseStage.CANARY, PreviewReleaseStage.ENABLED}:
+            raise ValueError("disable requires active preview stage")
     else:
         raise ValueError("unsupported release transition")
     return target
@@ -527,3 +605,111 @@ def _positive_int(value: object) -> int:
     if result < 1:
         raise ValueError("expected positive integer")
     return result
+
+
+def _lifecycle_matches_config(
+    lifecycle: object, config: PreviewDeploymentConfig
+) -> bool:
+    if type(lifecycle) is not AwsQuotaLifecycleBootstrap:
+        return False
+    current = lifecycle.current
+    if (
+        current.parameter_name != config.quota_key_parameter
+        or current.expected_version != config.quota_key_version
+        or current.key_id != config.quota_key_incarnation
+    ):
+        return False
+    previous = lifecycle.previous
+    if config.previous_quota_key_parameter is None:
+        return previous is None and lifecycle.generation in {1, 3}
+    return (
+        previous is not None
+        and previous.parameter_name == config.previous_quota_key_parameter
+        and previous.expected_version == config.previous_quota_key_version
+        and previous.key_id == config.previous_quota_key_incarnation
+        and lifecycle.generation == 2
+    )
+
+
+def _probe_authority_rows(client: object, table_name: str) -> None:
+    """One strong, read-only transaction; no lifecycle install or transition."""
+
+    control, watermark, lifecycle = _strong_authority_snapshot(client, table_name)
+    if (
+        _ddb_s(control, "kind") != "preview_admission_quarantine"
+        or _ddb_n(control, "schema_version") != 1
+        or _ddb_s(control, "state") not in {"open", "dispatching", "quarantined"}
+        or _ddb_s(watermark, "kind") != "preview_recovery_watermark"
+        or _ddb_n(watermark, "schema_version") != 1
+        or _ddb_n(watermark, "shard") < 0
+        or _ddb_s(lifecycle, "kind") != "quota_key_lifecycle_control"
+        or _ddb_n(lifecycle, "schema_version") != 1
+        or _ddb_s(lifecycle, "mode") not in {"single", "overlap"}
+        or _ddb_n(lifecycle, "generation") < 1
+    ):
+        raise ValueError("authority row malformed")
+
+
+def _strong_authority_snapshot(
+    client: object, table_name: str
+) -> tuple[object, object, object]:
+    response = client.transact_get_items(
+        TransactItems=[
+            {
+                "Get": {
+                    "TableName": table_name,
+                    "Key": {
+                        "pk": {"S": "PAP#1#CONTROL"},
+                        "sk": {"S": "ADMISSION#QUARANTINE"},
+                    },
+                }
+            },
+            {
+                "Get": {
+                    "TableName": table_name,
+                    "Key": {
+                        "pk": {"S": "PAP#1#RECOVERY"},
+                        "sk": {"S": "LEASE#WATERMARK"},
+                    },
+                }
+            },
+            {
+                "Get": {
+                    "TableName": table_name,
+                    "Key": {
+                        "pk": {"S": "PAP#1#QUOTA-KEY"},
+                        "sk": {"S": "LIFECYCLE#CONTROL"},
+                    },
+                }
+            },
+        ]
+    )
+    if type(response) is not dict or type(response.get("Responses")) is not list:
+        raise ValueError("authority probe unavailable")
+    rows = response["Responses"]
+    if len(rows) != 3 or any(type(row) is not dict or "Item" not in row for row in rows):
+        raise ValueError("authority row missing")
+    return tuple(row["Item"] for row in rows)  # type: ignore[return-value]
+
+
+def _ddb_s(item: object, name: str) -> str:
+    if type(item) is not dict or type(item.get(name)) is not dict:
+        raise ValueError("malformed DynamoDB item")
+    value = item[name]
+    if set(value) != {"S"} or type(value["S"]) is not str:
+        raise ValueError("malformed DynamoDB string")
+    return value["S"]
+
+
+def _ddb_n(item: object, name: str) -> int:
+    if type(item) is not dict or type(item.get(name)) is not dict:
+        raise ValueError("malformed DynamoDB item")
+    value = item[name]
+    if (
+        set(value) != {"N"}
+        or type(value["N"]) is not str
+        or not value["N"].isascii()
+        or not value["N"].isdigit()
+    ):
+        raise ValueError("malformed DynamoDB number")
+    return int(value["N"])

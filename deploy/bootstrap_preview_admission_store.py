@@ -4,6 +4,42 @@
 from __future__ import annotations
 
 import argparse
+import re
+
+MAX_EPOCH_MINUTE = 4_223_371_679
+TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
+
+
+def verify_store(client: object, table: str, table_arn: str, kms_key_arn: str) -> None:
+    described = client.describe_table(TableName=table)["Table"]
+    ttl = client.describe_time_to_live(TableName=table)["TimeToLiveDescription"]
+    backups = client.describe_continuous_backups(TableName=table)[
+        "ContinuousBackupsDescription"
+    ]
+    if (
+        described.get("TableName") != table
+        or described.get("TableArn") != table_arn
+        or described.get("TableStatus") != "ACTIVE"
+        or described.get("KeySchema")
+        != [
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ]
+        or described.get("AttributeDefinitions")
+        != [
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ]
+        or described.get("SSEDescription", {}).get("KMSMasterKeyArn")
+        != kms_key_arn
+        or ttl
+        != {"TimeToLiveStatus": "ENABLED", "AttributeName": "ttl"}
+        or backups.get("PointInTimeRecoveryDescription", {}).get(
+            "PointInTimeRecoveryStatus"
+        )
+        != "ENABLED"
+    ):
+        raise RuntimeError("preview store verification failed")
 
 
 def _put_if_absent(client: object, table: str, item: dict[str, object]) -> None:
@@ -28,8 +64,13 @@ def _put_if_absent(client: object, table: str, item: dict[str, object]) -> None:
 
 
 def bootstrap(client: object, table: str, initial_shard: int) -> None:
-    if type(initial_shard) is not int or initial_shard < 0:
-        raise ValueError("invalid initial shard")
+    if (
+        type(table) is not str
+        or not TABLE_RE.fullmatch(table)
+        or type(initial_shard) is not int
+        or not 0 <= initial_shard <= MAX_EPOCH_MINUTE
+    ):
+        raise ValueError("invalid bootstrap target")
     _put_if_absent(
         client,
         table,
@@ -59,10 +100,15 @@ def bootstrap(client: object, table: str, initial_shard: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-aws", action="store_true")
     parser.add_argument("--table", required=True)
+    parser.add_argument("--table-arn", required=True)
+    parser.add_argument("--table-kms-key-arn", required=True)
     parser.add_argument("--initial-shard", required=True, type=int)
     parser.add_argument("--region")
     args = parser.parse_args()
+    if not args.allow_aws:
+        parser.error("--allow-aws is required")
     import boto3
     from botocore.config import Config
 
@@ -71,8 +117,15 @@ def main() -> None:
         region_name=args.region,
         config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
     )
+    verify_store(client, args.table, args.table_arn, args.table_kms_key_arn)
     bootstrap(client, args.table, args.initial_shard)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        print("preview_admission_bootstrap=failed")
+        raise SystemExit(1) from None

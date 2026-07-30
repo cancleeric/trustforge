@@ -14,6 +14,21 @@ CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
 COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
 LEASE_BACKEND="${TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND:-dynamodb}"
 LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
+PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
+PREVIEW_ENV_KEYS=(
+  TRUSTFORGE_PREVIEW_ADMISSION_TABLE TRUSTFORGE_PREVIEW_TABLE_ARN
+  TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_VERSION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_QUOTA_LIFECYCLE_GENERATION
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_RETIRE_NOT_BEFORE
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST
+)
 
 if [ -n "$TOKEN_SSM_PREFIX" ] && ! [[ "$TOKEN_SSM_PREFIX" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
   echo "[ec2] ERROR: TRUSTFORGE_TOKEN_SSM_PREFIX contains invalid characters" >&2
@@ -27,6 +42,17 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "[ec2] ERROR: BEDROCK_MODEL_ID contains invalid characters" >&2
   exit 1
 fi
+if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
+  echo "[ec2] ERROR: preview admission flag must be exactly 0 or 1" >&2
+  exit 1
+fi
+for key in "${PREVIEW_ENV_KEYS[@]}"; do
+  value="${!key-}"
+  if [ -n "$value" ] && ! [[ "$value" =~ ^[A-Za-z0-9_./:-]+$ ]]; then
+    echo "[ec2] ERROR: invalid preview deployment value" >&2
+    exit 1
+  fi
+done
 
 EXTRA_UNIT_ENV=""
 [ -n "$DAILY_CAP" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=${DAILY_CAP}\n"
@@ -36,6 +62,11 @@ EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_COUNTER_TABLE=${C
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_CW_METRICS=${CW_METRICS}\n"
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=${LEASE_BACKEND}\n"
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_LEASE_TABLE=${LEASE_TABLE}\n"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=${PREVIEW_ADMISSION_ENABLED}\n"
+for key in "${PREVIEW_ENV_KEYS[@]}"; do
+  value="${!key-}"
+  [ -n "$value" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=${key}=${value}\n"
+done
 
 ssm_env_cmd() {
   local key="$1" val="$2"
@@ -47,6 +78,10 @@ ssm_env_cmd() {
 }
 
 UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")$(ssm_env_cmd TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND "$LEASE_BACKEND")$(ssm_env_cmd TRUSTFORGE_LEASE_TABLE "$LEASE_TABLE")"
+UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd TRUSTFORGE_PREVIEW_ADMISSION_ENABLED "$PREVIEW_ADMISSION_ENABLED")"
+for key in "${PREVIEW_ENV_KEYS[@]}"; do
+  UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd "$key" "${!key-}")"
+done
 
 poll_ssm_terminal_status() {
   local cmdid="$1" iid="$2" max_wait="${3:-180}" interval="${4:-5}"
@@ -127,6 +162,10 @@ fi
 MATCH_COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
 
 ACCT=$(aws sts get-caller-identity --query Account --output text)
+PREVIEW_CURRENT_PARAMETER="${TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER:-/trustforge/preview-admission/quota-hmac}"
+PREVIEW_PREVIOUS_PARAMETER="${TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER:-/trustforge/preview-admission/__none__}"
+PREVIEW_CURRENT_PARAMETER_ARN="arn:aws:ssm:$REGION:$ACCT:parameter${PREVIEW_CURRENT_PARAMETER}"
+PREVIEW_PREVIOUS_PARAMETER_ARN="arn:aws:ssm:$REGION:$ACCT:parameter${PREVIEW_PREVIOUS_PARAMETER}"
 BUCKET="trustforge-deploy-${ACCT}"
 ROLE=trustforge-ec2
 SG=trustforge-ec2-sg
@@ -164,7 +203,8 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
     {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"},
     {\"Effect\":\"Allow\",\"Action\":[\"ssm:GetParameter\",\"ssm:GetParametersByPath\",\"ssm:DeleteParameter\"],\"Resource\":[\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy\",\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"]},
     {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/runtime/*\"},
-    {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}}
+    {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}},
+    {\"Effect\":\"Deny\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"ArnLike\":{\"kms:EncryptionContext:PARAMETER_ARN\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/preview-admission/*\"},\"ArnNotEquals\":{\"kms:EncryptionContext:PARAMETER_ARN\":[\"$PREVIEW_CURRENT_PARAMETER_ARN\",\"$PREVIEW_PREVIOUS_PARAMETER_ARN\"]}}}
   ]}" >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-cloudwatch \

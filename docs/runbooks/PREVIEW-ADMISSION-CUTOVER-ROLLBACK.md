@@ -12,12 +12,15 @@ defaults to `0`; the formal service remains isolated.
 2. Confirm the dedicated table is `ACTIVE`, `PAY_PER_REQUEST`, has only string
    `pk`/`sk`, KMS encryption, TTL on `ttl`, PITR enabled, and the
    `TrustForgeComponent=preview-admission` tag.
-3. Run `python deploy/bootstrap_preview_admission_store.py --table
-   trustforge-preview-admission --initial-shard EPOCH_MINUTE`. It conditionally
+3. Run `python deploy/bootstrap_preview_admission_store.py --allow-aws --table
+   trustforge-preview-admission --table-arn TABLE_ARN --table-kms-key-arn
+   TABLE_KMS_ARN --initial-shard EPOCH_MINUTE`. It first verifies the exact
+   table/schema/TTL/PITR/table-SSE CMK, then conditionally
    creates only the fixed OPEN control and recovery watermark, accepts an
    existing row only when it matches exactly, and never writes secret bytes.
-   The sealed runtime conditionally installs lifecycle metadata from exact SSM
-   `name:version` references. Never infer missing control rows.
+   Attach lifecycle metadata separately with `preview_admission_admin.py
+   --allow-aws install-lifecycle`; this is the explicit mutating #993 authority
+   path using exact SSM `name:version` references. Never infer missing rows.
 4. Run runtime readiness with the feature still off. Missing/malformed
    table/TTL/PITR/KMS/tag/key/lifecycle/clock evidence must remain unavailable.
    `deploy/preview_admission_smoke.py` must first report `off` with the flag
@@ -33,14 +36,15 @@ remains owned by #956.
 
 ## Rollback
 
-1. Stop new preview traffic first.
+1. Stop new preview traffic first. The `enabled/canary → disabled` kill switch
+   is unconditional and must never wait for recovery or cleanup.
 2. Keep the table, PITR, TTL, SSM revisions, KMS key, and lifecycle tombstones.
 3. Run bounded D2 recovery until the strong recovery watermark is beyond the
    required shard. The durable admission gate must be exact OPEN with no
    pending binding, and lifecycle mode must be SINGLE.
-4. Only a positive `evaluate_preview_disable` result permits
-   `enabled/canary → disabled`. An error, ABSENT ambiguity, overlap, or lag is
-   not proof.
+4. Only a positive `preview_admission_admin.py --allow-aws disable-check
+   --required-shard SHARD` result permits cleanup/retirement. An error, ABSENT
+   ambiguity, overlap, unavailable reaper, stale/low shard, or lag is not proof.
 5. Retain table and key revisions for at least reservation retention plus the
    completed rotation period. This runbook contains no delete command.
 

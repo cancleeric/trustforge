@@ -11,6 +11,8 @@ Parameters:
     Default: ""
   QuotaKeyKmsKeyArn:
     Type: String
+  TableKmsKeyArn:
+    Type: String
   PreviewEnabled:
     Type: String
     Default: "0"
@@ -42,7 +44,7 @@ Resources:
       SSESpecification:
         SSEEnabled: true
         SSEType: KMS
-        KMSMasterKeyId: !Ref QuotaKeyKmsKeyArn
+        KMSMasterKeyId: !Ref TableKmsKeyArn
       Tags:
         - Key: TrustForgeComponent
           Value: preview-admission
