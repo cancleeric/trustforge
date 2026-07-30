@@ -309,14 +309,12 @@ impl Dir {
             return Err(Error::UnsafeObject("payload bound exceeds cap"));
         }
         let name = checked_name(name)?;
-        let fd = self.open_verified(name.as_c_str(), Some(max))?;
+        let accepted_modes: &[u32] = if readonly { &[0o400, 0o444] } else { &[0o600] };
+        let fd = self.open_verified_mode(name.as_c_str(), Some(max), accepted_modes)?;
         let before = sys::fstat(&fd)?;
         let named_before = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
         if generation(&before) != generation(&named_before) {
             return Err(Error::IdentityChanged);
-        }
-        if readonly && !matches!(before.mode & 0o777, 0o400 | 0o444) {
-            return Err(Error::UnsafeObject("read-only file mode"));
         }
         let capacity = max
             .checked_add(1)
@@ -423,13 +421,25 @@ impl Dir {
     }
 
     fn open_verified(&self, name: &CStr, max: Option<usize>) -> Result<OwnedFd, Error> {
+        self.open_verified_mode(name, max, &[0o600])
+    }
+
+    fn open_verified_mode(
+        &self,
+        name: &CStr,
+        max: Option<usize>,
+        accepted_modes: &[u32],
+    ) -> Result<OwnedFd, Error> {
         let fd = sys::openat2(
             &self.fd,
             name,
             O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
             0,
         )?;
-        let opened = verify_file(&fd, self.uid, Some(0o600), max)?;
+        let opened = verify_file(&fd, self.uid, None, max)?;
+        if !accepted_modes.contains(&(opened.mode & 0o777)) {
+            return Err(Error::UnsafeObject("regular file mode mismatch"));
+        }
         let named = sys::statat(&self.fd, name, AT_SYMLINK_NOFOLLOW)?;
         if identity(&opened) != identity(&named) {
             return Err(Error::IdentityChanged);
@@ -935,6 +945,31 @@ mod tests {
         assert_eq!(dir.read("occupied", 32).unwrap(), b"existing");
         assert_eq!(dir.read("candidate", 32).unwrap(), b"new");
         assert_eq!(dir.entries().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn readonly_receipts_accept_only_readonly_modes_without_weakening_mutable_reads() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(f) = Fixture::new() else { return };
+        let dir = f.vfs.root().mkdir("receipts").unwrap();
+        let path = f.path.join("receipts");
+
+        std::fs::write(path.join("private"), b"private").unwrap();
+        std::fs::set_permissions(path.join("private"), std::fs::Permissions::from_mode(0o400))
+            .unwrap();
+        assert_eq!(dir.read_readonly("private", 16).unwrap(), b"private");
+        assert!(dir.read("private", 16).is_err());
+
+        std::fs::write(path.join("public"), b"public").unwrap();
+        std::fs::set_permissions(path.join("public"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        assert_eq!(dir.read_readonly("public", 16).unwrap(), b"public");
+
+        dir.create_new("mutable", b"mutable", 16).unwrap();
+        assert_eq!(dir.read("mutable", 16).unwrap(), b"mutable");
+        assert!(dir.read_readonly("mutable", 16).is_err());
     }
 
     #[test]

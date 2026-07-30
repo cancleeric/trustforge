@@ -3,7 +3,10 @@
 The fixed-path NF3-B build receipt is authority-neutral evidence. Before any
 durable burn or NF2 action, the integrated runner verifies the actual retained
 `/proc/self/exe` and a root-provisioned, read-only receipt containing the
-reviewed NF1/NF2 build components.
+reviewed NF1/NF2 build components. Read-only receipt files accept only mode
+`0400` or `0444`; mutable transaction-store reads remain restricted to `0600`.
+Both paths retain the same regular-file, root owner/group, single-link, size,
+and retained-versus-named generation checks.
 
 The NF2 source-tree receipt is platform-independent: it length-frames the exact
 Git subtree OID and the canonical linked-source digest under a fixed domain.
