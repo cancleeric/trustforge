@@ -696,6 +696,10 @@ def test_ci_runs_on_develop_and_main_and_pre_push_is_full_local_gate():
     assert "uv sync --frozen --extra dev" in hook
     assert "TRUSTFORGE_UV_CACHE_DIR" in hook
     assert "UV_CACHE_DIR=\"$UV_CACHE_DIR\"" in hook
+    assert "TRUSTFORGE_UV_PYTHON" in hook
+    assert "UV_PYTHON_DOWNLOADS=never" in hook
+    assert "sys.version_info < (3, 11)" in hook
+    assert '""|/Users/*)' in hook
     assert "import coverage, xdist" in hook
     assert "PYTHON=.venv/bin/python" in hook
 
