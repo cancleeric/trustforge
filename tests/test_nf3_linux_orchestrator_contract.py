@@ -57,7 +57,7 @@ def test_native_receipts_bind_the_reviewed_canonical_view_probe():
         "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4",
         "e567a05c349321f68d01aaa114d665e2e6bdf6381af211bda90dd2107eb971dc",
         "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1",
-        "6b9e9f677f19350f80ea8b52072d27df91e667e1a745b773da62c2d50c5f68f5",
+        "2cc766af9791160ded10a1bf487cc7f19e3ba8838107c6d55f90876b9ad14617",
     ):
         assert receipt in value
     assert 'source_a = copy_reviewed_build_inputs(repo, scratch / "source-a")' in value
