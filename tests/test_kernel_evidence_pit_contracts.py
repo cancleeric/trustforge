@@ -111,9 +111,13 @@ def test_worker_route_keeps_hostile_retrieval_context_out_of_evidence(
     documents_seen_by_claim_extraction: list[Document] = []
     original_extract = BedrockClient.extract_claims_with_llm
 
-    def record_claim_inputs(client, documents, *, log=None):
+    def record_claim_inputs(
+        client, documents, *, log=None, mode=None, question=None,
+    ):
         documents_seen_by_claim_extraction.extend(documents)
-        return original_extract(client, documents, log=log)
+        return original_extract(
+            client, documents, log=log, mode=mode, question=question,
+        )
 
     monkeypatch.setattr(BedrockClient, "extract_claims_with_llm", record_claim_inputs)
 
