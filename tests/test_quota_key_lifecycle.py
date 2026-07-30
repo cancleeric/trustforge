@@ -407,9 +407,9 @@ def test_ssm_loader_rejects_malformed_identity_and_secret(field):
 
 
 def test_ssm_loader_restart_exact_attach_uses_same_aws_revision():
-    client = FakeSsmClient({1: bytes(range(32))})
-    first = AwsSsmQuotaKeyMaterialProvider(client)
-    second = AwsSsmQuotaKeyMaterialProvider(client)
+    ssm = FakeSsmClient({1: bytes(range(32))})
+    first = AwsSsmQuotaKeyMaterialProvider(ssm)
+    second = AwsSsmQuotaKeyMaterialProvider(ssm)
     first_key = first.load(
         parameter_name="/trustforge/quota",
         expected_version=1,
@@ -422,6 +422,33 @@ def test_ssm_loader_restart_exact_attach_uses_same_aws_revision():
     )
     assert first_key.source_revision == second_key.source_revision
     assert first_key.key_bytes == second_key.key_bytes
+    dynamodb = DurableClockClient(2_000_000_000)
+    issued = TrustedUtcInterval(1_999_999_950, 1_999_999_951)
+    for provider, loaded in ((first, first_key), (second, second_key)):
+        clock = PreviewTrustedClock(
+            dynamodb_client=dynamodb,
+            table_name="preview-store",
+            monotonic_clock=lambda: 0.0,
+            wall_clock=lambda: float(dynamodb.second),
+        )
+        authority = DurableQuotaKeyLifecycleAuthority(
+            clock,
+            dynamodb_client=dynamodb,
+            table_name="preview-store",
+            key_material_provider=provider,
+        )
+        snapshot = authority.install(
+            QuotaKeyLifecycle(
+                generation=1,
+                issued=issued,
+                current=provider.bind_lifecycle(
+                    loaded, activated=1_999_999_960
+                ),
+            )
+        )
+        assert snapshot.lifecycle.current.source_revision == (
+            first_key.source_revision
+        )
 
 
 def test_ssm_loader_requires_retry_bounded_low_level_client():

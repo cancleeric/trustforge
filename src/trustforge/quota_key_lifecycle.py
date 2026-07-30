@@ -127,7 +127,11 @@ class AwsSsmQuotaKeyMaterialProvider:
                 or parameter.get("Type") != "SecureString"
                 or parameter.get("Version") != expected_version
                 or type(parameter.get("ARN")) is not str
-                or not parameter["ARN"].endswith(f":parameter/{requested}")
+                or len(parameter["ARN"].split(":", 5)) != 6
+                or parameter["ARN"].split(":", 5)[0] != "arn"
+                or parameter["ARN"].split(":", 5)[2] != "ssm"
+                or parameter["ARN"].split(":", 5)[5]
+                != f"parameter/{requested}"
                 or type(parameter.get("Value")) is not str
             ):
                 raise ValueError
