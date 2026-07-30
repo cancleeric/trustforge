@@ -21,7 +21,13 @@ if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c 'import coverage, xdist' >
     echo "[pre-push] FAILED: cannot create sandbox-safe uv cache" >&2
     exit 1
   fi
-  if ! UV_CACHE_DIR="$UV_CACHE_DIR" uv sync --frozen --extra dev; then
+  UV_PYTHON="${TRUSTFORGE_UV_PYTHON:-$(command -v python3)}"
+  if [ -z "$UV_PYTHON" ] || [ ! -x "$UV_PYTHON" ]; then
+    echo "[pre-push] FAILED: sandbox-safe system Python is unavailable" >&2
+    exit 1
+  fi
+  if ! UV_CACHE_DIR="$UV_CACHE_DIR" UV_PYTHON="$UV_PYTHON" \
+    UV_PYTHON_DOWNLOADS=never uv sync --frozen --extra dev; then
     echo "[pre-push] FAILED: frozen dev venv bootstrap"
     exit 1
   fi
