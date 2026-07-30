@@ -469,6 +469,41 @@ def test_ssm_loader_requires_retry_bounded_low_level_client():
         AwsSsmQuotaKeyMaterialProvider(client)
 
 
+def test_attach_existing_is_read_only_and_rejects_durable_mismatch():
+    client = DurableClockClient(2_000_000_000)
+    provider = _provider()
+    clock = PreviewTrustedClock(
+        dynamodb_client=client,
+        table_name="preview-store",
+        monotonic_clock=lambda: 0.0,
+        wall_clock=lambda: float(client.second),
+    )
+    authority = DurableQuotaKeyLifecycleAuthority(
+        clock,
+        dynamodb_client=client,
+        table_name="preview-store",
+        key_material_provider=provider,
+    )
+    loaded = provider.load(
+        parameter_name="/trustforge/quota",
+        expected_version=1,
+        key_id="quota-1",
+    )
+    lifecycle = QuotaKeyLifecycle(
+        generation=1,
+        issued=TrustedUtcInterval(1_999_999_950, 1_999_999_951),
+        current=provider.bind_lifecycle(loaded, activated=1_999_999_960),
+    )
+    authority.install(lifecycle)
+    client.puts.clear()
+    authority.attach_existing(lifecycle)
+    assert client.puts == []
+    client.item = None
+    with pytest.raises(ValueError, match="durable lifecycle mismatch"):
+        authority.attach_existing(lifecycle)
+    assert client.puts == []
+
+
 def test_ssm_loader_accepts_botocore_get_parameter_shape():
     client = boto3.client(
         "ssm",

@@ -321,6 +321,7 @@ class PreviewAdmissionExecutor:
         *,
         lifecycle: AwsQuotaLifecycleBootstrap,
         region_name: str | None = None,
+        _attach_only: bool = False,
     ) -> "PreviewAdmissionExecutor":
         """Compose one exact retry-bounded DynamoDB/SSM authority graph."""
 
@@ -367,14 +368,16 @@ class PreviewAdmissionExecutor:
                 superseded=lifecycle.superseded,
                 retire_not_before=lifecycle.retire_not_before,
             )
-        authority.install(
-            QuotaKeyLifecycle(
-                generation=lifecycle.generation,
-                issued=lifecycle.issued,
-                current=current,
-                previous=previous,
-            )
+        materialized = QuotaKeyLifecycle(
+            generation=lifecycle.generation,
+            issued=lifecycle.issued,
+            current=current,
+            previous=previous,
         )
+        if _attach_only:
+            authority.attach_existing(materialized)
+        else:
+            authority.install(materialized)
         gate = DurableAdmissionGate(
             dynamodb,
             table_name,
@@ -385,6 +388,21 @@ class PreviewAdmissionExecutor:
             table_name,
             durable_gate=gate,
             lifecycle_authority=authority,
+        )
+
+    @classmethod
+    def from_aws_components_attach_only(
+        cls,
+        table_name: str,
+        *,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+    ) -> "PreviewAdmissionExecutor":
+        return cls.from_aws_components(
+            table_name,
+            lifecycle=lifecycle,
+            region_name=region_name,
+            _attach_only=True,
         )
 
     def execute(self, bound: BoundAdmissionRequest) -> AdmissionExecutionResult:
