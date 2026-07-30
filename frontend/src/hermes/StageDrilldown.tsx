@@ -34,7 +34,10 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
 
   const isDivergence = selectedStage === 'divergence'
   const selDef = !isDivergence ? STAGE_DEFS.find((s) => s.id === selectedStage) : null
-  const label = isDivergence ? t('divergence') : selectedStage === 'scan' ? t('scan') : selectedStage === 'filter' ? t('filter') : selectedStage === 'crossverify' ? t('crossverify') : selectedStage === 'manipulation' ? t('manipulation') : t('composite')
+  const stageIndex = Math.max(0, STAGE_DEFS.findIndex((stage) => stage.id === selectedStage))
+  const label = isDivergence
+    ? t('divergence')
+    : selectedStage === 'scan' ? t('scan') : selectedStage === 'filter' ? t('filter') : selectedStage === 'crossverify' ? t('crossverify') : selectedStage === 'manipulation' ? t('manipulation') : t('composite')
   const icon = isDivergence ? '⚠' : selDef?.icon ?? ''
   const color = isDivergence ? HERMES_RED : selectedStage === 'manipulation' ? HERMES_AMBER
     : selectedStage === 'crossverify' ? fallbackDerivation.divColor
@@ -44,7 +47,6 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
   const toggle = (key: string) => setExpanded((e) => ({ ...e, [key]: !e[key] }))
   const componentLabel = (value: string) => value === 'Reputation' ? t('reputation') : value === 'Corroboration' ? t('corroboration') : value === 'Recency' ? t('recency') : t('resistance')
   const reasoningKind = (value: string) => value === 'FACTS' ? t('facts') : value === 'INFERENCE' ? t('inference') : t('conclusion')
-  const stageIndex = Math.max(0, STAGE_DEFS.findIndex((stage) => stage.id === selectedStage))
   const liveStage = telemetry?.runId ? undefined : flow?.stages[stageIndex]
   const stageId = liveStage?.id
   const recentAttempts = journey?.jobs.flatMap((job) => job.coin === selCoin.name && stageId
