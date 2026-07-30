@@ -90,6 +90,41 @@ esac
 run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
 run_gate "YAML duplicate keys" "$PYTHON" scripts/check_yaml_duplicate_keys.py
 run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json
+run_gate \
+  "NF2 zero-capability host tests" \
+  env CARGO_TARGET_DIR=out/nf2-cargo-target \
+    cargo test --manifest-path native/nf2-zero-capability-broker/Cargo.toml --locked
+run_gate \
+  "NF2 zero-capability x86_64-musl clippy" \
+  env CARGO_TARGET_DIR=out/nf2-cargo-target \
+    cargo clippy --manifest-path native/nf2-zero-capability-broker/Cargo.toml \
+    --target x86_64-unknown-linux-musl --all-targets -- -D warnings
+run_gate \
+  "NF2 adversarial-hook x86_64-musl compile and clippy" \
+  env CARGO_TARGET_DIR=out/nf2-cargo-target \
+    cargo clippy --manifest-path native/nf2-zero-capability-broker/Cargo.toml \
+    --target x86_64-unknown-linux-musl --all-targets \
+    --features adversarial-test-hooks -- -D warnings
+run_gate \
+  "NF2 adversarial-hook Linux tests compile" \
+  env CARGO_TARGET_DIR=out/nf2-cargo-target \
+    cargo check --manifest-path native/nf2-zero-capability-broker/Cargo.toml \
+    --target x86_64-unknown-linux-musl --all-targets \
+    --features adversarial-test-hooks --locked
+run_gate \
+  "NF2 release rejects adversarial hooks" \
+  bash -ceu 'log=out/nf2-release-hooks-rejection.log
+    if env CARGO_TARGET_DIR=out/nf2-cargo-target cargo check \
+      --manifest-path native/nf2-zero-capability-broker/Cargo.toml \
+      --release --target x86_64-unknown-linux-musl \
+      --features adversarial-test-hooks >"$log" 2>&1; then
+      echo "release unexpectedly accepted adversarial hooks" >&2
+      exit 1
+    fi
+    grep -q "structurally forbidden in release builds" "$log"'
+run_gate \
+  "NF2 Linux harness syntax" \
+  "$PYTHON" -m py_compile scripts/test_nf2_zero_capability_linux.py
 run_gate "competition QA" env TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 "$PYTHON" scripts/run_question_bank.py --limit 24 --out out/pre-push/question-bank-results.json
 if [ ! -x frontend/node_modules/.bin/vitest ]; then
   # The caller may export NODE_ENV=production (for example, OpenClaw and
