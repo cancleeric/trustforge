@@ -704,7 +704,16 @@ def test_midpage_deadline_checkpoints_exact_item_and_next_run_resumes():
         }
 
     client.query = query
-    ticks = iter([0, 0, 0, 0, 2])
+    deadline_reached = threading.Event()
+    real_transact_write_items = client.transact_write_items
+
+    def checkpoint_then_advance_clock(**kwargs):
+        response = real_transact_write_items(**kwargs)
+        if client.item.get("last_sk", {}).get("S") == f"ID#{handles[1].reservation_id}":
+            deadline_reached.set()
+        return response
+
+    client.transact_write_items = checkpoint_then_advance_clock
     interval = TrustedUtcInterval(
         base.expiry_shard * 60 + 60, base.expiry_shard * 60 + 61
     )
@@ -712,9 +721,10 @@ def test_midpage_deadline_checkpoints_exact_item_and_next_run_resumes():
         client,
         "preview-store",
         _terminal(client),
-        monotonic_clock=lambda: next(ticks),
+        monotonic_clock=lambda: 2 if deadline_reached.is_set() else 0,
         deadline_seconds=1,
     ).run(interval)
+    assert deadline_reached.is_set()
     assert first.outcome is RecoveryOutcome.PROGRESSED
     assert first.candidates == 2
     assert client.item["last_sk"]["S"] == f"ID#{handles[1].reservation_id}"
