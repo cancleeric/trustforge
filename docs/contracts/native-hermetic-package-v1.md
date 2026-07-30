@@ -34,6 +34,12 @@ fresh empty `CARGO_HOME`, non-user `HOME`, explicit pinned executables,
 incremental compilation and a path-remapping flag. This prevents a user Cargo
 configuration or clone path from changing the result.
 
+After the copy, every build, package-config, Cargo-resolution and generated
+source read comes only from that content-checked snapshot. The original
+worktree is rechecked as an additional alarm, but is not an input after the
+snapshot boundary; an ABA mutation therefore cannot mix original bytes into
+the package or provenance.
+
 The current package has no third-party dependency, so its vendor closure is
 explicitly empty. Adding one without a content-bound vendor tree returns
 `BLOCK`.
@@ -50,14 +56,20 @@ explicitly empty. Adding one without a content-bound vendor tree returns
 - `native-hermetic-digests.json`: SHA-256 identities for the manifest, archive
   and runtime.
 
-The runtime must be a bounds-valid ELF64 file and have neither `PT_INTERP` nor
-`DT_NEEDED`. The builder parses ELF/program/section/dynamic table boundaries
-itself; it never translates a missing external `readelf` into PASS.
+The runtime must be a bounds-valid x86-64 ELF64 file and have neither
+`PT_INTERP`, `PT_DYNAMIC` nor `DT_NEEDED`. The builder parses program segments
+even when section headers are absent, and parses section/dynamic table
+boundaries itself; it never translates a missing external `readelf` into PASS.
 
 The repository toolchain lock pins `rustup`, Cargo, rustc, rust-lld, the full
 host Rust sysroot/shared closure, the full target musl sysroot/libc closure and
 the host OS/kernel identity. Self-reported versions alone are insufficient.
 Every tool and closure is rehashed after the build.
+
+The same lock binds the resolved Python executable, the isolated imported
+stdlib/module files, recursively discoverable host dylib/framework files,
+unresolved system dependency names and the host dyld shared-cache map. The
+builder runtime closure is also recomputed at the end boundary.
 
 ## Reproducibility and negative evidence
 

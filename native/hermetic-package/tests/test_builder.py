@@ -92,13 +92,16 @@ def test_hostile_output_ancestor_cargo_config_is_rejected(tmp_path: Path) -> Non
         MODULE.build(source, hostile / "output")
 
 
-def _elf(*, interp: bool = False, needed: bool = False) -> bytes:
-    phnum = 1 if interp else 0
+def _elf(
+    *, interp: bool = False, needed: bool = False, dynamic_program: bool = False
+) -> bytes:
+    phnum = 1 if interp or dynamic_program else 0
     shnum = 1 if needed else 0
     phoff = 64
     shoff = phoff + phnum * 56
     dynamic_offset = shoff + shnum * 64
-    data = bytearray(dynamic_offset + (16 if needed else 0))
+    dynamic_size = 16 if needed or dynamic_program else 0
+    data = bytearray(dynamic_offset + dynamic_size)
     data[:16] = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
     struct.pack_into(
         "<HHIQQQIHHHHHH",
@@ -120,6 +123,11 @@ def _elf(*, interp: bool = False, needed: bool = False) -> bytes:
     )
     if interp:
         struct.pack_into("<I", data, phoff, 3)
+    if dynamic_program:
+        struct.pack_into("<I", data, phoff, 2)
+        struct.pack_into("<Q", data, phoff + 8, dynamic_offset)
+        struct.pack_into("<QQ", data, phoff + 32, 16, 16)
+        struct.pack_into("<qQ", data, dynamic_offset, 1, 0)
     if needed:
         struct.pack_into("<I", data, shoff + 4, 6)
         struct.pack_into("<QQ", data, shoff + 24, dynamic_offset, 16)
@@ -136,6 +144,7 @@ def test_bounds_checked_elf_parser_rejects_false_and_dynamic_elf(
         (b"\x7fELFfake libc.so", "bounds-valid"),
         (_elf(interp=True), "PT_INTERP"),
         (_elf(needed=True), "DT_NEEDED"),
+        (_elf(dynamic_program=True), "DT_NEEDED in PT_DYNAMIC"),
     ):
         path.write_bytes(payload)
         with pytest.raises(MODULE.BuildBlocked, match=match):
@@ -145,7 +154,19 @@ def test_bounds_checked_elf_parser_rejects_false_and_dynamic_elf(
 
 
 def test_authority_value_is_rejected() -> None:
-    for value in ("use signer capability", "release PASS", "trust-anchor"):
+    for value in (
+        "actor",
+        "key",
+        "private_key",
+        "key_id",
+        "raw_key",
+        "raw_public_key",
+        "use signer capability",
+        "release PASS",
+        "eligibility",
+        "release_eligibility",
+        "trust-anchor",
+    ):
         with pytest.raises(MODULE.BuildBlocked, match="value"):
             MODULE._reject_authority_metadata({"schema": value})
 
@@ -294,6 +315,35 @@ def test_concurrent_tool_change_blocks_end_reverification(
     monkeypatch.setattr(MODULE, "_toolchain", changed_at_end)
     with pytest.raises(MODULE.BuildBlocked, match="repository lock|changed"):
         MODULE.build(source, tmp_path / "output")
+
+
+def test_aba_mutation_of_original_inputs_cannot_change_snapshot_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source_repo(tmp_path)
+    baseline = MODULE.build(source, tmp_path / "baseline")
+    original_run = MODULE._run
+    mutated = False
+    relative_paths = (
+        "package/fixed-config.json",
+        "Cargo.lock",
+        "generated/source_epoch.rs",
+    )
+
+    def aba_after_compile(argv, *, cwd, env=None):
+        nonlocal mutated
+        result = original_run(argv, cwd=cwd, env=env)
+        if len(argv) > 1 and argv[1] == "build" and not mutated:
+            mutated = True
+            for relative in relative_paths:
+                path = source / "native/hermetic-package" / relative
+                original = path.read_bytes()
+                path.write_bytes(b"attacker ABA bytes")
+                path.write_bytes(original)
+        return result
+
+    monkeypatch.setattr(MODULE, "_run", aba_after_compile)
+    assert MODULE.build(source, tmp_path / "aba") == baseline
 
 
 @pytest.mark.parametrize(

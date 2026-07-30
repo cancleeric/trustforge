@@ -12,6 +12,7 @@ import shutil
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -41,9 +42,10 @@ FORBIDDEN_AUTHORITY_NAMES = frozenset(
         "publication_authority",
     }
 )
-FORBIDDEN_AUTHORITY_TOKENS = re.compile(
-    r"(?i)(actor|raw.?public.?key|signer|trust.?anchor|verdict|"
-    r"release.?eligib|publication.?authority|(?:^|[^a-z])pass(?:[^a-z]|$))"
+FORBIDDEN_AUTHORITY_VALUE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(?:actor|key|key_id|private_key|raw_key|"
+    r"raw_public_key|signer|trust[-_ ]?anchor|verdict|pass|eligibility|eligible|"
+    r"release_eligibility|publication_authority)(?:[^a-z0-9]|$)"
 )
 ALLOWED_MANIFEST_KEYS = frozenset(
     {
@@ -75,6 +77,10 @@ ALLOWED_MANIFEST_KEYS = frozenset(
         "target_libdir_entries",
         "host_sysroot_entries",
         "host_platform",
+        "builder_runtime",
+        "python_entries",
+        "dynamic_dependencies",
+        "dyld_cache_map",
         "os_build",
         "kernel",
         "environment",
@@ -159,15 +165,76 @@ def _reject_authority_metadata(value: Any) -> None:
                 in {
                     re.sub(r"[^a-z0-9]", "", item) for item in FORBIDDEN_AUTHORITY_NAMES
                 }
-                or FORBIDDEN_AUTHORITY_TOKENS.search(key)
+                or FORBIDDEN_AUTHORITY_VALUE.search(key)
             ):
                 raise BuildBlocked(f"authority metadata is forbidden: {key}")
             _reject_authority_metadata(child)
     elif isinstance(value, list):
         for child in value:
             _reject_authority_metadata(child)
-    elif isinstance(value, str) and FORBIDDEN_AUTHORITY_TOKENS.search(value):
+    elif isinstance(value, str) and FORBIDDEN_AUTHORITY_VALUE.search(value):
         raise BuildBlocked("authority metadata value is forbidden")
+
+
+def _validate_manifest_shape(value: dict[str, Any]) -> None:
+    if set(value) != {
+        "schema",
+        "vcs",
+        "sources",
+        "cargo_resolution",
+        "generated",
+        "toolchain",
+        "builder_runtime",
+        "environment",
+        "build",
+        "runtime_closure",
+        "package_entries",
+    }:
+        raise BuildBlocked("provenance top-level schema is not exact")
+    if value["schema"] != SCHEMA:
+        raise BuildBlocked("provenance schema enum is invalid")
+    if set(value["vcs"]) != {"commit", "tree"}:
+        raise BuildBlocked("VCS schema is not exact")
+    if set(value["build"]) != {
+        "argv",
+        "offline",
+        "locked",
+        "frozen",
+        "target",
+        "rustflags",
+    } or (
+        value["build"]["offline"],
+        value["build"]["locked"],
+        value["build"]["frozen"],
+        value["build"]["target"],
+    ) != (True, True, True, TARGET):
+        raise BuildBlocked("build schema or enum is invalid")
+    if set(value["runtime_closure"]) != {"method", "pt_interp", "dt_needed"}:
+        raise BuildBlocked("runtime closure schema is not exact")
+    if value["runtime_closure"] != {
+        "method": "bounds-checked-elf64-parser/v1",
+        "pt_interp": False,
+        "dt_needed": [],
+    }:
+        raise BuildBlocked("runtime closure enum is invalid")
+    expected_environment = {
+        "PATH",
+        "HOME",
+        "CARGO_HOME",
+        "RUSTC",
+        "SOURCE_DATE_EPOCH",
+        "TZ",
+        "LC_ALL",
+        "LANG",
+        "CARGO_INCREMENTAL",
+        "CARGO_NET_OFFLINE",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTFLAGS",
+        "WRAPPER_AND_AMBIENT_KNOBS",
+    }
+    if set(value["environment"]) != expected_environment:
+        raise BuildBlocked("environment allowlist schema is not exact")
 
 
 def _git_identity(source_root: Path) -> dict[str, str]:
@@ -311,6 +378,72 @@ def _toolchain(cargo: Path, rustc: Path, source_root: Path) -> dict[str, Any]:
     }
 
 
+def _builder_runtime(source_root: Path) -> dict[str, Any]:
+    python = Path(sys.executable).resolve()
+    probe = (
+        "import argparse,hashlib,json,os,re,shutil,stat,struct,subprocess,"
+        "tarfile,tempfile,tomllib,pathlib,typing,sys;"
+        "print(json.dumps(sorted({m.__file__ for m in sys.modules.values() "
+        "if getattr(m,'__file__',None)})))"
+    )
+    module_paths = json.loads(
+        _run([str(python), "-I", "-S", "-c", probe], cwd=source_root)
+    )
+    paths = [python]
+    for raw in module_paths:
+        path = Path(raw).resolve()
+        if path.is_file() and path not in paths:
+            paths.append(path)
+    otool = Path("/usr/bin/otool")
+    dependencies: set[str] = set()
+    queue = list(paths)
+    inspected: set[Path] = set()
+    while queue:
+        path = queue.pop()
+        if path in inspected:
+            continue
+        inspected.add(path)
+        if (
+            path == python
+            or path.suffix in {".so", ".dylib"}
+            or os.access(path, os.X_OK)
+        ):
+            output = _run([str(otool), "-L", str(path)], cwd=source_root)
+            for line in output.splitlines()[1:]:
+                dependency = line.strip().split(" (", 1)[0]
+                if dependency:
+                    dependencies.add(dependency)
+                    dependency_path = Path(dependency)
+                    if dependency_path.is_absolute() and dependency_path.is_file():
+                        resolved = dependency_path.resolve()
+                        if resolved not in paths:
+                            paths.append(resolved)
+                            queue.append(resolved)
+    entries = []
+    for path in sorted(paths, key=lambda item: str(item)):
+        if path.stat().st_nlink != 1:
+            raise BuildBlocked(f"Python runtime file is multiply linked: {path}")
+        entries.append(
+            {
+                "path": str(path),
+                "mode": f"{stat.S_IMODE(path.stat().st_mode):04o}",
+                "size": path.stat().st_size,
+                "sha256": _digest(path),
+            }
+        )
+    dyld_map = Path(
+        "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/"
+        "dyld_shared_cache_arm64e.map"
+    )
+    if not dyld_map.is_file():
+        raise BuildBlocked("host dyld shared-cache map is unavailable")
+    return {
+        "python_entries": entries,
+        "dynamic_dependencies": sorted(dependencies),
+        "dyld_cache_map": _entry(dyld_map, dyld_map.parent),
+    }
+
+
 def _elf_static_assertions(binary: Path) -> dict[str, Any]:
     data = binary.read_bytes()
     if len(data) < 64 or data[:4] != b"\x7fELF":
@@ -319,6 +452,8 @@ def _elf_static_assertions(binary: Path) -> dict[str, Any]:
         raise BuildBlocked("only ELF64 with known endianness is supported")
     endian = "<" if data[5] == 1 else ">"
     header = struct.unpack_from(endian + "HHIQQQIHHHHHH", data, 16)
+    if header[1] != 62:
+        raise BuildBlocked("ELF machine is not x86_64")
     phoff, shoff = header[4], header[5]
     phentsize, phnum = header[8], header[9]
     shentsize, shnum = header[10], header[11]
@@ -327,9 +462,25 @@ def _elf_static_assertions(binary: Path) -> dict[str, Any]:
     if phoff + phentsize * phnum > len(data) or shoff + shentsize * shnum > len(data):
         raise BuildBlocked("ELF table exceeds file bounds")
     for index in range(phnum):
-        p_type = struct.unpack_from(endian + "I", data, phoff + index * phentsize)[0]
+        offset = phoff + index * phentsize
+        p_type = struct.unpack_from(endian + "I", data, offset)[0]
+        p_offset, p_filesz, p_memsz = (
+            struct.unpack_from(endian + "Q", data, offset + 8)[0],
+            struct.unpack_from(endian + "Q", data, offset + 32)[0],
+            struct.unpack_from(endian + "Q", data, offset + 40)[0],
+        )
+        if p_filesz > p_memsz or p_offset + p_filesz > len(data):
+            raise BuildBlocked("ELF program segment exceeds file bounds")
         if p_type == 3:
             raise BuildBlocked("runtime contains PT_INTERP")
+        if p_type == 2:
+            if p_filesz % 16:
+                raise BuildBlocked("PT_DYNAMIC entry table is malformed")
+            for position in range(p_offset, p_offset + p_filesz, 16):
+                tag = struct.unpack_from(endian + "q", data, position)[0]
+                if tag == 1:
+                    raise BuildBlocked("runtime contains DT_NEEDED in PT_DYNAMIC")
+            raise BuildBlocked("runtime contains PT_DYNAMIC")
     needed = 0
     for index in range(shnum):
         offset = shoff + index * shentsize
@@ -393,7 +544,9 @@ def _cargo_resolution(crate: Path) -> dict[str, Any]:
     }
 
 
-def _validate_toolchain_lock(crate: Path, toolchain: dict[str, Any]) -> None:
+def _validate_toolchain_lock(
+    crate: Path, toolchain: dict[str, Any], builder_runtime: dict[str, Any]
+) -> None:
     lock_path = crate / "toolchain-lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     expected_keys = {
@@ -407,6 +560,9 @@ def _validate_toolchain_lock(crate: Path, toolchain: dict[str, Any]) -> None:
         "host_os_build",
         "host_kernel",
         "target_sysroot_tree_sha256",
+        "builder_python_entries_sha256",
+        "builder_dynamic_dependencies_sha256",
+        "builder_dyld_cache_map_sha256",
     }
     if set(lock) != expected_keys:
         raise BuildBlocked("toolchain lock schema is not exact")
@@ -427,6 +583,13 @@ def _validate_toolchain_lock(crate: Path, toolchain: dict[str, Any]) -> None:
         "host_os_build": toolchain["host_platform"]["os_build"],
         "host_kernel": toolchain["host_platform"]["kernel"],
         "target_sysroot_tree_sha256": target_tree,
+        "builder_python_entries_sha256": hashlib.sha256(
+            _canonical_json(builder_runtime["python_entries"])
+        ).hexdigest(),
+        "builder_dynamic_dependencies_sha256": hashlib.sha256(
+            _canonical_json(builder_runtime["dynamic_dependencies"])
+        ).hexdigest(),
+        "builder_dyld_cache_map_sha256": builder_runtime["dyld_cache_map"]["sha256"],
     }
     if lock != observed:
         raise BuildBlocked(
@@ -495,15 +658,13 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     builder_entry = _entry(builder_path, source_root)
     builder_entry["path"] = builder_path.relative_to(source_root).as_posix()
     source_entries.append(builder_entry)
-    generated_input = crate / "generated/source_epoch.rs"
     expected_generated = f'pub const SOURCE_EPOCH: &str = "{EPOCH}";\n'.encode()
-    if generated_input.read_bytes() != expected_generated:
-        raise BuildBlocked("generated source does not match canonical recipe")
 
     cargo = _resolve_tool("cargo")
     rustc = _resolve_tool("rustc")
     toolchain = _toolchain(cargo, rustc, source_root)
-    _validate_toolchain_lock(crate, toolchain)
+    builder_runtime = _builder_runtime(source_root)
+    _validate_toolchain_lock(crate, toolchain, builder_runtime)
     linker = _resolve_tool(
         "rust-lld",
         sysroot=Path(_run([str(rustc), "--print", "sysroot"], cwd=source_root)),
@@ -512,6 +673,10 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     _reject_ancestor_cargo_config(output_dir)
     build_crate = output_dir / ".build-input"
     shutil.copytree(crate, build_crate)
+    builder_snapshot = output_dir / ".builder-input.py"
+    shutil.copy2(builder_path, builder_snapshot)
+    if _digest(builder_snapshot) != builder_entry["sha256"]:
+        raise BuildBlocked("builder snapshot does not match pinned builder identity")
     snapshot_entries = [
         _entry(path, build_crate)
         for path in _regular_files(build_crate)
@@ -523,6 +688,12 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         if item["path"] != "scripts/build_native_hermetic_package.py"
     ] != snapshot_entries:
         raise BuildBlocked("source snapshot does not match pinned source identities")
+    snapshot_builder_entry = _entry(builder_snapshot, output_dir)
+    snapshot_builder_entry["path"] = "scripts/build_native_hermetic_package.py"
+    pinned_source_entries = [*snapshot_entries, snapshot_builder_entry]
+    generated_input = build_crate / "generated/source_epoch.rs"
+    if generated_input.read_bytes() != expected_generated:
+        raise BuildBlocked("generated source does not match canonical recipe")
     with tempfile.TemporaryDirectory(prefix="nf1-cargo-home-") as cargo_home:
         target_dir = output_dir / ".target"
         environment = {
@@ -540,7 +711,8 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER": str(linker),
             "RUSTFLAGS": (
                 f"--remap-path-prefix={build_crate}=/workspace/native/hermetic-package "
-                "-C link-arg=--build-id=none"
+                "-C relocation-model=static -C link-arg=--build-id=none "
+                "-C link-arg=-no-pie"
             ),
         }
         command = [
@@ -566,10 +738,10 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     shutil.copyfile(runtime, stage / "bin/trustforge-native-foundation")
     os.chmod(stage / "bin/trustforge-native-foundation", 0o555)
     shutil.copyfile(
-        crate / "package/fixed-config.json", stage / "config/fixed-config.json"
+        build_crate / "package/fixed-config.json", stage / "config/fixed-config.json"
     )
     shutil.copyfile(
-        crate / "package/public-metadata-format.json",
+        build_crate / "package/public-metadata-format.json",
         stage / "config/public-metadata-format.json",
     )
     for path in (stage / "config").iterdir():
@@ -581,8 +753,8 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     provenance: dict[str, Any] = {
         "schema": SCHEMA,
         "vcs": identity,
-        "sources": source_entries,
-        "cargo_resolution": _cargo_resolution(crate),
+        "sources": pinned_source_entries,
+        "cargo_resolution": _cargo_resolution(build_crate),
         "generated": {
             "recipe": "scripts/build_native_hermetic_package.py:EPOCH",
             "path": "generated/source_epoch.rs",
@@ -590,6 +762,7 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
             "size": generated_input.stat().st_size,
         },
         "toolchain": toolchain,
+        "builder_runtime": builder_runtime,
         "environment": {
             "PATH": "toolchain:bin-only",
             "HOME": "isolated:non-user-empty-home",
@@ -638,6 +811,7 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         ),
         "package_entries": package_entries,
     }
+    _validate_manifest_shape(provenance)
     _reject_authority_metadata(provenance)
     if _git_identity(source_root) != identity:
         raise BuildBlocked("source VCS identity changed during build")
@@ -645,9 +819,12 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     if current_entries != source_entries[:-1]:
         raise BuildBlocked("source inputs changed during build")
     end_toolchain = _toolchain(cargo, rustc, source_root)
-    _validate_toolchain_lock(crate, end_toolchain)
+    end_builder_runtime = _builder_runtime(source_root)
+    _validate_toolchain_lock(crate, end_toolchain, end_builder_runtime)
     if end_toolchain != toolchain:
         raise BuildBlocked("toolchain closure changed during build")
+    if end_builder_runtime != builder_runtime:
+        raise BuildBlocked("Python builder runtime closure changed during build")
     manifest = output_dir / "native-hermetic-provenance.json"
     manifest.write_bytes(_canonical_json(provenance))
     archive = output_dir / "native-hermetic-package.tar"
@@ -666,6 +843,7 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
         ),
     }
     shutil.rmtree(build_crate)
+    builder_snapshot.unlink()
     (output_dir / "native-hermetic-digests.json").write_bytes(_canonical_json(result))
     return result
 
