@@ -302,6 +302,7 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
                 or not re.fullmatch(r"[0-7]{4}", entry["mode"])
                 or not isinstance(entry["size"], int)
                 or entry["size"] < 0
+                or not isinstance(entry["sha256"], str)
                 or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
             ):
                 raise BuildBlocked(f"{label} field type is invalid")
@@ -352,11 +353,24 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
     if not isinstance(cargo_resolution["third_party_dependencies"], list):
         raise BuildBlocked("third-party Cargo dependency type is invalid")
     for dependency in cargo_resolution["third_party_dependencies"]:
-        exact(
+        dependency = exact(
             dependency,
             {"name", "version", "source", "checksum"},
             "third-party Cargo dependency",
         )
+        if (
+            not isinstance(dependency["name"], str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", dependency["name"])
+            or not isinstance(dependency["version"], str)
+            or not re.fullmatch(
+                r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", dependency["version"]
+            )
+            or not isinstance(dependency["source"], str)
+            or not dependency["source"].startswith(("registry+", "git+"))
+            or not isinstance(dependency["checksum"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", dependency["checksum"])
+        ):
+            raise BuildBlocked("third-party Cargo dependency field format is invalid")
     if not isinstance(cargo_resolution["vendor_entries"], list):
         raise BuildBlocked("vendor entry type is invalid")
     if cargo_resolution["vendor_entries"]:
@@ -367,11 +381,19 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
     generated = exact(
         value["generated"], {"recipe", "path", "sha256", "size"}, "generated"
     )
-    if not isinstance(generated["size"], int) or not re.fullmatch(
-        r"[0-9a-f]{64}", generated["sha256"]
+    if (
+        not isinstance(generated["recipe"], str)
+        or not isinstance(generated["path"], str)
+        or not isinstance(generated["size"], int)
+        or not isinstance(generated["sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", generated["sha256"])
     ):
         raise BuildBlocked("generated field type is invalid")
-    if generated["path"] != "generated/source_epoch.rs" or generated["size"] <= 0:
+    if (
+        generated["recipe"] != "scripts/build_native_hermetic_package.py:EPOCH"
+        or generated["path"] != "generated/source_epoch.rs"
+        or generated["size"] <= 0
+    ):
         raise BuildBlocked("generated field enum is invalid")
     toolchain = value["toolchain"]
     exact(
@@ -398,12 +420,22 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
             not isinstance(record["size"], int)
             or record["size"] <= 0
             or not isinstance(record["version"], str)
+            or not isinstance(record["sha256"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
         ):
             raise BuildBlocked(f"{name} field format is invalid")
     digest_entries(toolchain["target_libdir_entries"], "target sysroot")
     digest_entries(toolchain["host_sysroot_entries"], "host sysroot")
-    exact(toolchain["host_platform"], {"os_build", "kernel"}, "host platform")
+    host_platform = exact(
+        toolchain["host_platform"], {"os_build", "kernel"}, "host platform"
+    )
+    if (
+        not isinstance(host_platform["os_build"], str)
+        or not re.fullmatch(r"[0-9A-Z]+", host_platform["os_build"])
+        or not isinstance(host_platform["kernel"], str)
+        or not re.fullmatch(r"Darwin [0-9.]+ (?:arm64|x86_64)", host_platform["kernel"])
+    ):
+        raise BuildBlocked("host platform field format is invalid")
     runtime = exact(
         value["builder_runtime"],
         {
@@ -417,7 +449,8 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
     )
     digest_entries(runtime["python_entries"], "Python runtime", allow_absolute=True)
     if not isinstance(runtime["dynamic_dependencies"], list) or not all(
-        isinstance(item, str) for item in runtime["dynamic_dependencies"]
+        isinstance(item, str) and "\n" not in item and item.startswith(("/", "@"))
+        for item in runtime["dynamic_dependencies"]
     ):
         raise BuildBlocked("dynamic dependency schema is invalid")
     map_record = exact(
@@ -445,14 +478,31 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
             or record["mode"] != "0755"
             or not isinstance(record["size"], int)
             or record["size"] <= 0
+            or not isinstance(record["sha256"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
         ):
             raise BuildBlocked(f"{label} field format is invalid")
-    if not re.fullmatch(r"[0-9a-f]{32}", cache_record["uuid"]):
+    if not isinstance(cache_record["uuid"], str) or not re.fullmatch(
+        r"[0-9a-f]{32}", cache_record["uuid"]
+    ):
         raise BuildBlocked("dyld cache UUID format is invalid")
     for record in (cache_record, subcache_record):
-        if not re.fullmatch(r"[0-9a-f]{64}", record["code_directory_sha256"]):
+        if not isinstance(record["code_directory_sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", record["code_directory_sha256"]
+        ):
             raise BuildBlocked("dyld cache CDHash format is invalid")
+    expected_dyld_paths = {
+        "dyld cache map": "dyld_shared_cache_arm64e.map",
+        "dyld cache": "dyld_shared_cache_arm64e",
+        "dyld subcache": "dyld_shared_cache_arm64e.01",
+    }
+    for label, record in (
+        ("dyld cache map", map_record),
+        ("dyld cache", cache_record),
+        ("dyld subcache", subcache_record),
+    ):
+        if record["path"] != expected_dyld_paths[label]:
+            raise BuildBlocked(f"{label} path enum is invalid")
     if set(value["build"]) != {
         "argv",
         "offline",
@@ -535,6 +585,12 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
         raise BuildBlocked("RUSTFLAGS type is invalid")
     if value["environment"]["RUSTFLAGS"] != value["build"]["rustflags"]:
         raise BuildBlocked("RUSTFLAGS binding is inconsistent")
+    if value["environment"]["RUSTFLAGS"] != (
+        "--remap-path-prefix=/build-input=/workspace/native/hermetic-package "
+        "-C relocation-model=static -C link-arg=--build-id=none "
+        "-C link-arg=-no-pie"
+    ):
+        raise BuildBlocked("RUSTFLAGS canonical enum is invalid")
     if (
         not isinstance(value["package_entries"], list)
         or len(value["package_entries"]) != 5
@@ -555,6 +611,8 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
             raise BuildBlocked("package entry field format is invalid")
         if entry["type"] == "file" and (
             not isinstance(entry["size"], int)
+            or entry["size"] < 0
+            or not isinstance(entry["sha256"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
         ):
             raise BuildBlocked("package file field format is invalid")
@@ -1159,7 +1217,7 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
             command,
             cwd=build_crate,
             env=environment,
-            sealed_paths=[cargo, rustc, linker, tool_snapshot / "bin/rustup"],
+            sealed_paths=_regular_files(tool_snapshot),
         )
 
     runtime = target_dir / TARGET / "release/trustforge-native-foundation"

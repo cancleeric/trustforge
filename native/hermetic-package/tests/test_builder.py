@@ -301,8 +301,57 @@ def test_two_independent_clean_clones_are_byte_identical(tmp_path: Path) -> None
             "vendor entry type",
         ),
         (
+            lambda value: value["cargo_resolution"].update(
+                third_party_dependencies=[
+                    {
+                        "name": "dep",
+                        "version": "1.0.0",
+                        "source": "registry+locked",
+                        "checksum": 123,
+                    }
+                ],
+                vendor_entries=[
+                    {
+                        "path": "dep",
+                        "mode": "0444",
+                        "size": 1,
+                        "sha256": "0" * 64,
+                    }
+                ],
+            ),
+            "third-party Cargo dependency field format",
+        ),
+        (
+            lambda value: value["generated"].update(recipe="ambient recipe"),
+            "generated field enum",
+        ),
+        (
+            lambda value: value["generated"].update(sha256=123),
+            "generated field type",
+        ),
+        (
+            lambda value: value["toolchain"]["cargo"].update(size="large"),
+            "cargo field format",
+        ),
+        (
+            lambda value: value["toolchain"]["host_platform"].update(kernel=123),
+            "host platform field format",
+        ),
+        (
+            lambda value: value["builder_runtime"].update(
+                dynamic_dependencies=["relative/library"]
+            ),
+            "dynamic dependency schema",
+        ),
+        (
             lambda value: value["builder_runtime"]["dyld_cache"].update(uuid="bad"),
             "UUID format",
+        ),
+        (
+            lambda value: value["builder_runtime"]["dyld_cache"].update(
+                path="wrong-cache"
+            ),
+            "dyld cache path enum",
         ),
         (
             lambda value: value["builder_runtime"]["dyld_subcache"].update(
@@ -315,8 +364,22 @@ def test_two_independent_clean_clones_are_byte_identical(tmp_path: Path) -> None
             "environment enum",
         ),
         (
+            lambda value: value["environment"].update(RUSTFLAGS="ambient"),
+            "RUSTFLAGS binding|canonical enum",
+        ),
+        (
             lambda value: value["package_entries"][0].update(path="../escape"),
             "package path enum",
+        ),
+        (
+            lambda value: next(
+                entry for entry in value["package_entries"] if entry["type"] == "file"
+            ).update(size=-1),
+            "package file field format",
+        ),
+        (
+            lambda value: value["sources"][0].update(sha256=123),
+            "source entry field type",
         ),
     ]
     for mutate, match in mutations:
@@ -405,6 +468,24 @@ def test_tool_path_swap_restore_cannot_change_sealed_execution(
         snapshot_cargo.chmod(0o555)
 
     monkeypatch.setattr(MODULE, "_resolve_tool", resolve)
+    monkeypatch.setattr(MODULE, "_SEALED_EXEC_TEST_HOOK", swap_restore)
+    with pytest.raises(MODULE.BuildBlocked, match="sealed tool pathname changed"):
+        MODULE.build(source, tmp_path / "output")
+
+
+def test_tool_library_swap_restore_during_execution_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source_repo(tmp_path)
+
+    def swap_restore(sealed_paths):
+        library = next(path for path in sealed_paths if path.suffix == ".rlib")
+        original = library.read_bytes()
+        library.chmod(0o644)
+        library.write_bytes(b"attacker transient library")
+        library.write_bytes(original)
+        library.chmod(0o444)
+
     monkeypatch.setattr(MODULE, "_SEALED_EXEC_TEST_HOOK", swap_restore)
     with pytest.raises(MODULE.BuildBlocked, match="sealed tool pathname changed"):
         MODULE.build(source, tmp_path / "output")
