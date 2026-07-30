@@ -401,6 +401,7 @@ def test_constant_time_compare_uses_fixed_length_digest():
 # ---------------------------------------------------------------------------
 
 def test_get_config_shape_and_layers(admin_enabled, monkeypatch):
+    monkeypatch.delenv("TRUSTFORGE_DISABLE_ADMIN_CONFIG", raising=False)
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "2.5")
     monkeypatch.setenv("BEDROCK_MODEL_ID", "anthropic.claude-test")
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
