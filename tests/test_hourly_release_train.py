@@ -257,6 +257,8 @@ def test_training_data_reconciliation_requires_api_and_filesystem_parity(monkeyp
     assert train.verify_training_data_reconciliation("i-production") == 2005
     assert "systemctl', 'show', 'trustforge.service'" in "\n".join(calls[0])
     assert "TRUSTFORGE_TRAINING_DATA_DIR=" in "\n".join(calls[0])
+    assert "scan_training_data(resolve_training_data_dir())" in "\n".join(calls[0])
+    assert "json.loads(line)" not in "\n".join(calls[0])
 
 
 def test_training_data_reconciliation_rejects_missing_evidence(monkeypatch):
