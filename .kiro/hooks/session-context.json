@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Session Start Context",
+      "trigger": "SessionStart",
+      "description": "新 session 開始時顯示目前工作樹、近期提交與本機 Python 環境狀態",
+      "action": {
+        "type": "command",
+        "command": "echo '=== TrustForge Session Context ==='; git status --short --branch; echo '--- Recent commits ---'; git log --oneline -5; echo '--- Local environment ---'; test -x .venv/bin/python && .venv/bin/python --version || echo '.venv unavailable'",
+        "timeout": 15
+      }
+    }
+  ]
+}

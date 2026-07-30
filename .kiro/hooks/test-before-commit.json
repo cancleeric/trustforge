@@ -7,7 +7,7 @@
       "description": "任務完成前自動跑測試，確保程式碼品質。",
       "action": {
         "type": "command",
-        "command": "cd /Users/yinghaowang/HurricaneSoft/trustforge && .venv/bin/pytest tests/ -x -q --no-cov --timeout=60 2>&1 | tail -20",
+        "command": ".venv/bin/pytest tests/ -x -q --no-cov --timeout=60 2>&1 | tail -20",
         "timeout": 120
       }
     }

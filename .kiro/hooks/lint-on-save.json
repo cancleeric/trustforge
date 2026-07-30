@@ -8,7 +8,7 @@
       "matcher": "\\.(py)$",
       "action": {
         "type": "command",
-        "command": "cd /Users/yinghaowang/HurricaneSoft/trustforge && .venv/bin/python -m py_compile \"$KIRO_FILE_PATH\" 2>&1 || true",
+        "command": ".venv/bin/python -m py_compile \"$KIRO_FILE_PATH\" 2>&1 || true",
         "timeout": 15
       }
     }

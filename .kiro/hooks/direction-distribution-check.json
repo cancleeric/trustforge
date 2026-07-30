@@ -8,7 +8,7 @@
       "matcher": "(orchestrator|scoring|direction)",
       "action": {
         "type": "command",
-        "command": "cd /Users/yinghaowang/HurricaneSoft/trustforge && .venv/bin/pytest tests/test_direction_distribution.py -x -q --no-cov --tb=short 2>&1 | tail -5",
+        "command": ".venv/bin/pytest tests/test_direction_distribution.py -x -q --no-cov --tb=short 2>&1 | tail -5",
         "timeout": 60
       }
     }
