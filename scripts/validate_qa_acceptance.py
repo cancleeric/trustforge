@@ -167,13 +167,13 @@ def validate_acceptance(
     if manifest["release_id"] != release_id:
         raise AcceptanceValidationError("manifest release_id does not match summary")
 
-    manifest_paths: set[str] = set()
+    manifest_artifacts: dict[str, dict[str, Any]] = {}
     for artifact in manifest["artifacts"]:
         path = artifact["path"]
         _verify_artifact(artifact, release_id, artifact_root)
-        if path in manifest_paths:
+        if path in manifest_artifacts:
             raise AcceptanceValidationError(f"duplicate artifact path: {path}")
-        manifest_paths.add(path)
+        manifest_artifacts[path] = artifact
 
     observed: dict[str, dict[str, Any]] = {}
     for case in summary["cases"]:
@@ -191,9 +191,14 @@ def validate_acceptance(
             raise AcceptanceValidationError(f"release mismatch for {case_id}")
         for evidence in case["evidence"]:
             _validate_artifact_path(evidence["path"], release_id)
-            if evidence["path"] not in manifest_paths:
+            manifest_evidence = manifest_artifacts.get(evidence["path"])
+            if manifest_evidence is None:
                 raise AcceptanceValidationError(
                     f"case evidence absent from manifest: {evidence['path']}"
+                )
+            if evidence != manifest_evidence:
+                raise AcceptanceValidationError(
+                    f"case evidence metadata mismatch: {evidence['path']}"
                 )
         observed[case_id] = case
 

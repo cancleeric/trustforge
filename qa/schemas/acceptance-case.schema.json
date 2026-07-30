@@ -18,6 +18,7 @@
     "message": {"type": "string", "maxLength": 4096},
     "evidence": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,

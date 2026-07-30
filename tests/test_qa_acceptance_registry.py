@@ -178,6 +178,18 @@ def test_evidence_must_exist_in_manifest(tmp_path: Path) -> None:
         _validate(summary, tmp_path)
 
 
+def test_case_requires_evidence_and_metadata_matches_manifest(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
+    summary["cases"][0]["evidence"] = []
+    with pytest.raises(AcceptanceValidationError, match="schema error"):
+        _validate(summary, tmp_path)
+
+    summary = _valid_summary(tmp_path)
+    summary["cases"][0]["evidence"][0]["size_bytes"] += 1
+    with pytest.raises(AcceptanceValidationError, match="metadata mismatch"):
+        _validate(summary, tmp_path)
+
+
 def test_manifest_hash_and_magic_must_match_real_artifact(tmp_path: Path) -> None:
     summary = _valid_summary(tmp_path)
     summary["manifest"]["artifacts"][0]["sha256"] = "0" * 64
