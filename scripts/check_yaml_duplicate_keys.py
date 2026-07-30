@@ -51,6 +51,28 @@ UniqueKeyLoader.add_constructor(
 )
 
 
+def _construct_tagged_value(
+    loader: UniqueKeyLoader, _tag_suffix: str, node: yaml.Node
+) -> object:
+    """Inspect CloudFormation-style tagged values without executing tag logic."""
+
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return _construct_unique_mapping(loader, node, deep=True)
+    raise yaml.constructor.ConstructorError(
+        None,
+        None,
+        f"unsupported tagged YAML node {type(node).__name__}",
+        node.start_mark,
+    )
+
+
+UniqueKeyLoader.add_multi_constructor("!", _construct_tagged_value)
+
+
 def load_unique_yaml(path: Path) -> object:
     with path.open(encoding="utf-8") as stream:
         return yaml.load(stream, Loader=UniqueKeyLoader)
