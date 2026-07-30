@@ -16,6 +16,7 @@ COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
 LEASE_BACKEND="${TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND:-dynamodb}"
 LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
 TRAINING_DATA_DIR="${TRUSTFORGE_TRAINING_DATA_DIR:-/opt/trustforge/data/training}"
+SKILL_CHANGE_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_changes.jsonl}"
 PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
 PREVIEW_ENV_KEYS=(
   TRUSTFORGE_PREVIEW_ADMISSION_TABLE TRUSTFORGE_PREVIEW_TABLE_ARN
@@ -54,6 +55,10 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
 fi
 if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
   echo "[ec2] ERROR: TRUSTFORGE_TRAINING_DATA_DIR must be an absolute safe path" >&2
+  exit 1
+fi
+if ! [[ "$SKILL_CHANGE_LOG_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$SKILL_CHANGE_LOG_PATH" == *"/../"* ]] || [[ "$SKILL_CHANGE_LOG_PATH" == */.. ]]; then
+  echo "[ec2] ERROR: TRUSTFORGE_SKILL_CHANGE_LOG must be an absolute safe path" >&2
   exit 1
 fi
 if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
@@ -434,7 +439,7 @@ echo "[ec2] SG=$SGID VPC=$VPC"
 UD=$(mktemp)
 cat > "$UD" <<EOF
 #!/bin/bash
-set -x
+set -euxo pipefail
 dnf install -y python3.11 python3.11-pip unzip >/var/log/tf-setup.log 2>&1
 python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'cryptography>=44,<50' 'jsonschema>=4.23,<5' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
 mkdir -p /opt/trustforge && cd /opt/trustforge
@@ -463,6 +468,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 UNIT
+TRUSTFORGE_SKILL_CHANGE_LOG=${SKILL_CHANGE_LOG_PATH} bash /opt/trustforge/deploy/reconcile_skill_change_log.sh
 chmod 600 /etc/systemd/system/trustforge.service
 cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2
 [Unit]
