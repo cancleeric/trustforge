@@ -22,6 +22,7 @@ _SNAPSHOT_TOKEN = object()
 _DIGEST_TOKEN = object()
 _BOUND_ADMISSION_TOKEN = object()
 _RETIREMENT_TOKEN = object()
+_KEY_MATERIAL_TOKEN = object()
 LIFECYCLE_CONTROL_KEY = {
     "pk": {"S": "PAP#1#QUOTA-KEY"},
     "sk": {"S": "LIFECYCLE#CONTROL"},
@@ -62,7 +63,48 @@ class RetirementCapability:
         return result
 
 
-@dataclass(frozen=True, slots=True)
+class QuotaKeyMaterialProvider:
+    """Authenticate secret-manager metadata and mint nominal key material."""
+
+    __slots__ = ("_nonce", "_revisions")
+
+    def __init__(self) -> None:
+        self._nonce = object()
+        self._revisions: dict[str, bytes] = {}
+
+    def verify(
+        self,
+        *,
+        version: int,
+        key_id: str,
+        key_bytes: bytes,
+        activated: int,
+        source_revision: str,
+        authenticated_revision: bool,
+        csprng_provenance: bool,
+        superseded: int | None = None,
+        retire_not_before: int | None = None,
+    ) -> "QuotaKey":
+        if authenticated_revision is not True or csprng_provenance is not True:
+            raise ValueError("unverified quota key material")
+        prior = self._revisions.get(source_revision)
+        if prior is not None and not hmac.compare_digest(prior, key_bytes):
+            raise ValueError("source revision was rebound")
+        self._revisions[source_revision] = key_bytes
+        return QuotaKey._mint(
+            _KEY_MATERIAL_TOKEN,
+            self._nonce,
+            version=version,
+            key_id=key_id,
+            key_bytes=key_bytes,
+            activated=activated,
+            source_revision=source_revision,
+            superseded=superseded,
+            retire_not_before=retire_not_before,
+        )
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class QuotaKey:
     version: int
     key_id: str
@@ -71,6 +113,27 @@ class QuotaKey:
     source_revision: str
     superseded: int | None = None
     retire_not_before: int | None = None
+    _provider: object = field(repr=False)
+
+    def __new__(cls, *args: object, **kwargs: object) -> "QuotaKey":
+        del args, kwargs
+        raise TypeError("quota key material must be provider-minted")
+
+    @classmethod
+    def _mint(
+        cls,
+        token: object,
+        provider: object,
+        **values: object,
+    ) -> "QuotaKey":
+        if token is not _KEY_MATERIAL_TOKEN:
+            raise ValueError("invalid quota key material")
+        result = object.__new__(cls)
+        for name, value in values.items():
+            object.__setattr__(result, name, value)
+        object.__setattr__(result, "_provider", provider)
+        result.__post_init__()
+        return result
 
     def __post_init__(self) -> None:
         if (
@@ -81,7 +144,6 @@ class QuotaKey:
             or len(self.key_id) > 64
             or type(self.key_bytes) is not bytes
             or len(self.key_bytes) < 32
-            or len(set(self.key_bytes)) < 8
             or type(self.source_revision) is not str
             or not self.source_revision
             or len(self.source_revision) > 128
@@ -277,17 +339,29 @@ class ObservabilityDigest:
 class QuotaKeyLifecycleAuthority:
     """Thread-safe monotonic lifecycle snapshots bound to a trusted clock."""
 
-    def __init__(self, clock: PreviewTrustedClock) -> None:
-        if type(clock) is not PreviewTrustedClock:
+    def __init__(
+        self,
+        clock: PreviewTrustedClock,
+        *,
+        key_material_provider: QuotaKeyMaterialProvider,
+    ) -> None:
+        if (
+            type(clock) is not PreviewTrustedClock
+            or type(key_material_provider) is not QuotaKeyMaterialProvider
+        ):
             raise ValueError("trusted clock required")
         self._clock = clock
+        self._key_material_provider = key_material_provider
         self._nonce = object()
         self._lock = threading.RLock()
         self._lifecycle: QuotaKeyLifecycle | None = None
         self._observed: TrustedUtcInterval | None = None
 
     def install(self, lifecycle: QuotaKeyLifecycle) -> QuotaLifecycleSnapshot:
-        if type(lifecycle) is not QuotaKeyLifecycle:
+        if (
+            type(lifecycle) is not QuotaKeyLifecycle
+            or not self._owns_material(lifecycle)
+        ):
             raise ValueError("invalid quota lifecycle")
         with self._lock:
             now = self._trusted_now()
@@ -417,6 +491,16 @@ class QuotaKeyLifecycleAuthority:
             _SNAPSHOT_TOKEN, self._lifecycle, now, self._nonce
         )
 
+    def _owns_material(self, lifecycle: QuotaKeyLifecycle) -> bool:
+        return (
+            lifecycle.current._provider is self._key_material_provider._nonce
+            and (
+                lifecycle.previous is None
+                or lifecycle.previous._provider
+                is self._key_material_provider._nonce
+            )
+        )
+
     def _trusted_now(self) -> TrustedUtcInterval:
         return (
             self._clock.refresh()
@@ -434,6 +518,7 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
         *,
         dynamodb_client: LifecycleClient,
         table_name: str,
+        key_material_provider: QuotaKeyMaterialProvider,
     ) -> None:
         if (
             getattr(clock, "_client", None) is not dynamodb_client
@@ -442,7 +527,9 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
             or not callable(getattr(dynamodb_client, "put_item", None))
         ):
             raise ValueError("durable lifecycle storage mismatch")
-        super().__init__(clock)
+        super().__init__(
+            clock, key_material_provider=key_material_provider
+        )
         self._client = dynamodb_client
         self._table = table_name
         self._durable_fingerprint: str | None = None
@@ -453,7 +540,10 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
         lifecycle: QuotaKeyLifecycle,
         retirement: RetirementCapability | None = None,
     ) -> QuotaLifecycleSnapshot:
-        if type(lifecycle) is not QuotaKeyLifecycle:
+        if (
+            type(lifecycle) is not QuotaKeyLifecycle
+            or not self._owns_material(lifecycle)
+        ):
             raise ValueError("invalid quota lifecycle")
         with self._lock:
             now = self._trusted_now()
@@ -730,12 +820,14 @@ def _lifecycle_metadata(lifecycle: QuotaKeyLifecycle) -> dict[str, object]:
         "mode": lifecycle.mode.value,
         "current_version": lifecycle.current.version,
         "current_source_revision": lifecycle.current.source_revision,
+        "current_activated": lifecycle.current.activated,
         "issued_earliest": lifecycle.issued.earliest,
         "issued_latest": lifecycle.issued.latest,
     }
     if lifecycle.previous is not None:
         value["previous_version"] = lifecycle.previous.version
         value["previous_source_revision"] = lifecycle.previous.source_revision
+        value["previous_superseded"] = lifecycle.previous.superseded
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     value["config_fingerprint"] = hashlib.sha256(
         b"TrustForge/PAP1/quota-lifecycle-config/v1\x00" + canonical
@@ -811,12 +903,17 @@ def _decode_metadata(item: object) -> dict[str, object]:
         "mode",
         "current_version",
         "current_source_revision",
+        "current_activated",
         "issued_earliest",
         "issued_latest",
         "config_fingerprint",
     }
     if mode == "overlap":
-        expected |= {"previous_version", "previous_source_revision"}
+        expected |= {
+            "previous_version",
+            "previous_source_revision",
+            "previous_superseded",
+        }
     if (
         set(decoded) != expected
         or decoded.get("pk") != "PAP#1#QUOTA-KEY"

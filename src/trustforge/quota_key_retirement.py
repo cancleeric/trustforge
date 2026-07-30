@@ -19,6 +19,7 @@ from trustforge.preview_admission_compiler import (
 )
 from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
+    MAX_SNAPSHOT_AGE_SECONDS,
     MIN_OVERLAP_SECONDS,
     RetirementCapability,
     _RETIREMENT_TOKEN,
@@ -163,9 +164,15 @@ class QuotaKeyRetirementWaterlineWriter:
 
         responses = _strong_read(self._client, self._table)
         proof = _decode_write_proof(responses)
-        transition_upper = int(proof.lifecycle.issued_latest)
+        transition_upper = int(
+            max(
+                proof.lifecycle.current_activated,
+                proof.lifecycle.previous_superseded,
+            )
+            + MAX_SNAPSHOT_AGE_SECONDS
+        )
         last_expiry = (
-            transition_upper + RESERVATION_LEASE_SECONDS
+            transition_upper + RESERVATION_LEASE_SECONDS + 59
         ) // 60
         return QuotaKeyRetirementWaterline._mint(
             _PROPOSAL_TOKEN,
@@ -173,7 +180,9 @@ class QuotaKeyRetirementWaterlineWriter:
             proof,
             last_old_admission_upper=transition_upper,
             last_old_expiry_shard=last_expiry,
-            retire_not_before=transition_upper + MIN_OVERLAP_SECONDS,
+            retire_not_before=int(
+                proof.lifecycle.previous_superseded + MIN_OVERLAP_SECONDS
+            ),
             retention_until=transition_upper + RETENTION_SECONDS,
         )
 
@@ -397,6 +406,8 @@ class _Lifecycle:
     previous_version: int
     config_fingerprint: str
     issued_latest: float
+    current_activated: float
+    previous_superseded: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +656,9 @@ def _decode_lifecycle(item: dict[str, object]) -> _Lifecycle:
         or type(item.get("config_fingerprint")) is not str
         or not item["config_fingerprint"]
         or type(item.get("issued_latest")) not in (int, float)
+        or type(item.get("current_activated")) not in (int, float)
+        or type(item.get("previous_superseded")) not in (int, float)
+        or item["current_activated"] != item["previous_superseded"]
     ):
         raise ValueError
     return _Lifecycle(
@@ -653,6 +667,8 @@ def _decode_lifecycle(item: dict[str, object]) -> _Lifecycle:
         item["previous_version"],
         item["config_fingerprint"],
         item["issued_latest"],
+        item["current_activated"],
+        item["previous_superseded"],
     )
 
 

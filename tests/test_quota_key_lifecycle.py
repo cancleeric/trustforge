@@ -21,6 +21,7 @@ from trustforge.quota_key_lifecycle import (
     QuotaKey,
     QuotaKeyLifecycle,
     QuotaKeyLifecycleAuthority,
+    QuotaKeyMaterialProvider,
     QuotaLifecycleSnapshot,
 )
 from tests.test_preview_admission_compiler import request as _request
@@ -65,11 +66,13 @@ def _authority(second: int = 2_000_000_000):
         monotonic_clock=lambda: 0.0,
         wall_clock=lambda: float(client.second),
     )
-    return client, QuotaKeyLifecycleAuthority(clock)
+    return client, QuotaKeyLifecycleAuthority(
+        clock, key_material_provider=_KEY_PROVIDER
+    )
 
 
 def _key(version: int, activated: int, *, previous: bool = False) -> QuotaKey:
-    return QuotaKey(
+    return _KEY_PROVIDER.verify(
         version=version,
         key_id=f"quota-{version}",
         key_bytes=bytes((index + version) % 256 for index in range(32)),
@@ -77,6 +80,8 @@ def _key(version: int, activated: int, *, previous: bool = False) -> QuotaKey:
         source_revision=f"ssm-v{version}",
         superseded=activated if previous else None,
         retire_not_before=activated + MIN_OVERLAP_SECONDS if previous else None,
+        authenticated_revision=True,
+        csprng_provenance=True,
     )
 
 
@@ -151,12 +156,14 @@ def test_single_uses_one_identity_layout_and_global_once():
         lambda value: QuotaKeyLifecycle(
             value.generation,
             value.issued,
-            QuotaKey(
-                2,
-                "quota-2",
-                b"x" * 31,
-                value.current.activated,
-                "ssm-v2",
+            _KEY_PROVIDER.verify(
+                version=2,
+                key_id="quota-2",
+                key_bytes=b"x" * 31,
+                activated=value.current.activated,
+                source_revision="ssm-v2",
+                authenticated_revision=True,
+                csprng_provenance=True,
             ),
             value.previous,
         ),
@@ -169,14 +176,16 @@ def test_malformed_or_weak_lifecycle_fails_closed(mutator):
 
 
 def replace_previous(current: QuotaKey) -> QuotaKey:
-    return QuotaKey(
-        current.version,
-        current.key_id,
-        current.key_bytes,
-        current.activated - 1,
-        current.source_revision,
-        current.activated,
-        current.activated + MIN_OVERLAP_SECONDS,
+    return _KEY_PROVIDER.verify(
+        version=current.version,
+        key_id=current.key_id,
+        key_bytes=current.key_bytes,
+        activated=current.activated - 1,
+        source_revision=current.source_revision,
+        superseded=current.activated,
+        retire_not_before=current.activated + MIN_OVERLAP_SECONDS,
+        authenticated_revision=True,
+        csprng_provenance=True,
     )
 
 
@@ -196,12 +205,14 @@ def test_generation_rollback_and_same_generation_conflict_rejected():
             QuotaKeyLifecycle(
                 2,
                 lifecycle.issued,
-                QuotaKey(
-                    2,
-                    "other",
-                    bytes(range(32)),
-                    lifecycle.current.activated,
-                    "ssm-other",
+                _KEY_PROVIDER.verify(
+                    version=2,
+                    key_id="other",
+                    key_bytes=bytes(range(32)),
+                    activated=lifecycle.current.activated,
+                    source_revision="ssm-other",
+                    authenticated_revision=True,
+                    csprng_provenance=True,
                 ),
                 lifecycle.previous,
             )
@@ -269,7 +280,10 @@ def test_durable_authority_bootstrap_overlap_and_exact_response_loss_proof():
         wall_clock=lambda: float(client.second),
     )
     authority = DurableQuotaKeyLifecycleAuthority(
-        clock, dynamodb_client=client, table_name="preview-store"
+        clock,
+        dynamodb_client=client,
+        table_name="preview-store",
+        key_material_provider=_KEY_PROVIDER,
     )
     bootstrap = QuotaKeyLifecycle(
         1,
@@ -302,7 +316,10 @@ def test_durable_authority_allows_exact_attach_but_rejects_skip_overlap():
         wall_clock=lambda: float(client.second),
     )
     authority = DurableQuotaKeyLifecycleAuthority(
-        clock, dynamodb_client=client, table_name="preview-store"
+        clock,
+        dynamodb_client=client,
+        table_name="preview-store",
+        key_material_provider=_KEY_PROVIDER,
     )
     bootstrap = QuotaKeyLifecycle(
         1,
@@ -317,5 +334,65 @@ def test_durable_authority_allows_exact_attach_but_rejects_skip_overlap():
                 2,
                 TrustedUtcInterval(1_999_999_930, 1_999_999_931),
                 _key(2, 1_999_999_932),
+            )
+        )
+_KEY_PROVIDER = QuotaKeyMaterialProvider()
+
+
+def test_key_material_is_provider_bound_and_revision_stable():
+    provider = QuotaKeyMaterialProvider()
+    with pytest.raises(TypeError):
+        QuotaKey()  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="unverified"):
+        provider.verify(
+            version=1,
+            key_id="quota-1",
+            key_bytes=bytes(range(32)),
+            activated=1,
+            source_revision="revision-1",
+            authenticated_revision=False,
+            csprng_provenance=True,
+        )
+    provider.verify(
+        version=1,
+        key_id="quota-1",
+        key_bytes=bytes(range(32)),
+        activated=1,
+        source_revision="revision-1",
+        authenticated_revision=True,
+        csprng_provenance=True,
+    )
+    with pytest.raises(ValueError, match="rebound"):
+        provider.verify(
+            version=1,
+            key_id="quota-1",
+            key_bytes=bytes(range(1, 33)),
+            activated=1,
+            source_revision="revision-1",
+            authenticated_revision=True,
+            csprng_provenance=True,
+        )
+
+
+def test_authority_rejects_another_provider_material():
+    _, authority = _authority()
+    other = QuotaKeyMaterialProvider()
+    foreign = other.verify(
+        version=1,
+        key_id="quota-1",
+        key_bytes=bytes(range(32)),
+        activated=1_999_999_900,
+        source_revision="foreign-revision",
+        authenticated_revision=True,
+        csprng_provenance=True,
+    )
+    with pytest.raises(ValueError, match="invalid quota lifecycle"):
+        authority.install(
+            QuotaKeyLifecycle(
+                generation=1,
+                issued=TrustedUtcInterval(
+                    1_999_999_950, 1_999_999_951
+                ),
+                current=foreign,
             )
         )

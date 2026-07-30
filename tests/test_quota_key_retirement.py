@@ -17,7 +17,10 @@ from trustforge.quota_key_lifecycle import (
     MIN_OVERLAP_SECONDS,
     QuotaKey,
     QuotaKeyLifecycle,
+    QuotaKeyMaterialProvider,
 )
+
+_KEY_PROVIDER = QuotaKeyMaterialProvider()
 
 
 def _ddb(item: dict[str, object]) -> dict[str, object]:
@@ -93,6 +96,8 @@ class Client:
             "previous_version": 1,
             "config_fingerprint": "exact-transition",
             "issued_latest": 100,
+            "current_activated": 100,
+            "previous_superseded": 100,
         }
         if self.mutate == "equal_time":
             waterline["retire_not_before"] = 200
@@ -145,7 +150,10 @@ def _authority(
         lifecycle_authority
         if lifecycle_authority is not None
         else DurableQuotaKeyLifecycleAuthority(
-            clock, dynamodb_client=client, table_name="table"
+            clock,
+            dynamodb_client=client,
+            table_name="table",
+            key_material_provider=_KEY_PROVIDER,
         )
     )
     return QuotaKeyRetirementAuthority(
@@ -198,7 +206,10 @@ def test_clock_and_authority_must_share_exact_storage() -> None:
         wall_clock=lambda: 200.0,
     )
     lifecycle = DurableQuotaKeyLifecycleAuthority(
-        clock, dynamodb_client=first, table_name="table"
+        clock,
+        dynamodb_client=first,
+        table_name="table",
+        key_material_provider=_KEY_PROVIDER,
     )
     try:
         QuotaKeyRetirementAuthority(
@@ -266,7 +277,10 @@ def _writer(client: StatefulClient) -> QuotaKeyRetirementWaterlineWriter:
         wall_clock=lambda: 200.0,
     )
     lifecycle = DurableQuotaKeyLifecycleAuthority(
-        clock, dynamodb_client=client, table_name="table"
+        clock,
+        dynamodb_client=client,
+        table_name="table",
+        key_material_provider=_KEY_PROVIDER,
     )
     return QuotaKeyRetirementWaterlineWriter(
         dynamodb_client=client,
@@ -341,19 +355,30 @@ def test_capability_retires_overlap_in_one_transaction_and_cannot_replay() -> No
         wall_clock=lambda: 200.0,
     )
     lifecycle_authority = DurableQuotaKeyLifecycleAuthority(
-        clock, dynamodb_client=client, table_name="table"
+        clock,
+        dynamodb_client=client,
+        table_name="table",
+        key_material_provider=_KEY_PROVIDER,
     )
-    current = QuotaKey(
-        2, "quota-2", bytes(range(1, 33)), 100, "ssm-v2"
+    current = _KEY_PROVIDER.verify(
+        version=2,
+        key_id="quota-2",
+        key_bytes=bytes(range(1, 33)),
+        activated=100,
+        source_revision="ssm-v2",
+        authenticated_revision=True,
+        csprng_provenance=True,
     )
-    previous = QuotaKey(
-        1,
-        "quota-1",
-        bytes(range(32)),
-        0,
-        "ssm-v1",
-        100,
-        100 + MIN_OVERLAP_SECONDS,
+    previous = _KEY_PROVIDER.verify(
+        version=1,
+        key_id="quota-1",
+        key_bytes=bytes(range(32)),
+        activated=0,
+        source_revision="ssm-v1",
+        superseded=100,
+        retire_not_before=100 + MIN_OVERLAP_SECONDS,
+        authenticated_revision=True,
+        csprng_provenance=True,
     )
     lifecycle_authority._lifecycle = QuotaKeyLifecycle(
         2, TrustedUtcInterval(99, 100), current, previous
@@ -396,7 +421,7 @@ def _stored_waterline(*, recovery_version: int = 4) -> dict[str, object]:
             "last_old_admission_upper": 100,
             "last_old_expiry_shard": 1,
             "required_recovery_version": recovery_version,
-            "retire_not_before": 86_590,
+            "retire_not_before": 86_500,
             "retention_until": 604_900,
         }
     )
