@@ -21,6 +21,7 @@ from trustforge.preview_admission_compiler import (
     build_counter_specs,
 )
 from trustforge.preview_admission_executor import (
+    AwsQuotaLifecycleBootstrap,
     AdmissionOutcome,
     PreviewAdmissionExecutor,
     _CONFIRMED_WRITE_REJECTION_CODES,
@@ -36,8 +37,9 @@ from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
     LIFECYCLE_CONTROL_KEY,
     QuotaKeyLifecycle,
-    QuotaKeyMaterialProvider,
 )
+from tests.test_quota_key_lifecycle import _provider
+from tests.test_quota_key_lifecycle import FakeSsmClient
 
 
 def _request(reservation_id: str = "12345678-1234-4234-9234-123456789abc"):
@@ -218,7 +220,7 @@ def _executor(client, table_name: str = "preview-store"):
 
 
 def _lifecycle_authority(client, table_name: str):
-    provider = QuotaKeyMaterialProvider()
+    provider = _provider({1: bytes(range(32))})
     authority = DurableQuotaKeyLifecycleAuthority(
         PreviewTrustedClock(
             dynamodb_client=client,
@@ -234,14 +236,13 @@ def _lifecycle_authority(client, table_name: str):
         QuotaKeyLifecycle(
             generation=1,
             issued=TrustedUtcInterval(1_999_999_950, 1_999_999_951),
-            current=provider.verify(
-                version=1,
+            current=provider.bind_lifecycle(
+                provider.load(
+                parameter_name="/trustforge/quota",
+                expected_version=1,
                 key_id="quota-1",
-                key_bytes=bytes(range(32)),
+                ),
                 activated=1_999_999_960,
-                source_revision="ssm-v1",
-                authenticated_revision=True,
-                csprng_provenance=True,
             ),
         )
     )
@@ -569,14 +570,72 @@ def test_factory_rejects_split_external_authority(monkeypatch):
         )
 
 
-def test_source_has_no_provider_or_retry_boundary():
+def test_aws_factory_composes_one_exact_retry_bounded_graph(monkeypatch):
+    now = int(datetime.now(UTC).timestamp())
+
+    class AwsFactoryClient(FakeClient):
+        def describe_table(self, **kwargs):
+            del kwargs
+            date = datetime.fromtimestamp(now, UTC).strftime(
+                "%a, %d %b %Y %H:%M:%S GMT"
+            )
+            return {
+                "ResponseMetadata": {"HTTPHeaders": {"date": date}}
+            }
+
+    dynamodb = AwsFactoryClient(_request())
+    ssm = FakeSsmClient({1: bytes(range(32))})
+    calls = []
+
+    def client(service_name, **kwargs):
+        calls.append((service_name, kwargs))
+        selected = dynamodb if service_name == "dynamodb" else ssm
+        if service_name == "ssm":
+            selected.meta.config = kwargs["config"]
+        return selected
+
+    monkeypatch.setattr(boto3, "client", client)
+    executor = PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=1,
+            issued=TrustedUtcInterval(now - 2, now - 1),
+            activated=now - 1,
+            parameter_name="/trustforge/quota",
+            expected_version=1,
+            key_id="quota-1",
+        ),
+        region_name="us-east-1",
+    )
+    assert [name for name, _ in calls] == ["dynamodb", "ssm"]
+    assert all(
+        kwargs["config"].retries["total_max_attempts"] == 1
+        for _, kwargs in calls
+    )
+    assert executor._client is dynamodb
+    assert executor._durable_gate._client is dynamodb
+    assert executor._durable_gate._trusted_clock is (
+        executor._lifecycle_authority._clock
+    )
+    assert executor._lifecycle_authority._client is dynamodb
+    assert ssm.calls == [
+        {
+            "Name": "/trustforge/quota:1",
+            "WithDecryption": True,
+        }
+    ]
+
+
+def test_source_has_no_model_provider_or_runtime_retry_boundary():
     import inspect
     import trustforge.preview_admission_executor as module
 
     source = inspect.getsource(module).lower()
     assert "bedrock" not in source
     assert "hermes" not in source
-    assert "provider" not in source
+    assert "bedrock" not in source
+    assert "key_bytes=" not in source
+    assert "withdecryption=false" not in source
     assert ".retry" not in source
     assert "sleep(" not in source
 

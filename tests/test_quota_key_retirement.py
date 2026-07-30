@@ -16,10 +16,12 @@ from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
     MIN_OVERLAP_SECONDS,
     QuotaKeyLifecycle,
-    QuotaKeyMaterialProvider,
 )
+from tests.test_quota_key_lifecycle import _provider
 
-_KEY_PROVIDER = QuotaKeyMaterialProvider()
+_KEY_PROVIDER = _provider(
+    {1: bytes(range(32)), 2: bytes(range(1, 33))}
+)
 
 
 def _ddb(item: dict[str, object]) -> dict[str, object]:
@@ -359,25 +361,23 @@ def test_capability_retires_overlap_in_one_transaction_and_cannot_replay() -> No
         table_name="table",
         key_material_provider=_KEY_PROVIDER,
     )
-    current = _KEY_PROVIDER.verify(
-        version=2,
+    current = _KEY_PROVIDER.bind_lifecycle(
+        _KEY_PROVIDER.load(
+        parameter_name="/trustforge/quota",
+        expected_version=2,
         key_id="quota-2",
-        key_bytes=bytes(range(1, 33)),
+        ),
         activated=100,
-        source_revision="ssm-v2",
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
-    previous = _KEY_PROVIDER.verify(
-        version=1,
+    previous = _KEY_PROVIDER.bind_lifecycle(
+        _KEY_PROVIDER.load(
+        parameter_name="/trustforge/quota",
+        expected_version=1,
         key_id="quota-1",
-        key_bytes=bytes(range(32)),
+        ),
         activated=0,
-        source_revision="ssm-v1",
         superseded=100,
         retire_not_before=100 + MIN_OVERLAP_SECONDS,
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
     lifecycle_authority._lifecycle = QuotaKeyLifecycle(
         2, TrustedUtcInterval(99, 100), current, previous
@@ -428,32 +428,32 @@ def test_proven_uncommitted_retirement_allows_fresh_decision_retry() -> None:
         monotonic_clock=lambda: 1.0,
         wall_clock=lambda: 200.0,
     )
-    provider = QuotaKeyMaterialProvider()
+    provider = _provider(
+        {1: bytes(range(32)), 2: bytes(range(1, 33))}
+    )
     lifecycle_authority = DurableQuotaKeyLifecycleAuthority(
         clock,
         dynamodb_client=client,
         table_name="table",
         key_material_provider=provider,
     )
-    current = provider.verify(
-        version=2,
+    current = provider.bind_lifecycle(
+        provider.load(
+        parameter_name="/trustforge/quota-retry",
+        expected_version=2,
         key_id="quota-retry-2",
-        key_bytes=bytes(range(1, 33)),
+        ),
         activated=100,
-        source_revision="retry-v2",
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
-    previous = provider.verify(
-        version=1,
+    previous = provider.bind_lifecycle(
+        provider.load(
+        parameter_name="/trustforge/quota-retry",
+        expected_version=1,
         key_id="quota-retry-1",
-        key_bytes=bytes(range(32)),
+        ),
         activated=0,
-        source_revision="retry-v1",
         superseded=100,
         retire_not_before=100 + MIN_OVERLAP_SECONDS,
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
     lifecycle_authority._lifecycle = QuotaKeyLifecycle(
         2, TrustedUtcInterval(99, 100), current, previous

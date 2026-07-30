@@ -22,10 +22,12 @@ from trustforge.preview_durable_admission_gate import (
     DurableAdmissionGate,
     append_quarantine_action,
 )
-from trustforge.preview_trusted_clock import TrustedUtcInterval
+from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
 from trustforge.quota_key_lifecycle import (
+    AwsSsmQuotaKeyMaterialProvider,
     BoundAdmissionRequest,
     DurableQuotaKeyLifecycleAuthority,
+    QuotaKeyLifecycle,
 )
 
 
@@ -130,6 +132,30 @@ class AdmissionExecutionResult:
 
 
 _UNAVAILABLE = AdmissionExecutionResult(AdmissionOutcome.UNAVAILABLE)
+
+
+@dataclass(frozen=True, slots=True)
+class AwsQuotaLifecycleBootstrap:
+    generation: int
+    issued: TrustedUtcInterval
+    activated: int
+    parameter_name: str
+    expected_version: int
+    key_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.generation != 1
+            or type(self.issued) is not TrustedUtcInterval
+            or type(self.activated) is not int
+            or type(self.parameter_name) is not str
+            or not self.parameter_name
+            or type(self.expected_version) is not int
+            or self.expected_version < 1
+            or type(self.key_id) is not str
+            or not self.key_id
+        ):
+            raise ValueError("invalid AWS quota lifecycle bootstrap")
 
 # These service responses establish that the requested transaction was rejected.
 # Everything else after dispatch has an unknown commit disposition and poisons the
@@ -252,6 +278,64 @@ class PreviewAdmissionExecutor:
         del table_name, lifecycle_authority, region_name
         raise ValueError(
             "construct with one exact client, table, gate, and lifecycle authority"
+        )
+
+    @classmethod
+    def from_aws_components(
+        cls,
+        table_name: str,
+        *,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+    ) -> "PreviewAdmissionExecutor":
+        """Compose one exact retry-bounded DynamoDB/SSM authority graph."""
+
+        if type(lifecycle) is not AwsQuotaLifecycleBootstrap:
+            raise ValueError("AWS lifecycle bootstrap required")
+        import boto3
+        from botocore.config import Config
+
+        config = Config(
+            retries={"total_max_attempts": 1, "mode": "standard"}
+        )
+        dynamodb = boto3.client(
+            "dynamodb", region_name=region_name, config=config
+        )
+        ssm = boto3.client("ssm", region_name=region_name, config=config)
+        clock = PreviewTrustedClock(
+            dynamodb_client=dynamodb, table_name=table_name
+        )
+        provider = AwsSsmQuotaKeyMaterialProvider(ssm)
+        authority = DurableQuotaKeyLifecycleAuthority(
+            clock,
+            dynamodb_client=dynamodb,
+            table_name=table_name,
+            key_material_provider=provider,
+        )
+        loaded = provider.load(
+            parameter_name=lifecycle.parameter_name,
+            expected_version=lifecycle.expected_version,
+            key_id=lifecycle.key_id,
+        )
+        authority.install(
+            QuotaKeyLifecycle(
+                generation=lifecycle.generation,
+                issued=lifecycle.issued,
+                current=provider.bind_lifecycle(
+                    loaded, activated=lifecycle.activated
+                ),
+            )
+        )
+        gate = DurableAdmissionGate(
+            dynamodb,
+            table_name,
+            trusted_clock=clock,
+        )
+        return cls(
+            dynamodb,
+            table_name,
+            durable_gate=gate,
+            lifecycle_authority=authority,
         )
 
     def execute(self, bound: BoundAdmissionRequest) -> AdmissionExecutionResult:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import hashlib
@@ -70,42 +71,114 @@ class RetirementCapability:
         return result
 
 
-class QuotaKeyMaterialProvider:
-    """Authenticate secret-manager metadata and mint nominal key material."""
+class AwsSsmQuotaKeyMaterialProvider:
+    """Load nominal quota-key material from one retry-bounded AWS SSM client."""
 
-    __slots__ = ("_nonce", "_revisions")
+    __slots__ = ("_client", "_nonce", "_revisions")
 
-    def __init__(self) -> None:
+    def __init__(self, ssm_client: object) -> None:
+        config = getattr(getattr(ssm_client, "meta", None), "config", None)
+        retries = getattr(config, "retries", None)
+        if (
+            not callable(getattr(ssm_client, "get_parameter", None))
+            or type(retries) is not dict
+            or retries.get("total_max_attempts") != 1
+        ):
+            raise ValueError("retry-bounded SSM client required")
         self._nonce = object()
         self._revisions: dict[str, bytes] = {}
 
-    def verify(
+        self._client = ssm_client
+
+    def load(
         self,
         *,
-        version: int,
+        parameter_name: str,
+        expected_version: int,
         key_id: str,
-        key_bytes: bytes,
-        activated: int,
-        source_revision: str,
-        authenticated_revision: bool,
-        csprng_provenance: bool,
-        superseded: int | None = None,
-        retire_not_before: int | None = None,
     ) -> "QuotaKey":
-        if authenticated_revision is not True or csprng_provenance is not True:
-            raise ValueError("unverified quota key material")
+        if (
+            type(parameter_name) is not str
+            or not parameter_name
+            or type(expected_version) is not int
+            or expected_version < 1
+            or type(key_id) is not str
+            or not key_id
+        ):
+            raise ValueError("invalid SSM quota key reference")
+        requested = f"{parameter_name}:{expected_version}"
+        try:
+            response = self._client.get_parameter(
+                Name=requested, WithDecryption=True
+            )
+            metadata = response["ResponseMetadata"]
+            parameter = response["Parameter"]
+            if (
+                type(response) is not dict
+                or set(response) != {"ResponseMetadata", "Parameter"}
+                or type(metadata) is not dict
+                or metadata.get("HTTPStatusCode") != 200
+                or type(metadata.get("RequestId")) is not str
+                or not metadata["RequestId"]
+                or type(parameter) is not dict
+                or set(parameter)
+                != {"Name", "ARN", "Type", "Version", "Value"}
+                or parameter.get("Name") != requested
+                or parameter.get("Type") != "SecureString"
+                or parameter.get("Version") != expected_version
+                or type(parameter.get("ARN")) is not str
+                or not parameter["ARN"].endswith(f":parameter/{requested}")
+                or type(parameter.get("Value")) is not str
+            ):
+                raise ValueError
+            key_bytes = base64.b64decode(
+                parameter["Value"], validate=True
+            )
+            if (
+                len(key_bytes) < 32
+                or base64.b64encode(key_bytes).decode()
+                != parameter["Value"]
+            ):
+                raise ValueError
+        except Exception:
+            raise ValueError("SSM quota key load failed") from None
+        source_revision = (
+            f"aws-ssm:{parameter['ARN']}:{parameter['Version']}"
+        )
         prior = self._revisions.get(source_revision)
         if prior is not None and not hmac.compare_digest(prior, key_bytes):
-            raise ValueError("source revision was rebound")
+            raise ValueError("SSM revision was rebound")
         self._revisions[source_revision] = key_bytes
         return QuotaKey._mint(
             _KEY_MATERIAL_TOKEN,
             self._nonce,
-            version=version,
+            version=expected_version,
             key_id=key_id,
             key_bytes=key_bytes,
-            activated=activated,
+            activated=0,
             source_revision=source_revision,
+            superseded=None,
+            retire_not_before=None,
+        )
+
+    def bind_lifecycle(
+        self,
+        key: "QuotaKey",
+        *,
+        activated: int,
+        superseded: int | None = None,
+        retire_not_before: int | None = None,
+    ) -> "QuotaKey":
+        if type(key) is not QuotaKey or key._provider is not self._nonce:
+            raise ValueError("foreign SSM quota key")
+        return QuotaKey._mint(
+            _KEY_MATERIAL_TOKEN,
+            self._nonce,
+            version=key.version,
+            key_id=key.key_id,
+            key_bytes=key.key_bytes,
+            activated=activated,
+            source_revision=key.source_revision,
             superseded=superseded,
             retire_not_before=retire_not_before,
         )
@@ -350,11 +423,11 @@ class QuotaKeyLifecycleAuthority:
         self,
         clock: PreviewTrustedClock,
         *,
-        key_material_provider: QuotaKeyMaterialProvider,
+        key_material_provider: AwsSsmQuotaKeyMaterialProvider,
     ) -> None:
         if (
             type(clock) is not PreviewTrustedClock
-            or type(key_material_provider) is not QuotaKeyMaterialProvider
+            or type(key_material_provider) is not AwsSsmQuotaKeyMaterialProvider
         ):
             raise ValueError("trusted clock required")
         self._clock = clock
@@ -525,7 +598,7 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
         *,
         dynamodb_client: LifecycleClient,
         table_name: str,
-        key_material_provider: QuotaKeyMaterialProvider,
+        key_material_provider: AwsSsmQuotaKeyMaterialProvider,
     ) -> None:
         if (
             getattr(clock, "_client", None) is not dynamodb_client

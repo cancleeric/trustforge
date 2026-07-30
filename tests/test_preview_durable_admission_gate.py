@@ -45,8 +45,8 @@ from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
     LIFECYCLE_CONTROL_KEY,
     QuotaKeyLifecycle,
-    QuotaKeyMaterialProvider,
 )
+from tests.test_quota_key_lifecycle import _provider
 
 
 def _request() -> AdmissionCompileRequest:
@@ -170,7 +170,7 @@ class IntegratedClient(FakeGateClient):
 
 def _authority(client) -> DurableQuotaKeyLifecycleAuthority:
     second = client.trusted_second
-    provider = QuotaKeyMaterialProvider()
+    provider = _provider({1: bytes(range(32))})
     authority = DurableQuotaKeyLifecycleAuthority(
         PreviewTrustedClock(
             dynamodb_client=client,
@@ -186,14 +186,13 @@ def _authority(client) -> DurableQuotaKeyLifecycleAuthority:
         QuotaKeyLifecycle(
             1,
             TrustedUtcInterval(second - 50, second - 49),
-            provider.verify(
-                version=1,
+            provider.bind_lifecycle(
+                provider.load(
+                parameter_name="/trustforge/quota",
+                expected_version=1,
                 key_id="quota-1",
-                key_bytes=bytes(range(32)),
+                ),
                 activated=second - 40,
-                source_revision="ssm-v1",
-                authenticated_revision=True,
-                csprng_provenance=True,
             ),
         )
     )

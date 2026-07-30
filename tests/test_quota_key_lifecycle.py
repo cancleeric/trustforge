@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import base64
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +23,7 @@ from trustforge.quota_key_lifecycle import (
     QuotaKey,
     QuotaKeyLifecycle,
     QuotaKeyLifecycleAuthority,
-    QuotaKeyMaterialProvider,
+    AwsSsmQuotaKeyMaterialProvider,
     QuotaLifecycleSnapshot,
 )
 from tests.test_preview_admission_compiler import request as _request
@@ -58,6 +60,48 @@ class DurableClockClient(ClockClient):
         return {}
 
 
+class FakeSsmClient:
+    def __init__(self, values: dict[int, bytes] | None = None):
+        self.meta = SimpleNamespace(
+            config=SimpleNamespace(retries={"total_max_attempts": 1})
+        )
+        self.values = values or {
+            version: bytes(
+                (index + version) % 256 for index in range(32)
+            )
+            for version in range(1, 5)
+        }
+        self.calls = []
+        self.mutate: str | None = None
+
+    def get_parameter(self, **kwargs):
+        self.calls.append(kwargs)
+        requested = kwargs["Name"]
+        version = int(requested.rsplit(":", 1)[1])
+        parameter = {
+            "Name": requested,
+            "ARN": f"arn:aws:ssm:us-east-1:123:parameter/{requested}",
+            "Type": "SecureString",
+            "Version": version,
+            "Value": base64.b64encode(self.values[version]).decode(),
+        }
+        if self.mutate is not None:
+            parameter[self.mutate] = "wrong"
+        return {
+            "ResponseMetadata": {
+                "HTTPStatusCode": 200,
+                "RequestId": "request-1",
+            },
+            "Parameter": parameter,
+        }
+
+
+def _provider(
+    values: dict[int, bytes] | None = None,
+) -> AwsSsmQuotaKeyMaterialProvider:
+    return AwsSsmQuotaKeyMaterialProvider(FakeSsmClient(values))
+
+
 def _authority(second: int = 2_000_000_000):
     client = ClockClient(second)
     clock = PreviewTrustedClock(
@@ -72,16 +116,16 @@ def _authority(second: int = 2_000_000_000):
 
 
 def _key(version: int, activated: int, *, previous: bool = False) -> QuotaKey:
-    return _KEY_PROVIDER.verify(
-        version=version,
+    loaded = _KEY_PROVIDER.load(
+        parameter_name="/trustforge/quota",
+        expected_version=version,
         key_id=f"quota-{version}",
-        key_bytes=bytes((index + version) % 256 for index in range(32)),
+    )
+    return _KEY_PROVIDER.bind_lifecycle(
+        loaded,
         activated=activated - (100 if previous else 0),
-        source_revision=f"ssm-v{version}",
         superseded=activated if previous else None,
         retire_not_before=activated + MIN_OVERLAP_SECONDS if previous else None,
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
 
 
@@ -156,14 +200,10 @@ def test_single_uses_one_identity_layout_and_global_once():
         lambda value: QuotaKeyLifecycle(
             value.generation,
             value.issued,
-            _KEY_PROVIDER.verify(
-                version=2,
+            _provider({2: b"x" * 31}).load(
+                parameter_name="/trustforge/quota",
+                expected_version=2,
                 key_id="quota-2",
-                key_bytes=b"x" * 31,
-                activated=value.current.activated,
-                source_revision="ssm-v2",
-                authenticated_revision=True,
-                csprng_provenance=True,
             ),
             value.previous,
         ),
@@ -176,16 +216,11 @@ def test_malformed_or_weak_lifecycle_fails_closed(mutator):
 
 
 def replace_previous(current: QuotaKey) -> QuotaKey:
-    return _KEY_PROVIDER.verify(
-        version=current.version,
-        key_id=current.key_id,
-        key_bytes=current.key_bytes,
+    return _KEY_PROVIDER.bind_lifecycle(
+        current,
         activated=current.activated - 1,
-        source_revision=current.source_revision,
         superseded=current.activated,
         retire_not_before=current.activated + MIN_OVERLAP_SECONDS,
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
 
 
@@ -205,14 +240,13 @@ def test_generation_rollback_and_same_generation_conflict_rejected():
             QuotaKeyLifecycle(
                 2,
                 lifecycle.issued,
-                _KEY_PROVIDER.verify(
-                    version=2,
+                _KEY_PROVIDER.bind_lifecycle(
+                    _KEY_PROVIDER.load(
+                    parameter_name="/trustforge/quota",
+                    expected_version=2,
                     key_id="other",
-                    key_bytes=bytes(range(32)),
+                    ),
                     activated=lifecycle.current.activated,
-                    source_revision="ssm-other",
-                    authenticated_revision=True,
-                    csprng_provenance=True,
                 ),
                 lifecycle.previous,
             )
@@ -336,55 +370,77 @@ def test_durable_authority_allows_exact_attach_but_rejects_skip_overlap():
                 _key(2, 1_999_999_932),
             )
         )
-_KEY_PROVIDER = QuotaKeyMaterialProvider()
+_KEY_PROVIDER = _provider()
 
 
 def test_key_material_is_provider_bound_and_revision_stable():
-    provider = QuotaKeyMaterialProvider()
+    provider = _provider()
     with pytest.raises(TypeError):
         QuotaKey()  # type: ignore[call-arg]
-    with pytest.raises(ValueError, match="unverified"):
-        provider.verify(
-            version=1,
-            key_id="quota-1",
-            key_bytes=bytes(range(32)),
-            activated=1,
-            source_revision="revision-1",
-            authenticated_revision=False,
-            csprng_provenance=True,
-        )
-    provider.verify(
-        version=1,
+    first = provider.load(
+        parameter_name="/trustforge/quota",
+        expected_version=1,
         key_id="quota-1",
-        key_bytes=bytes(range(32)),
-        activated=1,
-        source_revision="revision-1",
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
-    with pytest.raises(ValueError, match="rebound"):
-        provider.verify(
-            version=1,
+    assert first.source_revision.startswith("aws-ssm:arn:")
+    assert "Value" not in repr(provider)
+    assert first.key_bytes not in repr(first).encode()
+
+
+@pytest.mark.parametrize("field", ["Name", "ARN", "Type", "Version", "Value"])
+def test_ssm_loader_rejects_malformed_identity_and_secret(field):
+    client = FakeSsmClient({1: bytes(range(32))})
+    client.mutate = field
+    provider = AwsSsmQuotaKeyMaterialProvider(client)
+    with pytest.raises(ValueError, match="SSM quota key load failed"):
+        provider.load(
+            parameter_name="/trustforge/quota",
+            expected_version=1,
             key_id="quota-1",
-            key_bytes=bytes(range(1, 33)),
-            activated=1,
-            source_revision="revision-1",
-            authenticated_revision=True,
-            csprng_provenance=True,
         )
+    assert client.calls == [
+        {
+            "Name": "/trustforge/quota:1",
+            "WithDecryption": True,
+        }
+    ]
+
+
+def test_ssm_loader_restart_exact_attach_uses_same_aws_revision():
+    client = FakeSsmClient({1: bytes(range(32))})
+    first = AwsSsmQuotaKeyMaterialProvider(client)
+    second = AwsSsmQuotaKeyMaterialProvider(client)
+    first_key = first.load(
+        parameter_name="/trustforge/quota",
+        expected_version=1,
+        key_id="quota-1",
+    )
+    second_key = second.load(
+        parameter_name="/trustforge/quota",
+        expected_version=1,
+        key_id="quota-1",
+    )
+    assert first_key.source_revision == second_key.source_revision
+    assert first_key.key_bytes == second_key.key_bytes
+
+
+def test_ssm_loader_requires_retry_bounded_low_level_client():
+    client = FakeSsmClient()
+    client.meta.config.retries["total_max_attempts"] = 2
+    with pytest.raises(ValueError, match="retry-bounded"):
+        AwsSsmQuotaKeyMaterialProvider(client)
 
 
 def test_authority_rejects_another_provider_material():
     _, authority = _authority()
-    other = QuotaKeyMaterialProvider()
-    foreign = other.verify(
-        version=1,
+    other = _provider()
+    foreign = other.bind_lifecycle(
+        other.load(
+        parameter_name="/trustforge/quota",
+        expected_version=1,
         key_id="quota-1",
-        key_bytes=bytes(range(32)),
+        ),
         activated=1_999_999_900,
-        source_revision="foreign-revision",
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
     with pytest.raises(ValueError, match="invalid quota lifecycle"):
         authority.install(
@@ -406,21 +462,20 @@ def test_durable_authority_rejects_future_activation():
         monotonic_clock=lambda: 0.0,
         wall_clock=lambda: float(client.second),
     )
-    provider = QuotaKeyMaterialProvider()
+    provider = _provider()
     authority = DurableQuotaKeyLifecycleAuthority(
         clock,
         dynamodb_client=client,
         table_name="preview-store",
         key_material_provider=provider,
     )
-    future = provider.verify(
-        version=1,
+    future = provider.bind_lifecycle(
+        provider.load(
+        parameter_name="/trustforge/quota",
+        expected_version=1,
         key_id="quota-future",
-        key_bytes=bytes(range(32)),
+        ),
         activated=2_000_000_001,
-        source_revision="future-revision",
-        authenticated_revision=True,
-        csprng_provenance=True,
     )
     with pytest.raises(ValueError, match="stale lifecycle transition"):
         authority.install(
