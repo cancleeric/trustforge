@@ -155,17 +155,6 @@ impl LedgerStore {
         binding.boot_id = kernel_boot_id()?;
         let now_boottime_ns = internal_boottime_ns()?;
         validate_binding(&binding)?;
-        if now_boottime_ns >= binding.deadline_boottime_ns {
-            return Err(Error::UnsafeObject("stale request"));
-        }
-        if binding
-            .deadline_boottime_ns
-            .checked_sub(now_boottime_ns)
-            .ok_or(Error::UnsafeObject("stale request"))?
-            > MAX_FUTURE_NS
-        {
-            return Err(Error::UnsafeObject("deadline too far"));
-        }
         if let Err(error) = self.recover_locked(&lock) {
             self.poison_or_latch(&lock)?;
             return Err(error);
@@ -198,6 +187,25 @@ impl LedgerStore {
                 return Err(error);
             }
         }
+        let temporal_error = if now_boottime_ns >= binding.deadline_boottime_ns {
+            Some(Error::UnsafeObject("stale request"))
+        } else if binding
+            .deadline_boottime_ns
+            .checked_sub(now_boottime_ns)
+            .ok_or(Error::UnsafeObject("stale request"))?
+            > MAX_FUTURE_NS
+        {
+            Some(Error::UnsafeObject("deadline too far"))
+        } else {
+            None
+        };
+        if let Some(error) = temporal_error {
+            if let Err(append_error) = self.append(&lock, &binding, State::Tombstoned) {
+                self.poison_or_latch(&lock)?;
+                return Err(append_error);
+            }
+            return Err(error);
+        }
         if let Err(error) = self
             .append(&lock, &binding, State::Prepared)
             .and_then(|_| self.append(&lock, &binding, State::Claimed))
@@ -221,37 +229,68 @@ impl LedgerStore {
             return Err(Error::UnsafeObject("STORE_POISONED"));
         }
         let records = self.checked_records(lock)?;
+        let mut burns = Vec::new();
         for entry in lock.entries_in(&self.burns)? {
             if !entry.name.ends_with(".burn") {
                 return Err(Error::UnsafeObject("unknown burn entry"));
             }
             let bytes = lock.read_in(&self.burns, &entry.name, RECORD_MAX)?;
             let burn = parse_burn(&bytes, &self.store_id)?;
-            if records
-                .iter()
-                .any(|r| r.binding.transaction_id == burn.1 && r.binding.request_sha256 != burn.0)
+            if entry.name != format!("{}.burn", burn.request_sha256)
+                || burns.iter().any(|prior: &Burn| {
+                    prior.request_sha256 == burn.request_sha256
+                        || prior.transaction_id == burn.transaction_id
+                })
             {
+                return Err(Error::UnsafeObject("burn duplicate/mismatch"));
+            }
+            if records.iter().any(|r| {
+                r.binding.transaction_id == burn.transaction_id
+                    && r.binding.request_sha256 != burn.request_sha256
+            }) {
                 return Err(Error::UnsafeObject("transaction/request confusion"));
             }
-            match records
-                .iter()
-                .rev()
-                .find(|r| r.binding.transaction_id == burn.1 && r.binding.request_sha256 == burn.0)
-            {
+            match records.iter().rev().find(|r| {
+                r.binding.transaction_id == burn.transaction_id
+                    && r.binding.request_sha256 == burn.request_sha256
+            }) {
                 None => {
                     let binding = Binding {
-                        transaction_id: burn.1,
-                        request_sha256: burn.0,
-                        foundation_sha256: ZERO.into(),
-                        boot_id: "recovered".into(),
-                        deadline_boottime_ns: 1,
+                        transaction_id: burn.transaction_id.clone(),
+                        request_sha256: burn.request_sha256.clone(),
+                        foundation_sha256: burn.request.foundation_sha256.clone(),
+                        boot_id: kernel_boot_id()?,
+                        deadline_boottime_ns: burn.request.deadline_boottime_ns,
                     };
                     self.append(lock, &binding, State::Tombstoned)?;
+                }
+                Some(record)
+                    if record.binding.foundation_sha256 != burn.request.foundation_sha256
+                        || record.binding.deadline_boottime_ns
+                            != burn.request.deadline_boottime_ns =>
+                {
+                    return Err(Error::UnsafeObject("burn/record semantic mismatch"));
                 }
                 Some(record) if matches!(record.state, State::Prepared | State::Claimed) => {
                     self.append(lock, &record.binding, State::Tombstoned)?
                 }
                 _ => {}
+            }
+            burns.push(burn);
+        }
+        let recovered = self.checked_records(lock)?;
+        for record in &recovered {
+            let matches = burns
+                .iter()
+                .filter(|burn| {
+                    burn.transaction_id == record.binding.transaction_id
+                        && burn.request_sha256 == record.binding.request_sha256
+                        && burn.request.foundation_sha256 == record.binding.foundation_sha256
+                        && burn.request.deadline_boottime_ns == record.binding.deadline_boottime_ns
+                })
+                .count();
+            if matches != 1 {
+                return Err(Error::UnsafeObject("record missing matching burn"));
             }
         }
         Ok(())
@@ -459,6 +498,11 @@ struct Record {
     previous_sha256: String,
     hash: String,
 }
+struct Burn {
+    request_sha256: String,
+    transaction_id: String,
+    request: Request,
+}
 
 fn encode_record(seq: u64, state: State, b: &Binding, store: &str, previous: &str) -> Vec<u8> {
     format!("v1\nsequence={seq}\nstate={}\ntransaction={}\nrequest={}\nfoundation={}\nboot={}\ndeadline={}\nstore={store}\nprevious={previous}\n",
@@ -521,7 +565,7 @@ fn value<'a>(lines: &mut impl Iterator<Item = &'a str>, key: &str) -> Result<&'a
         .and_then(|line| line.strip_prefix(&format!("{key}=")))
         .ok_or(Error::UnsafeObject("record field"))
 }
-fn parse_burn(bytes: &[u8], store: &str) -> Result<(String, String), Error> {
+fn parse_burn(bytes: &[u8], store: &str) -> Result<Burn, Error> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::UnsafeObject("burn utf8"))?;
     let mut l = text
         .strip_suffix('\n')
@@ -543,8 +587,11 @@ fn parse_burn(bytes: &[u8], store: &str) -> Result<(String, String), Error> {
         .parse()
         .map_err(|_| Error::UnsafeObject("burn replay length"))?;
     let replay = decode_hex(value(&mut l, "replay")?)?;
+    let parsed = decode_canonical_request(&canonical)?;
+    let expected_replay = canonical_replay_identity(&parsed)?;
     if canonical.len() != length
         || replay.len() != replay_length
+        || replay != expected_replay
         || request_digest(&replay)? != request
         || l.next().is_some()
     {
@@ -552,7 +599,11 @@ fn parse_burn(bytes: &[u8], store: &str) -> Result<(String, String), Error> {
     }
     valid_hex(&request)?;
     valid_hex(&tx)?;
-    Ok((request, tx))
+    Ok(Burn {
+        request_sha256: request,
+        transaction_id: tx,
+        request: parsed,
+    })
 }
 fn validate_binding(b: &Binding) -> Result<(), Error> {
     valid_hex(&b.transaction_id)?;
@@ -625,6 +676,35 @@ fn canonical_request(r: &Request) -> Result<Vec<u8>, Error> {
         r.deadline_boottime_ns
     )
     .into_bytes())
+}
+fn decode_canonical_request(bytes: &[u8]) -> Result<Request, Error> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::UnsafeObject("request utf8"))?;
+    let mut lines = text
+        .strip_suffix('\n')
+        .ok_or(Error::UnsafeObject("request newline"))?
+        .lines();
+    if lines.next() != Some("v1") {
+        return Err(Error::UnsafeObject("request version"));
+    }
+    let foundation_sha256 = value(&mut lines, "foundation")?.to_owned();
+    let operation = value(&mut lines, "operation")?.to_owned();
+    let payload = decode_hex(value(&mut lines, "payload")?)?;
+    let deadline_boottime_ns = value(&mut lines, "deadline")?
+        .parse()
+        .map_err(|_| Error::UnsafeObject("request deadline"))?;
+    if lines.next().is_some() {
+        return Err(Error::UnsafeObject("request fields"));
+    }
+    let request = Request {
+        foundation_sha256,
+        operation,
+        payload,
+        deadline_boottime_ns,
+    };
+    if canonical_request(&request)? != bytes {
+        return Err(Error::UnsafeObject("request canonical"));
+    }
+    Ok(request)
 }
 fn canonical_replay_identity(r: &Request) -> Result<Vec<u8>, Error> {
     valid_hex(&r.foundation_sha256)?;
@@ -786,6 +866,7 @@ mod tests {
         };
         assert!(store.claim(&"55".repeat(32), base.clone()).is_err());
         let mut future = base;
+        future.payload = b"future".to_vec();
         future.deadline_boottime_ns = 100 + MAX_FUTURE_NS + 1;
         assert!(store.claim(&"66".repeat(32), future).is_err());
         let boundary = Request {
@@ -847,6 +928,94 @@ mod tests {
         std::fs::remove_file(&heads[0]).unwrap();
         assert!(LedgerStore::open_for_test(&path).is_err());
         assert!(path.join("poison/store.poison").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn committed_record_with_deleted_burn_persists_poison() {
+        let _clock = TestClockGuard::at(100);
+        let path = test_root("missing-burn");
+        let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
+        let request = Request {
+            foundation_sha256: "33".repeat(32),
+            operation: "execute".into(),
+            payload: b"missing-burn".to_vec(),
+            deadline_boottime_ns: 200,
+        };
+        store
+            .claim(&"11".repeat(32), request.clone())
+            .unwrap()
+            .commit()
+            .unwrap();
+        drop(store);
+        let burn = std::fs::read_dir(path.join("burns"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::remove_file(burn).unwrap();
+        assert!(LedgerStore::open_for_test(&path).is_err());
+        assert!(path.join("poison/store.poison").exists());
+        assert!(LedgerStore::open_for_test(&path).is_err());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn canonical_burn_mutation_persists_poison() {
+        let _clock = TestClockGuard::at(100);
+        let path = test_root("burn-mutation");
+        let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
+        store
+            .claim(
+                &"11".repeat(32),
+                Request {
+                    foundation_sha256: "33".repeat(32),
+                    operation: "execute".into(),
+                    payload: b"mutation".to_vec(),
+                    deadline_boottime_ns: 200,
+                },
+            )
+            .unwrap()
+            .commit()
+            .unwrap();
+        drop(store);
+        let burn = std::fs::read_dir(path.join("burns"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut bytes = std::fs::read(&burn).unwrap();
+        let position = bytes.iter().rposition(|byte| *byte == b'a').unwrap();
+        bytes[position] = b'b';
+        std::fs::write(&burn, bytes).unwrap();
+        assert!(LedgerStore::open_for_test(&path).is_err());
+        assert!(path.join("poison/store.poison").exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn stale_request_is_burned_tombstoned_and_never_retried() {
+        let _clock = TestClockGuard::at(100);
+        let path = test_root("stale");
+        let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
+        let stale = Request {
+            foundation_sha256: "33".repeat(32),
+            operation: "execute".into(),
+            payload: b"stale".to_vec(),
+            deadline_boottime_ns: 100,
+        };
+        assert!(store.claim(&"11".repeat(32), stale).is_err());
+        drop(store);
+        let reopened = LedgerStore::open_for_test(&path).unwrap();
+        let valid = Request {
+            foundation_sha256: "33".repeat(32),
+            operation: "execute".into(),
+            payload: b"stale".to_vec(),
+            deadline_boottime_ns: 200,
+        };
+        assert!(reopened.claim(&"22".repeat(32), valid).is_err());
         std::fs::remove_dir_all(path).unwrap();
     }
 

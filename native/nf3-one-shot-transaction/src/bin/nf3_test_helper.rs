@@ -36,7 +36,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: nf3-test-helper COMMAND ROOT TX_HEX TAG DEADLINE_NS".into());
     };
     if command.starts_with("pause-") {
-        println!("READY command={command}");
+        println!("HELPER_ARMED command={command}");
     }
     let session = store.claim(
         tx,
