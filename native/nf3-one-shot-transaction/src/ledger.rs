@@ -56,6 +56,10 @@ pub struct ClaimSession<'a> {
 }
 
 impl LedgerStore {
+    pub(crate) fn store_id(&self) -> &str {
+        &self.store_id
+    }
+
     pub fn provision(store_id: &str) -> Result<Self, Error> {
         Self::provision_at(Path::new(PRODUCTION_ROOT), store_id)
     }
@@ -765,11 +769,13 @@ fn recheck_kernel(b: &Binding) -> Result<(), Error> {
     Ok(())
 }
 #[cfg(test)]
-static TEST_BOOTTIME_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+std::thread_local! {
+    static TEST_BOOTTIME_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 fn internal_boottime_ns() -> Result<u64, Error> {
     #[cfg(test)]
     {
-        let injected = TEST_BOOTTIME_NS.load(Ordering::SeqCst);
+        let injected = TEST_BOOTTIME_NS.with(std::cell::Cell::get);
         if injected != 0 {
             return Ok(injected);
         }
@@ -783,23 +789,36 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    static TEST_CLOCK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     struct TestClockGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: u64,
     }
     impl TestClockGuard {
         fn at(value: u64) -> Self {
-            let lock = TEST_CLOCK_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            TEST_BOOTTIME_NS.store(value, Ordering::SeqCst);
-            Self { _lock: lock }
+            let previous = TEST_BOOTTIME_NS.with(|clock| clock.replace(value));
+            Self { previous }
         }
     }
     impl Drop for TestClockGuard {
         fn drop(&mut self) {
-            TEST_BOOTTIME_NS.store(0, Ordering::SeqCst);
+            TEST_BOOTTIME_NS.with(|clock| clock.set(self.previous));
         }
+    }
+
+    #[test]
+    fn injected_clock_is_thread_local_and_raii_restored() {
+        assert_ne!(internal_boottime_ns().unwrap(), 100);
+        {
+            let _clock = TestClockGuard::at(100);
+            assert_eq!(internal_boottime_ns().unwrap(), 100);
+            assert_ne!(
+                std::thread::spawn(internal_boottime_ns)
+                    .join()
+                    .unwrap()
+                    .unwrap(),
+                100
+            );
+        }
+        assert_ne!(internal_boottime_ns().unwrap(), 100);
     }
 
     #[test]

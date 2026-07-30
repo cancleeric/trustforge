@@ -153,15 +153,36 @@ run_gate \
   env CARGO_TARGET_DIR=out/nf3-cargo-target \
     cargo test --manifest-path native/nf3-one-shot-transaction/Cargo.toml --locked
 run_gate \
+  "NF3 integrated Linux harness syntax" \
+  bash -n native/nf3-one-shot-transaction/tests/run_integrated_linux.sh
+run_gate \
+  "NF3 integrated Linux orchestrator syntax" \
+  "$PYTHON" -m py_compile scripts/test_nf3_integrated_linux.py
+run_gate \
+  "NF3 evidence Cargo profile receipt" \
+  "$PYTHON" scripts/test_nf3_integrated_linux.py \
+    --source-tree . --verify-profile-only
+run_gate \
+  "NF3 ordinary dev profile is unbound" \
+  bash -ceu 'log=out/nf3-dev-profile-unbound.log
+    if cargo run --quiet \
+      --manifest-path native/nf3-one-shot-transaction/Cargo.toml \
+      --bin nf3_profile_probe >"$log" 2>&1; then
+      echo "ordinary dev profile unexpectedly emitted accepted identity" >&2
+      exit 1
+    fi
+    grep -q "^UNBOUND_BUILD_PROFILE$" "$log"'
+run_gate \
   "NF3 retained-dirfd x86_64-musl clippy" \
-  env CARGO_TARGET_DIR=out/nf3-cargo-target \
+  env CARGO_TARGET_DIR=out/nf3-cargo-target RUSTFLAGS="-C linker=rust-lld" \
     cargo clippy --manifest-path native/nf3-one-shot-transaction/Cargo.toml \
-    --target x86_64-unknown-linux-musl --all-targets --locked -- -D warnings
+    --profile evidence --target x86_64-unknown-linux-musl \
+    --all-targets --locked --features adversarial-test-hooks -- -D warnings
 run_gate \
   "NF3 adversarial helper x86_64-musl compile" \
-  env CARGO_TARGET_DIR=out/nf3-cargo-target \
+  env CARGO_TARGET_DIR=out/nf3-cargo-target RUSTFLAGS="-C linker=rust-lld" \
     cargo check --manifest-path native/nf3-one-shot-transaction/Cargo.toml \
-    --target x86_64-unknown-linux-musl --all-targets --locked \
+    --profile evidence --target x86_64-unknown-linux-musl --all-targets --locked \
     --features adversarial-test-hooks
 run_gate \
   "NF3 release rejects adversarial hooks" \
