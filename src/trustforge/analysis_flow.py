@@ -41,6 +41,7 @@ from .bedrock import (
 )
 from .execlog import ExecutionLog
 from .feature_store import TrustFeatureStore
+from .formal_run_idempotency import FormalRunIdentity
 from .ingestion.base import collect
 from .ingestion.cache import doc_from_dict, doc_to_dict
 from .ledger import append_run
@@ -189,6 +190,27 @@ MANUAL_PRIORITY = 0
 SCHEDULED_PRIORITY = 100
 MANUAL_DEDUP_WINDOW_SEC = 300
 MANUAL_LOCK_TIMEOUT_SEC = 90
+_FORMAL_INTENT_STATES = frozenset(
+    {"pending", "claiming", "collecting", "completed", "execution_uncertain"}
+)
+
+
+def _formal_projection_ids(
+    identity: FormalRunIdentity, operation_id: str, coin: str, mode: str, question: str,
+) -> tuple[str, str, str]:
+    operation_digest = hashlib.sha256(
+        (
+            f"{identity.namespace}\0{identity.scope_locator}\0{operation_id}"
+        ).encode()
+    ).hexdigest()
+    job_id = f"flow-{operation_digest[:16]}"
+    question_digest = hashlib.sha256(
+        (
+            f"{identity.namespace}\0{identity.scope_locator}\0"
+            f"{coin}\0{mode}\0{question}"
+        ).encode()
+    ).hexdigest()
+    return f"question-{question_digest[:20]}", job_id, f"result-{job_id}"
 
 
 @contextmanager
@@ -632,6 +654,36 @@ class AnalysisFlow:
           locale TEXT NOT NULL, state TEXT NOT NULL,
           result_json TEXT, updated_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS formal_analysis_projection_queue (
+          operation_id TEXT NOT NULL CHECK(length(operation_id) BETWEEN 1 AND 128),
+          job_id TEXT NOT NULL CHECK(length(job_id) BETWEEN 1 AND 128),
+          result_id TEXT NOT NULL CHECK(length(result_id) BETWEEN 1 AND 128),
+          question_id TEXT NOT NULL CHECK(length(question_id) BETWEEN 1 AND 128),
+          namespace TEXT NOT NULL CHECK(length(namespace) BETWEEN 1 AND 128),
+          scope_locator TEXT NOT NULL CHECK(
+            length(scope_locator)=64 AND scope_locator NOT GLOB '*[^0-9a-f]*'
+          ),
+          caller_key_id TEXT NOT NULL CHECK(length(caller_key_id) BETWEEN 1 AND 128),
+          caller_scope_hmac TEXT NOT NULL CHECK(
+            length(caller_scope_hmac)=64 AND caller_scope_hmac NOT GLOB '*[^0-9a-f]*'
+          ),
+          key_key_id TEXT NOT NULL CHECK(length(key_key_id) BETWEEN 1 AND 128),
+          key_hmac TEXT NOT NULL CHECK(
+            length(key_hmac)=64 AND key_hmac NOT GLOB '*[^0-9a-f]*'
+          ),
+          coin TEXT NOT NULL, mode TEXT NOT NULL,
+          question TEXT NOT NULL CHECK(length(question) BETWEEN 1 AND 1000),
+          locale TEXT NOT NULL CHECK(locale IN ('zh-Hant','en')),
+          fencing_token INTEGER NOT NULL CHECK(fencing_token BETWEEN 1 AND 9223372036854775807),
+          state TEXT NOT NULL CHECK(
+            state IN ('pending','claiming','collecting','completed','execution_uncertain')
+          ),
+          created_at REAL NOT NULL, updated_at REAL NOT NULL,
+          PRIMARY KEY(namespace,scope_locator,operation_id),
+          UNIQUE(namespace,scope_locator,job_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_formal_projection_state
+          ON formal_analysis_projection_queue(state,created_at,operation_id);
         CREATE TABLE IF NOT EXISTS analysis_atomic_owners (
           job_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, mode TEXT NOT NULL,
           owner_token TEXT NOT NULL, claimed_at REAL NOT NULL,
@@ -934,6 +986,119 @@ class AnalysisFlow:
                 ).fetchone()
                 job_id = existing["job_id"] if existing else None
             return question_id, job_id
+
+    def plan_formal_manual(
+        self, coin: str, mode: str, question: str, *, locale: str,
+        fresh: bool, operation_id: str, identity: FormalRunIdentity,
+    ) -> dict[str, str | None]:
+        """Plan an independent formal intent without creating a snapshot.
+
+        The returned created identity is deterministic from the already durable
+        operation identity.  Callers MUST bind their shared outbox before
+        invoking :meth:`enqueue_formal_projection`.  This local dark projection
+        deliberately does not implement cross-key 300-second content reuse;
+        that decision requires the B2 shared-authority content transaction.
+        """
+        coin, mode, question = coin.strip().upper(), mode.strip(), question.strip()
+        if coin not in COIN_POOL or mode not in QUESTION_TYPES:
+            raise ValueError("unsupported coin or mode")
+        if not question or len(question) > 1000:
+            raise ValueError("question must contain 1..1000 characters")
+        locale = normalize_locale(locale)
+        if not isinstance(fresh, bool):
+            raise ValueError("fresh must be boolean")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9._:-]{0,127}", operation_id):
+            raise ValueError("invalid operation id")
+        if not isinstance(identity, FormalRunIdentity):
+            raise TypeError("identity must be a validated formal-run identity")
+        question_id, job_id, result_id = _formal_projection_ids(
+            identity, operation_id, coin, mode, question
+        )
+        return {
+            "disposition": "fresh-created" if fresh else "created",
+            "question_id": question_id,
+            "job_id": job_id,
+            "result_id": result_id,
+        }
+
+    def enqueue_formal_projection(
+        self, coin: str, mode: str, question: str, *, locale: str, job_id: str,
+        operation_id: str, identity: FormalRunIdentity, fencing_token: int,
+    ) -> tuple[str, str]:
+        """Durably enqueue a local projection without collecting or dispatching.
+
+        This is the recovery boundary after the shared authority's dispatch
+        claim.  A separate reconciler owns external collection; the HTTP
+        process never crosses that unknown-result boundary.  ``question_id`` in
+        this dedicated queue is the caller-scope-bound external formal alias;
+        formal intent creation deliberately does not write the unscoped legacy
+        ``analysis_questions`` registry or consume its global active-question
+        quota.
+        """
+        coin, mode, question = coin.strip().upper(), mode.strip(), question.strip()
+        if coin not in COIN_POOL or mode not in QUESTION_TYPES:
+            raise ValueError("unsupported coin or mode")
+        if not question or len(question) > 1000:
+            raise ValueError("question must contain 1..1000 characters")
+        locale = normalize_locale(locale)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9._:-]{0,127}", operation_id):
+            raise ValueError("invalid operation id")
+        if not isinstance(identity, FormalRunIdentity):
+            raise TypeError("identity must be a validated formal-run identity")
+        if (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or not 1 <= fencing_token <= 9_223_372_036_854_775_807
+        ):
+            raise ValueError("fencing token must be a positive integer")
+        question_id, expected_job_id, result_id = _formal_projection_ids(
+            identity, operation_id, coin, mode, question
+        )
+        if job_id != expected_job_id:
+            raise ValueError("job id is not deterministic for scoped operation")
+        now = time.time()
+        conn = self._conn()
+        expected = (
+            job_id, result_id, question_id, identity.namespace, identity.scope_locator,
+            identity.caller_scope_hmac.key_id, identity.caller_scope_hmac.digest,
+            identity.key_hmac.key_id, identity.key_hmac.digest,
+            coin, mode, question, locale, fencing_token,
+        )
+        fields = (
+            "job_id", "result_id", "question_id", "namespace", "scope_locator",
+            "caller_key_id", "caller_scope_hmac", "key_key_id", "key_hmac",
+            "coin", "mode", "question", "locale", "fencing_token",
+        )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """SELECT * FROM formal_analysis_projection_queue
+                   WHERE namespace=? AND scope_locator=? AND operation_id=?""",
+                (identity.namespace, identity.scope_locator, operation_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["state"] not in _FORMAL_INTENT_STATES
+                    or tuple(existing[field] for field in fields) != expected
+                ):
+                    raise MultiAngleAuthorityError(
+                        "formal deterministic projection conflicts with durable intent"
+                    )
+                conn.commit()
+                return question_id, job_id
+            conn.execute(
+                """INSERT INTO formal_analysis_projection_queue
+                   (operation_id,job_id,result_id,question_id,namespace,scope_locator,
+                    caller_key_id,caller_scope_hmac,key_key_id,key_hmac,
+                    coin,mode,question,locale,fencing_token,state,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
+                (operation_id, *expected, now, now),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return question_id, job_id
 
     def _atomic_store(self):
         if self._atomic_batch_store is not None:
