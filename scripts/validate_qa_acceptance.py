@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
+import mimetypes
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -28,7 +30,10 @@ def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def expanded_case_ids(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def expanded_case_ids(
+    registry: dict[str, Any],
+    repo_root: Path | None = None,
+) -> dict[str, dict[str, Any]]:
     """Expand requirement matrices to deterministic case IDs."""
     if registry.get("schema_version") != SCHEMA_VERSION:
         raise AcceptanceValidationError("unsupported registry schema_version")
@@ -46,6 +51,21 @@ def expanded_case_ids(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
         requirement_ids.add(requirement_id)
         if requirement.get("hard") and not requirement.get("automation"):
             raise AcceptanceValidationError(f"hard requirement lacks automation: {requirement_id}")
+        status = requirement.get("implementation_status", "implemented")
+        if status not in {"implemented", "planned"}:
+            raise AcceptanceValidationError(
+                f"invalid implementation_status for {requirement_id}: {status}"
+            )
+        if repo_root is not None and status == "implemented":
+            missing_automation = [
+                path for path in requirement.get("automation", [])
+                if not (repo_root / path).is_file()
+            ]
+            if missing_automation:
+                raise AcceptanceValidationError(
+                    f"implemented automation missing for {requirement_id}: "
+                    f"{', '.join(missing_automation)}"
+                )
 
         matrix = requirement.get("matrix", [])
         unknown = [name for name in matrix if name not in dimensions]
@@ -101,12 +121,37 @@ def _validate_artifact_path(path: str, release_id: str) -> None:
         )
 
 
+def _verify_artifact(
+    artifact: dict[str, Any],
+    release_id: str,
+    artifact_root: Path,
+) -> None:
+    _validate_artifact_path(artifact["path"], release_id)
+    path = artifact_root / artifact["path"]
+    if not path.is_file():
+        raise AcceptanceValidationError(f"artifact does not exist: {artifact['path']}")
+    payload = path.read_bytes()
+    if len(payload) != artifact["size_bytes"]:
+        raise AcceptanceValidationError(f"artifact size mismatch: {artifact['path']}")
+    if hashlib.sha256(payload).hexdigest() != artifact["sha256"]:
+        raise AcceptanceValidationError(f"artifact sha256 mismatch: {artifact['path']}")
+    guessed_media_type, _ = mimetypes.guess_type(path.name)
+    if guessed_media_type and guessed_media_type != artifact["media_type"]:
+        raise AcceptanceValidationError(f"artifact media_type mismatch: {artifact['path']}")
+    magic = artifact.get("magic")
+    if magic and not payload.startswith(magic.encode("utf-8")):
+        raise AcceptanceValidationError(f"artifact magic mismatch: {artifact['path']}")
+
+
 def validate_acceptance(
     registry: dict[str, Any],
     summary: dict[str, Any],
     schemas_dir: Path,
+    artifact_root: Path | None = None,
 ) -> None:
-    expected_cases = expanded_case_ids(registry)
+    repo_root = schemas_dir.resolve().parents[1]
+    expected_cases = expanded_case_ids(registry, repo_root)
+    artifact_root = artifact_root or repo_root
     errors = sorted(
         _schema_validator(schemas_dir, "acceptance-summary.schema.json").iter_errors(summary),
         key=lambda error: list(error.absolute_path),
@@ -125,7 +170,7 @@ def validate_acceptance(
     manifest_paths: set[str] = set()
     for artifact in manifest["artifacts"]:
         path = artifact["path"]
-        _validate_artifact_path(path, release_id)
+        _verify_artifact(artifact, release_id, artifact_root)
         if path in manifest_paths:
             raise AcceptanceValidationError(f"duplicate artifact path: {path}")
         manifest_paths.add(path)
@@ -163,7 +208,13 @@ def validate_acceptance(
         for case_id, case in observed.items()
         if expected_cases[case_id]["gate"] == "deployment"
     )
-    all_pass = all(case["status"] == "pass" for case in observed.values())
+    all_automated = all(
+        requirement.get("implementation_status", "implemented") == "implemented"
+        for requirement in expected_cases.values()
+    )
+    all_pass = all_automated and all(
+        case["status"] == "pass" for case in observed.values()
+    )
     expected_disposition = (
         "production_accepted"
         if all_pass

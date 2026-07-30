@@ -23,15 +23,19 @@ def _registry() -> dict:
     return json.loads((ROOT / "qa" / "requirements.json").read_text(encoding="utf-8"))
 
 
-def _valid_summary() -> dict:
+def _valid_summary(artifact_root: Path) -> dict:
     registry = _registry()
     release_id = "v1.2.3-qa"
     artifact_path = f"out/acceptance/{release_id}/reports/report.md"
+    payload = b"# TrustForge\nverified report\n"
+    output_path = artifact_root / artifact_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(payload)
     artifact = {
         "path": artifact_path,
-        "sha256": "a" * 64,
+        "sha256": __import__("hashlib").sha256(payload).hexdigest(),
         "media_type": "text/markdown",
-        "size_bytes": 42,
+        "size_bytes": len(payload),
         "magic": "# TrustForge",
     }
     cases = []
@@ -53,7 +57,7 @@ def _valid_summary() -> dict:
     return {
         "schema_version": "1.0",
         "release_id": release_id,
-        "disposition": "production_accepted",
+        "disposition": "deployed_not_accepted",
         "manifest": {
             "schema_version": "1.0",
             "release_id": release_id,
@@ -66,11 +70,16 @@ def _valid_summary() -> dict:
     }
 
 
-def _validate(summary: dict, registry: dict | None = None) -> None:
+def _validate(
+    summary: dict,
+    artifact_root: Path,
+    registry: dict | None = None,
+) -> None:
     validate_acceptance(
         registry or _registry(),
         summary,
         ROOT / "qa" / "schemas",
+        artifact_root,
     )
 
 
@@ -83,40 +92,43 @@ def test_registry_expands_required_competition_matrices() -> None:
     assert "UI-01[viewport=boundary-901x900]" in cases
 
 
-def test_complete_release_bound_summary_passes() -> None:
-    _validate(_valid_summary())
+def test_complete_release_bound_summary_records_planned_gates(tmp_path: Path) -> None:
+    _validate(_valid_summary(tmp_path), tmp_path)
 
 
 @pytest.mark.parametrize("status", ["fail", "skipped", "not_run"])
-def test_failed_deployment_case_requires_failed_disposition(status: str) -> None:
-    summary = _valid_summary()
+def test_failed_deployment_case_requires_failed_disposition(
+    status: str, tmp_path: Path
+) -> None:
+    summary = _valid_summary(tmp_path)
     summary["cases"][0]["status"] = status
     with pytest.raises(AcceptanceValidationError, match="disposition must be deployment_failed"):
-        _validate(summary)
+        _validate(summary, tmp_path)
     summary["disposition"] = "deployment_failed"
-    _validate(summary)
+    _validate(summary, tmp_path)
 
 
-def test_failed_competition_case_requires_deployed_not_accepted() -> None:
-    summary = _valid_summary()
+def test_failed_competition_case_requires_deployed_not_accepted(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
     competition_case = next(
         case for case in summary["cases"] if case["requirement_id"] == "CA-01"
     )
     competition_case["status"] = "fail"
+    summary["disposition"] = "production_accepted"
     with pytest.raises(
         AcceptanceValidationError,
         match="disposition must be deployed_not_accepted",
     ):
-        _validate(summary)
+        _validate(summary, tmp_path)
     summary["disposition"] = "deployed_not_accepted"
-    _validate(summary)
+    _validate(summary, tmp_path)
 
 
-def test_missing_case_fails_closed() -> None:
-    summary = _valid_summary()
+def test_missing_case_fails_closed(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
     summary["cases"].pop()
     with pytest.raises(AcceptanceValidationError, match="missing required cases"):
-        _validate(summary)
+        _validate(summary, tmp_path)
 
 
 def test_duplicate_and_unknown_requirement_ids_are_rejected() -> None:
@@ -138,43 +150,62 @@ def test_hard_requirement_without_automation_is_rejected() -> None:
         expanded_case_ids(registry)
 
 
-def test_release_binding_and_artifact_boundary_are_enforced() -> None:
-    summary = _valid_summary()
+def test_implemented_automation_path_must_exist() -> None:
+    registry = _registry()
+    registry["requirements"][0]["automation"] = ["scripts/does-not-exist.py"]
+    with pytest.raises(AcceptanceValidationError, match="implemented automation missing"):
+        expanded_case_ids(registry, ROOT)
+
+
+def test_release_binding_and_artifact_boundary_are_enforced(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
     summary["manifest"]["release_id"] = "another-release"
     with pytest.raises(AcceptanceValidationError, match="does not match"):
-        _validate(summary)
+        _validate(summary, tmp_path)
 
-    summary = _valid_summary()
+    summary = _valid_summary(tmp_path)
     summary["manifest"]["artifacts"][0]["path"] = "../report.md"
     with pytest.raises(AcceptanceValidationError, match="must be below"):
-        _validate(summary)
+        _validate(summary, tmp_path)
 
 
-def test_evidence_must_exist_in_manifest() -> None:
-    summary = _valid_summary()
+def test_evidence_must_exist_in_manifest(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
     summary["cases"][0]["evidence"][0]["path"] = (
         f"out/acceptance/{summary['release_id']}/reports/other.md"
     )
     with pytest.raises(AcceptanceValidationError, match="absent from manifest"):
-        _validate(summary)
+        _validate(summary, tmp_path)
 
 
-def test_secret_bearing_fields_are_rejected() -> None:
-    summary = _valid_summary()
+def test_manifest_hash_and_magic_must_match_real_artifact(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
+    summary["manifest"]["artifacts"][0]["sha256"] = "0" * 64
+    with pytest.raises(AcceptanceValidationError, match="sha256 mismatch"):
+        _validate(summary, tmp_path)
+
+    summary = _valid_summary(tmp_path)
+    summary["manifest"]["artifacts"][0]["magic"] = "%PDF"
+    with pytest.raises(AcceptanceValidationError, match="magic mismatch"):
+        _validate(summary, tmp_path)
+
+
+def test_secret_bearing_fields_are_rejected(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
     summary["cases"][0]["metrics"] = {"authorization_header": "redacted"}
     with pytest.raises(AcceptanceValidationError, match="secret-bearing field"):
-        _validate(summary)
+        _validate(summary, tmp_path)
 
 
-def test_invalid_schema_version_is_rejected() -> None:
-    summary = _valid_summary()
+def test_invalid_schema_version_is_rejected(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
     summary["schema_version"] = "2.0"
     with pytest.raises(AcceptanceValidationError, match="schema error"):
-        _validate(summary)
+        _validate(summary, tmp_path)
 
 
-def test_duplicate_case_result_is_rejected() -> None:
-    summary = _valid_summary()
+def test_duplicate_case_result_is_rejected(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
     summary["cases"].append(copy.deepcopy(summary["cases"][0]))
     with pytest.raises(AcceptanceValidationError, match="duplicate result"):
-        _validate(summary)
+        _validate(summary, tmp_path)
