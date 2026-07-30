@@ -41,7 +41,7 @@ function submit(question = '分析 BTC 近期風險') {
 
 beforeEach(() => {
   previewMock.mockReset()
-  window.localStorage.clear()
+  window.localStorage.clear?.()
   document.cookie = 'trustforge_hermes_locale=; Max-Age=0; Path=/'
 })
 
