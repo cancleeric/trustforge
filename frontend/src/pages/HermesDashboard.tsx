@@ -27,6 +27,8 @@ import HermesFirstRun from '../hermes/HermesFirstRun'
 import { useReducedMotion } from '../lib/useReducedMotion'
 import { useAdaptiveQuality } from '../hermes/useAdaptiveQuality'
 import FpsMeter from '../hermes/FpsMeter'
+import WorkspaceStageDrilldown from '../hermes/WorkspaceStageDrilldown'
+import { buildWorkspaceStageDetails } from '../hermes/workspaceStageDetails'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
@@ -137,6 +139,10 @@ export default function HermesDashboard() {
     requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs' || requestedModule === 'whale'
       ? requestedModule : null
   const activeQuestionMode = focus
+  const workspaceStageDetails = activeModule
+    ? buildWorkspaceStageDetails(activeModule, locale, moduleTelemetry)
+    : []
+  const selectedWorkspaceStage = workspaceStageDetails.find((stage) => stage.id === selectedStage)
 
   // N70（CEO：「新手模式不要動選單，動作是切回首頁、中間顯示新手板」）：
   // 新手模式原本的作用是把左軌導覽砍到只剩「分析」——把功能藏起來，新手反而
@@ -735,7 +741,9 @@ export default function HermesDashboard() {
         {selectedStage && (
           <>
             <button className="hermes-drilldown-scrim" type="button" aria-label={t('close')} onClick={() => setSelectedStage(null)} />
-            <StageDrilldown telemetry={moduleTelemetry} journey={analysisJourney} flow={analysisFlow} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onClose={() => setSelectedStage(null)} />
+            {selectedWorkspaceStage
+              ? <WorkspaceStageDrilldown detail={selectedWorkspaceStage} onClose={() => setSelectedStage(null)} />
+              : <StageDrilldown telemetry={moduleTelemetry} journey={analysisJourney} flow={analysisFlow} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onClose={() => setSelectedStage(null)} />}
           </>
         )}
 
