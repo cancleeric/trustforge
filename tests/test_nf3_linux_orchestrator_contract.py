@@ -16,7 +16,7 @@ def source() -> str:
 
 def test_builds_use_nf2_verified_absolute_tool_handles():
     value = source()
-    assert "harness.host_tool(\"cargo\")" in value
+    assert 'harness.host_tool("cargo")' in value
     assert '"RUSTC": rustc' in value
     assert 'f"-C linker={rust_lld} "' in value
     assert '"-C linker-flavor=ld.lld "' in value
@@ -33,9 +33,7 @@ def test_toolchain_environment_is_isolated_and_offline():
     assert '"CARGO_NET_OFFLINE": "true"' in value
     assert '"RUSTDOC": FORBIDDEN_RUSTDOC' in value
     assert 'FORBIDDEN_RUSTDOC = "/nonexistent/trustforge-rustdoc-forbidden"' in value
-    assert (
-        'f"--remap-path-prefix={source_tree}={CANONICAL_SOURCE_ROOT}"' in value
-    )
+    assert 'f"--remap-path-prefix={source_tree}={CANONICAL_SOURCE_ROOT}"' in value
     assert "os.environ.copy()" not in value
 
 
@@ -64,7 +62,7 @@ def test_native_receipts_bind_the_reviewed_canonical_view_probe():
         assert receipt in value
     assert 'source_a = copy_reviewed_build_inputs(repo, scratch / "source-a")' in value
     assert (
-        'source_b = copy_reviewed_build_inputs('
+        "source_b = copy_reviewed_build_inputs("
         'repo, scratch / "different-source-b")' in value
     )
     assert "canonical_source = install_canonical_build_view(source_a)" in value
@@ -76,12 +74,44 @@ def test_native_receipts_bind_the_reviewed_canonical_view_probe():
     assert "len(set(evidence_rlib_hashes)) != 1" in value
     assert "len(set(helper_hashes)) != 1" in value
     assert '"cross_host_substitution": "forbidden"' in value
-    assert 'parser.add_argument("--probe-remapped-builds", action="store_true")' in value
+    assert (
+        'parser.add_argument("--probe-remapped-builds", action="store_true")' in value
+    )
+
+
+def test_nested_units_use_only_secure_host_visible_handoff_artifacts():
+    value = source()
+    assert 'HANDOFF_ROOT = Path("/run/trustforge-nf3-handoff")' in value
+    assert "O_EXCL | os.O_NOFOLLOW" in value
+    assert "os.fsync(handoff_fd)" in value
+    assert "handoff cleanup generation mismatch" in value
+    assert "systemd NF3 handoff RuntimeDirectory is not empty" in value
+    nested = value[value.index("release_profile_line = run(") :]
+    nested = nested[: nested.index("evidence = {")]
+    assert "BindReadOnlyPaths={release_receipt}" not in nested
+    assert "BindReadOnlyPaths={release_probe_a}" not in nested
+    assert "BindReadOnlyPaths={evidence_receipt}" not in nested
+    assert "BindReadOnlyPaths={helper_a}" not in nested
+    assert "BindReadOnlyPaths={evidence_rlib_a}" not in nested
+    assert "BindReadOnlyPaths={repo}" not in nested
+    assert nested.count("BindReadOnlyPaths=/run/trustforge-nf3-handoff/") == 6
+
+
+def test_handoff_rejects_non_plain_destination(tmp_path):
+    with pytest.raises(ValueError, match="one plain filename"):
+        orchestrator.stage_handoff_file(
+            -1,
+            tmp_path / "unused",
+            "../escape",
+            expected_sha256="0" * 64,
+        )
 
 
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
-    test_invocation = value[value.index('harness.host_tool("cargo"),\n                "test"') :]
+    test_invocation = value[
+        value.index('harness.host_tool("cargo"),\n                "test"') :
+    ]
     assert '"--lib"' in test_invocation
     assert '"--tests"' in test_invocation
     assert '"--bins"' in test_invocation

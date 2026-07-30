@@ -57,6 +57,7 @@ FIXED_TOOLCHAIN_RECEIPT_SHA256 = (
 CANONICAL_SOURCE_ROOT = "/workspace/trustforge"
 CANONICAL_BUILD_PARENT = Path("/run/trustforge-nf3-build-input")
 CANONICAL_BUILD_SOURCE = CANONICAL_BUILD_PARENT / "source"
+HANDOFF_ROOT = Path("/run/trustforge-nf3-handoff")
 BLOCKED_RECEIPT = "0" * 64
 ACCEPTED_NF1_COMMIT = "e28a675f03ee517dcd69fba0d7705ec8828d24cd"
 TARGET = "x86_64-unknown-linux-musl"
@@ -120,6 +121,117 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
+def _file_generation(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_ctime_ns,
+    )
+
+
+def _validate_handoff_directory() -> int:
+    """Open the empty systemd-owned handoff without following path components."""
+    try:
+        descriptor = os.open(HANDOFF_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        block("systemd NF3 handoff RuntimeDirectory is unavailable")
+    metadata = os.fstat(descriptor)
+    if (
+        metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_nlink != 2
+    ):
+        os.close(descriptor)
+        block("systemd NF3 handoff RuntimeDirectory metadata is unsafe")
+    if os.listdir(descriptor):
+        os.close(descriptor)
+        block("systemd NF3 handoff RuntimeDirectory is not empty")
+    return descriptor
+
+
+def stage_handoff_file(
+    handoff_fd: int,
+    source: Path,
+    destination: str,
+    *,
+    expected_sha256: str,
+    executable: bool = False,
+) -> tuple[int, int, int, int]:
+    """Copy one verified generation into the host-visible handoff."""
+    if "/" in destination or destination in ("", ".", ".."):
+        raise ValueError("handoff destination must be one plain filename")
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    destination_fd = -1
+    try:
+        before = os.fstat(source_fd)
+        generation = _file_generation(before)
+        expected_mode = 0o500 if executable else 0o400
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != 0
+            or before.st_gid != 0
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > 128 * 1024 * 1024
+            or stat.S_IMODE(before.st_mode) & 0o022
+        ):
+            block(f"unsafe handoff source metadata: {source}")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            expected_mode,
+            dir_fd=handoff_fd,
+        )
+        os.fchown(destination_fd, 0, 0)
+        value = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            value.update(chunk)
+            copied += len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                view = view[written:]
+        if copied != before.st_size or value.hexdigest() != expected_sha256:
+            block(f"handoff source content mismatch: {source}")
+        if _file_generation(os.fstat(source_fd)) != generation:
+            block(f"handoff source generation changed during copy: {source}")
+        os.fchmod(destination_fd, expected_mode)
+        os.fsync(destination_fd)
+        staged = os.fstat(destination_fd)
+        if (
+            not stat.S_ISREG(staged.st_mode)
+            or staged.st_uid != 0
+            or staged.st_gid != 0
+            or staged.st_nlink != 1
+            or staged.st_size != copied
+            or stat.S_IMODE(staged.st_mode) != expected_mode
+        ):
+            block(f"staged handoff metadata mismatch: {destination}")
+        os.fsync(handoff_fd)
+        return _file_generation(staged)
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        os.close(source_fd)
+
+
+def cleanup_handoff_file(
+    handoff_fd: int, destination: str, generation: tuple[int, int, int, int]
+) -> None:
+    """Remove only the exact file generation created by this process."""
+    metadata = os.stat(destination, dir_fd=handoff_fd, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or _file_generation(metadata) != generation:
+        block(f"handoff cleanup generation mismatch: {destination}")
+    os.unlink(destination, dir_fd=handoff_fd)
+    os.fsync(handoff_fd)
+
+
 def load_nf2_harness(repo: Path):
     path = repo / NF2_HARNESS
     specification = importlib.util.spec_from_file_location(
@@ -143,9 +255,7 @@ def verified_rust_toolchain(repo: Path, scratch: Path):
         block("canonical Linux host receipt cannot be parsed")
     if receipt_digest != harness.HOST_RECEIPT_SHA256:
         block("canonical Linux host receipt differs from reviewed NF2 contract")
-    harness.RECEIPT_TOOL_RECORDS.update(
-        harness.validate_host_receipt(receipt_value)
-    )
+    harness.RECEIPT_TOOL_RECORDS.update(harness.validate_host_receipt(receipt_value))
     try:
         harness.VERIFIED_HOST_TOOLS["rustup"] = harness.verify_tool(
             harness.ROOT_RUSTUP,
@@ -242,9 +352,7 @@ def verified_rust_toolchain(repo: Path, scratch: Path):
         or cargo_version.returncode != 0
         or f"release: {harness.PINNED_RUST_RELEASE}" not in rust_version.stdout
         or f"commit-hash: {harness.PINNED_RUST_COMMIT}" not in rust_version.stdout
-        or not cargo_version.stdout.startswith(
-            f"cargo {harness.PINNED_RUST_RELEASE} "
-        )
+        or not cargo_version.stdout.startswith(f"cargo {harness.PINNED_RUST_RELEASE} ")
     ):
         block("pinned Rust 1.96.0 toolchain identity mismatch")
     try:
@@ -369,16 +477,23 @@ def require_host() -> None:
         block("native Linux x86_64 required")
     if os.geteuid() != 0:
         block("root required")
-    if Path("/run/systemd/container").exists() and Path(
-        "/run/systemd/container"
-    ).read_text().strip():
+    if (
+        Path("/run/systemd/container").exists()
+        and Path("/run/systemd/container").read_text().strip()
+    ):
         block("systemd container marker present")
     cgroup = Path("/proc/1/cgroup").read_text()
-    if any(marker in cgroup.lower() for marker in ("docker", "containerd", "kubepods", "lxc", "podman")):
+    if any(
+        marker in cgroup.lower()
+        for marker in ("docker", "containerd", "kubepods", "lxc", "podman")
+    ):
         block("container cgroup marker present")
-    if subprocess.run(
-        ["systemd-detect-virt", "--container", "--quiet"], check=False
-    ).returncode == 0:
+    if (
+        subprocess.run(
+            ["systemd-detect-virt", "--container", "--quiet"], check=False
+        ).returncode
+        == 0
+    ):
         block("systemd reports a container")
     systemd_state = subprocess.run(
         ["systemctl", "is-system-running"],
@@ -558,7 +673,10 @@ def verify_release_rejects_hooks(repo: Path, target_root: Path, toolchain) -> No
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    if result.returncode == 0 or "adversarial test hooks are forbidden" not in result.stdout:
+    if (
+        result.returncode == 0
+        or "adversarial test hooks are forbidden" not in result.stdout
+    ):
         raise RuntimeError("release did not structurally reject adversarial hooks")
     verify_target_tree(harness, target_tree, target_entries)
 
@@ -638,11 +756,17 @@ def main() -> int:
     nf1_source = arguments.accepted_nf1_source.resolve(strict=True)
     if arguments.accepted_nf1_commit != ACCEPTED_NF1_COMMIT:
         block("accepted NF1 commit differs from fixed receipt")
-    if run(["git", "rev-parse", "HEAD"], cwd=nf1_source, capture=True) != ACCEPTED_NF1_COMMIT:
+    if (
+        run(["git", "rev-parse", "HEAD"], cwd=nf1_source, capture=True)
+        != ACCEPTED_NF1_COMMIT
+    ):
         block("accepted NF1 source checkout mismatch")
     if run(["git", "status", "--porcelain"], cwd=nf1_source, capture=True):
         block("accepted NF1 source is dirty")
-    if digest(archive) != "808487c590a183a8df2e69cfc5257969e18ae88b15c4378da95d97add6c03c1b":
+    if (
+        digest(archive)
+        != "808487c590a183a8df2e69cfc5257969e18ae88b15c4378da95d97add6c03c1b"
+    ):
         block("accepted NF1 archive digest mismatch")
     head = run(["git", "rev-parse", "HEAD"], cwd=repo, capture=True)
     tree = run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, capture=True)
@@ -694,6 +818,8 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="trustforge-nf3-b-") as raw:
         scratch = Path(raw)
+        handoff_fd = _validate_handoff_directory()
+        handoff_generations: dict[str, tuple[int, int, int, int]] = {}
         toolchain = verified_rust_toolchain(repo, scratch / "toolchain-environment")
         source_a = copy_reviewed_build_inputs(repo, scratch / "source-a")
         source_b = copy_reviewed_build_inputs(repo, scratch / "different-source-b")
@@ -756,6 +882,19 @@ def main() -> int:
             release_probe_hash,
             EXPECTED_RELEASE_RLIB_SHA256,
         )
+        handoff_generations["release-receipt.v1"] = stage_handoff_file(
+            handoff_fd,
+            release_receipt,
+            "release-receipt.v1",
+            expected_sha256=digest(release_receipt),
+        )
+        handoff_generations["release-probe"] = stage_handoff_file(
+            handoff_fd,
+            release_probe_a,
+            "release-probe",
+            expected_sha256=release_probe_hash,
+            executable=True,
+        )
         release_profile_line = run(
             [
                 "systemd-run",
@@ -770,8 +909,8 @@ def main() -> int:
                 "--property=PrivateTmp=yes",
                 "--property=RuntimeDirectory=trustforge-nf3-build",
                 "--property=RuntimeDirectoryMode=0700",
-                f"--property=BindReadOnlyPaths={release_receipt}:/run/trustforge-nf3-build/receipt.v1",
-                f"--property=BindReadOnlyPaths={release_probe_a}:/run/trustforge-nf3-release-probe",
+                "--property=BindReadOnlyPaths=/run/trustforge-nf3-handoff/release-receipt.v1:/run/trustforge-nf3-build/receipt.v1",
+                "--property=BindReadOnlyPaths=/run/trustforge-nf3-handoff/release-probe:/run/trustforge-nf3-release-probe",
                 "/run/trustforge-nf3-release-probe",
             ],
             cwd=repo,
@@ -797,6 +936,35 @@ def main() -> int:
             helper_hashes[0],
             EXPECTED_EVIDENCE_RLIB_SHA256,
         )
+        handoff_generations["evidence-receipt.v1"] = stage_handoff_file(
+            handoff_fd,
+            evidence_receipt,
+            "evidence-receipt.v1",
+            expected_sha256=digest(evidence_receipt),
+        )
+        handoff_generations["evidence-helper"] = stage_handoff_file(
+            handoff_fd,
+            helper_a,
+            "evidence-helper",
+            expected_sha256=helper_hashes[0],
+            executable=True,
+        )
+        handoff_generations["evidence-nf2.rlib"] = stage_handoff_file(
+            handoff_fd,
+            evidence_rlib_a,
+            "evidence-nf2.rlib",
+            expected_sha256=EXPECTED_EVIDENCE_RLIB_SHA256,
+        )
+        integrated_script = (
+            repo / "native/nf3-one-shot-transaction/tests/run_integrated_linux.sh"
+        )
+        handoff_generations["run-integrated-linux"] = stage_handoff_file(
+            handoff_fd,
+            integrated_script,
+            "run-integrated-linux",
+            expected_sha256=digest(integrated_script),
+            executable=True,
+        )
         verify_release_rejects_hooks(
             canonical_source, scratch / "release-hook-rejection", toolchain
         )
@@ -810,10 +978,7 @@ def main() -> int:
                 harness.host_tool("cargo"),
                 "test",
                 "--manifest-path",
-                str(
-                    canonical_source
-                    / "native/nf3-one-shot-transaction/Cargo.toml"
-                ),
+                str(canonical_source / "native/nf3-one-shot-transaction/Cargo.toml"),
                 "--target",
                 TARGET,
                 "--lib",
@@ -852,11 +1017,8 @@ def main() -> int:
             cwd=repo,
         )
         unit = f"trustforge-nf3-b-{head[:12]}"
-        cases_root = Path(
-            tempfile.mkdtemp(prefix=f"{unit}-cases-", dir="/root")
-        )
+        cases_root = Path(tempfile.mkdtemp(prefix=f"{unit}-cases-", dir="/root"))
         os.chmod(cases_root, 0o700)
-        service_repo = Path(f"/run/{unit}-repo")
         service_helper = Path(f"/run/{unit}-helper")
         service_rlib = Path(f"/run/{unit}-nf2.rlib")
         properties = [
@@ -874,11 +1036,11 @@ def main() -> int:
             "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL",
             "RuntimeDirectory=trustforge-nf3-build",
             "RuntimeDirectoryMode=0700",
-            f"BindReadOnlyPaths={evidence_receipt}:/run/trustforge-nf3-build/receipt.v1",
+            "BindReadOnlyPaths=/run/trustforge-nf3-handoff/evidence-receipt.v1:/run/trustforge-nf3-build/receipt.v1",
             f"BindReadOnlyPaths={install}:/opt/trustforge/native-foundation/current",
-            f"BindReadOnlyPaths={repo}:{service_repo}",
-            f"BindReadOnlyPaths={helper_a}:{service_helper}",
-            f"BindReadOnlyPaths={evidence_rlib_a}:{service_rlib}",
+            f"BindReadOnlyPaths=/run/trustforge-nf3-handoff/evidence-helper:{service_helper}",
+            f"BindReadOnlyPaths=/run/trustforge-nf3-handoff/evidence-nf2.rlib:{service_rlib}",
+            "BindReadOnlyPaths=/run/trustforge-nf3-handoff/run-integrated-linux:/run/trustforge-nf3-run-integrated-linux",
             "ReadWritePaths=/root",
             "TimeoutStartSec=20min",
         ]
@@ -887,10 +1049,7 @@ def main() -> int:
             command.extend(["--property", prop])
         command.extend(
             [
-                str(
-                    service_repo
-                    / "native/nf3-one-shot-transaction/tests/run_integrated_linux.sh"
-                ),
+                "/run/trustforge-nf3-run-integrated-linux",
                 str(service_helper),
                 str(service_rlib),
                 helper_hashes[0],
@@ -1008,6 +1167,11 @@ def main() -> int:
             json.dumps(evidence, sort_keys=True, indent=2) + "\n"
         )
         os.chmod(arguments.evidence_out, stat.S_IRUSR | stat.S_IWUSR)
+        for name, generation in reversed(handoff_generations.items()):
+            cleanup_handoff_file(handoff_fd, name, generation)
+        if os.listdir(handoff_fd):
+            block("systemd NF3 handoff has unknown entries after cleanup")
+        os.close(handoff_fd)
     print("PASS: NF3 integrated native root/systemd evidence")
     return 0
 

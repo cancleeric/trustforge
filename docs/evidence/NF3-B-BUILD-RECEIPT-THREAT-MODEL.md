@@ -17,16 +17,21 @@ systemd-managed, root-owned mode-0700 build view,
 pre-rustc package-source disambiguator from observing different checkout paths.
 Every verified Cargo/Rust invocation then maps that fixed view to
 `/workspace/trustforge`; the canonical profile and toolchain receipts bind this
-remap. The outer evidence service must declare
-`RuntimeDirectory=trustforge-nf3-build-input` and
+remap. The outer evidence service must declare both
+`RuntimeDirectory=trustforge-nf3-build-input trustforge-nf3-handoff` and
 `RuntimeDirectoryMode=0700`; the orchestrator refuses to create or use an
-unverified parent. The accepted exact-commit probe produced identical A/B
-release rlib, release probe, evidence rlib, and evidence helper objects from
-the two inputs through this canonical view. Those reviewed native receipts are
-now the sole accepted pins. A locally cross-compiled object, or an object built
-on another host, cannot replace them even when its source tree and arguments
-appear identical. Such a change requires a new native cross-view double-build
-receipt and exact-commit review.
+unverified parent. Before starting a nested unit it copies each retained,
+verified artifact generation into the empty root-owned handoff with
+`O_EXCL|O_NOFOLLOW`, rechecks owner, mode, link count, size, digest and
+generation, and fsyncs both file and directory. Nested units bind only these
+host-visible staged paths. Successful cleanup removes only the exact staged
+generations and rejects unknown entries. The accepted exact-commit probe
+produced identical A/B release rlib, release probe, evidence rlib, and evidence
+helper objects from the two inputs through this canonical view. Those reviewed
+native receipts are now the sole accepted pins. A locally cross-compiled
+object, or an object built on another host, cannot replace them even when its
+source tree and arguments appear identical. Such a change requires a new
+native cross-view double-build receipt and exact-commit review.
 
 The reviewed canonical-view receipts are:
 
