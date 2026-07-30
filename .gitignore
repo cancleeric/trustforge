@@ -25,6 +25,9 @@ out/
 .playwright-mcp/
 .kiro/settings/
 
+# JavaScript dependency trees and tool caches are reproducible local artifacts.
+/node_modules/
+
 # 本機審查與執行期產物
 semantic-review/
 skills/hermes/source/*.json

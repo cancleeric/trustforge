@@ -34,7 +34,11 @@ from . import budget_guard
 from .agent.narrative_locale import DEFAULT_LOCALE as DEFAULT_NARRATIVE_LOCALE
 from .agent.narrative_locale import normalize_locale
 from .agent.orchestrator import build_report
-from .bedrock import BedrockClient
+from .bedrock import (
+    BedrockClient,
+    _CLAIM_EXTRACTION_CONTEXT_VERSION,
+    claim_extraction_prompt_context,
+)
 from .execlog import ExecutionLog
 from .feature_store import TrustFeatureStore
 from .ingestion.base import collect
@@ -91,6 +95,20 @@ def _atomic_owner_token(batch_id: str, mode: str, job_id: str) -> str:
 def _multi_angle_doc_line(doc) -> str:
     # Must stay byte-for-byte aligned with BedrockClient.extract_claims_with_llm.
     return f"[{doc.id}] kind={doc.kind} source={doc.source}: {doc.text[:300]}"
+
+
+def _claim_extraction_context_receipt(
+    *, mode: str, question: str, model_invoked: bool,
+) -> dict[str, Any]:
+    """Commit to the exact prompt-context block without persisting full text."""
+    context = claim_extraction_prompt_context(mode, question)
+    return {
+        "contract_version": _CLAIM_EXTRACTION_CONTEXT_VERSION,
+        "mode": mode,
+        "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
+        "prompt_context_sha256": hashlib.sha256(context.encode("utf-8")).hexdigest(),
+        "model_invoked": model_invoked,
+    }
 
 
 def _bounded_multi_angle_documents(docs: list) -> list:
@@ -1626,7 +1644,12 @@ class AnalysisFlow:
     def _complete_claimed_synthesis(self, snapshot_id: str, coin: str) -> bool:
         """完成已取得唯一 claim 的合成；任何例外由 caller 釋放 claim。"""
         conn = self._conn()
-        from .multi_angle import angle_result_from_payload, synthesize_angles
+        from .multi_angle import (
+            angle_result_from_payload,
+            narrate_synthesis,
+            narration_fallback,
+            synthesize_angles,
+        )
         angles = []
         for mode in MODES:
             row = conn.execute(
@@ -1645,20 +1668,19 @@ class AnalysisFlow:
         if len(angles) < len(MODES):
             raise RuntimeError("multi-angle inputs disappeared after synthesis claim")
         report = synthesize_angles(angles, coin, snapshot_id)
-        narration = report.synthesis_summary
+        narration = narration_fallback(report)
         # Feature switch 關閉時完全不進 live gate、不預留成本、不建立 client。
         # Resolver 預設開啟，且 env 是 Admin 無法覆蓋的 emergency kill switch。
         from .admin_config import multi_angle_narration_enabled_resolved
         narration_enabled, _ = multi_angle_narration_enabled_resolved()
         if narration_enabled:
             try:
-                from .multi_angle import narrate_synthesis
                 narration_log = ExecutionLog(run_id=f"ma-{snapshot_id}")
                 with _bedrock_live_attempt(narration_log) as live:
                     client = BedrockClient(offline=not live)
                     narration = narrate_synthesis(report, client, narration_log)
             except Exception:
-                narration = report.synthesis_summary
+                narration = narration_fallback(report)
         now = time.time()
         result_id = f"result-ma-{snapshot_id}"
         payload = report.to_dict()
@@ -2379,6 +2401,7 @@ class AnalysisFlow:
                 "stage_started", entity_type="stage_run", entity_id=f"{job_id}:{stage}",
                 snapshot_id=job["snapshot_id"], job_id=job_id, stage=stage,
                 parent_type="analysis_job", parent_id=job_id,
+                metadata={"mode": job["mode"], "question": job["question"]},
             )
             try:
                 package = getattr(self, f"_stage_{stage}")(package)
@@ -2554,7 +2577,15 @@ class AnalysisFlow:
             client = BedrockClient(offline=True)
             package["client"] = client
             package["claims"] = client.extract_claims_with_llm(
-                package["docs"], log=log
+                package["docs"], log=log, mode=job["mode"], question=job["question"]
+            )
+            receipt = _claim_extraction_context_receipt(
+                mode=job["mode"], question=job["question"], model_invoked=False,
+            )
+            package["claim_extraction_context"] = receipt
+            log.record(
+                "bedrock.claim_extraction_context", params=receipt,
+                summary="Claim Extraction used offline fallback; model was not invoked",
             )
             return package
 
@@ -2653,15 +2684,32 @@ class AnalysisFlow:
                             "claim document block exceeds authority byte cap"
                         )
                 package["claims"] = client.extract_claims_with_llm(
-                    prompt_docs, log=log
+                    prompt_docs,
+                    log=log,
+                    mode=job["mode"],
+                    question=job["question"],
                 )
-                llm_active = not client.offline and bool(client.config.model_id)
+                model_invoked = bool(
+                    getattr(client, "last_claim_extraction_model_invoked", False)
+                )
+                receipt = _claim_extraction_context_receipt(
+                    mode=job["mode"], question=job["question"],
+                    model_invoked=model_invoked,
+                )
+                package["claim_extraction_context"] = receipt
+                log.record(
+                    "bedrock.claim_extraction_context", params=receipt,
+                    summary=(
+                        "Claim Extraction prompt context committed"
+                        if model_invoked else "Claim Extraction used offline fallback; model was not invoked"
+                    ),
+                )
         except Exception as exc:
             self._agos_complete_tool(
                 invocation_id, status="failed", error=str(exc)
             )
             raise
-        log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
+        log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": model_invoked}, summary=f"{len(package['claims'])} claims")
         self._agos_complete_tool(
             invocation_id,
             output=[
@@ -2847,7 +2895,14 @@ class AnalysisFlow:
                    "price_provenance": _price_provenance_data(evidence),
                    "agent_os_memory_counts": memory_counts,
                    "retrieval_context": package.get("retrieval_context", []),
-                   "execution": log.manifest(), "execution_log": log.events, "snapshot_id": job["snapshot_id"], "mode": job["mode"]}
+                   "execution": log.manifest(), "execution_log": log.events, "snapshot_id": job["snapshot_id"],
+                   "mode": job["mode"], "question": job["question"],
+                   "claim_extraction_context": package.get(
+                       "claim_extraction_context",
+                       _claim_extraction_context_receipt(
+                           mode=job["mode"], question=job["question"], model_invoked=False,
+                       ),
+                   )}
         payload["report"]["memory_lineage"] = memory_counts
         now = time.time()
         self._conn().execute("BEGIN IMMEDIATE")

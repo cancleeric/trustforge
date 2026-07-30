@@ -156,7 +156,9 @@ class _StubBedrockClient:
         self.stance_offline = offline if stance_offline is None else stance_offline
         self.cost_events: list[dict] = []
 
-    def extract_claims_with_llm(self, docs, log=None):
+    def extract_claims_with_llm(
+        self, docs, log=None, *, mode=None, question=None,
+    ):
         from trustforge.trust.scoring import extract_claims
 
         return extract_claims(docs)

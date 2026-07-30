@@ -83,7 +83,9 @@ class FakeBedrockClient:
             input_tokens=80, output_tokens=30, model_id=self.config.model_id,
         )
 
-    def extract_claims_with_llm(self, docs, log=None):
+    def extract_claims_with_llm(
+        self, docs, log=None, *, mode=None, question=None,
+    ):
         """直接呼叫真實實作（讓 complete 被計數）。"""
         # 呼叫真實的 BedrockClient.extract_claims_with_llm，但使用本 fake 的 complete
         from trustforge.bedrock import _OBJECTIVE_KINDS
