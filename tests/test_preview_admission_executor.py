@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import threading
 from typing import Callable
 
@@ -20,6 +21,8 @@ from trustforge.preview_admission_compiler import (
     build_counter_specs,
 )
 from trustforge.preview_admission_executor import (
+    AwsQuotaLifecycleBootstrap,
+    AwsQuotaKeyReference,
     AdmissionOutcome,
     PreviewAdmissionExecutor,
     _CONFIRMED_WRITE_REJECTION_CODES,
@@ -31,6 +34,16 @@ from trustforge.preview_durable_admission_gate import (
 )
 from trustforge.preview_trusted_clock import TrustedBuckets, TrustedUtcInterval
 from trustforge.preview_trusted_clock import PreviewTrustedClock
+from trustforge.quota_key_lifecycle import (
+    DurableQuotaKeyLifecycleAuthority,
+    LIFECYCLE_CONTROL_KEY,
+    MIN_OVERLAP_SECONDS,
+    QuotaKeyLifecycle,
+    _encode_metadata,
+    _lifecycle_metadata,
+)
+from tests.test_quota_key_lifecycle import _provider
+from tests.test_quota_key_lifecycle import FakeSsmClient
 
 
 def _request(reservation_id: str = "12345678-1234-4234-9234-123456789abc"):
@@ -45,6 +58,9 @@ def _request(reservation_id: str = "12345678-1234-4234-9234-123456789abc"):
         reservation_id=reservation_id,
         reserved_tokens=100,
         reserved_micro_usd=200,
+        lifecycle_generation=1,
+        current_quota_key_version=1,
+        previous_quota_key_version=None,
     )
 
 
@@ -99,12 +115,25 @@ class FakeClient:
         self.control_put_calls: list[dict[str, object]] = []
         self.reservation_item = None
         self.finalize_calls: list[dict[str, object]] = []
+        self.lifecycle_item = None
+
+    def describe_table(self, **kwargs):
+        del kwargs
+        date = datetime.fromtimestamp(2_000_000_000, UTC).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        return {"ResponseMetadata": {"HTTPHeaders": {"date": date}}}
 
     def get_item(self, **kwargs):
+        if kwargs["Key"] == LIFECYCLE_CONTROL_KEY:
+            return {} if self.lifecycle_item is None else {"Item": self.lifecycle_item}
         self.control_get_calls.append(kwargs)
         return {"Item": self.control_item}
 
     def put_item(self, **kwargs):
+        if kwargs.get("Item", {}).get("sk") == LIFECYCLE_CONTROL_KEY["sk"]:
+            self.lifecycle_item = kwargs["Item"]
+            return {}
         self.control_put_calls.append(kwargs)
         self.control_item = kwargs["Item"]
         return {"ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": "gate"}}
@@ -144,13 +173,41 @@ class FakeClient:
             isinstance(self.write, dict)
             and self.write.get("ResponseMetadata", {}).get("HTTPStatusCode") == 200
         ):
-            self.control_item = kwargs["TransactItems"][-1]["Put"]["Item"]
-            self.reservation_item = kwargs["TransactItems"][-2]["Put"]["Item"]
+            self.control_item = kwargs["TransactItems"][-2]["Put"]["Item"]
+            self.reservation_item = kwargs["TransactItems"][-3]["Put"]["Item"]
         return self.write
 
 
+class _AuthorityClockClient:
+    def describe_table(self, **kwargs):
+        del kwargs
+        date = datetime.fromtimestamp(2_000_000_000, UTC).strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+        return {"ResponseMetadata": {"HTTPHeaders": {"date": date}}}
+
+
+class _BoundExecutor:
+    def __init__(self, executor, authority, client):
+        self._executor = executor
+        self._authority = authority
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._executor, name)
+
+    def execute(self, request):
+        snapshot = self._authority.snapshot()
+        bound = self._authority.bind_admission(
+            request, self._authority.derive(snapshot, b"executor-test-user")
+        )
+        self._client.request = bound.request
+        return self._executor.execute(bound)
+
+
 def _executor(client, table_name: str = "preview-store"):
-    return PreviewAdmissionExecutor(
+    authority = _lifecycle_authority(client, table_name)
+    executor = PreviewAdmissionExecutor(
         client,
         table_name,
         durable_gate=DurableAdmissionGate(
@@ -161,7 +218,39 @@ def _executor(client, table_name: str = "preview-store"):
                 table_name=table_name,
             ),
         ),
+        lifecycle_authority=authority,
     )
+    return _BoundExecutor(executor, authority, client)
+
+
+def _lifecycle_authority(client, table_name: str):
+    provider = _provider({1: bytes(range(32))})
+    authority = DurableQuotaKeyLifecycleAuthority(
+        PreviewTrustedClock(
+            dynamodb_client=client,
+            table_name=table_name,
+            monotonic_clock=lambda: 0.0,
+            wall_clock=lambda: 2_000_000_000.0,
+        ),
+        dynamodb_client=client,
+        table_name=table_name,
+        key_material_provider=provider,
+    )
+    authority.install(
+        QuotaKeyLifecycle(
+            generation=1,
+            issued=TrustedUtcInterval(1_999_999_950, 1_999_999_951),
+            current=provider.bind_lifecycle(
+                provider.load(
+                parameter_name="/trustforge/quota",
+                expected_version=1,
+                key_id="quota-1",
+                ),
+                activated=1_999_999_960,
+            ),
+        )
+    )
+    return authority
 
 
 def _client_error(
@@ -190,6 +279,18 @@ def _client_error(
         response,
         operation_name,
     )
+
+
+def test_executor_rejects_raw_compile_request_without_io():
+    request = _request()
+    client = FakeClient(request)
+    executor = _executor(client)
+
+    result = executor._executor.execute(request)  # type: ignore[arg-type]
+
+    assert result.outcome is AdmissionOutcome.UNAVAILABLE
+    assert client.read_calls == []
+    assert client.write_calls == []
 
 
 def test_confirmed_success_returns_handle_and_canonical_token():
@@ -455,40 +556,183 @@ def test_write_gate_prevents_second_dispatch_crossing_ambiguity():
     assert len(client.write_calls) == 1
 
 
-def test_factory_configures_exactly_one_sdk_attempt(monkeypatch):
-    captured = {}
+def test_factory_rejects_split_external_authority(monkeypatch):
     fake = FakeClient(_request())
 
     def client(service_name, **kwargs):
-        captured["service_name"] = service_name
-        captured.update(kwargs)
-        return fake
+        raise AssertionError("factory must not create an independent client")
 
     monkeypatch.setattr(boto3, "client", client)
 
-    executor = PreviewAdmissionExecutor.from_boto3(
-        "preview-store", region_name="us-east-1"
+    with pytest.raises(ValueError, match="one exact client"):
+        PreviewAdmissionExecutor.from_boto3(
+            "preview-store",
+            lifecycle_authority=_lifecycle_authority(
+                fake, "preview-store"
+            ),
+            region_name="us-east-1",
+        )
+
+
+def test_aws_factory_composes_one_exact_retry_bounded_graph(monkeypatch):
+    now = int(datetime.now(UTC).timestamp())
+
+    class AwsFactoryClient(FakeClient):
+        def describe_table(self, **kwargs):
+            del kwargs
+            date = datetime.fromtimestamp(now, UTC).strftime(
+                "%a, %d %b %Y %H:%M:%S GMT"
+            )
+            return {
+                "ResponseMetadata": {"HTTPHeaders": {"date": date}}
+            }
+
+    dynamodb = AwsFactoryClient(_request())
+    ssm = FakeSsmClient({1: bytes(range(32))})
+    calls = []
+
+    def client(service_name, **kwargs):
+        calls.append((service_name, kwargs))
+        selected = dynamodb if service_name == "dynamodb" else ssm
+        if service_name == "ssm":
+            selected.meta.config = kwargs["config"]
+        return selected
+
+    monkeypatch.setattr(boto3, "client", client)
+    executor = PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=1,
+            issued=TrustedUtcInterval(now - 2, now - 1),
+            activated=now - 1,
+            current=AwsQuotaKeyReference(
+                parameter_name="/trustforge/quota",
+                expected_version=1,
+                key_id="quota-1",
+            ),
+        ),
+        region_name="us-east-1",
+    )
+    assert [name for name, _ in calls] == ["dynamodb", "ssm"]
+    assert all(
+        kwargs["config"].retries["total_max_attempts"] == 1
+        for _, kwargs in calls
+    )
+    assert executor._client is dynamodb
+    assert executor._durable_gate._client is dynamodb
+    assert executor._durable_gate._trusted_clock is (
+        executor._lifecycle_authority._clock
+    )
+    assert executor._lifecycle_authority._client is dynamodb
+    assert ssm.calls == [
+        {
+            "Name": "/trustforge/quota:1",
+            "WithDecryption": True,
+        }
+    ]
+
+
+def test_aws_factory_overlap_transition_and_single_restart(monkeypatch):
+    now = int(datetime.now(UTC).timestamp())
+
+    class TransitionClient(FakeClient):
+        def describe_table(self, **kwargs):
+            del kwargs
+            date = datetime.fromtimestamp(now, UTC).strftime(
+                "%a, %d %b %Y %H:%M:%S GMT"
+            )
+            return {
+                "ResponseMetadata": {"HTTPHeaders": {"date": date}}
+            }
+
+    dynamodb = TransitionClient(_request())
+    ssm = FakeSsmClient(
+        {1: bytes(range(32)), 2: bytes(range(1, 33))}
     )
 
-    assert captured["service_name"] == "dynamodb"
-    assert captured["region_name"] == "us-east-1"
-    assert captured["config"].retries == {
-        "total_max_attempts": 1,
-        "mode": "standard",
-    }
-    assert executor._durable_gate._client is fake
-    assert executor._durable_gate._trusted_clock._client is fake
-    assert executor._durable_gate._trusted_clock._table_name == "preview-store"
+    def client(service_name, **kwargs):
+        if service_name == "ssm":
+            ssm.meta.config = kwargs["config"]
+            return ssm
+        return dynamodb
+
+    monkeypatch.setattr(boto3, "client", client)
+
+    def reference(version):
+        return AwsQuotaKeyReference(
+            parameter_name="/trustforge/quota",
+            expected_version=version,
+            key_id=f"quota-{version}",
+        )
+
+    PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=1,
+            issued=TrustedUtcInterval(now - 6, now - 5),
+            activated=now - 5,
+            current=reference(1),
+        ),
+    )
+    overlap = PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=2,
+            issued=TrustedUtcInterval(now - 3, now - 2),
+            activated=now - 2,
+            current=reference(2),
+            previous=reference(1),
+            previous_activated=now - 5,
+            superseded=now - 2,
+            retire_not_before=now - 2 + MIN_OVERLAP_SECONDS,
+        ),
+    )
+    assert overlap._lifecycle_authority._lifecycle.previous is not None
+
+    issued = TrustedUtcInterval(now - 1, now)
+    post_retirement = QuotaKeyLifecycle(
+        generation=3,
+        issued=issued,
+        current=overlap._lifecycle_authority._lifecycle.current,
+    )
+    dynamodb.lifecycle_item = _encode_metadata(
+        _lifecycle_metadata(post_retirement)
+    )
+    restarted = PreviewAdmissionExecutor.from_aws_components(
+        "preview-store",
+        lifecycle=AwsQuotaLifecycleBootstrap(
+            generation=3,
+            issued=issued,
+            activated=now - 2,
+            current=reference(2),
+        ),
+    )
+    assert restarted._lifecycle_authority._lifecycle.generation == 3
+    assert restarted._lifecycle_authority._lifecycle.previous is None
+
+    with pytest.raises(ValueError, match="invalid AWS quota lifecycle"):
+        AwsQuotaLifecycleBootstrap(
+            generation=2,
+            issued=issued,
+            activated=now - 2,
+            current=reference(2),
+            previous=reference(2),
+            previous_activated=now - 5,
+            superseded=now - 2,
+            retire_not_before=now - 2 + MIN_OVERLAP_SECONDS,
+        )
 
 
-def test_source_has_no_provider_or_retry_boundary():
+def test_source_has_no_model_provider_or_runtime_retry_boundary():
     import inspect
     import trustforge.preview_admission_executor as module
 
     source = inspect.getsource(module).lower()
     assert "bedrock" not in source
     assert "hermes" not in source
-    assert "provider" not in source
+    assert "bedrock" not in source
+    assert "key_bytes=" not in source
+    assert "withdecryption=false" not in source
     assert ".retry" not in source
     assert "sleep(" not in source
 
@@ -521,6 +765,9 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
         def transact_get_items(self, **kwargs):
             return client.transact_get_items(**kwargs)
 
+        def describe_table(self, **kwargs):
+            return _AuthorityClockClient().describe_table(**kwargs)
+
         def get_item(self, **kwargs):
             return client.get_item(**kwargs)
 
@@ -528,7 +775,7 @@ def test_moto_canonical_syntax_and_atomic_rejection_smoke():
             return client.put_item(**kwargs)
 
         def transact_write_items(self, **kwargs):
-            reservation = kwargs["TransactItems"][-2]["Put"]["Item"]
+            reservation = kwargs["TransactItems"][-3]["Put"]["Item"]
             client.put_item(
                 TableName="preview-store",
                 Item={
@@ -593,6 +840,9 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
                 reads_complete.wait()
             return response
 
+        def describe_table(self, **kwargs):
+            return _AuthorityClockClient().describe_table(**kwargs)
+
         def get_item(self, **kwargs):
             return client.get_item(**kwargs)
 
@@ -643,7 +893,7 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
     assert shared_client.write_attempts == 2
 
     items = client.scan(TableName="preview-store")["Items"]
-    assert len(items) == 11
+    assert len(items) == 12
     reservation_items = [
         item for item in items if item["kind"]["S"] == "preview_reservation"
     ]
@@ -658,7 +908,7 @@ def test_concurrent_same_absent_snapshot_has_one_atomic_winner():
 
     expected_counters = {
         (spec.key["pk"], spec.key["sk"]): spec.increment
-        for spec in build_counter_specs(first_request)
+        for spec in build_counter_specs(executor._client.request)
     }
     counter_items = [
         item for item in items if item["kind"]["S"].startswith("preview_")

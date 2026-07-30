@@ -41,6 +41,12 @@ from trustforge.preview_trusted_clock import (
     TrustedBuckets,
     TrustedUtcInterval,
 )
+from trustforge.quota_key_lifecycle import (
+    DurableQuotaKeyLifecycleAuthority,
+    LIFECYCLE_CONTROL_KEY,
+    QuotaKeyLifecycle,
+)
+from tests.test_quota_key_lifecycle import _provider
 
 
 def _request() -> AdmissionCompileRequest:
@@ -54,6 +60,9 @@ def _request() -> AdmissionCompileRequest:
         reservation_id="12345678-1234-4234-9234-123456789abc",
         reserved_tokens=100,
         reserved_micro_usd=200,
+        lifecycle_generation=1,
+        current_quota_key_version=1,
+        previous_quota_key_version=None,
     )
 
 
@@ -79,6 +88,7 @@ class FakeGateClient:
         self.transact_get_calls: list[dict[str, object]] = []
         self.transact_write_calls: list[dict[str, object]] = []
         self.trusted_second = 1_700_000_100
+        self.lifecycle_item = None
 
     def describe_table(self, **kwargs: object) -> object:
         del kwargs
@@ -88,10 +98,19 @@ class FakeGateClient:
         return {"ResponseMetadata": {"HTTPHeaders": {"date": date}}}
 
     def get_item(self, **kwargs: object) -> object:
+        if kwargs["Key"] == LIFECYCLE_CONTROL_KEY:
+            return (
+                {"Item": deepcopy(self.lifecycle_item)}
+                if self.lifecycle_item is not None
+                else {}
+            )
         self.get_calls.append(kwargs)
         return {"Item": deepcopy(self.item)} if self.item is not None else {}
 
     def put_item(self, **kwargs: object) -> object:
+        if kwargs.get("Item", {}).get("sk") == LIFECYCLE_CONTROL_KEY["sk"]:
+            self.lifecycle_item = deepcopy(kwargs["Item"])
+            return _response()
         self.put_calls.append(kwargs)
         response = self.put_response
         if isinstance(response, Exception):
@@ -141,10 +160,50 @@ class IntegratedClient(FakeGateClient):
     def transact_write_items(self, **kwargs: object) -> object:
         self.write_calls.append(kwargs)
         actions = kwargs["TransactItems"]
-        self.item = deepcopy(actions[-1]["Put"]["Item"])
-        if len(actions) > 2:
-            self.reservation_item = deepcopy(actions[-2]["Put"]["Item"])
+        if len(actions) == 2:
+            self.item = deepcopy(actions[-1]["Put"]["Item"])
+        else:
+            self.item = deepcopy(actions[-2]["Put"]["Item"])
+            self.reservation_item = deepcopy(actions[-3]["Put"]["Item"])
         return _response()
+
+
+def _authority(client) -> DurableQuotaKeyLifecycleAuthority:
+    second = client.trusted_second
+    provider = _provider({1: bytes(range(32))})
+    authority = DurableQuotaKeyLifecycleAuthority(
+        PreviewTrustedClock(
+            dynamodb_client=client,
+            table_name="preview-store",
+            monotonic_clock=lambda: 0.0,
+            wall_clock=lambda: float(second),
+        ),
+        dynamodb_client=client,
+        table_name="preview-store",
+        key_material_provider=provider,
+    )
+    authority.install(
+        QuotaKeyLifecycle(
+            1,
+            TrustedUtcInterval(second - 50, second - 49),
+            provider.bind_lifecycle(
+                provider.load(
+                parameter_name="/trustforge/quota",
+                expected_version=1,
+                key_id="quota-1",
+                ),
+                activated=second - 40,
+            ),
+        )
+    )
+    return authority
+
+
+def _bound(authority, request):
+    snapshot = authority.snapshot()
+    return authority.bind_admission(
+        request, authority.derive(snapshot, b"durable-gate-test")
+    )
 
 
 def _open(generation: int = 0, version: int = 0) -> dict[str, object]:
@@ -377,11 +436,12 @@ def test_executor_uses_shared_durable_gate_and_opens_before_admitted():
     request = _request()
     client = IntegratedClient(_open(), request)
     gate = _gate(client)
+    authority = _authority(client)
     executor = PreviewAdmissionExecutor(
-        client, "preview-store", durable_gate=gate
+        client, "preview-store", durable_gate=gate, lifecycle_authority=authority
     )
 
-    result = executor.execute(request)
+    result = executor.execute(_bound(authority, request))
 
     assert result.outcome is AdmissionOutcome.ADMITTED
     assert gate.ready is True
@@ -392,7 +452,7 @@ def test_executor_uses_shared_durable_gate_and_opens_before_admitted():
     assert len(client.get_calls) == 1
     # Only DISPATCHING is standalone; final OPEN is transaction-bound.
     assert len(client.put_calls) == 1
-    assert client.write_calls[0]["TransactItems"][-1]["Put"]["Item"]["state"] == {
+    assert client.write_calls[0]["TransactItems"][-2]["Put"]["Item"]["state"] == {
         "S": "quarantined"
     }
 
@@ -401,10 +461,11 @@ def test_closed_startup_executor_performs_zero_admission_io():
     request = _request()
     client = IntegratedClient(None, request)
     gate = _gate(client)
+    authority = _authority(client)
 
     result = PreviewAdmissionExecutor(
-        client, "preview-store", durable_gate=gate
-    ).execute(request)
+        client, "preview-store", durable_gate=gate, lifecycle_authority=authority
+    ).execute(_bound(authority, request))
 
     assert result.outcome is AdmissionOutcome.UNAVAILABLE
     assert client.read_calls == []
@@ -428,10 +489,11 @@ def test_admission_finalize_response_loss_requires_exact_open_commit(commit):
 
     client = LostFinalizeClient(_open(), request)
     gate = _gate(client)
+    authority = _authority(client)
 
     result = PreviewAdmissionExecutor(
-        client, "preview-store", durable_gate=gate
-    ).execute(request)
+        client, "preview-store", durable_gate=gate, lifecycle_authority=authority
+    ).execute(_bound(authority, request))
 
     assert result.outcome is (
         AdmissionOutcome.ADMITTED if commit else AdmissionOutcome.UNAVAILABLE
@@ -444,13 +506,14 @@ def test_executor_rejects_missing_mismatched_or_subclass_gate():
     first = IntegratedClient(_open(), request)
     second = IntegratedClient(_open(), request)
     gate = _gate(first)
+    authority = _authority(first)
 
     with pytest.raises(ValueError):
-        PreviewAdmissionExecutor(first, "preview-store", durable_gate=None)  # type: ignore[arg-type]
+        PreviewAdmissionExecutor(first, "preview-store", durable_gate=None, lifecycle_authority=authority)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
-        PreviewAdmissionExecutor(second, "preview-store", durable_gate=gate)
+        PreviewAdmissionExecutor(second, "preview-store", durable_gate=gate, lifecycle_authority=authority)
     with pytest.raises(ValueError):
-        PreviewAdmissionExecutor(first, "other-store", durable_gate=gate)
+        PreviewAdmissionExecutor(first, "other-store", durable_gate=gate, lifecycle_authority=authority)
 
     class DerivedGate(DurableAdmissionGate):
         pass
@@ -459,7 +522,7 @@ def test_executor_rejects_missing_mismatched_or_subclass_gate():
         first, "preview-store", trusted_clock=gate._trusted_clock
     )
     with pytest.raises(ValueError):
-        PreviewAdmissionExecutor(first, "preview-store", durable_gate=derived)
+        PreviewAdmissionExecutor(first, "preview-store", durable_gate=derived, lifecycle_authority=authority)
 
 
 def test_finalize_response_loss_accepts_only_exact_strong_open_proof():

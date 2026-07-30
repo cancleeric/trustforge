@@ -1038,9 +1038,12 @@ def _reserved_item(handle: AdmissionHandle) -> dict[str, object]:
         "policy_version": handle.policy_version,
         "key_version": handle.key_version,
         "schema_version": handle.schema_version,
+        "lifecycle_generation": handle.lifecycle_generation,
+        "current_quota_key_version": handle.current_quota_key_version,
     }
     if handle.previous_identity_digest is not None:
         native["previous_identity_digest"] = handle.previous_identity_digest
+        native["previous_quota_key_version"] = handle.previous_quota_key_version
     if handle.circuit_half_open_owner is not None:
         native["circuit_half_open_owner"] = handle.circuit_half_open_owner
     return _ddb_map(native)
