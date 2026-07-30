@@ -1217,7 +1217,8 @@ def main() -> int:
                 cwd=repo,
             )
             unit = f"trustforge-nf3-b-{head[:12]}"
-            cases_root = Path(tempfile.mkdtemp(prefix=f"{unit}-cases-", dir="/root"))
+            cases_root = Path(tempfile.mkdtemp(prefix=f"{unit}-cases-", dir="/var/tmp"))
+            os.chown(cases_root, 0, 0)
             os.chmod(cases_root, 0o700)
             service_helper = Path(f"/run/{unit}-helper")
             service_rlib = Path(f"/run/{unit}-nf2.rlib")
@@ -1241,7 +1242,7 @@ def main() -> int:
                 f"BindReadOnlyPaths={handoff_path / 'evidence-helper'}:{service_helper}",
                 f"BindReadOnlyPaths={handoff_path / 'evidence-nf2.rlib'}:{service_rlib}",
                 f"BindReadOnlyPaths={handoff_path / 'run-integrated-linux'}:/run/trustforge-nf3-run-integrated-linux",
-                "ReadWritePaths=/root",
+                f"ReadWritePaths={cases_root}",
                 "TimeoutStartSec=20min",
             ]
             command = ["systemd-run", "--wait", "--collect", "--pipe", f"--unit={unit}"]
@@ -1254,12 +1255,14 @@ def main() -> int:
                     str(service_helper),
                     str(service_rlib),
                     helper_hashes[0],
-                    "/root",
+                    str(cases_root),
                     str(cases_root),
                 ]
             )
             run(command, cwd=repo)
-            if list(Path("/root").glob("trustforge-nf3-integrated-*")):
+            if list(cases_root.glob("trustforge-nf3-integrated-*")) or list(
+                cases_root.glob("trustforge-nf3-witness-*")
+            ):
                 raise RuntimeError("integrated harness store cleanup incomplete")
             case_directories = sorted(cases_root.glob("case-*"))
             if len(case_directories) != 60:

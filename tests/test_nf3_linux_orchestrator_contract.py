@@ -222,6 +222,21 @@ def test_nonexecutable_nf2_python_harness_uses_fixed_interpreter_argv():
     assert "SYSTEM_PYTHON,\n                    str(repo /" in value
 
 
+def test_nested_integrated_writes_are_scoped_to_exact_cases_root():
+    value = source()
+    integrated = value[value.index('unit = f"trustforge-nf3-b-') :]
+    integrated = integrated[: integrated.index("evidence = {")]
+    assert 'dir="/var/tmp"' in integrated
+    assert '"ReadWritePaths=/root"' not in integrated
+    assert 'f"ReadWritePaths={cases_root}"' in integrated
+    command = integrated[integrated.index("command.extend(") :]
+    assert command.count("str(cases_root)") == 2
+    assert '"/root",\n                    str(cases_root)' not in command
+    assert 'cases_root.glob("trustforge-nf3-integrated-*")' in integrated
+    assert 'cases_root.glob("trustforge-nf3-witness-*")' in integrated
+    assert "shutil.rmtree(cases_root)" in integrated
+
+
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
     normalized = "".join(value.split())

@@ -54,6 +54,12 @@ probe, preserving the probe's `/proc/self/exe` identity. `/bin/bash` receives
 the bound integration script as a separate argument. Neither path uses `-c`,
 shell interpolation, or an untrusted command string.
 
+The nested integrated matrix keeps `ProtectHome=read-only` and grants no broad
+write access to `/root`. Its only `ReadWritePaths` entry is one freshly created,
+root-owned mode-0700 case directory under `/var/tmp`. That exact directory is
+also passed as both the secure store parent and evidence directory, and is
+removed after its case evidence has been copied out.
+
 The reviewed canonical-view receipts are:
 
 - release NF2 rlib: `1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4`;
