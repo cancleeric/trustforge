@@ -215,26 +215,64 @@ def test_transient_fault_is_failed_then_exact_retry_remains_fail_closed(
 
 
 def test_short_write_is_retried(monkeypatch, tmp_path: Path) -> None:
+    real_open = os.open
     real_write = os.write
+    target_fd = None
+    observed_fds = []
     shortened = False
 
+    def track_staging_open(path, *args, **kwargs):
+        nonlocal target_fd
+        descriptor = real_open(path, *args, **kwargs)
+        if isinstance(path, str) and path.endswith(".stage"):
+            assert kwargs.get("dir_fd") is not None
+            target_fd = descriptor
+        return descriptor
+
     def short_write(fd: int, raw) -> int:
-        nonlocal shortened
-        if not shortened and len(raw) > 1:
+        nonlocal shortened, target_fd
+        observed_fds.append(fd)
+        if fd == target_fd and not shortened and len(raw) > 1:
             shortened = True
             return real_write(fd, raw[:1])
         return real_write(fd, raw)
 
+    monkeypatch.setattr(os, "open", track_staging_open)
     monkeypatch.setattr(os, "write", short_write)
     assert _store(tmp_path)._publish(b"PASS").eligible
     assert shortened
+    assert target_fd is not None
+    assert target_fd in observed_fds
+    assert any(fd != target_fd for fd in observed_fds)
 
 
 def test_zero_progress_write_tombstones(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(os, "write", lambda _fd, _raw: 0)
+    real_open = os.open
+    real_write = os.write
+    target_fd = None
+    zeroed_fds = []
+
+    def track_staging_open(path, *args, **kwargs):
+        nonlocal target_fd
+        descriptor = real_open(path, *args, **kwargs)
+        if isinstance(path, str) and path.endswith(".stage"):
+            assert kwargs.get("dir_fd") is not None
+            target_fd = descriptor
+        return descriptor
+
+    def zero_target_write(fd: int, raw) -> int:
+        if fd == target_fd:
+            zeroed_fds.append(fd)
+            return 0
+        return real_write(fd, raw)
+
+    monkeypatch.setattr(os, "open", track_staging_open)
+    monkeypatch.setattr(os, "write", zero_target_write)
     with pytest.raises(EvidenceTransactionError):
         _store(tmp_path)._publish(b"PASS")
-    # Tombstone writing also cannot progress; importantly no canonical PASS exists.
+    assert zeroed_fds == [target_fd]
+    assert target_fd is not None
+    # The target write fails closed; unrelated state/tombstone writes still progress.
     assert not (tmp_path / CANONICAL_NAME).exists()
 
 
