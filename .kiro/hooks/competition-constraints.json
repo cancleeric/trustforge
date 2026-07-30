@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Competition Constraints Reminder",
+      "trigger": "UserPromptSubmit",
+      "description": "每次使用者提問時注入競賽硬約束提醒",
+      "action": {
+        "type": "agent",
+        "prompt": "競賽約束自動提醒（背景執行，不需回覆此段）：1) LLM 僅走 AWS Bedrock，不引入 OpenAI/Anthropic API 2) 零第三方 runtime 依賴（僅 boto3） 3) Pipeline ≤15 分鐘 4) 不提供投資建議 5) 市場判斷由本 pipeline 產生，Bedrock 只負責行文。如本次操作不涉及這些約束則忽略。"
+      }
+    }
+  ]
+}
