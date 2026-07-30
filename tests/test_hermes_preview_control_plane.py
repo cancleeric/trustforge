@@ -370,7 +370,7 @@ def test_mapped_and_raw_client_ips_bind_the_same_quota_identity():
     ]
 
 
-def test_admission_uses_exact_token_reservation_and_merged_executor():
+def test_admission_uses_worst_case_reservation_without_remote_tokenization():
     tokenizer = Tokenizer(100)
     plane, runtime, observer = _plane(AdmissionOutcome.DENIED, tokenizer)
     result = plane.admit(
@@ -378,17 +378,26 @@ def test_admission_uses_exact_token_reservation_and_merged_executor():
     )
     assert result.status is PreviewControlStatus.DENIED
     bound = runtime.executor.requests[0]
-    assert bound.request.reserved_tokens == 612
-    assert bound.request.reserved_micro_usd == 2_391
-    assert tokenizer.payloads == [
-        canonical_planner_envelope(
-            _request().canonical_payload(),
-            model_id="approved-model-v1",
-        )
-    ]
+    assert bound.request.reserved_tokens == 2_560
+    assert bound.request.reserved_micro_usd == 10_000
+    assert tokenizer.payloads == []
     assert observer.events == [
         PreviewObservation.mint(PreviewObservationOutcome.DENIED, None, False)
     ]
+
+
+def test_rate_budget_or_circuit_denial_calls_neither_tokenizer_nor_inference():
+    tokenizer = Tokenizer(100)
+    planner = Planner()
+    plane, _, _ = _plane(
+        AdmissionOutcome.DENIED, tokenizer=tokenizer, planner=planner
+    )
+    result = plane.execute(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert result.status is PreviewControlStatus.DENIED
+    assert tokenizer.payloads == []
+    assert planner.calls == []
 
 
 def test_client_request_id_never_becomes_durable_reservation_identity():
@@ -404,13 +413,19 @@ def test_client_request_id_never_becomes_durable_reservation_identity():
     assert sentinel not in repr(bound.request)
 
 
-def test_tokenizer_overflow_and_unsafe_proxy_fail_before_executor():
-    plane, runtime, _ = _plane(tokenizer=Tokenizer(2049))
-    result = plane.admit(
+def test_tokenizer_overflow_is_admitted_but_never_dispatches_inference():
+    tokenizer = Tokenizer(2049)
+    planner = Planner()
+    plane, runtime, _ = _plane(
+        AdmissionOutcome.ADMITTED, tokenizer=tokenizer, planner=planner
+    )
+    result = plane.execute(
         _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
     )
     assert result.status is PreviewControlStatus.UNAVAILABLE
-    assert runtime.executor.requests == []
+    assert len(runtime.executor.requests) == 1
+    assert len(tokenizer.payloads) == 1
+    assert planner.calls == []
 
 
 def test_stale_price_policy_fails_before_executor():
@@ -503,7 +518,29 @@ def test_execute_binds_attempt_timeout_deadline_and_known_usage(monkeypatch):
     }
     assert captured[0]["actual_tokens"] == 200
     assert captured[0]["actual_micro_usd"] == 782
-    assert len(runtime.terminal.intents) == 1
+
+
+def test_completed_result_observed_after_provider_deadline_returns_timeout_504_reason(
+    monkeypatch,
+):
+    plane, _, observer = _plane(
+        AdmissionOutcome.ADMITTED,
+        monotonic=Monotonic([0, 0, 5.001]),
+    )
+    captured = []
+    monkeypatch.setattr(
+        control, "TerminalIntent", lambda **kwargs: captured.append(kwargs)
+    )
+    result = plane.execute(
+        _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
+    )
+    assert result.status is PreviewControlStatus.UNAVAILABLE
+    assert result.reason == "planner_timeout"
+    assert captured[0]["disposition"] is control.TerminalDisposition.UNCERTAIN
+    assert (
+        observer.events[-1].terminal_class
+        is PreviewTerminalClass.PROVIDER_TIMEOUT
+    )
 
 
 def test_schema_failure_is_uncertain_worst_case_and_not_circuit(monkeypatch):
@@ -571,13 +608,13 @@ def test_observer_cannot_capture_question_payload_or_provider_exception():
     assert "provider exception" not in rendered
 
 
-@pytest.mark.parametrize("count,expected", [(1, 2_004), (100, 2_391), (2048, 10_000)])
-def test_reservation_price_is_exact_ceil_for_actual_input(count, expected):
+@pytest.mark.parametrize("count", [1, 100, 2048])
+def test_reservation_price_is_worst_case_before_exact_remote_count(count):
     plane, runtime, _ = _plane(tokenizer=Tokenizer(count))
     plane.admit(
         _request(), peer_ip="127.0.0.1", canonical_client_ip="203.0.113.2"
     )
-    assert runtime.executor.requests[0].request.reserved_micro_usd == expected
+    assert runtime.executor.requests[0].request.reserved_micro_usd == 10_000
 
 
 @pytest.mark.parametrize(
@@ -628,6 +665,65 @@ def test_topology_rejects_non_nominal_capability(args):
     with pytest.raises(ValueError, match="invalid preview topology"):
         PreviewTopology(
             args[0], args[1], TrustedProxyPolicy(("127.0.0.1",)), args[2]
+        )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://127.0.0.1:4174",
+        "http://127.0.0.1:4175",
+        "http://localhost:4175",
+    ],
+)
+def test_explicit_development_topology_accepts_only_direct_loopback(origin):
+    topology = PreviewTopology(
+        "127.0.0.1",
+        origin,
+        TrustedProxyPolicy(("127.0.0.1",)),
+        False,
+        development_loopback=True,
+    )
+    identity = topology.canonical_identity(
+        peer_ip="127.0.0.1",
+        canonical_client_ip="203.0.113.99",
+    )
+    assert identity == b"pap1-client-ip:127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "bind,origin,peer",
+    [
+        ("0.0.0.0", "http://127.0.0.1:4175", "127.0.0.1"),
+        ("127.0.0.1", "http://127.0.0.1.evil.test:4175", "127.0.0.1"),
+        ("127.0.0.1", "http://127.0.0.1:4176", "127.0.0.1"),
+        ("127.0.0.1", "https://127.0.0.1:4175", "127.0.0.1"),
+        ("127.0.0.1", "http://127.0.0.1:4175", "203.0.113.9"),
+    ],
+)
+def test_development_topology_rejects_lookalike_nonloopback_and_wrong_port(
+    bind, origin, peer
+):
+    if peer != "127.0.0.1":
+        topology = PreviewTopology(
+            bind,
+            origin,
+            TrustedProxyPolicy(("127.0.0.1",)),
+            False,
+            development_loopback=True,
+        )
+        with pytest.raises(ValueError, match="unsafe ingress identity"):
+            topology.canonical_identity(
+                peer_ip=peer, canonical_client_ip="127.0.0.1"
+            )
+        return
+    with pytest.raises(ValueError, match="invalid preview topology"):
+        PreviewTopology(
+            bind,
+            origin,
+            TrustedProxyPolicy(("127.0.0.1",)),
+            False,
+            development_loopback=True,
         )
 
 
@@ -834,9 +930,9 @@ def test_provider_overrun_is_timeout_and_uncertain(monkeypatch):
     assert captured[0]["circuit_failure"] is True
 
 
-@pytest.mark.parametrize("termination_proven,writes", [(False, 0), (True, 1)])
-def test_timeout_settles_only_with_authoritative_termination_proof(
-    monkeypatch, termination_proven, writes
+@pytest.mark.parametrize("termination_proven", [False, True])
+def test_pre_inference_timeout_rolls_back_reserve_and_releases_lease(
+    monkeypatch, termination_proven
 ):
     class TimeoutExecution:
         capacity = 4
@@ -859,10 +955,9 @@ def test_timeout_settles_only_with_authoritative_termination_proof(
     )
     assert result.status is PreviewControlStatus.UNAVAILABLE
     assert result.value is None
-    assert len(runtime.terminal.intents) == writes
-    assert len(captured) == writes
-    if termination_proven:
-        assert observer.events[-1].terminal_class is PreviewTerminalClass.PROVIDER_TIMEOUT
+    assert len(runtime.terminal.intents) == 1
+    assert len(captured) == 1
+    assert observer.events[-1].terminal_class is PreviewTerminalClass.CLIENT_ABORT
 
 
 def test_proven_timeout_reconcile_failure_is_terminal_unavailable():
@@ -916,8 +1011,13 @@ def test_proven_pre_dispatch_cancellation_is_not_a_circuit_failure(monkeypatch):
 
 def test_saturation_is_pre_provider_abort_without_circuit(monkeypatch):
     execution = ImmediateExecution(PlannerExecutionSaturated("full"))
+    tokenizer = Tokenizer()
+    planner = Planner()
     plane, _, observer = _plane(
-        AdmissionOutcome.ADMITTED, planner_execution=execution
+        AdmissionOutcome.ADMITTED,
+        tokenizer=tokenizer,
+        planner=planner,
+        planner_execution=execution,
     )
     captured = []
     monkeypatch.setattr(
@@ -930,6 +1030,8 @@ def test_saturation_is_pre_provider_abort_without_circuit(monkeypatch):
     assert captured[0]["disposition"] is control.TerminalDisposition.PRE_PROVIDER_ABORT
     assert captured[0]["circuit_failure"] is False
     assert observer.events[-1].circuit_failure is False
+    assert tokenizer.payloads == []
+    assert planner.calls == []
 
 
 def test_total_deadline_before_dispatch_is_pre_provider_abort(monkeypatch):
