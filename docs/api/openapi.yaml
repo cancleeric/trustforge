@@ -1406,33 +1406,63 @@ paths:
     post:
       tags: [analysis]
       operationId: registerAnalysisQuestion
-      summary: 建立高優先手動分析工作
+      summary: 冪等建立高優先手動分析工作
       description: |
-        建立新的不可變資料 snapshot 與高優先工作。此路徑不受 Hermes
-        自動排程開關影響，但仍受來源、Bedrock 與每日成本護欄約束；請求
-        本身不等待分析完成，使用 analysis-job 追蹤結果。
+        `Idempotency-Key` 是正式執行 authority；同 caller、同 key、同
+        fingerprint 重播完全相同的 durable receipt，且不建立第二個 job
+        或費用。相同 key 配不同 payload 回 409。`fresh=true` 只略過
+        300 秒內容重用，仍受全部安全、成本與併發護欄，且必須由新 key
+        表達新的使用者意圖。請求本身不等待分析完成，使用
+        `/api/analysis-job` 追蹤結果。
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          description: |
+            `tf1.<UTC YYYYMM>.<22-char unpadded base64url>`；random 部分必須
+            由 128-bit CSPRNG 產生。重複 header、逗號合併、控制字元、
+            外圍空白與非 canonical 值均為 400。
+          schema:
+            type: string
+            pattern: "^tf1\\.[0-9]{6}\\.[A-Za-z0-9_-]{22}$"
+            minLength: 33
+            maxLength: 33
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [coin, mode, question]
-              properties:
-                coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
-                mode: {type: string, enum: [risk, sentiment, fundamentals, news, catalyst]}
-                question: {type: string, minLength: 1, maxLength: 1000}
+              $ref: "#/components/schemas/FormalRunRequest"
       responses:
         "202":
-          description: 題目已登記並排程
+          description: 已接受的新執行或 immutable receipt replay
+          headers:
+            Idempotency-Replayed:
+              description: 只有相同 key/fingerprint 重播時為 `true`
+              schema: {type: string, const: "true"}
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/OkEnvelope"
+                $ref: "#/components/schemas/FormalRunSuccessEnvelope"
         "400":
-          $ref: "#/components/responses/BadRequest"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
+          description: 缺少或不合法的 key/body；任何 chargeable side effect 前失敗
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FormalRunErrorEnvelope"}
+        "409":
+          description: key conflict、執行中、epoch/tombstone unavailable 或無法本地重語系化
+          headers:
+            Retry-After:
+              description: "`idempotency_request_in_progress` 才提供的整數秒數"
+              schema: {type: integer, minimum: 1, maximum: 3600}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FormalRunErrorEnvelope"}
+        "503":
+          description: shared idempotency authority、trusted clock 或 policy unavailable
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FormalRunErrorEnvelope"}
 
   /api/analysis-question-context:
     get:
@@ -2310,6 +2340,66 @@ paths:
 
 components:
   schemas:
+    FormalRunRequest:
+      type: object
+      additionalProperties: false
+      required: [coin, mode, question]
+      properties:
+        coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        mode: {type: string, enum: [risk, sentiment, fundamentals, news, catalyst]}
+        question: {type: string, minLength: 1, maxLength: 1000}
+        locale: {type: string, enum: [zh-Hant, en], default: zh-Hant}
+        fresh:
+          type: boolean
+          default: false
+          description: true 建立新執行；不得沿用先前意圖的 Idempotency-Key
+    FormalRunReceipt:
+      type: object
+      additionalProperties: false
+      required: [schema_version, receipt_id, question_id, job_id, result_id, state, origin, disposition, locale, created_at, expires_at, fingerprint_version]
+      properties:
+        schema_version: {type: string, const: formal-run-receipt/v1}
+        receipt_id: {type: string, minLength: 1, maxLength: 200}
+        question_id: {type: string, minLength: 1, maxLength: 200}
+        job_id: {type: string, minLength: 1, maxLength: 200}
+        result_id:
+          oneOf:
+            - {type: string, minLength: 1, maxLength: 200}
+            - {type: "null"}
+          description: execution_uncertain 在結果尚未協調完成時為 null
+        state: {type: string, enum: [accepted, execution_uncertain]}
+        origin: {type: string, const: manual}
+        disposition: {type: string, enum: [created, reused, relocalized, fresh-created]}
+        locale: {type: string, enum: [zh-Hant, en]}
+        created_at: {type: string, format: date-time}
+        expires_at:
+          type: ["null"]
+          description: 非 terminal receipt 不得過期
+        fingerprint_version: {type: string, const: analysis-question/v1}
+    FormalRunSuccessEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: {const: true}
+        data: {$ref: "#/components/schemas/FormalRunReceipt"}
+    FormalRunErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, error]
+      properties:
+        ok: {const: false}
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [bad_request, idempotency_conflict, idempotency_request_in_progress, idempotency_key_unavailable, relocalization_unavailable, idempotency_unavailable]
+            message:
+              type: string
+              description: 固定安全訊息；不得揭露原始 key、payload、receipt 或 caller
     AnalysisPlanRequest:
       type: object
       additionalProperties: false

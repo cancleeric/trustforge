@@ -25,7 +25,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Any
@@ -41,7 +41,11 @@ from .bedrock import (
 )
 from .execlog import ExecutionLog
 from .feature_store import TrustFeatureStore
-from .formal_run_idempotency import FormalRunIdentity
+from .formal_run_idempotency import (
+    FormalRunIdentity,
+    HmacValue,
+    TerminalSafeResponse,
+)
 from .ingestion.base import collect
 from .ingestion.cache import doc_from_dict, doc_to_dict
 from .ledger import append_run
@@ -191,7 +195,7 @@ SCHEDULED_PRIORITY = 100
 MANUAL_DEDUP_WINDOW_SEC = 300
 MANUAL_LOCK_TIMEOUT_SEC = 90
 _FORMAL_INTENT_STATES = frozenset(
-    {"pending", "claiming", "collecting", "completed", "execution_uncertain"}
+    {"pending_authority", "pending", "claiming", "collecting", "completed", "execution_uncertain"}
 )
 
 
@@ -273,6 +277,7 @@ def _db_path(path: str | Path | None = None) -> Path:
 @contextmanager
 def _bedrock_live_attempt(
     log: ExecutionLog, *, batch_allocation: bool = False,
+    formal_pre_reserved: bool = False,
     on_accounted: Callable[[dict[str, Any]], None] | None = None,
     force_offline: bool = False,
 ):
@@ -324,7 +329,7 @@ def _bedrock_live_attempt(
         from .web import _bedrock_allowed  # noqa: PLC0415 — 避免頂層循環匯入
 
         if _bedrock_allowed() and budget_guard.narrative_model_priced():
-            if batch_allocation:
+            if batch_allocation or formal_pre_reserved:
                 # #884: the authority transaction already reserved this job's
                 # conservative allocation. Re-entering the legacy per-call
                 # reserve/release path would double charge capacity.
@@ -346,9 +351,10 @@ def _bedrock_live_attempt(
     start_idx = len(log.events)
     accounting_error: Exception | None = None
     body_error: BaseException | None = None
+    authority_allocation = batch_allocation or formal_pre_reserved
     shared_reservation = (
-        reservation is not None
-        and reservation_backend == "dynamodb"
+        budget_guard.reservation_is_durable_shared(reservation)
+        or (reservation is not None and reservation_backend == "dynamodb")
     )
     # A live legacy reservation may only be released after actual usage has a
     # durable ledger receipt or a conservative/actual unledgered fallback was
@@ -391,6 +397,8 @@ def _bedrock_live_attempt(
                 # held for durable reconciliation/manual disposition.
                 if not shared_reservation:
                     reservation_release_safe = True
+                else:
+                    budget_guard.mark_reservation_accounting_uncertain(reservation)
                 log.record(
                     "llm.accounting_uncertain",
                     params={
@@ -407,12 +415,18 @@ def _bedrock_live_attempt(
             # (the provider may have accepted a timed-out request), so it is
             # deliberately not receipted and cannot be settled automatically.
             should_persist = total_cost_usd > 0 or (
-                batch_allocation and not live
+                authority_allocation and not live
             )
-            if batch_allocation and live and not new_calls:
+            if authority_allocation and live and not new_calls:
                 log.record(
                     "atomic.accounting_uncertain",
-                    params={"outcome": "failed", "reason": "live_usage_missing"},
+                    params={
+                        "outcome": "failed",
+                        "reason": "live_usage_missing",
+                        "authority": (
+                            "formal" if formal_pre_reserved else "batch"
+                        ),
+                    },
                     summary="Live Bedrock attempt has no verifiable usage receipt",
                 )
                 if body_error is None:
@@ -427,6 +441,9 @@ def _bedrock_live_attempt(
                     "offline": not live,
                     "calls": new_calls,
                     "total_cost_usd": total_cost_usd,
+                    "accounting_authority": (
+                        "formal" if formal_pre_reserved else "legacy"
+                    ),
                     "accounting_outcome": (
                         "charged" if total_cost_usd > 0 else "cancelled_offline"
                     ),
@@ -633,6 +650,19 @@ class AnalysisFlow:
           coin TEXT NOT NULL, mode TEXT NOT NULL, question TEXT NOT NULL,
           payload_json TEXT NOT NULL, published_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS formal_analysis_accounting_receipts (
+          job_id TEXT PRIMARY KEY, provider_operation_id TEXT NOT NULL,
+          reservation_id TEXT NOT NULL, max_reserved_cost TEXT NOT NULL,
+          actual_cost_micros INTEGER NOT NULL, call_count INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('collecting','final')),
+          updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS formal_analysis_accounting_calls (
+          accounting_token TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          actual_cost_micros INTEGER NOT NULL,
+          created_at REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS analysis_synthesis_claims (
           snapshot_id TEXT NOT NULL, coin TEXT NOT NULL, claimed_at REAL NOT NULL,
           PRIMARY KEY(snapshot_id, coin)
@@ -675,8 +705,10 @@ class AnalysisFlow:
           question TEXT NOT NULL CHECK(length(question) BETWEEN 1 AND 1000),
           locale TEXT NOT NULL CHECK(locale IN ('zh-Hant','en')),
           fencing_token INTEGER NOT NULL CHECK(fencing_token BETWEEN 1 AND 9223372036854775807),
+          claim_token TEXT,
+          claim_expires_at REAL,
           state TEXT NOT NULL CHECK(
-            state IN ('pending','claiming','collecting','completed','execution_uncertain')
+            state IN ('pending_authority','pending','claiming','collecting','completed','execution_uncertain')
           ),
           created_at REAL NOT NULL, updated_at REAL NOT NULL,
           PRIMARY KEY(namespace,scope_locator,operation_id),
@@ -684,6 +716,18 @@ class AnalysisFlow:
         );
         CREATE INDEX IF NOT EXISTS idx_formal_projection_state
           ON formal_analysis_projection_queue(state,created_at,operation_id);
+        CREATE TABLE IF NOT EXISTS formal_analysis_reconciliation_alerts (
+          namespace TEXT NOT NULL,
+          scope_locator TEXT NOT NULL,
+          operation_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          reservation_id TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          first_observed_at REAL NOT NULL,
+          last_observed_at REAL NOT NULL,
+          observation_count INTEGER NOT NULL,
+          PRIMARY KEY(namespace,scope_locator,operation_id)
+        );
         CREATE TABLE IF NOT EXISTS analysis_atomic_owners (
           job_id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, mode TEXT NOT NULL,
           owner_token TEXT NOT NULL, claimed_at REAL NOT NULL,
@@ -744,6 +788,42 @@ class AnalysisFlow:
             SELECT RAISE(ABORT, 'analysis_lineage_events is append-only');
           END;
         """)
+        formal_sql_row = conn.execute(
+            """SELECT sql FROM sqlite_master
+               WHERE type='table' AND name='formal_analysis_projection_queue'"""
+        ).fetchone()
+        formal_sql = formal_sql_row[0] if formal_sql_row else ""
+        if "pending_authority" not in formal_sql:
+            conn.execute("BEGIN IMMEDIATE")
+            migrated_sql = formal_sql.replace(
+                "formal_analysis_projection_queue",
+                "formal_analysis_projection_queue_v2",
+                1,
+            ).replace(
+                "state IN ('pending','claiming'",
+                "state IN ('pending_authority','pending','claiming'",
+            )
+            conn.execute(migrated_sql)
+            columns_csv = ",".join(
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(formal_analysis_projection_queue)"
+                )
+            )
+            conn.execute(
+                f"""INSERT INTO formal_analysis_projection_queue_v2({columns_csv})
+                    SELECT {columns_csv} FROM formal_analysis_projection_queue"""
+            )
+            conn.execute("DROP TABLE formal_analysis_projection_queue")
+            conn.execute(
+                """ALTER TABLE formal_analysis_projection_queue_v2
+                   RENAME TO formal_analysis_projection_queue"""
+            )
+            conn.execute(
+                """CREATE INDEX idx_formal_projection_state
+                   ON formal_analysis_projection_queue(state,created_at,operation_id)"""
+            )
+            conn.commit()
         # SQLite deployments created before manual priority support need an
         # additive migration.  Defaults preserve the previous scheduled-job
         # semantics for every existing row. BEGIN IMMEDIATE makes the
@@ -759,6 +839,26 @@ class AnalysisFlow:
             conn.execute("ALTER TABLE analysis_jobs ADD COLUMN atomic_batch_id TEXT")
         if "atomic_mode" not in columns:
             conn.execute("ALTER TABLE analysis_jobs ADD COLUMN atomic_mode TEXT")
+        for name in (
+            "formal_operation_id", "formal_provider_operation_id",
+            "formal_reservation_id", "formal_max_reserved_cost",
+        ):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE analysis_jobs ADD COLUMN {name} TEXT")
+        formal_columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(formal_analysis_projection_queue)"
+            ).fetchall()
+        }
+        if "claim_token" not in formal_columns:
+            conn.execute(
+                "ALTER TABLE formal_analysis_projection_queue ADD COLUMN claim_token TEXT"
+            )
+        if "claim_expires_at" not in formal_columns:
+            conn.execute(
+                "ALTER TABLE formal_analysis_projection_queue ADD COLUMN claim_expires_at REAL"
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_priority ON analysis_jobs(state,priority,created_at)")
         request_columns = {
             row[1]
@@ -1024,6 +1124,7 @@ class AnalysisFlow:
     def enqueue_formal_projection(
         self, coin: str, mode: str, question: str, *, locale: str, job_id: str,
         operation_id: str, identity: FormalRunIdentity, fencing_token: int,
+        pending_authority: bool = False,
     ) -> tuple[str, str]:
         """Durably enqueue a local projection without collecting or dispatching.
 
@@ -1084,21 +1185,259 @@ class AnalysisFlow:
                     raise MultiAngleAuthorityError(
                         "formal deterministic projection conflicts with durable intent"
                     )
+                if (
+                    not pending_authority
+                    and existing["state"] == "pending_authority"
+                    and existing["claim_token"] is None
+                ):
+                    conn.execute(
+                        """UPDATE formal_analysis_projection_queue
+                           SET state='pending',updated_at=?
+                           WHERE namespace=? AND scope_locator=? AND operation_id=?
+                             AND state='pending_authority' AND claim_token IS NULL""",
+                        (now, identity.namespace, identity.scope_locator, operation_id),
+                    )
                 conn.commit()
                 return question_id, job_id
+            initial_state = "pending_authority" if pending_authority else "pending"
             conn.execute(
                 """INSERT INTO formal_analysis_projection_queue
                    (operation_id,job_id,result_id,question_id,namespace,scope_locator,
                     caller_key_id,caller_scope_hmac,key_key_id,key_hmac,
                     coin,mode,question,locale,fencing_token,state,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
-                (operation_id, *expected, now, now),
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (operation_id, *expected, initial_state, now, now),
             )
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         return question_id, job_id
+
+    def cancel_staged_formal_projection(
+        self, *, identity: FormalRunIdentity, operation_id: str
+    ) -> None:
+        self._conn().execute(
+            """DELETE FROM formal_analysis_projection_queue
+               WHERE namespace=? AND scope_locator=? AND operation_id=?
+                 AND state='pending_authority' AND claim_token IS NULL""",
+            (identity.namespace, identity.scope_locator, operation_id),
+        )
+
+    def reconcile_staged_formal_projections(self, store, budget=None) -> int:
+        """Activate only staged payloads whose shared bind is authoritative."""
+        rows = self._conn().execute(
+            """SELECT * FROM formal_analysis_projection_queue
+               WHERE state='pending_authority' AND claim_token IS NULL
+               ORDER BY created_at,operation_id LIMIT 100"""
+        ).fetchall()
+        activated = 0
+        for raw in rows:
+            row = dict(raw)
+            identity = FormalRunIdentity(
+                namespace=row["namespace"],
+                scope_locator=row["scope_locator"],
+                caller_scope_hmac=HmacValue(
+                    row["caller_key_id"], row["caller_scope_hmac"]
+                ),
+                key_hmac=HmacValue(row["key_key_id"], row["key_hmac"]),
+            )
+            resolution = store.dispatch_resolution(
+                identity=identity, fencing_token=int(row["fencing_token"])
+            )
+            if resolution == "pending":
+                cursor = self._conn().execute(
+                    """UPDATE formal_analysis_projection_queue
+                       SET state='pending',updated_at=?
+                       WHERE namespace=? AND scope_locator=? AND operation_id=?
+                         AND state='pending_authority' AND claim_token IS NULL""",
+                    (time.time(), row["namespace"], row["scope_locator"], row["operation_id"]),
+                )
+                activated += cursor.rowcount
+                continue
+            if resolution in {"claimed", "uncertain", "completed"}:
+                logging.getLogger(__name__).critical(
+                    "formal reservation retained for reconciliation: "
+                    "operation=%s resolution=%s",
+                    row["operation_id"],
+                    resolution,
+                )
+                continue
+            # Never race an in-flight HTTP owner. After two lease intervals,
+            # fence the acquired authority terminal before releasing a token.
+            if budget is None or time.time() - float(row["created_at"]) < 60:
+                continue
+            reservation_id = "br_" + hashlib.sha256(
+                str(row["operation_id"]).encode()
+            ).hexdigest()[:32]
+            reservation = budget.lookup(reservation_id)
+            if reservation is None:
+                continue
+            now = datetime.now(UTC)
+            try:
+                store.fail_terminal(
+                    identity=identity,
+                    fencing_token=int(row["fencing_token"]),
+                    response=TerminalSafeResponse(
+                        status=503,
+                        code="reservation_reconciled_before_dispatch",
+                        schema_version="error/v1",
+                        body={
+                            "ok": False,
+                            "data": None,
+                            "error": {
+                                "code": "reservation_reconciled_before_dispatch"
+                            },
+                        },
+                        replay_headers={},
+                    ),
+                    now=now,
+                    expires_at=now + timedelta(hours=24),
+                )
+            except Exception:
+                # Bind/dispatch may have won the fence. Retain capacity and
+                # retry from freshly observed authority state next cycle.
+                continue
+            budget.release(reservation)
+            self.cancel_staged_formal_projection(
+                identity=identity, operation_id=str(row["operation_id"])
+            )
+        return activated
+
+    def claim_formal_projection(self, *, lease_seconds: int = 30) -> dict[str, object] | None:
+        """Claim one local intent without crossing the shared dispatch boundary."""
+        if lease_seconds <= 0:
+            raise ValueError("claim lease must be positive")
+        conn = self._conn()
+        now = time.time()
+        claim_token = secrets.token_hex(16)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM formal_analysis_projection_queue
+                   WHERE state='pending'
+                      OR (state IN ('claiming','collecting') AND claim_expires_at<=?)
+                   ORDER BY CASE state WHEN 'claiming' THEN 0 ELSE 1 END,
+                            created_at, operation_id
+                   LIMIT 1""",
+                (now,),
+            ).fetchone()
+            if row is None:
+                conn.commit()
+                return None
+            cursor = conn.execute(
+                """UPDATE formal_analysis_projection_queue
+                   SET state=CASE WHEN state='pending' THEN 'claiming' ELSE state END,
+                       claim_token=?, claim_expires_at=?, updated_at=?
+                   WHERE namespace=? AND scope_locator=? AND operation_id=?
+                     AND (
+                       state='pending'
+                       OR (state IN ('claiming','collecting') AND claim_expires_at<=?)
+                     )""",
+                (
+                    claim_token,
+                    now + lease_seconds,
+                    now,
+                    row["namespace"],
+                    row["scope_locator"],
+                    row["operation_id"],
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return None
+            conn.commit()
+            claimed = dict(row)
+            claimed["state"] = "claiming" if row["state"] == "pending" else row["state"]
+            claimed["claim_token"] = claim_token
+            claimed["claim_expires_at"] = now + lease_seconds
+            return claimed
+        except Exception:
+            conn.rollback()
+            raise
+
+    def set_formal_projection_state(
+        self,
+        *,
+        namespace: str,
+        scope_locator: str,
+        operation_id: str,
+        expected: str,
+        state: str,
+        claim_token: str,
+        alert_reason: str | None = None,
+    ) -> None:
+        if expected not in _FORMAL_INTENT_STATES or state not in _FORMAL_INTENT_STATES:
+            raise ValueError("invalid formal projection transition")
+        if state == "execution_uncertain" and not alert_reason:
+            raise ValueError("uncertain formal projection requires an alert reason")
+        conn = self._conn()
+        now = time.time()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """UPDATE formal_analysis_projection_queue SET state=?, updated_at=?
+                   WHERE namespace=? AND scope_locator=? AND operation_id=? AND state=?
+                     AND claim_token=?""",
+                (
+                    state,
+                    now,
+                    namespace,
+                    scope_locator,
+                    operation_id,
+                    expected,
+                    claim_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise MultiAngleAuthorityError(
+                    "formal projection transition lost authority"
+                )
+            if state == "execution_uncertain":
+                row = conn.execute(
+                    """SELECT job_id FROM formal_analysis_projection_queue
+                       WHERE namespace=? AND scope_locator=? AND operation_id=?""",
+                    (namespace, scope_locator, operation_id),
+                ).fetchone()
+                reservation_id = "br_" + hashlib.sha256(
+                    operation_id.encode()
+                ).hexdigest()[:32]
+                conn.execute(
+                    """INSERT INTO formal_analysis_reconciliation_alerts
+                       (namespace,scope_locator,operation_id,job_id,reservation_id,
+                        reason,first_observed_at,last_observed_at,observation_count)
+                       VALUES(?,?,?,?,?,?,?,?,1)
+                       ON CONFLICT(namespace,scope_locator,operation_id) DO UPDATE SET
+                         reason=excluded.reason,
+                         last_observed_at=excluded.last_observed_at,
+                         observation_count=
+                           formal_analysis_reconciliation_alerts.observation_count+1""",
+                    (
+                        namespace,
+                        scope_locator,
+                        operation_id,
+                        str(row["job_id"]),
+                        reservation_id,
+                        str(alert_reason),
+                        now,
+                        now,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def formal_reconciliation_alerts(self) -> list[dict[str, object]]:
+        """Return durable operator-visible lineage for retained reservations."""
+        return [
+            dict(row)
+            for row in self._conn().execute(
+                """SELECT * FROM formal_analysis_reconciliation_alerts
+                   ORDER BY first_observed_at,operation_id"""
+            ).fetchall()
+        ]
 
     def _atomic_store(self):
         if self._atomic_batch_store is not None:
@@ -1950,7 +2289,8 @@ class AnalysisFlow:
                 "conversation": conversation, "retrieval": "sqlite_char_bigram_v1"}
 
     def enqueue_job(self, snapshot_id: str, mode: str, question: str, *, origin: str = "scheduled",
-                    locale: str = DEFAULT_NARRATIVE_LOCALE) -> str | None:
+                    locale: str = DEFAULT_NARRATIVE_LOCALE, job_id: str | None = None,
+                    formal_metadata: dict[str, str] | None = None) -> str | None:
         """`locale`（N11）：敘事輸出語系，只掛在**行程內的 stage package** 上，
         不進 `analysis_jobs` 資料表（schema 異動歸 CDO，本次不碰）。因此
         daemon 重啟後由 `_restart_from_snapshot()` 重跑的工作會回到預設中文
@@ -1962,20 +2302,59 @@ class AnalysisFlow:
             raise ValueError("unsupported analysis job origin")
         qtype = QUESTION_TYPES[mode]
         priority = MANUAL_PRIORITY if origin == "manual" else SCHEDULED_PRIORITY
+        required_formal_fields = {
+            "operation_id", "provider_operation_id",
+            "reservation_id", "max_reserved_cost",
+        }
+        if formal_metadata is not None and set(formal_metadata) != required_formal_fields:
+            raise ValueError("formal job metadata is incomplete")
         # Idempotency must be checked before capacity.  Otherwise a full queue
         # prevents refresh_once() from revisiting the same immutable snapshot
         # and filling matrix entries that did not fit during the previous pass.
-        if self._conn().execute(
-            "SELECT 1 FROM analysis_jobs WHERE snapshot_id=? AND coin=? AND mode=? AND question=?",
+        existing = self._conn().execute(
+            """SELECT job_id,formal_operation_id,formal_provider_operation_id,
+                      formal_reservation_id,formal_max_reserved_cost
+               FROM analysis_jobs
+               WHERE snapshot_id=? AND coin=? AND mode=? AND question=?""",
             (snapshot_id, row["coin"], mode, question),
-        ).fetchone():
+        ).fetchone()
+        if existing is not None:
+            if formal_metadata is not None:
+                expected = (
+                    job_id,
+                    formal_metadata["operation_id"],
+                    formal_metadata["provider_operation_id"],
+                    formal_metadata["reservation_id"],
+                    formal_metadata["max_reserved_cost"],
+                )
+                actual = (
+                    existing["job_id"],
+                    existing["formal_operation_id"],
+                    existing["formal_provider_operation_id"],
+                    existing["formal_reservation_id"],
+                    existing["formal_max_reserved_cost"],
+                )
+                if actual != expected:
+                    raise MultiAngleAuthorityError(
+                        "formal job conflicts with existing analysis content"
+                    )
+                return existing["job_id"]
             return None
         pending = self._conn().execute(
             "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')",
         ).fetchone()[0]
         if pending >= QUEUE_CAPACITY:
             return None
-        job_id, now = f"flow-{uuid.uuid4().hex[:16]}", time.time()
+        job_id, now = job_id or f"flow-{uuid.uuid4().hex[:16]}", time.time()
+        collision = self._conn().execute(
+            """SELECT snapshot_id,coin,mode,question,formal_operation_id,
+                      formal_provider_operation_id,formal_reservation_id,
+                      formal_max_reserved_cost
+               FROM analysis_jobs WHERE job_id=?""",
+            (job_id,),
+        ).fetchone()
+        if collision is not None:
+            raise MultiAngleAuthorityError("analysis job id collision")
         cur = self._conn().execute(
             """INSERT OR IGNORE INTO analysis_jobs(
                  job_id,snapshot_id,coin,mode,question,question_type,state,current_stage,retry_count,error,
@@ -1986,6 +2365,19 @@ class AnalysisFlow:
         )
         if not cur.rowcount:
             return None
+        if formal_metadata is not None:
+            self._conn().execute(
+                """UPDATE analysis_jobs SET formal_operation_id=?,
+                   formal_provider_operation_id=?,formal_reservation_id=?,
+                   formal_max_reserved_cost=? WHERE job_id=?""",
+                (
+                    formal_metadata["operation_id"],
+                    formal_metadata["provider_operation_id"],
+                    formal_metadata["reservation_id"],
+                    formal_metadata["max_reserved_cost"],
+                    job_id,
+                ),
+            )
         self._checkpoint(job_id, STAGES[0], "queued")
         self._append_lineage(
             "job_enqueued", entity_type="analysis_job", entity_id=job_id,
@@ -2106,6 +2498,131 @@ class AnalysisFlow:
         priority = int(package.get("priority", self._job(package["job_id"])["priority"]))
         package["priority"] = priority
         self._queues[stage].put((priority, next(self._queue_sequence), package))
+
+    def _formal_accounting_callback(self, job: sqlite3.Row):
+        provider_operation_id = (
+            job.get("formal_provider_operation_id")
+            if isinstance(job, dict)
+            else job["formal_provider_operation_id"]
+        )
+        if provider_operation_id is None:
+            return None
+
+        def record(receipt: dict[str, Any]) -> None:
+            cost = Decimal(str(receipt["actual_cost_usd"]))
+            micros = int((cost * Decimal("1000000")).to_integral_exact())
+            conn = self._conn()
+            now = time.time()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                inserted = conn.execute(
+                    """INSERT OR IGNORE INTO formal_analysis_accounting_calls
+                       (accounting_token,job_id,actual_cost_micros,created_at)
+                       VALUES(?,?,?,?)""",
+                    (
+                        str(receipt["accounting_token"]),
+                        job["job_id"],
+                        micros,
+                        now,
+                    ),
+                )
+                if inserted.rowcount != 1:
+                    conn.commit()
+                    return
+                conn.execute(
+                    """INSERT INTO formal_analysis_accounting_receipts
+                   (job_id,provider_operation_id,reservation_id,max_reserved_cost,
+                    actual_cost_micros,call_count,state,updated_at)
+                   VALUES(?,?,?,?,?,1,'collecting',?)
+                   ON CONFLICT(job_id) DO UPDATE SET
+                     actual_cost_micros=
+                       formal_analysis_accounting_receipts.actual_cost_micros
+                       + excluded.actual_cost_micros,
+                     call_count=formal_analysis_accounting_receipts.call_count+1,
+                     updated_at=excluded.updated_at""",
+                (
+                    job["job_id"],
+                    provider_operation_id,
+                    job["formal_reservation_id"],
+                    job["formal_max_reserved_cost"],
+                    micros,
+                    now,
+                ),
+            )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        return record
+
+    def dispatch_formal_projection(
+        self, row: dict[str, object], provider_operation_id: str
+    ) -> None:
+        """Durably start a claimed formal job; later stages run asynchronously."""
+        job_id = str(row["job_id"])
+        existing = self._conn().execute(
+            "SELECT * FROM analysis_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        reservation_id = str(row["reservation_id"])
+        maximum = str(row["max_reserved_cost"])
+        expected = (
+            str(row["coin"]), str(row["mode"]), str(row["question"]),
+            str(row["operation_id"]), provider_operation_id, reservation_id, maximum,
+        )
+        fields = (
+            "coin", "mode", "question", "formal_operation_id",
+            "formal_provider_operation_id", "formal_reservation_id",
+            "formal_max_reserved_cost",
+        )
+        if existing is not None:
+            if tuple(existing[field] for field in fields) != expected:
+                raise MultiAngleAuthorityError("formal job identity collision")
+            return
+        # Shared dispatch authority has already been claimed before this method
+        # is entered.  Collection therefore happens exactly once at the
+        # unknown-result boundary: any exception/crash is marked uncertain by
+        # FormalRunWorker and must be reconciled, never blindly resent.
+        snapshot_id = self.create_snapshot(
+            str(row["coin"]), query=str(row["question"])
+        )
+        created = self.enqueue_job(
+            snapshot_id,
+            str(row["mode"]),
+            str(row["question"]),
+            origin="manual",
+            locale=str(row["locale"]),
+            job_id=job_id,
+            formal_metadata={
+                "operation_id": str(row["operation_id"]),
+                "provider_operation_id": provider_operation_id,
+                "reservation_id": reservation_id,
+                "max_reserved_cost": maximum,
+            },
+        )
+        if created != job_id:
+            raise MultiAngleAuthorityError("formal job could not be durably enqueued")
+
+    def reconcile_formal_projection(
+        self, provider_operation_id: str
+    ) -> tuple[str, Decimal | None]:
+        job = self._conn().execute(
+            """SELECT job_id,state FROM analysis_jobs
+               WHERE formal_provider_operation_id=?""",
+            (provider_operation_id,),
+        ).fetchone()
+        if job is None:
+            return "unknown", None
+        if job["state"] in {"queued", "running"}:
+            return "pending", None
+        receipt = self._conn().execute(
+            """SELECT actual_cost_micros,state
+               FROM formal_analysis_accounting_receipts WHERE job_id=?""",
+            (job["job_id"],),
+        ).fetchone()
+        if job["state"] == "completed" and receipt is not None and receipt["state"] == "final":
+            return "completed", Decimal(receipt["actual_cost_micros"]) / Decimal("1000000")
+        return "unknown", None
 
     def start(self) -> None:
         self.recover()
@@ -2853,6 +3370,12 @@ class AnalysisFlow:
         try:
             with _bedrock_live_attempt(
                 log, batch_allocation=batch_allocation,
+                formal_pre_reserved=(
+                    job.get("formal_provider_operation_id")
+                    if isinstance(job, dict)
+                    else job["formal_provider_operation_id"]
+                ) is not None,
+                on_accounted=self._formal_accounting_callback(job),
             ) as live:
                 client = BedrockClient(offline=not live)
                 package["client"] = client
@@ -3032,6 +3555,12 @@ class AnalysisFlow:
                 log._force_atomic_offline = client.offline
             with _bedrock_live_attempt(
                 log, batch_allocation=batch_allocation,
+                formal_pre_reserved=(
+                    job.get("formal_provider_operation_id")
+                    if isinstance(job, dict)
+                    else job["formal_provider_operation_id"]
+                ) is not None,
+                on_accounted=self._formal_accounting_callback(job),
             ) as live:
                 client.offline = not live
                 invocation_id = (
@@ -3131,6 +3660,21 @@ class AnalysisFlow:
                  None, job["job_id"], job["snapshot_id"], now),
             )
             self._conn().execute("UPDATE analysis_jobs SET state='completed',updated_at=? WHERE job_id=?", (now, job["job_id"]))
+            if job["formal_provider_operation_id"] is not None:
+                self._conn().execute(
+                    """INSERT INTO formal_analysis_accounting_receipts
+                       (job_id,provider_operation_id,reservation_id,max_reserved_cost,
+                        actual_cost_micros,call_count,state,updated_at)
+                       VALUES(?,?,?,?,0,0,'final',?)
+                       ON CONFLICT(job_id) DO UPDATE SET state='final',updated_at=excluded.updated_at""",
+                    (
+                        job["job_id"],
+                        job["formal_provider_operation_id"],
+                        job["formal_reservation_id"],
+                        job["formal_max_reserved_cost"],
+                        now,
+                    ),
+                )
             self._conn().execute("COMMIT")
         except Exception:
             self._conn().execute("ROLLBACK"); raise

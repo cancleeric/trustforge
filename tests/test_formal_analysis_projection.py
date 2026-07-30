@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from trustforge.analysis_flow import AnalysisFlow
 from trustforge.formal_run_idempotency import build_identity, parse_idempotency_key
+from trustforge.ingestion.base import Document
 
 def identity(byte: int = 1, *, caller: str = "tenant-a"):
     random_part = base64.urlsafe_b64encode(bytes([byte]) * 16).decode().rstrip("=")
@@ -41,6 +43,132 @@ def test_formal_plan_is_provider_free_and_deterministic(tmp_path, monkeypatch):
         "job_id": first["job_id"],
         "result_id": f"result-{first['job_id']}",
     }
+
+
+def test_formal_dispatch_collects_nonempty_snapshot_and_is_exact_on_retry(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "flow.sqlite3"
+    flow = AnalysisFlow(path)
+    ident = identity()
+    operation = "op-dispatch-durable"
+    planned = flow.plan_formal_manual(
+        "BTC", "risk", "Assess risk", locale="zh-Hant",
+        fresh=False, operation_id=operation, identity=ident,
+    )
+    flow.enqueue_formal_projection(
+        "BTC", "risk", "Assess risk", locale="zh-Hant",
+        job_id=planned["job_id"], operation_id=operation,
+        identity=ident, fencing_token=1,
+    )
+    row = flow.claim_formal_projection()
+    assert row is not None
+    row.update({"reservation_id": "br-test", "max_reserved_cost": "0.2"})
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect",
+        lambda *_args, **_kwargs: [
+            Document(
+                id="formal-evidence",
+                kind="news",
+                source="trusted-source",
+                text="BTC has verifiable evidence.",
+                url="https://evidence.test",
+                ts=1.0,
+            )
+        ],
+    )
+
+    flow.dispatch_formal_projection(row, "provider-op")
+    snapshot = flow._conn().execute(
+        """SELECT s.document_count FROM analysis_snapshots s
+           JOIN analysis_jobs j ON j.snapshot_id=s.snapshot_id
+           WHERE j.job_id=?""",
+        (planned["job_id"],),
+    ).fetchone()
+    assert snapshot["document_count"] == 1
+    restarted = AnalysisFlow(path)
+    assert restarted.reconcile_formal_projection("provider-op") == ("pending", None)
+    restarted.dispatch_formal_projection(row, "provider-op")
+    conflicting = {**row, "question": "different content"}
+    with pytest.raises(Exception, match="collision"):
+        restarted.dispatch_formal_projection(conflicting, "provider-op")
+
+
+def test_formal_collection_failure_never_creates_job_or_final_receipt(
+    tmp_path, monkeypatch
+):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    ident = identity(2)
+    operation = "op-collection-fails"
+    planned = flow.plan_formal_manual(
+        "BTC", "risk", "Assess risk", locale="zh-Hant",
+        fresh=False, operation_id=operation, identity=ident,
+    )
+    flow.enqueue_formal_projection(
+        "BTC", "risk", "Assess risk", locale="zh-Hant",
+        job_id=planned["job_id"], operation_id=operation,
+        identity=ident, fencing_token=1,
+    )
+    row = flow.claim_formal_projection()
+    assert row is not None
+    row.update({"reservation_id": "br-fail", "max_reserved_cost": "0.2"})
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("provider outcome unknown")
+        ),
+    )
+
+    with pytest.raises(TimeoutError, match="unknown"):
+        flow.dispatch_formal_projection(row, "provider-failed")
+    assert flow._conn().execute(
+        "SELECT 1 FROM analysis_jobs WHERE job_id=?", (planned["job_id"],)
+    ).fetchone() is None
+    assert flow._conn().execute(
+        "SELECT 1 FROM formal_analysis_accounting_receipts WHERE job_id=?",
+        (planned["job_id"],),
+    ).fetchone() is None
+
+
+def test_execution_uncertain_retains_reservation_and_durable_alert_after_restart(
+    tmp_path,
+):
+    path = tmp_path / "flow.sqlite3"
+    flow = AnalysisFlow(path)
+    ident = identity(9)
+    operation = "op-failed-provider-reconciliation"
+    plan = flow.plan_formal_manual(
+        "BTC", "risk", "Assess risk", locale="zh-Hant", fresh=False,
+        operation_id=operation, identity=ident,
+    )
+    flow.enqueue_formal_projection(
+        "BTC", "risk", "Assess risk", locale="zh-Hant",
+        job_id=plan["job_id"], operation_id=operation,
+        identity=ident, fencing_token=3,
+    )
+    claimed = flow.claim_formal_projection()
+    assert claimed is not None
+    flow.set_formal_projection_state(
+        namespace=ident.namespace,
+        scope_locator=ident.scope_locator,
+        operation_id=operation,
+        expected="claiming",
+        state="execution_uncertain",
+        claim_token=str(claimed["claim_token"]),
+        alert_reason="provider_reconciliation_unknown",
+    )
+
+    restarted = AnalysisFlow(path)
+    assert restarted.claim_formal_projection() is None
+    alerts = restarted.formal_reconciliation_alerts()
+    assert len(alerts) == 1
+    assert alerts[0]["operation_id"] == operation
+    assert alerts[0]["job_id"] == plan["job_id"]
+    assert alerts[0]["reservation_id"] == "br_" + hashlib.sha256(
+        operation.encode()
+    ).hexdigest()[:32]
+    assert alerts[0]["reason"] == "provider_reconciliation_unknown"
+    assert alerts[0]["observation_count"] == 1
 
 
 def test_fresh_plan_bypasses_existing_content_without_collect(tmp_path, monkeypatch):
@@ -109,6 +237,7 @@ def test_projection_enqueue_is_restart_durable_and_never_collects(tmp_path, monk
         "trustforge.analysis_flow.collect",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not collect")),
     )
+
     assert flow.enqueue_formal_projection(
         "BTC", "risk", "Assess risk", locale="zh-Hant",
         job_id=job_id, operation_id=operation,
@@ -133,6 +262,26 @@ def test_projection_enqueue_is_restart_durable_and_never_collects(tmp_path, monk
         job_id=job_id, operation_id=operation,
         identity=ident, fencing_token=1,
     )
+
+
+def test_pending_authority_is_never_claimed_before_bind(tmp_path):
+    flow = AnalysisFlow(tmp_path / "staged.sqlite3")
+    ident = identity()
+    operation = "op-bind-paused"
+    plan = flow.plan_formal_manual(
+        "BTC", "risk", "Paused bind", locale="zh-Hant", fresh=False,
+        operation_id=operation, identity=ident,
+    )
+    flow.enqueue_formal_projection(
+        "BTC", "risk", "Paused bind", locale="zh-Hant",
+        job_id=plan["job_id"], operation_id=operation,
+        identity=ident, fencing_token=1, pending_authority=True,
+    )
+    for _ in range(10):
+        assert flow.claim_formal_projection(lease_seconds=1) is None
+    assert flow._conn().execute(
+        "SELECT state FROM formal_analysis_projection_queue"
+    ).fetchone()["state"] == "pending_authority"
 
 
 def test_formal_plans_are_independent_across_operation_and_scope(tmp_path):
@@ -352,3 +501,53 @@ def test_formal_queue_does_not_consume_or_depend_on_legacy_question_quota(tmp_pa
     assert flow._conn().execute(  # noqa: SLF001
         "SELECT count(*) FROM formal_analysis_projection_queue"
     ).fetchone()[0] == 1
+
+
+def test_formal_projection_claim_lease_fences_two_workers(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.time.time", lambda: 1000.0)
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    ident = identity(51)
+    operation = "op-claim-fence"
+    plan = flow.plan_formal_manual(
+        "BTC", "risk", "Fence claim", locale="zh-Hant", fresh=False,
+        operation_id=operation, identity=ident,
+    )
+    flow.enqueue_formal_projection(
+        "BTC", "risk", "Fence claim", locale="zh-Hant",
+        job_id=plan["job_id"], operation_id=operation, identity=ident,
+        fencing_token=1,
+    )
+    first = flow.claim_formal_projection(lease_seconds=30)
+    assert first is not None
+    assert flow.claim_formal_projection(lease_seconds=30) is None
+
+
+def test_expired_formal_projection_claim_gets_new_fencing_token(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("trustforge.analysis_flow.time.time", lambda: clock[0])
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    ident = identity(52)
+    operation = "op-claim-expiry"
+    plan = flow.plan_formal_manual(
+        "BTC", "risk", "Recover claim", locale="zh-Hant", fresh=False,
+        operation_id=operation, identity=ident,
+    )
+    flow.enqueue_formal_projection(
+        "BTC", "risk", "Recover claim", locale="zh-Hant",
+        job_id=plan["job_id"], operation_id=operation, identity=ident,
+        fencing_token=1,
+    )
+    first = flow.claim_formal_projection(lease_seconds=30)
+    clock[0] = 1031.0
+    second = flow.claim_formal_projection(lease_seconds=30)
+    assert first is not None and second is not None
+    assert first["claim_token"] != second["claim_token"]
+    with pytest.raises(Exception, match="lost authority"):
+        flow.set_formal_projection_state(
+            namespace=ident.namespace,
+            scope_locator=ident.scope_locator,
+            operation_id=operation,
+            expected="claiming",
+            state="collecting",
+            claim_token=str(first["claim_token"]),
+        )
