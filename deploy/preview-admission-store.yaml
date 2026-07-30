@@ -1,0 +1,86 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Dedicated default-off TrustForge paid-preview admission store.
+
+Parameters:
+  RuntimeRoleName:
+    Type: String
+  QuotaKeyParameterArn:
+    Type: String
+  QuotaKeyKmsKeyArn:
+    Type: String
+  PreviewEnabled:
+    Type: String
+    Default: "0"
+    AllowedValues: ["0", "1"]
+
+Resources:
+  PreviewAdmissionTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: trustforge-preview-admission
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref QuotaKeyKmsKeyArn
+      Tags:
+        - Key: TrustForgeComponent
+          Value: preview-admission
+
+  PreviewAdmissionRuntimePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: trustforge-preview-admission-runtime
+      Roles: [!Ref RuntimeRoleName]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PreviewAdmissionDataPlane
+            Effect: Allow
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:ListTagsOfResource
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:TransactGetItems
+              - dynamodb:TransactWriteItems
+            Resource: !GetAtt PreviewAdmissionTable.Arn
+          - Sid: ExactQuotaKeyRevision
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Ref QuotaKeyParameterArn
+          - Sid: ExactQuotaKeyDecrypt
+            Effect: Allow
+            Action: kms:Decrypt
+            Resource: !Ref QuotaKeyKmsKeyArn
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+
+Outputs:
+  PreviewAdmissionTableName:
+    Value: !Ref PreviewAdmissionTable
+  PreviewAdmissionTableArn:
+    Value: !GetAtt PreviewAdmissionTable.Arn
+  PreviewAdmissionEnabledDefault:
+    Value: !Ref PreviewEnabled
