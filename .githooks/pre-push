@@ -157,6 +157,23 @@ run_gate \
   env CARGO_TARGET_DIR=out/nf3-cargo-target \
     cargo clippy --manifest-path native/nf3-one-shot-transaction/Cargo.toml \
     --target x86_64-unknown-linux-musl --all-targets --locked -- -D warnings
+run_gate \
+  "NF3 adversarial helper x86_64-musl compile" \
+  env CARGO_TARGET_DIR=out/nf3-cargo-target \
+    cargo check --manifest-path native/nf3-one-shot-transaction/Cargo.toml \
+    --target x86_64-unknown-linux-musl --all-targets --locked \
+    --features adversarial-test-hooks
+run_gate \
+  "NF3 release rejects adversarial hooks" \
+  bash -ceu 'log=out/nf3-release-hooks-rejection.log
+    if env CARGO_TARGET_DIR=out/nf3-cargo-target cargo check \
+      --manifest-path native/nf3-one-shot-transaction/Cargo.toml \
+      --release --target x86_64-unknown-linux-musl \
+      --features adversarial-test-hooks >"$log" 2>&1; then
+      echo "NF3 release unexpectedly accepted adversarial hooks" >&2
+      exit 1
+    fi
+    grep -q "adversarial test hooks are forbidden" "$log"'
 run_gate "competition QA" env TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 "$PYTHON" scripts/run_question_bank.py --limit 24 --out out/pre-push/question-bank-results.json
 if [ ! -x frontend/node_modules/.bin/vitest ]; then
   # The caller may export NODE_ENV=production (for example, OpenClaw and
