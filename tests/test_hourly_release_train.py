@@ -146,6 +146,47 @@ def test_gate_rejects_non_uv_interpreter_below_home(tmp_path):
         )
 
 
+def test_gate_resolves_only_active_rust_toolchain_below_rustup_root(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    rustup = home / ".cargo/bin/rustup"
+    cargo = home / ".rustup/toolchains/stable-test/bin/cargo"
+    rustc = cargo.parent / "rustc"
+    rustup.parent.mkdir(parents=True)
+    rustup.write_bytes(b"rustup")
+    cargo.parent.mkdir(parents=True)
+    cargo.write_bytes(b"cargo")
+    rustc.write_bytes(b"rustc")
+
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=f"{cargo}\n"),
+    )
+
+    assert train._trusted_rust_toolchain(home) == cargo.parent.parent
+
+
+def test_gate_rejects_rustup_cargo_outside_toolchain_root(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    rustup = home / ".cargo/bin/rustup"
+    cargo = home / "untrusted/bin/cargo"
+    rustup.parent.mkdir(parents=True)
+    rustup.write_bytes(b"rustup")
+    cargo.parent.mkdir(parents=True)
+    cargo.write_bytes(b"cargo")
+
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=f"{cargo}\n"),
+    )
+
+    with pytest.raises(RuntimeError, match="outside the trusted toolchain root"):
+        train._trusted_rust_toolchain(home)
+
+
 def test_frontend_identity_requires_release_sha_and_question_picker(monkeypatch):
     expected_sha = "abcdef1234567890abcdef1234567890abcdef12"
     responses = iter(
