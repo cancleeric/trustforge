@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import collections
+import base64
 import copy
 import dataclasses
 import hashlib
@@ -42,12 +43,14 @@ import logging
 import math
 import os
 import re
+import secrets
 import sys
 import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -6845,35 +6848,202 @@ def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_memory_unavailable", "Hermes 題目記憶暫時無法讀取")
 
 
+def _formal_scope_keys() -> tuple[str, dict[str, bytes]]:
+    from .runtime_control import is_production_environment
+
+    active = os.getenv("TRUSTFORGE_FORMAL_SCOPE_ACTIVE_KEY_ID", "scope-v1").strip()
+    raw = os.getenv("TRUSTFORGE_FORMAL_SCOPE_SECRETS", "").strip()
+    try:
+        configured = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("formal scope keyring is invalid") from exc
+    if not configured and not is_production_environment():
+        fallback = os.getenv("TRUSTFORGE_FORMAL_CALLER_SECRET", "")
+        configured = {active: fallback}
+    if (
+        not isinstance(configured, dict)
+        or active not in configured
+        or any(
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or len(value.encode()) < 32
+            for key, value in configured.items()
+        )
+    ):
+        raise RuntimeError("formal scope keyring is unavailable")
+    return active, {key: value.encode() for key, value in configured.items()}
+
+
+def _formal_scope_cookie(headers) -> tuple[str | None, str | None]:
+    """Validate the stable anonymous browser scope or issue it before acquire."""
+    from .runtime_control import is_production_environment
+
+    active, keys = _formal_scope_keys()
+    production = is_production_environment()
+    cookie_name = "__Host-tf_formal_scope" if production else "tf_formal_scope"
+    jar = SimpleCookie()
+    try:
+        jar.load(headers.get("Cookie", ""))
+    except Exception:
+        jar = SimpleCookie()
+    morsel = jar.get(cookie_name)
+    if morsel is not None:
+        parts = morsel.value.split(".")
+        if len(parts) == 4 and parts[0] == "tfcs1" and parts[1] in keys:
+            key_id, random_value, supplied = parts[1], parts[2], parts[3]
+            expected = hmac.new(
+                keys[key_id],
+                f"tfcs1\0{key_id}\0{random_value}".encode(),
+                hashlib.sha256,
+            ).digest()
+            try:
+                decoded = base64.urlsafe_b64decode(supplied + "=" * (-len(supplied) % 4))
+                random_bytes = base64.urlsafe_b64decode(
+                    random_value + "=" * (-len(random_value) % 4)
+                )
+            except ValueError:
+                decoded, random_bytes = b"", b""
+            if len(random_bytes) == 16 and hmac.compare_digest(decoded, expected):
+                # Signing-key rotation must not change the logical caller.
+                return f"browser:{random_value}", None
+    random_value = base64.urlsafe_b64encode(secrets.token_bytes(16)).decode().rstrip("=")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(
+            keys[active],
+            f"tfcs1\0{active}\0{random_value}".encode(),
+            hashlib.sha256,
+        ).digest()
+    ).decode().rstrip("=")
+    value = f"tfcs1.{active}.{random_value}.{signature}"
+    attributes = (
+        f"{cookie_name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"
+    )
+    if production:
+        attributes += "; Secure"
+    return None, attributes
+
+
+def _handle_api_formal_analysis_question(
+    headers, rfile, client_ip: str = ""
+) -> tuple[int, str, dict[str, str]]:
+    """Create a formal manual intent without doing provider work inline."""
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error[0], error[1], {}
+    assert payload is not None
+    if set(payload) != {"coin", "mode", "question", "locale", "fresh"}:
+        return (
+            400,
+            _json_envelope_err(
+                "bad_request", "只接受且必須提供 coin、mode、question、locale、fresh"
+            ),
+            {},
+    )
+    try:
+        get_all = getattr(headers, "get_all", None)
+        key_values = (
+            get_all("Idempotency-Key", [])
+            if callable(get_all)
+            else ([headers["Idempotency-Key"]] if "Idempotency-Key" in headers else [])
+        )
+        from .formal_run_idempotency import (
+            BadIdempotencyKey,
+            FormalRunIdempotencyError,
+        )
+        from .formal_run_runtime import formal_run_coordinator
+
+        caller_scope, set_cookie = _formal_scope_cookie(headers)
+        if caller_scope is None:
+            return (
+                428,
+                _json_envelope_err(
+                    "caller_scope_required",
+                    "瀏覽器識別已建立，請使用相同 Idempotency-Key 重試",
+                ),
+                {"Set-Cookie": set_cookie},
+            )
+
+        outcome = formal_run_coordinator().submit(
+            idempotency_keys=key_values,
+            caller_scope=caller_scope,
+            coin=payload["coin"],
+            mode=payload["mode"],
+            question=payload["question"],
+            locale=payload["locale"],
+            fresh=payload["fresh"],
+            admit_owner=lambda: _check_status_rate_limit(
+                client_ip, "analysis-write"
+            ),
+        )
+        response_headers = dict(outcome.replay_headers or {})
+        if outcome.replayed:
+            response_headers["Idempotency-Replayed"] = "true"
+        body = (
+            _json_envelope_ok(outcome.body)
+            if outcome.status < 400
+            else json.dumps(outcome.body, ensure_ascii=False, separators=(",", ":"))
+        )
+        return outcome.status, body, response_headers
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc)), {}
+    except ValueError as exc:
+        return 400, _json_envelope_err("bad_request", str(exc)), {}
+    except BadIdempotencyKey as exc:
+        return 400, _json_envelope_err("bad_request", str(exc)), {}
+    except FormalRunIdempotencyError as exc:
+        return 503, _json_envelope_err(exc.code, "正式分析服務暫時無法使用"), {}
+    except Exception:
+        logging.exception("TrustForge /api/analysis-question error")
+        return (
+            503,
+            _json_envelope_err("idempotency_unavailable", "正式分析服務暫時無法使用"),
+            {},
+        )
+
+
 def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[int, str]:
-    """Create a high-priority manual analysis job, independent of scheduling."""
+    """Legacy direct helper retained for non-HTTP compatibility tests.
+
+    The public ``do_POST`` route uses the strict formal handler above.
+    """
     payload, error = _read_admin_put_body(headers, rfile)
     if error is not None:
         return error
     assert payload is not None
     if set(payload) - {"coin", "mode", "question", "locale"}:
-        return 400, _json_envelope_err("bad_request", "只接受 coin、mode、question、locale")
+        return 400, _json_envelope_err(
+            "bad_request", "只接受 coin、mode、question、locale"
+        )
     try:
         _check_status_rate_limit(client_ip, "analysis-write")
         from .agent.narrative_locale import normalize_locale
         from .analysis_flow import AnalysisFlow
-        # N11：語系是展示層選項，不是驗證輸入——非法/未知值一律 fallback 成
-        # 預設中文（`normalize_locale` 不 raise），絕不因語系值回 400/500。
+
         locale = normalize_locale(payload.get("locale"))
         with AnalysisFlow() as flow:
             question_id, job_id = flow.submit_manual(
-                str(payload.get("coin", "")), str(payload.get("mode", "")), str(payload.get("question", "")),
+                str(payload.get("coin", "")),
+                str(payload.get("mode", "")),
+                str(payload.get("question", "")),
                 locale=locale,
             )
-        return 202, _json_envelope_ok({"question_id": question_id, "job_id": job_id,
-                                       "state": "queued" if job_id else "registered", "origin": "manual"})
+        return 202, _json_envelope_ok(
+            {
+                "question_id": question_id,
+                "job_id": job_id,
+                "state": "queued" if job_id else "registered",
+                "origin": "manual",
+            }
+        )
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     except ValueError as exc:
         return 400, _json_envelope_err("bad_request", str(exc))
     except Exception:
-        logging.exception("TrustForge /api/analysis-question error")
-        return 502, _json_envelope_err("analysis_queue_unavailable", "分析排程暫時無法寫入")
+        logging.exception("TrustForge /api/analysis-question compatibility helper error")
+        return 502, _json_envelope_err(
+            "analysis_queue_unavailable", "分析排程暫時無法寫入"
+        )
 
 
 def _handle_api_analysis_comparison_question(headers, rfile, client_ip: str = "") -> tuple[int, str]:
@@ -9260,8 +9430,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, _json_envelope_err("not_found", "無此管理端點"),
                               "application/json; charset=utf-8")
         if u.path == "/api/analysis-question":
-            code, body = _handle_api_analysis_question(getattr(self, "headers", {}), self.rfile, client_ip)
-            return self._send(code, body, "application/json; charset=utf-8")
+            code, body, replay_headers = _handle_api_formal_analysis_question(
+                getattr(self, "headers", {}), self.rfile, client_ip
+            )
+            return self._send(
+                code,
+                body,
+                "application/json; charset=utf-8",
+                extra_headers=replay_headers,
+            )
         if u.path == "/api/analysis-plan":
             code, body = _handle_api_analysis_plan(
                 getattr(self, "headers", {}), self.rfile, self.client_address[0]

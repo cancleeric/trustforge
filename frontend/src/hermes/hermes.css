@@ -2636,7 +2636,12 @@
 .hermes-fps-meter {
   position: fixed;
   bottom: calc(var(--hermes-bottom) + 12px);
-  left: max(12px, env(safe-area-inset-left));
+  /* The desktop rail is an opaque layer above the workspace.  Anchoring this
+     HUD to the viewport's left edge put almost the entire badge underneath
+     that rail (only its bottom/left border remained visible).  Share the
+     layout's rail variable so the complete FPS + adaptive-quality badge sits
+     immediately inside the visible bridge workspace. */
+  left: max(calc(var(--hermes-rail) + 12px), env(safe-area-inset-left));
   z-index: 12;
   display: flex;
   align-items: center;

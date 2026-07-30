@@ -282,6 +282,49 @@ class FormalRunIdempotencyStore(Protocol):
         reconciliation_state: str | None = None,
     ) -> None: ...
 
+    def bind_with_content_decision(
+        self,
+        *,
+        identity: FormalRunIdentity,
+        fencing_token: int,
+        receipt: FormalRunReceipt,
+        operation_id: str,
+        content: HmacValue,
+        fresh: bool,
+        now: datetime,
+        reservation_id: str,
+        max_reserved_cost: str,
+        provider_operation_id: str,
+        cost_policy_version: str,
+        cost_policy_digest: str,
+    ) -> FormalRunReceipt | None: ...
+
+    def claim_dispatch(
+        self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
+    ) -> str: ...
+
+    def mark_execution_uncertain(
+        self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
+    ) -> None: ...
+
+    def pending_projection_token(self, *, identity: FormalRunIdentity) -> int | None: ...
+
+    def complete_dispatch(
+        self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
+    ) -> None: ...
+
+    def dispatch_resolution(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> Literal["pending", "claimed", "completed", "uncertain", "none"]: ...
+
+    def provider_operation(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> str | None: ...
+
+    def reservation_details(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> tuple[str, str] | None: ...
+
     def fail_terminal(
         self,
         *,
@@ -365,6 +408,24 @@ def request_fingerprint(
         coin=coin, mode=mode, question=question, locale=locale, fresh=fresh
     )
     return HmacValue(key_id, _purpose_hmac(secret, b"fingerprint", canonical))
+
+
+def content_fingerprint(
+    secret: bytes,
+    key_id: str,
+    *,
+    coin: str,
+    mode: str,
+    question: str,
+) -> HmacValue:
+    """Hash reusable analysis content without locale or freshness controls."""
+    values = (CONTRACT_VERSION, coin.strip().upper(), mode.strip(), question.strip())
+    encoded = bytearray()
+    for value in values:
+        field = value.encode("utf-8")
+        encoded.extend(struct.pack(">Q", len(field)))
+        encoded.extend(field)
+    return HmacValue(key_id, _purpose_hmac(secret, b"content", bytes(encoded)))
 
 
 def build_identity(

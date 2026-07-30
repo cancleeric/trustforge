@@ -459,7 +459,9 @@ describe('N80 窄螢幕頂欄不得把語言切換鈕擠出視窗', () => {
     expect(dashboard).toContain('measuring={measuring}')
     expect(dashboard).not.toMatch(/searchParams\.get\('fps'\).*FpsMeter/)
     expect(css).toMatch(/\.hermes-fps-meter\s*\{[^}]*bottom:\s*calc\(var\(--hermes-bottom\) \+ 12px\)/s)
+    expect(css).toMatch(/\.hermes-fps-meter\s*\{[^}]*left:\s*max\(calc\(var\(--hermes-rail\) \+ 12px\),\s*env\(safe-area-inset-left\)\)/s)
     expect(css).toMatch(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{[^}]*bottom:\s*calc\(var\(--hermes-bottom\) \+ 112px\)/)
+    expect(css).toMatch(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{[^}]*left:\s*max\(6px,\s*env\(safe-area-inset-left\)\)/)
     expect(css).toMatch(/\.hermes-fps-quality::after\s*\{[^}]*content:\s*attr\(data-short\)/s)
   })
 

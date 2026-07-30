@@ -106,13 +106,15 @@ describe('N26: zh-TW mode has no residual English strings', () => {
     expect(screen.getByText('持續運作')).toBeInTheDocument()
   })
 
-  it('StageBar: non-analyze module stations are truthful status-only controls', () => {
+  it.each(['analyze', 'compare', 'history', 'status', 'costs', 'whale'] as const)(
+    'StageBar: %s workspace stations do not open the unrelated homepage drawer',
+    (mode) => {
     const { coin } = galaxyHarness()
     const onSelectStage = vi.fn()
     render(
       <HermesI18nProvider>
         <StageBar
-          mode="costs"
+          mode={mode}
           selCoin={coin}
           derivation={deriveSelected(coin)}
           selectedStage={null}
@@ -121,10 +123,39 @@ describe('N26: zh-TW mode has no residual English strings', () => {
       </HermesI18nProvider>,
     )
 
-    const station = screen.getByRole('button', { name: '呼叫收集 · 階段資料尚未提供，無法開啟明細' })
-    expect(station).toBeDisabled()
-    fireEvent.click(station)
+    const stations = screen.getAllByRole('button')
+    expect(stations).toHaveLength(5)
+    for (const station of stations) {
+      expect(station).toBeDisabled()
+      expect(station).toHaveAccessibleName(/階段資料尚未提供，無法開啟明細/)
+      fireEvent.click(station)
+    }
     expect(onSelectStage).not.toHaveBeenCalled()
+    },
+  )
+
+  it('StageBar: homepage energy stations dispatch five distinct drilldown ids', () => {
+    const { coin } = galaxyHarness()
+    const onSelectStage = vi.fn()
+    render(
+      <HermesI18nProvider>
+        <StageBar
+          selCoin={coin}
+          derivation={deriveSelected(coin)}
+          selectedStage={null}
+          onSelectStage={onSelectStage}
+        />
+      </HermesI18nProvider>,
+    )
+
+    for (const station of screen.getAllByRole('button')) fireEvent.click(station)
+    expect(onSelectStage.mock.calls.map(([stage]) => stage)).toEqual([
+      'scan',
+      'filter',
+      'crossverify',
+      'manipulation',
+      'composite',
+    ])
   })
 
   it('StageDrilldown: title stays aligned with the evidence semantics', () => {

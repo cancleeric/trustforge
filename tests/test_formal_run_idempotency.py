@@ -100,6 +100,34 @@ def bind_chargeable(store, ident, token, *, suffix: str = ""):
     return bound_receipt
 
 
+def bind_content(store, ident, token, suffix, *, fresh=False, locale="zh-Hant"):
+    candidate = FormalRunReceipt(
+        receipt_id=f"frc_content_{suffix}",
+        question_id=f"q_content_{suffix}",
+        job_id=f"job_content_{suffix}",
+        result_id=f"result_content_{suffix}",
+        state="accepted",
+        origin="manual",
+        disposition="fresh-created" if fresh else "created",
+        locale=locale,
+        created_at="2026-07-30T08:00:00Z",
+    )
+    return store.bind_with_content_decision(
+        identity=ident,
+        fencing_token=token,
+        receipt=candidate,
+        operation_id=f"op_content_{suffix}",
+        content=HmacValue("content-v1", "e" * 64),
+        fresh=fresh,
+        now=NOW,
+        reservation_id=f"res_content_{suffix}",
+        max_reserved_cost="1",
+        provider_operation_id=f"provider_content_{suffix}",
+        cost_policy_version="cost-v1",
+        cost_policy_digest="d" * 64,
+    )
+
+
 def receipt(*, state: str = "accepted", disposition: str = "created") -> FormalRunReceipt:
     return FormalRunReceipt(
         receipt_id="frc_1",
@@ -499,6 +527,80 @@ def test_provider_free_bind_has_no_reservation_or_dispatch(tmp_path):
         lookup=lookup(parsed, ident, fp),
         now=NOW, lease_seconds=30,
     ).receipt == reused
+
+
+def test_sqlite_content_guard_reuses_same_scope_and_survives_restart(tmp_path):
+    path = tmp_path / "store.db"
+    first_store = SqliteFormalRunIdempotencyStore(path, environment="test")
+    first_parsed, first_identity = identity(key(byte=41))
+    first_owner = first_store.acquire(
+        lookup=lookup(first_parsed, first_identity), now=NOW, lease_seconds=30
+    )
+    created = bind_content(
+        first_store, first_identity, first_owner.fencing_token or 0, "first"
+    )
+    assert created is not None and created.disposition == "created"
+
+    restarted = SqliteFormalRunIdempotencyStore(path, environment="test")
+    second_parsed, second_identity = identity(key(byte=42))
+    second_owner = restarted.acquire(
+        lookup=lookup(second_parsed, second_identity), now=NOW, lease_seconds=30
+    )
+    reused = bind_content(
+        restarted, second_identity, second_owner.fencing_token or 0, "second"
+    )
+    assert reused is not None and reused.disposition == "reused"
+    assert (reused.job_id, reused.result_id) == (created.job_id, created.result_id)
+
+
+def test_sqlite_content_guard_locale_mismatch_leaves_authority_acquired(tmp_path):
+    store = SqliteFormalRunIdempotencyStore(tmp_path / "store.db", environment="test")
+    first_parsed, first_identity = identity(key(byte=43))
+    first_owner = store.acquire(
+        lookup=lookup(first_parsed, first_identity), now=NOW, lease_seconds=30
+    )
+    bind_content(store, first_identity, first_owner.fencing_token or 0, "locale-first")
+    second_parsed, second_identity = identity(key(byte=44))
+    second_owner = store.acquire(
+        lookup=lookup(second_parsed, second_identity), now=NOW, lease_seconds=30
+    )
+    assert (
+        bind_content(
+            store,
+            second_identity,
+            second_owner.fencing_token or 0,
+            "locale-second",
+            locale="en",
+        )
+        is None
+    )
+    assert (
+        store.acquire(
+            lookup=lookup(second_parsed, second_identity),
+            now=NOW,
+            lease_seconds=30,
+        ).kind
+        == "in_progress"
+    )
+
+
+def test_sqlite_content_guard_race_has_one_chargeable_winner(tmp_path):
+    path = tmp_path / "store.db"
+    stores = [
+        SqliteFormalRunIdempotencyStore(path, environment="test"),
+        SqliteFormalRunIdempotencyStore(path, environment="test"),
+    ]
+    owners = []
+    for offset, store in enumerate(stores, start=45):
+        parsed, ident = identity(key(byte=offset))
+        owner = store.acquire(lookup=lookup(parsed, ident), now=NOW, lease_seconds=30)
+        owners.append((store, ident, owner.fencing_token or 0, str(offset)))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda args: bind_content(*args), owners))
+    assert sorted(item.disposition for item in results if item is not None) == [
+        "created",
+        "reused",
+    ]
 
 
 def test_terminal_safe_response_defensively_freezes_body_and_headers():

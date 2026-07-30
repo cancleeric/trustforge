@@ -33,6 +33,7 @@ import type {
   OverviewData,
   StatusData,
 } from './types'
+import { isFormalRunReceipt, type FormalRunReceipt } from './formalRun'
 
 /**
  * `signal` 建議由呼叫端的 React effect 傳入（effect cleanup 時
@@ -101,7 +102,7 @@ export function getAnalysisSnapshot(coin: string, mode: string, signal?: AbortSi
   })
 }
 
-export interface AnalysisQuestionReceipt { question_id: string; job_id: string | null; state: string; origin: 'manual' }
+export type AnalysisQuestionReceipt = FormalRunReceipt
 
 /** Narrative locale contract of `POST /api/analysis-question` (N11). */
 export type NarrativeLocale = 'zh-Hant' | 'en'
@@ -117,16 +118,31 @@ export function currentNarrativeLocale(): NarrativeLocale {
   return saved === 'en' ? 'en' : 'zh-Hant'
 }
 
-export function registerAnalysisQuestion(coin: string, mode: string, question: string, signal?: AbortSignal, locale?: NarrativeLocale): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
-  const valid = (value: unknown): value is AnalysisQuestionReceipt => !!value && typeof value === 'object' &&
-    typeof (value as AnalysisQuestionReceipt).question_id === 'string' &&
-    ((value as AnalysisQuestionReceipt).job_id === null || typeof (value as AnalysisQuestionReceipt).job_id === 'string') &&
-    typeof (value as AnalysisQuestionReceipt).state === 'string' &&
-    (value as AnalysisQuestionReceipt).origin === 'manual'
-  return apiFetch('/api/analysis-question', undefined, valid, {
+export function registerAnalysisQuestion(
+  coin: string,
+  mode: string,
+  question: string,
+  idempotencyKey: string,
+  fresh: boolean,
+  signal?: AbortSignal,
+  locale?: NarrativeLocale,
+): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
+  const options = {
     signal, method: 'POST',
-    jsonBody: { coin, mode, question, locale: locale ?? currentNarrativeLocale() },
+    headers: { 'Idempotency-Key': idempotencyKey },
+    jsonBody: { coin, mode, question, locale: locale ?? currentNarrativeLocale(), fresh },
     timeoutMs: REGISTER_TIMEOUT_MS,
+  } as const
+  const submit = () => apiFetch('/api/analysis-question', undefined, isFormalRunReceipt, options)
+  return submit().then((result) => {
+    // The first 428 installs/refreshes an HttpOnly caller-scope cookie. The
+    // browser persists it from the response; replay the byte-identical intent
+    // once with the same formal key. A second challenge is surfaced instead
+    // of becoming an unbounded retry loop.
+    if (!result.ok && result.error.code === 'caller_scope_required' && !signal?.aborted) {
+      return submit()
+    }
+    return result
   })
 }
 
