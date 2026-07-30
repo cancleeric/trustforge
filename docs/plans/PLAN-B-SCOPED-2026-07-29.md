@@ -68,7 +68,7 @@ Choose and implement **one** second protocol family. Candidate priority:
 2. **BNB Chain BEP-95 burn contract** (fallback): pin the `github.com/bnb-chain/BEPs` commit that defines the real-time burn, plus the system contract address and burn event signature. This is an `evm_bytecode` family.
 
 **Regardless of choice**, the fixture must:
-- Be a separate PEP under `data/asset_intrinsic_evidence/pep/asset:eth/` (or `asset:bnb/`).
+- Be a separate PEP under `data/asset_intrinsic_evidence/pep/asset_eth/` (or `asset_bnb/`).
 - Contain at least two evidence files (issuance excerpt, supply excerpt).
 - Pass the builder script dry-run.
 - Result in a checked-in record inside `data/asset_intrinsic_records.json`.
@@ -114,8 +114,8 @@ Update `docs/plans/PLAN-ISSUE-748-ASSET-STRUCTURE-SCORE-PROMOTION-2026-07-29.md`
 
 | Command | Expected Result |
 |---|---|
-| `python scripts/build_issuance_supply_records.py data/asset_intrinsic_evidence/pep/asset:eth --dry-run` | Exit 0, no stdout JSON |
-| `python scripts/build_issuance_supply_records.py data/asset_intrinsic_evidence/pep/asset:eth` | Exit 0, valid JSON on stdout, `network_used=false` implied by no network |
+| `python scripts/build_issuance_supply_records.py data/asset_intrinsic_evidence/pep/asset_eth --dry-run` | Exit 0, no stdout JSON |
+| `python scripts/build_issuance_supply_records.py data/asset_intrinsic_evidence/pep/asset_eth` | Exit 0, valid JSON on stdout, `network_used=false` implied by no network |
 | `python scripts/validate_asset_intrinsic_records.py data/asset_intrinsic_records.json --as-of 2026-08-01T00:00:00Z` | Exit 0, `pit_visible_assets >= 3` |
 
 ### 3.3 Regression Tests

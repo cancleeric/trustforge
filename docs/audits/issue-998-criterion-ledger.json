@@ -305,7 +305,7 @@
     "artifact_digests": [
       {"path":"docs/methodology/ASSET-INTRINSIC-METHODOLOGY.md","sha256":"e23f409bc64210b5a620b859548cce05a97ac50f94c82c6cca5548e3db1c3307"},
       {"path":"docs/reports/ISSUE-872-HOLDER-CONCENTRATION-FEASIBILITY-2026-07-29.md","sha256":"51a6a9cbfe28ccf0637f3bd603f1bd8ed6d8338c20ab6a63742f3faa3b774f7a"},
-      {"path":"data/asset_intrinsic_evidence/pep/asset:eth/manifest.json","sha256":"1450239f10089870d051462b01e448acf1ca7b0fb9f49848a51594e89699a6c2"},
+      {"path":"data/asset_intrinsic_evidence/pep/asset_eth/manifest.json","sha256":"1450239f10089870d051462b01e448acf1ca7b0fb9f49848a51594e89699a6c2"},
       {"path":"data/asset_intrinsic_benchmark/manifest.json","sha256":"84fccd76c4a6839f6bfd425b925225c258e3c3c0a6913c202cc76b616b3762c9"},
       {"path":"data/asset_intrinsic_benchmark/profiles.json","sha256":"cc76da3722102228eaee84dba87a76778808ab8987ecb21eed028180d1460986"},
       {"path":"data/contracts/intrinsic-promotion-policy.v1.json","sha256":"ef7693b2484ac133b9eb7d92b747aef5e57e92df450a28881b46b6cac3b61294"},
@@ -315,7 +315,7 @@
     ],
     "proof_catalog": {
       "A":"docs/methodology/ASSET-INTRINSIC-METHODOLOGY.md; tests/test_asset_intrinsic.py; tests/test_asset_intrinsic_metamorphic.py; tests/test_asset_intrinsic_forbidden_inference.py; tests/test_asset_intrinsic_migration.py",
-      "B":"scripts/build_issuance_supply_records.py; data/asset_intrinsic_evidence/pep/asset:eth/manifest.json; tests/test_asset_intrinsic.py; tests/test_asset_intrinsic_shadow.py",
+      "B":"scripts/build_issuance_supply_records.py; data/asset_intrinsic_evidence/pep/asset_eth/manifest.json; tests/test_asset_intrinsic.py; tests/test_asset_intrinsic_shadow.py",
       "C":"data/asset_intrinsic_records.json; tests/test_asset_intrinsic.py; tests/test_asset_intrinsic_shadow.py",
       "D":"docs/reports/ISSUE-872-*.md",
       "E":"src/trustforge/asset_intrinsic_shadow.py; src/trustforge/agent/shadow_runtime.py; tests/test_asset_intrinsic_shadow.py; tests/test_shadow_runtime.py; tests/test_shadow_dashboard.py; tests/test_analyze_intrinsic_shadow_api.py",
