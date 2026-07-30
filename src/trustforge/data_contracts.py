@@ -25,6 +25,7 @@ from trustforge.asset_intrinsic_shadow import (
     TOTAL_DELTA_CAP,
 )
 from trustforge.ecolink import ECOLINK_SCHEMA_VERSION, OFFICIAL_ECOLINK_HOSTS
+from trustforge.intrinsic_official_contract import intrinsic_official_state_schema
 from trustforge.peer_metrics import PEER_METRICS_SCHEMA_VERSION
 
 DOCUMENT_SCHEMA_VERSION = "1.0.0"
@@ -329,6 +330,99 @@ def _asset_intrinsic_assessment_schema_properties() -> dict[str, Any]:
     }
 
 
+def _comparison_report_schema_properties() -> dict[str, Any]:
+    bounded_text = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 16_384,
+        "pattern": r"\S",
+    }
+    dimension = {
+        "type": "object",
+        "required": [
+            "dimension",
+            "label",
+            "finding",
+            "a_evidence_refs",
+            "b_evidence_refs",
+            "confidence",
+            "decision",
+        ],
+        "properties": {
+            "dimension": {"enum": ["價格動能", "鏈上活動", "市場情緒", "生態發展"]},
+            "label": bounded_text,
+            "finding": bounded_text,
+            "a_evidence_refs": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0},
+                "maxItems": 10_000,
+            },
+            "b_evidence_refs": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0},
+                "maxItems": 10_000,
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "decision": {"enum": ["abstain", "insufficient", "normal"]},
+        },
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "required": [
+            "coin_a",
+            "coin_b",
+            "query",
+            "conclusion",
+            "dimensions",
+            "confidence",
+            "limits",
+            "could_flip",
+            "generated_at",
+            "supporting_report_a",
+            "supporting_report_b",
+            "supporting_evidence_a",
+            "supporting_evidence_b",
+        ],
+        "properties": {
+            "coin_a": {"type": "string", "minLength": 1, "maxLength": 32},
+            "coin_b": {"type": "string", "minLength": 1, "maxLength": 32},
+            "query": bounded_text,
+            "conclusion": bounded_text,
+            "dimensions": {
+                "type": "array",
+                "items": dimension,
+                "maxItems": 32,
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "limits": {
+                "type": "array",
+                "items": bounded_text,
+                "maxItems": 1_000,
+            },
+            "could_flip": {
+                "type": "array",
+                "items": bounded_text,
+                "maxItems": 1_000,
+            },
+            "generated_at": {"type": "string", "format": "date-time"},
+            "supporting_report_a": {"type": ["object", "null"]},
+            "supporting_report_b": {"type": ["object", "null"]},
+            "supporting_evidence_a": {
+                "type": "array",
+                "items": {"type": "object"},
+                "maxItems": 10_000,
+            },
+            "supporting_evidence_b": {
+                "type": "array",
+                "items": {"type": "object"},
+                "maxItems": 10_000,
+            },
+        },
+        "additionalProperties": False,
+    }
+
+
 def contract_schemas() -> dict[str, dict[str, Any]]:
     """Return deterministic JSON Schema documents used by CI and consumers."""
     return {
@@ -404,6 +498,12 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                         {"type": "null"},
                     ],
                 },
+                "asset_intrinsic_official_state": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/IntrinsicOfficialState"},
+                        {"type": "null"},
+                    ],
+                },
                 "risk_notices": {
                     "type": "array",
                     "items": {
@@ -444,6 +544,7 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
             "$defs": {
                 "AssetContext": _asset_context_schema_properties(),
                 "AssetIntrinsicAssessment": _asset_intrinsic_assessment_schema_properties(),
+                "IntrinsicOfficialState": intrinsic_official_state_schema(),
                 "TermAnnotation": {
                     "type": "object",
                     "required": ["term_id", "term_name", "matched_text", "start", "end", "glossary_link"],
@@ -477,6 +578,13 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
             "$id": "https://trustforge.local/contracts/asset-intrinsic-assessment/1.0.0",
             "title": "TrustForge AssetIntrinsicAssessment",
             **_asset_intrinsic_assessment_schema_properties(),
+        },
+        "IntrinsicOfficialState": intrinsic_official_state_schema(),
+        "ComparisonReport": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://trustforge.local/contracts/comparison-report/1.0.0",
+            "title": "TrustForge ComparisonReport",
+            **_comparison_report_schema_properties(),
         },
         "PeerMetricsSnapshot": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",

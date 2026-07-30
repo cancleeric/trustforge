@@ -30,6 +30,7 @@ from trustforge.preview_lease_recovery import (
     PreviewLeaseRecovery,
     RecoveryOutcome,
     _ddb_map,
+    _decode_reservation,
 )
 from trustforge.preview_durable_admission_gate import (
     DurableAdmissionGate,
@@ -337,6 +338,95 @@ def test_exact_terminal_row_is_checkpointed_without_second_d1():
     assert result.outcome is RecoveryOutcome.PROGRESSED
     assert result.candidates == 1
     assert terminal.intents == []
+
+
+def _terminal_reservation_item(circuit_failure=...):
+    handle = _handle()
+    item = {
+        key: value for key, value in asdict(handle).items() if value is not None
+    }
+    item.update(
+        {
+            "pk": f"PAP#1#RESERVATION#{handle.expiry_shard:010d}",
+            "sk": f"ID#{handle.reservation_id}",
+            "kind": "preview_reservation",
+            "status": "terminal",
+            "version": 1,
+            "ttl": handle.created_upper + RETENTION_SECONDS,
+            "terminal_disposition": "uncertain",
+        }
+    )
+    if circuit_failure is not ...:
+        item["circuit_failure"] = circuit_failure
+    return item
+
+
+@pytest.mark.parametrize(
+    "circuit_failure,accepted",
+    [
+        (..., True),
+        (0, True),
+        (1, False),
+        (False, False),
+        (True, False),
+        ("0", False),
+        ("1", False),
+        (2, False),
+    ],
+)
+def test_terminal_circuit_failure_decoder_requires_canonical_int_schema(
+    circuit_failure, accepted
+):
+    item = _terminal_reservation_item(circuit_failure)
+    if accepted:
+        reservation = _decode_reservation(item)
+        assert reservation.disposition is TerminalDisposition.UNCERTAIN
+    else:
+        with pytest.raises(ValueError):
+            _decode_reservation(item)
+
+
+@pytest.mark.parametrize(
+    "circuit_failure,expected",
+    [
+        (..., RecoveryOutcome.PROGRESSED),
+        (0, RecoveryOutcome.PROGRESSED),
+        (1, RecoveryOutcome.UNAVAILABLE),
+        (False, RecoveryOutcome.UNAVAILABLE),
+        (True, RecoveryOutcome.UNAVAILABLE),
+        ("0", RecoveryOutcome.UNAVAILABLE),
+        ("1", RecoveryOutcome.UNAVAILABLE),
+        (2, RecoveryOutcome.UNAVAILABLE),
+    ],
+)
+def test_terminal_circuit_failure_schema_controls_recovery_checkpoint(
+    circuit_failure, expected
+):
+    handle = _handle()
+    client = Client(handle.expiry_shard)
+    returned = False
+    item = _terminal_reservation_item(circuit_failure)
+
+    def query(**kwargs):
+        nonlocal returned
+        del kwargs
+        if returned:
+            return {"Items": []}
+        returned = True
+        return {"Items": [_ddb_map(item)]}
+
+    client.query = query
+    terminal = _exact_terminal(client)
+    result = PreviewLeaseRecovery(client, "preview-store", terminal).run(
+        TrustedUtcInterval(
+            handle.expiry_shard * 60 + 60,
+            handle.expiry_shard * 60 + 61,
+        )
+    )
+    assert result.outcome is expected
+    assert terminal.intents == []
+    if expected is RecoveryOutcome.UNAVAILABLE:
+        assert client.puts == []
 
 
 def test_conflicting_terminal_row_blocks_watermark():
@@ -764,7 +854,16 @@ def test_midpage_deadline_checkpoints_exact_item_and_next_run_resumes():
         }
 
     client.query = query
-    ticks = iter([0, 0, 0, 0, 2])
+    deadline_reached = threading.Event()
+    real_transact_write_items = client.transact_write_items
+
+    def checkpoint_then_advance_clock(**kwargs):
+        response = real_transact_write_items(**kwargs)
+        if client.item.get("last_sk", {}).get("S") == f"ID#{handles[1].reservation_id}":
+            deadline_reached.set()
+        return response
+
+    client.transact_write_items = checkpoint_then_advance_clock
     interval = TrustedUtcInterval(
         base.expiry_shard * 60 + 60, base.expiry_shard * 60 + 61
     )
@@ -772,9 +871,10 @@ def test_midpage_deadline_checkpoints_exact_item_and_next_run_resumes():
         client,
         "preview-store",
         _terminal(client),
-        monotonic_clock=lambda: next(ticks),
+        monotonic_clock=lambda: 2 if deadline_reached.is_set() else 0,
         deadline_seconds=1,
     ).run(interval)
+    assert deadline_reached.is_set()
     assert first.outcome is RecoveryOutcome.PROGRESSED
     assert first.candidates == 2
     assert client.item["last_sk"]["S"] == f"ID#{handles[1].reservation_id}"

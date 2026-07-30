@@ -1,32 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useHermesI18n } from '../hermes/hermesI18n'
-
-interface PerCoinStat {
-  total: number
-  has_direction: number
-}
-
-interface TrainingStatusData {
-  training_data: {
-    total_records: number
-    has_direction: number
-    direction_ratio: number
-    per_coin: Record<string, PerCoinStat>
-  }
-  backfill: {
-    mode: string
-    is_running: boolean
-    completed: number
-    total: number
-    progress_pct: number
-  } | null
-  upgrade_threshold: {
-    target: number
-    current: number
-    met: boolean
-    pct: number
-  }
-}
+import { isTrainingStatusData, type TrainingStatusData } from '../lib/endpoints'
 
 type StatusLight = 'green' | 'yellow' | 'neutral' | 'red'
 
@@ -67,23 +41,36 @@ export default function TrainingStatusCard() {
           setAvailability({ kind: 'not_enabled', diagnostic: 'HTTP 404' })
           return
         }
+        let code = ''
+        try {
+          const envelope = await resp.json()
+          code = typeof envelope?.error?.code === 'string' ? envelope.error.code : ''
+        } catch {
+          // The HTTP status remains the fail-closed diagnostic.
+        }
+        setData(null)
         setAvailability({
           kind: 'error',
-          message: `HTTP ${resp.status}`,
-          diagnostic: `HTTP ${resp.status}`,
+          message: code === 'training_data_unavailable' ? t('trainingDataReadError') : `HTTP ${resp.status}`,
+          diagnostic: code ? `${code}: HTTP ${resp.status}` : `HTTP ${resp.status}`,
         })
         return
       }
       const envelope = await resp.json()
-      if (envelope.ok && envelope.data) {
-        setData(envelope.data as TrainingStatusData)
+      if (envelope.ok === true && isTrainingStatusData(envelope.data)) {
+        setData(envelope.data)
         setAvailability({ kind: 'ready' })
       } else {
-        const message = envelope.error?.message ?? 'Unknown error'
+        const validError = envelope.ok === false &&
+          envelope.error && typeof envelope.error === 'object' &&
+          typeof envelope.error.code === 'string' &&
+          typeof envelope.error.message === 'string'
+        const message = validError ? envelope.error.message : t('trainingDataReadError')
+        setData(null)
         setAvailability({
           kind: 'error',
           message,
-          diagnostic: envelope.error?.code ? `${envelope.error.code}: ${message}` : message,
+          diagnostic: validError ? `${envelope.error.code}: ${message}` : 'parse_error: malformed success response',
         })
       }
     } catch (err) {
@@ -91,9 +78,10 @@ export default function TrainingStatusCard() {
         err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
           ? err.message
           : 'Fetch failed'
+      setData(null)
       setAvailability({ kind: 'unavailable', diagnostic })
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void fetchStatus()

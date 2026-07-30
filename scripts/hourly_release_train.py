@@ -504,6 +504,39 @@ def discard_frontend_snapshot(instance: str, snapshot: str) -> None:
     run_ssm(instance, [f"rm -f {snapshot}"])
 
 
+def verify_training_data_reconciliation(instance: str) -> int:
+    """Fail deployment when the API silently diverges from production JSONL."""
+    output = run_ssm(
+        instance,
+        [
+            "python3.11 - <<'PY'",
+            "import json, os, pathlib, shlex, subprocess, sys, urllib.request",
+            "unit_env = subprocess.check_output(['systemctl', 'show', 'trustforge.service', '--property=Environment', '--value'], text=True)",
+            "configured = [item.split('=', 1)[1] for item in shlex.split(unit_env) if item.startswith('TRUSTFORGE_TRAINING_DATA_DIR=')]",
+            "if len(configured) != 1: raise SystemExit('training data path missing from systemd environment')",
+            "os.environ['TRUSTFORGE_TRAINING_DATA_DIR'] = configured[0]",
+            "sys.path.insert(0, '/opt/trustforge/src')",
+            "from trustforge.training_data import resolve_training_data_dir, scan_training_data",
+            "actual = scan_training_data(resolve_training_data_dir()).total_records",
+            "with urllib.request.urlopen('http://localhost/api/training-status', timeout=10) as response:",
+            "    payload = json.load(response)",
+            "api_total = payload.get('data', {}).get('training_data', {}).get('total_records')",
+            "if not isinstance(api_total, int) or api_total != actual or actual <= 0:",
+            "    raise SystemExit(f'training data reconciliation failed: api={api_total!r} actual={actual}')",
+            "print(json.dumps({'training_records': actual}))",
+            "PY",
+        ],
+    )
+    try:
+        result = json.loads(output.splitlines()[-1])
+        count = result["training_records"]
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("training data reconciliation evidence is invalid") from exc
+    if not isinstance(count, int) or count <= 0:
+        raise RuntimeError("training data reconciliation returned no records")
+    return count
+
+
 def restore_backend(
     main_tree: Path,
     expected_sha: str,
@@ -606,6 +639,7 @@ def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> di
             check=True,
         )
         frontend_asset = verify_frontend_identity(main_sha)
+        training_records = verify_training_data_reconciliation(frontend_instance)
         discard_frontend_snapshot(frontend_instance, frontend_snapshot)
     except Exception as deploy_error:
         rollback_errors = []
@@ -637,6 +671,7 @@ def deploy_production(main_tree: Path, main_sha: str, release_branch: str) -> di
         "git_sha": deployed_sha,
         "artifact_digest": deployed_digest,
         "frontend_asset": frontend_asset,
+        "training_records": training_records,
     }
 
 
@@ -756,6 +791,8 @@ def execute(args: argparse.Namespace) -> Path:
                     receipt["post_deploy_verification"] = {
                         "runtime": "passed",
                         "frontend": "passed",
+                        "training_data_reconciliation": "passed",
+                        "training_records": deployed["training_records"],
                         "verified_main_sha": main_sha,
                         "frontend_asset": deployed["frontend_asset"],
                     }

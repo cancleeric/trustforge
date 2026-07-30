@@ -354,6 +354,58 @@ def test_closed_failure_and_uncertain_append_safe_circuit_failure(disposition):
         assert circuit["version"] == {"N": "1"}
 
 
+@pytest.mark.parametrize("half_open", [False, True])
+def test_non_provider_failure_never_opens_circuit_and_releases_once(half_open):
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        if half_open:
+            _seed_open_circuit(client)
+        request = _request(previous=PREVIOUS) if half_open else _request()
+        handle = _admit(client, request)
+        intent = TerminalIntent(
+            handle,
+            TrustedUtcInterval(1_700_000_001, 1_700_000_002),
+            TerminalDisposition.UNCERTAIN,
+            circuit_failure=False,
+        )
+
+        result = PreviewTerminalReconciler(
+            client, "preview-store"
+        ).reconcile(intent)
+
+        assert result.outcome is TerminalOutcome.RECONCILED
+        circuit = _native(client, circuit_key(1, POLICY))
+        assert circuit["state"] == {"S": "closed"}
+        assert circuit["failures"] == {"L": []}
+        for spec in build_counter_specs(request):
+            if spec.kind == "preview_identity_concurrency":
+                assert _number(_native(client, spec.key), "value") == 0
+
+
+def test_non_provider_circuit_classification_is_replay_bound():
+    with mock_aws():
+        client = boto3.client("dynamodb", region_name="us-east-1")
+        _create(client)
+        handle = _admit(client, _request())
+        reconciler = PreviewTerminalReconciler(client, "preview-store")
+        intent = TerminalIntent(
+            handle,
+            TrustedUtcInterval(1_700_000_001, 1_700_000_002),
+            TerminalDisposition.UNCERTAIN,
+            circuit_failure=False,
+        )
+        assert reconciler.reconcile(intent).outcome is TerminalOutcome.RECONCILED
+        replay = reconciler.reconcile(intent)
+        assert replay.outcome is TerminalOutcome.RECONCILED
+        assert replay.replay is True
+        conflicting = replace(intent, circuit_failure=True)
+        assert (
+            reconciler.reconcile(conflicting).outcome
+            is TerminalOutcome.UNAVAILABLE
+        )
+
+
 def test_exact_replay_is_successful_noop_and_conflicting_replay_is_closed():
     with mock_aws():
         client = boto3.client("dynamodb", region_name="us-east-1")

@@ -66,6 +66,7 @@ class TerminalIntent:
     disposition: TerminalDisposition
     actual_tokens: int | None = None
     actual_micro_usd: int | None = None
+    circuit_failure: bool = True
 
     def __post_init__(self) -> None:
         try:
@@ -80,6 +81,7 @@ class TerminalIntent:
         if (
             type(self.handle) is not AdmissionHandle
             or type(self.disposition) is not TerminalDisposition
+            or type(self.circuit_failure) is not bool
             # The whole terminal clock interval must be provably after the
             # admission interval's conservative upper whole-second bound.
             or self.interval.earliest < self.handle.created_upper
@@ -614,6 +616,8 @@ def _terminal_item(
     item["status"] = "terminal"
     item["version"] = 1
     item["terminal_disposition"] = intent.disposition.value
+    if not intent.circuit_failure:
+        item["circuit_failure"] = 0
     if intent.actual_tokens is not None:
         item["actual_tokens"] = intent.actual_tokens
         item["actual_micro_usd"] = intent.actual_micro_usd
@@ -641,6 +645,18 @@ def _next_circuit(
             return None
         return CircuitSnapshot(
             current.pk, current.sk, CircuitState.CLOSED, current.version + 1, ()
+        )
+    if not intent.circuit_failure:
+        return (
+            CircuitSnapshot(
+                current.pk,
+                current.sk,
+                CircuitState.CLOSED,
+                current.version + 1,
+                (),
+            )
+            if half_open
+            else None
         )
     if intent.disposition is TerminalDisposition.PRE_PROVIDER_ABORT and not half_open:
         return None

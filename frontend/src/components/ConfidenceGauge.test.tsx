@@ -44,7 +44,7 @@ describe('ConfidenceGauge tierLabel', () => {
     expect(screen.getByText('資訊完整度（校準後）')).toBeInTheDocument()
     expect(screen.getByText('資訊完整度：中')).toBeInTheDocument()
     expect(screen.queryByText(/信任等級/)).not.toBeInTheDocument()
-    expect(screen.getByText(/信任分 0\.95｜資訊完整度 0\.50/)).toBeInTheDocument()
+    expect(screen.getByText(/原始信任分 0\.95｜校準後資訊完整度 0\.50/)).toBeInTheDocument()
   })
 
   it('abstain 態：層標回「棄權／資料不足」(bad)、百分比仍顯示 hero=calibrated', () => {

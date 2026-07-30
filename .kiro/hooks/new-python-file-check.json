@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "New Python File Convention Check",
+      "trigger": "PostFileCreate",
+      "description": "新建 Python 檔案時檢查是否在正確目錄且有基本 docstring",
+      "matcher": "\\.py$",
+      "action": {
+        "type": "agent",
+        "prompt": "新 Python 檔案已建立。請確認：1) 若為 production code，應位於 src/trustforge/ 下 2) 若為測試，應位於 tests/ 下 3) 檔案應有 module-level docstring 說明用途 4) 不引入 boto3 以外的第三方套件。如已符合則繼續。"
+      }
+    }
+  ]
+}

@@ -260,9 +260,14 @@ describe('N17: en mode has no residual Chinese aria-labels (beyond the locked He
       json: async () => ({
         ok: true,
         data: {
-          training_data: { total_records: 10, has_direction: 5, direction_ratio: 0.5, per_coin: {} },
+          training_data: {
+            total_records: 10,
+            has_direction: 5,
+            direction_ratio: 0.5,
+            per_coin: { BTC: { total: 10, has_direction: 5 } },
+          },
           backfill: null,
-          upgrade_threshold: { target: 100, current: 10, met: false, pct: 10 },
+          upgrade_threshold: { target: 100, current: 5, met: false, pct: 5 },
         },
       }),
     }) as unknown as typeof fetch)

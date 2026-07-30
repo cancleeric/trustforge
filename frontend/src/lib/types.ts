@@ -16,6 +16,8 @@ export interface ApiFailure {
   error: {
     code: string
     message: string
+    /** 部分端點（如 Hermes planning preview）的安全錯誤契約會明示是否可重試。 */
+    retryable?: boolean
     retry_href?: string
     /** `/api/admin/config` PUT 409（`version_conflict`）專用：最新
      * version（後端衝突後重讀失敗時為 null）——管理頁重載最新設定後

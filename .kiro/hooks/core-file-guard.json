@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Core File Write Guard",
+      "trigger": "PreToolUse",
+      "description": "修改核心檔案（bedrock/scoring/orchestrator/budget）前提醒審慎確認",
+      "matcher": "fs_write|str_replace",
+      "action": {
+        "type": "agent",
+        "prompt": "⚠️ 寫入防護提醒：如果正在修改 bedrock.py、scoring.py、orchestrator.py 或 budget_guard.py，這些是 TrustForge 核心模組。請確認：1) 變更不會破壞 LLM 唯一入口約束 2) 信任評分公式如需調整已有明確理由 3) 預算護欄邏輯維持完整。非核心檔案則正常操作即可。"
+      }
+    }
+  ]
+}
