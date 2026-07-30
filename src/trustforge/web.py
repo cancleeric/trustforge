@@ -5946,7 +5946,20 @@ def _handle_api_training_status() -> tuple[int, str]:
     """
     import sqlite3
 
-    training_data_dir = Path(__file__).resolve().parents[2] / "data" / "training"
+    configured_training_dir = os.getenv("TRUSTFORGE_TRAINING_DATA_DIR", "").strip()
+    training_data_dir = (
+        Path(configured_training_dir)
+        if configured_training_dir
+        else Path(__file__).resolve().parents[2] / "data" / "training"
+    )
+    if configured_training_dir and not training_data_dir.is_absolute():
+        return 503, _json_envelope_err(
+            "training_data_unavailable", "訓練資料目錄設定無效"
+        )
+    if not training_data_dir.is_dir():
+        return 503, _json_envelope_err(
+            "training_data_unavailable", "訓練資料目錄不存在或無法讀取"
+        )
     backfill_db_path = Path(__file__).resolve().parents[2] / "out" / "trustforge-backfill.sqlite3"
 
     # --- 訓練資料統計 ---
