@@ -106,6 +106,44 @@ describe('N26: zh-TW mode has no residual English strings', () => {
     expect(screen.getByText('持續運作')).toBeInTheDocument()
   })
 
+  it('StageBar: non-analyze module stations are truthful status-only controls', () => {
+    const { coin } = galaxyHarness()
+    const onSelectStage = vi.fn()
+    render(
+      <HermesI18nProvider>
+        <StageBar
+          mode="costs"
+          selCoin={coin}
+          derivation={deriveSelected(coin)}
+          selectedStage={null}
+          onSelectStage={onSelectStage}
+        />
+      </HermesI18nProvider>,
+    )
+
+    const station = screen.getByRole('button', { name: '呼叫收集 · 階段資料尚未提供，無法開啟明細' })
+    expect(station).toBeDisabled()
+    fireEvent.click(station)
+    expect(onSelectStage).not.toHaveBeenCalled()
+  })
+
+  it('StageDrilldown: title stays aligned with the evidence semantics', () => {
+    const { coin } = galaxyHarness()
+    render(
+      <HermesI18nProvider>
+        <StageDrilldown
+          selCoin={coin}
+          derivation={deriveSelected(coin)}
+          selectedStage="filter"
+          onClose={vi.fn()}
+        />
+      </HermesI18nProvider>,
+    )
+
+    expect(screen.getByRole('dialog', { name: `${coin.full} — 可信過濾` })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: `${coin.full} — 主張抽取` })).not.toBeInTheDocument()
+  })
+
   it('HermesRightRail: CONTINUOUS ENGINE / RUNNING / "<mode> · <state>" are localized under zh-TW', () => {
     const { coin } = galaxyHarness()
     const derivation = deriveSelected(coin)

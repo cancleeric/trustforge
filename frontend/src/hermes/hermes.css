@@ -1292,6 +1292,16 @@
   box-shadow: inset 0 0 18px color-mix(in srgb, var(--station-color) 10%, transparent);
 }
 
+.hermes-energy-station:disabled {
+  cursor: not-allowed;
+  opacity: .72;
+}
+
+.hermes-energy-station:disabled::after {
+  opacity: 0;
+  box-shadow: none;
+}
+
 .hermes-energy-index {
   position: relative;
   z-index: 2;
@@ -2620,6 +2630,56 @@
   display: none !important;
 }
 
+/* FPS / adaptive-quality HUD: the energy deck owns the bottom
+   `--hermes-bottom` pixels, so the meter sits immediately above that reserved
+   region instead of using an unrelated inline `bottom:8`. */
+.hermes-fps-meter {
+  position: fixed;
+  bottom: calc(var(--hermes-bottom) + 12px);
+  left: max(12px, env(safe-area-inset-left));
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid rgba(77, 216, 224, .28);
+  border-radius: 4px;
+  background: rgba(2, 4, 10, .9);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .32);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  letter-spacing: .5px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.hermes-fps-value {
+  min-width: 28px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.hermes-fps-unit {
+  color: rgba(255, 255, 255, .5);
+}
+
+.hermes-fps-separator {
+  width: 1px;
+  height: 14px;
+  background: rgba(255, 255, 255, .15);
+}
+
+.hermes-fps-quality {
+  font-weight: 600;
+}
+
+.hermes-fps-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
 @media (max-width:900px) {
   .hermes-frame {
     --hermes-rail: clamp(190px, 34vw, 250px);
@@ -2837,6 +2897,42 @@
     --hermes-topbar-wrapped: 40px;
     --hermes-rail-strip: 45px;
     --hermes-tagline: calc(var(--hermes-topbar-wrapped) + var(--hermes-rail-strip));
+  }
+
+  /* The mobile left rail is absent, so collapse the HUD into a status badge.
+     Keep it above both the energy deck and the mobile divergence card. */
+  .hermes-fps-meter {
+    bottom: calc(var(--hermes-bottom) + 112px);
+    left: max(6px, env(safe-area-inset-left));
+    gap: 4px;
+    min-width: 0;
+    padding: 3px 6px;
+    border-radius: 999px;
+    background: rgba(2, 4, 10, .94);
+    font-size: 9px;
+  }
+
+  .hermes-fps-value {
+    min-width: 20px;
+    font-size: 11px;
+  }
+
+  .hermes-fps-separator {
+    display: none;
+  }
+
+  .hermes-fps-quality {
+    font-size: 0;
+  }
+
+  .hermes-fps-quality::after {
+    content: attr(data-short);
+    font-size: 9px;
+  }
+
+  .hermes-fps-dot {
+    width: 5px;
+    height: 5px;
   }
 
   /* N70：這裡原本是 `[data-region='left-rail'] { display:none !important }`。

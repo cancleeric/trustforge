@@ -35,7 +35,12 @@ vi.mock('../lib/endpoints', () => ({
 
 function DashboardHistoryControls() {
   const navigate = useNavigate()
-  return <button onClick={() => navigate('/?qa=1&coin=SOL')}>plain entry</button>
+  return (
+    <>
+      <button onClick={() => navigate('/?qa=1&coin=SOL')}>plain entry</button>
+      <button onClick={() => navigate('/?qa=1&workspace=compare')}>compare entry</button>
+    </>
+  )
 }
 
 function LocationProbe() {
@@ -109,6 +114,23 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.getByRole('region', { name: 'analyze workspace' })).toBeInTheDocument()
     expect(registerAnalysisQuestion).not.toHaveBeenCalled()
   }, 15_000)
+
+  it('closes an open stage drilldown when switching to a status-only workspace', async () => {
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+        <DashboardHistoryControls />
+      </MemoryRouter>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /來源掃描/ }))
+    expect(screen.getByRole('dialog', { name: /Bitcoin — 來源掃描/ })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('compare entry'))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: '市場 A · 階段資料尚未提供，無法開啟明細' })).toBeDisabled()
+  })
 
   it('renders only the dashboard composer when Analyze is embedded on desktop', () => {
     render(
