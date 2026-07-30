@@ -343,7 +343,7 @@ def test_canonical_store_to_dataset_to_evaluator_to_signed_ledger(tmp_path):
             store,
             identity,
             load_policy(),
-            pit_cutoff="2026-07-30T00:00:00Z",
+            pit_cutoff="2026-08-01T00:00:00Z",
             stale_after_days=30,
         )
 
@@ -356,11 +356,11 @@ def test_canonical_store_to_dataset_to_evaluator_to_signed_ledger(tmp_path):
             artifact_digest=identity.candidate_artifact_digest,
             release_id="release:test@1",
         ),
-        pit_cutoff="2026-07-30T00:00:00Z",
+        pit_cutoff="2026-08-01T00:00:00Z",
         policy=load_intrinsic_promotion_policy(),
         benchmark_manifest_digest=BENCHMARK,
         dataset_loader=canonical_loader,
-        now=lambda: datetime(2026, 7, 30, 1, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 8, 1, 1, tzinfo=timezone.utc),
     )
     assert event["kind"] == EVENT_KIND, (
         event["failure_stage"],
