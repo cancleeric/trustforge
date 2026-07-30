@@ -32,3 +32,28 @@ def test_repository_openapi_has_unique_keys() -> None:
     document = load_unique_yaml(root / "docs" / "api" / "openapi.yaml")
 
     assert "/api/multi-angle" in document["paths"]
+
+
+def test_duplicate_key_gate_accepts_cloudformation_intrinsic_tags(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "template.yaml"
+    source.write_text(
+        "value: !Ref Table\n"
+        "choice: !If [Enabled, !Ref Current, !Ref Previous]\n"
+    )
+
+    assert load_unique_yaml(source) == {
+        "value": "Table",
+        "choice": ["Enabled", "Current", "Previous"],
+    }
+
+
+def test_duplicate_key_gate_rejects_duplicate_inside_tagged_mapping(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tagged.yaml"
+    source.write_text("value: !Custom\n  repeated: one\n  repeated: two\n")
+
+    with pytest.raises(DuplicateKeyError, match=r"tagged\.yaml:3:3.*line 2"):
+        load_unique_yaml(source)
