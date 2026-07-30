@@ -7,9 +7,8 @@
 // `normalizeDecisionState()` 正規化才拿去判斷 hero/配色）。
 //
 // #4（LOW｜跨面板 invariant）：table-driven 驗證 normal/low_confidence/
-// abstain 三態下 hero 選擇公式（`isLowInfo ? calibrated : raw`）與
-// `bucketColor()` 配色公式在 React 側（`ConfidenceGauge`/`OverviewCard`
-// 共用同一套邏輯）保持一致，並涵蓋 legacy/未知值 fallback。
+// abstain 三態下 hero 固定使用 calibrated，並驗證 `bucketColor()` 配色
+// 公式及 legacy/未知值 fallback。
 
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -152,14 +151,11 @@ describe('bucketColor（ConfidenceGauge） — state-aware 配色邊界值', () 
 })
 
 // ---------------------------------------------------------------------------
-// #4 修復：跨面板 invariant——hero 選擇 + 配色公式 table-driven（React 側）
-// OverviewCard/ConfidenceGauge 共用同一套「isLowInfo ? calibrated : raw」
-// 規則，這裡把該公式抽出來跟兩元件原始碼比對邏輯保持一致地單元測試。
+// 跨面板 invariant：主儀表固定顯示 calibrated，raw 只作具名明細。
 // ---------------------------------------------------------------------------
 
-function heroSelection(decisionState: DecisionState, calibrated: number, raw: number): number {
-  const isLowInfo = decisionState === 'abstain' || decisionState === 'low_confidence'
-  return isLowInfo ? calibrated : raw
+function heroSelection(_decisionState: DecisionState, calibrated: number, _raw: number): number {
+  return calibrated
 }
 
 describe('跨面板 invariant — hero 選擇 + 配色 parity（normal/low_confidence/abstain × legacy/未知 fallback）', () => {
@@ -183,10 +179,10 @@ describe('跨面板 invariant — hero 選擇 + 配色 parity（normal/low_confi
       expect(hero).toBe(calibrated)
       expect(color).toBe('var(--color-tf-warn)')
     } else {
-      // normal、legacy_hold、unknown_future 皆正規化為 normal：主角＝裸均值信任分
+      // normal、legacy_hold、unknown_future 皆正規化為 normal，主角仍是校準後資訊完整度。
       expect(normalized).toBe('normal')
-      expect(hero).toBe(trust)
-      expect(color).toBe('var(--color-tf-good)') // trust = 0.8 >= 0.7
+      expect(hero).toBe(calibrated)
+      expect(color).toBe('var(--color-tf-bad)') // calibrated = 0.3 < 0.45
     }
   })
 })

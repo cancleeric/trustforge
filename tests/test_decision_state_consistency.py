@@ -260,7 +260,7 @@ class TestNoLegacyConfidenceWordingInUserFacingOutput:
 
 DECISION_STATE_CASES = [
     # (decision_state, calibrated_confidence, confidence/trust_score, expected_hero, expected_color)
-    ("normal", 0.30, 0.80, 0.80, "#3fb950"),
+    ("normal", 0.30, 0.80, 0.30, "#f85149"),
     ("low_confidence", 0.30, 0.80, 0.30, "#d9832a"),
     ("abstain", 0.30, 0.80, 0.30, "#f85149"),
 ]
@@ -281,6 +281,11 @@ class TestCrossPanelInvariant:
         assert f"{expected_hero:.2f}" in out
         assert expected_color in out
 
+    def test_normal_gauge_shows_calibrated_73_as_hero_and_raw_57_as_detail(self):
+        out = web._conf_gauge(0.73, "標籤", 0.57, "normal")
+        assert ">73</div>" in out
+        assert "校準後資訊完整度 0.73｜原始信任分 0.57" in out
+
     @pytest.mark.parametrize(
         "decision_state, calibrated, raw, expected_hero, expected_color", DECISION_STATE_CASES
     )
@@ -296,6 +301,17 @@ class TestCrossPanelInvariant:
         row_html = out[row_start : row_start + 900]
         assert f"（{expected_hero:.2f}）" in row_html
         assert f"color:{expected_color}" in row_html
+
+    def test_normal_comparison_shows_calibrated_73_as_hero_and_raw_57_as_detail(self):
+        report_a = _make_report(
+            "BTC", decision_state="normal", calibrated_confidence=0.73, confidence=0.57
+        )
+        report_b = _make_report("ETH", decision_state="normal")
+        out = web._render_comparison(report_a, [], report_b, [], "BTC vs ETH")
+        row_start = out.find("資訊完整度</td>")
+        row_html = out[row_start : row_start + 900]
+        assert "（0.73）" in row_html
+        assert "校準後資訊完整度 0.73｜原始信任分 0.57" in row_html
 
     @pytest.mark.parametrize(
         "decision_state, calibrated, raw, expected_hero, expected_color", DECISION_STATE_CASES
