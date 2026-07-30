@@ -58,6 +58,8 @@ CANONICAL_SOURCE_ROOT = "/workspace/trustforge"
 CANONICAL_BUILD_PARENT = Path("/run/trustforge-nf3-build-input")
 CANONICAL_BUILD_SOURCE = CANONICAL_BUILD_PARENT / "source"
 HANDOFF_ROOT = Path("/run/trustforge-nf3-handoff")
+SYSTEMD_EXEC_WRAPPER = "/usr/bin/env"
+SYSTEMD_SCRIPT_WRAPPER = "/bin/bash"
 BLOCKED_RECEIPT = "0" * 64
 ACCEPTED_NF1_COMMIT = "e28a675f03ee517dcd69fba0d7705ec8828d24cd"
 TARGET = "x86_64-unknown-linux-musl"
@@ -916,6 +918,7 @@ def main() -> int:
                 "--property=RuntimeDirectoryMode=0700",
                 "--property=BindReadOnlyPaths=/run/trustforge-nf3-handoff/release-receipt.v1:/run/trustforge-nf3-build/receipt.v1",
                 "--property=BindReadOnlyPaths=/run/trustforge-nf3-handoff/release-probe:/run/trustforge-nf3-release-probe",
+                SYSTEMD_EXEC_WRAPPER,
                 "/run/trustforge-nf3-release-probe",
             ],
             cwd=repo,
@@ -1054,6 +1057,7 @@ def main() -> int:
             command.extend(["--property", prop])
         command.extend(
             [
+                SYSTEMD_SCRIPT_WRAPPER,
                 "/run/trustforge-nf3-run-integrated-linux",
                 str(service_helper),
                 str(service_rlib),

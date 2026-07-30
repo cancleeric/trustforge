@@ -141,6 +141,25 @@ def test_handoff_source_allows_cargo_hardlinks_but_destination_requires_one_link
     assert "staged.st_nlink != 1" in staging
 
 
+def test_nested_execstart_uses_existing_fixed_wrappers_without_shell_strings():
+    value = source()
+    assert 'SYSTEMD_EXEC_WRAPPER = "/usr/bin/env"' in value
+    assert 'SYSTEMD_SCRIPT_WRAPPER = "/bin/bash"' in value
+    release = value[value.index("release_profile_line = run(") :]
+    release = release[: release.index("expected_release_fields =")]
+    assert (
+        'SYSTEMD_EXEC_WRAPPER,\n                "/run/trustforge-nf3-release-probe",'
+    ) in release
+    integrated = value[value.index('command = ["systemd-run"') :]
+    integrated = integrated[: integrated.index("run(command, cwd=repo)")]
+    assert (
+        "SYSTEMD_SCRIPT_WRAPPER,\n"
+        '                "/run/trustforge-nf3-run-integrated-linux",'
+    ) in integrated
+    assert '"/bin/bash -c"' not in value
+    assert '"sh", "-c"' not in value
+
+
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
     test_invocation = value[

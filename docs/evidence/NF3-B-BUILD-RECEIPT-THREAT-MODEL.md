@@ -36,6 +36,13 @@ object, or an object built on another host, cannot replace them even when its
 source tree and arguments appear identical. Such a change requires a new
 native cross-view double-build receipt and exact-commit review.
 
+Because systemd validates `ExecStart` before applying a unit's bind mounts, a
+nested unit starts through a fixed existing executable. `/usr/bin/env` receives
+the bound native probe as a separate argument and replaces itself with that
+probe, preserving the probe's `/proc/self/exe` identity. `/bin/bash` receives
+the bound integration script as a separate argument. Neither path uses `-c`,
+shell interpolation, or an untrusted command string.
+
 The reviewed canonical-view receipts are:
 
 - release NF2 rlib: `1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4`;
