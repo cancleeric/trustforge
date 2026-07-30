@@ -26,6 +26,12 @@ PRODUCTION_ACCOUNT = "795930814369"
 PRODUCTION_REGION = "ap-southeast-2"
 PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
 VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)\Z")
+# main 引入 formal-run analysis-question handler 後，必須先完成生產配套
+# (DynamoDB table + caller/idempotency/retention secret + EC2 env) 並建立此 flag，
+# release train 才會嘗試部署該版本；否則 fail-closed 不部署，避免 fe-nginx 把對外層
+# 寫壞、或 activate 一個生產環境跑不起來的 formal-run 版本。
+FORMAL_RUN_READY_FLAG = OUT / "formal-run-prod-ready"
+FORMAL_HANDLER_MARKER = "_handle_api_formal_analysis_question"
 
 
 def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -727,6 +733,27 @@ def require_backup_receipt(command: str, run_id: str) -> Path:
     return receipt
 
 
+def formal_run_blocked(main_tree: Path, main_sha: str) -> bool:
+    """main 含 formal-run handler 但生產配套未就緒時回傳 True。
+
+    release train 應在此為真時 fail-closed 不部署，直到生產配套（DynamoDB
+    table + caller/idempotency/retention secret + EC2 env）完成並建立
+    FORMAL_RUN_READY_FLAG。避免部署一個生產環境跑不起來的 formal-run 版本，
+    也避免 fe-nginx 在無配套下把對外層改壞。
+
+    flag 採顯式授權：檔案內容須為「這個」main SHA，避免 stale/accidental flag
+    永久授權未來版本——每次新 main 都要重新產製 flag，強制人工確認配套就緒。
+    """
+    web_py = main_tree / "src" / "trustforge" / "web.py"
+    if not web_py.exists():
+        return False
+    if FORMAL_HANDLER_MARKER not in web_py.read_text(encoding="utf-8"):
+        return False
+    if not FORMAL_RUN_READY_FLAG.exists():
+        return True
+    return FORMAL_RUN_READY_FLAG.read_text(encoding="utf-8").strip() != main_sha
+
+
 def execute(args: argparse.Namespace) -> Path:
     started = datetime.now(UTC)
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
@@ -801,6 +828,16 @@ def execute(args: argparse.Namespace) -> Path:
                         receipt["steps"].append({"release_version": release_version})
                     gate(main_tree)
                     main_sha = run(["git", "rev-parse", "HEAD"], cwd=main_tree, capture=True).strip()
+                    if formal_run_blocked(main_tree, main_sha):
+                        receipt["status"] = "blocked-formal-pending"
+                        receipt["main_sha"] = main_sha
+                        receipt["blocked_reason"] = (
+                            "main 引入 formal-run analysis-question handler，但生產 formal-run "
+                            "配套（DynamoDB table + caller/idempotency/retention secret + EC2 env）"
+                            f"尚未就緒。完成配套後，將此 main SHA 寫入 {FORMAL_RUN_READY_FLAG} 才會部署。"
+                        )
+                        receipt["finished_at"] = datetime.now(UTC).isoformat()
+                        return record(receipt)
                     release_branch = f"release/auto-{run_id[:8]}"
                     backup = require_backup_receipt(backup_command, run_id)
                     receipt["steps"].append({"backup_receipt": str(backup)})
