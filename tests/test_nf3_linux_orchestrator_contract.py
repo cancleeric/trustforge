@@ -55,9 +55,9 @@ def test_native_receipts_bind_the_reviewed_canonical_view_probe():
     value = source()
     for receipt in (
         "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4",
-        "1db21394225521a2fb22ee81e73a35697a14d2e8275bc6008097684a026ecb93",
+        "e567a05c349321f68d01aaa114d665e2e6bdf6381af211bda90dd2107eb971dc",
         "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1",
-        "db9f6e1f95d1aea350fe43d4a0c2392fd9f67c284a8c6207bc5d56b341798830",
+        "6b9e9f677f19350f80ea8b52072d27df91e667e1a745b773da62c2d50c5f68f5",
     ):
         assert receipt in value
     assert 'source_a = copy_reviewed_build_inputs(repo, scratch / "source-a")' in value
