@@ -233,7 +233,7 @@ impl Dir {
         )?;
         let validation = (|| {
             #[cfg(test)]
-            if FORCE_POST_RENAME_FAILURE.load(std::sync::atomic::Ordering::SeqCst) {
+            if FORCE_POST_RENAME_FAILURE.with(std::cell::Cell::get) {
                 return Err(Error::IdentityChanged);
             }
             let after = sys::fstat(&self.open_verified(new.as_c_str(), None)?)?;
@@ -288,7 +288,7 @@ impl Dir {
     pub fn entries(&self) -> Result<Vec<Entry>, Error> {
         let first = self.scan_once()?;
         #[cfg(test)]
-        if FORCE_SCAN_MUTATION.load(std::sync::atomic::Ordering::SeqCst) {
+        if FORCE_SCAN_MUTATION.with(std::cell::Cell::get) {
             self.create_new("forced-mutation", b"x", 1)?;
         }
         let second = self.scan_once()?;
@@ -522,11 +522,10 @@ fn generation(s: &sys::Stat) -> DirectoryGeneration {
     }
 }
 #[cfg(test)]
-static FORCE_POST_RENAME_FAILURE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-static FORCE_SCAN_MUTATION: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    static FORCE_POST_RENAME_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_SCAN_MUTATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 fn entry(name: &str, stat: &sys::Stat) -> Entry {
     Entry {
         name: name.into(),
@@ -749,6 +748,28 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    enum FaultHook {
+        Scan,
+        PostRename,
+    }
+    impl FaultHook {
+        fn scan() -> Self {
+            FORCE_SCAN_MUTATION.set(true);
+            Self::Scan
+        }
+        fn post_rename() -> Self {
+            FORCE_POST_RENAME_FAILURE.set(true);
+            Self::PostRename
+        }
+    }
+    impl Drop for FaultHook {
+        fn drop(&mut self) {
+            match self {
+                Self::Scan => FORCE_SCAN_MUTATION.set(false),
+                Self::PostRename => FORCE_POST_RENAME_FAILURE.set(false),
+            }
+        }
+    }
 
     struct Fixture {
         path: std::path::PathBuf,
@@ -781,7 +802,9 @@ mod tests {
 
     #[test]
     fn create_read_rename_enumerate_identity() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         let dir = f.vfs.root().mkdir("records").unwrap();
         let made = dir.create_new("a.tmp", b"payload", 32).unwrap();
@@ -800,7 +823,9 @@ mod tests {
 
     #[test]
     fn rejects_symlink_hardlink_fifo_and_permissions() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         let path = f.path.join("records");
         let dir = f.vfs.root().mkdir("records").unwrap();
@@ -818,7 +843,9 @@ mod tests {
 
     #[test]
     fn retained_fd_resists_path_substitution() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         f.vfs.root().create_new("sentinel", b"old", 8).unwrap();
         let old = f.path.with_extension("old");
@@ -836,7 +863,9 @@ mod tests {
 
     #[test]
     fn rejects_symlinked_root_unsafe_names_and_bounds() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         std::fs::set_permissions(&f.path, std::fs::Permissions::from_mode(0o750)).unwrap();
         assert!(Vfs::open(&f.path).is_err());
@@ -863,13 +892,16 @@ mod tests {
 
     #[test]
     fn mutation_blocks_scan_and_postrename_failure_still_publishes() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         let dir = f.vfs.root().mkdir("records").unwrap();
         dir.create_new("source", b"x", 8).unwrap();
-        FORCE_SCAN_MUTATION.store(true, Ordering::SeqCst);
-        assert!(dir.entries().is_err());
-        FORCE_SCAN_MUTATION.store(false, Ordering::SeqCst);
+        {
+            let _fault = FaultHook::scan();
+            assert!(dir.entries().is_err());
+        }
         assert!(
             dir.entries()
                 .unwrap()
@@ -877,19 +909,22 @@ mod tests {
                 .any(|e| e.name == "forced-mutation")
         );
 
-        FORCE_POST_RENAME_FAILURE.store(true, Ordering::SeqCst);
-        assert!(matches!(
-            dir.rename("source", "published"),
-            Err(Error::IdentityChanged)
-        ));
-        FORCE_POST_RENAME_FAILURE.store(false, Ordering::SeqCst);
+        {
+            let _fault = FaultHook::post_rename();
+            assert!(matches!(
+                dir.rename("source", "published"),
+                Err(Error::IdentityChanged)
+            ));
+        }
         assert_eq!(dir.read("published", 8).unwrap(), b"x");
         assert!(dir.read("source", 8).is_err());
     }
 
     #[test]
     fn retained_lock_detects_named_inode_replacement() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         let locks = f.vfs.root().mkdir("locks").unwrap();
         let guard = locks.lock("global.lock").unwrap();

@@ -677,6 +677,23 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     static TEST_CLOCK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct TestClockGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl TestClockGuard {
+        fn at(value: u64) -> Self {
+            let lock = TEST_CLOCK_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            TEST_BOOTTIME_NS.store(value, Ordering::SeqCst);
+            Self { _lock: lock }
+        }
+    }
+    impl Drop for TestClockGuard {
+        fn drop(&mut self) {
+            TEST_BOOTTIME_NS.store(0, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn canonical_record_round_trip_and_extra_field_rejected() {
@@ -708,7 +725,7 @@ mod tests {
 
     #[test]
     fn claim_commit_and_request_burn_are_durable() {
-        let _clock = TEST_CLOCK_LOCK.lock().unwrap();
+        let _clock = TestClockGuard::at(100);
         if crate::linux::kernel_boottime_ns().is_err() {
             return;
         }
@@ -719,7 +736,6 @@ mod tests {
         ));
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        TEST_BOOTTIME_NS.store(100, Ordering::SeqCst);
         let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
         let request = Request {
             foundation_sha256: "33".repeat(32),
@@ -758,7 +774,6 @@ mod tests {
             .unwrap();
         drop(store);
         assert!(LedgerStore::open_for_test(&path).is_ok());
-        TEST_BOOTTIME_NS.store(0, Ordering::SeqCst);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -780,9 +795,8 @@ mod tests {
 
     #[test]
     fn missing_head_gap_persists_poison() {
-        let _clock = TEST_CLOCK_LOCK.lock().unwrap();
+        let _clock = TestClockGuard::at(100);
         let path = test_root("gap");
-        TEST_BOOTTIME_NS.store(100, Ordering::SeqCst);
         let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
         store
             .claim(
@@ -806,7 +820,6 @@ mod tests {
         std::fs::remove_file(&heads[0]).unwrap();
         assert!(LedgerStore::open_for_test(&path).is_err());
         assert!(path.join("poison/store.poison").exists());
-        TEST_BOOTTIME_NS.store(0, Ordering::SeqCst);
         std::fs::remove_dir_all(path).unwrap();
     }
 
