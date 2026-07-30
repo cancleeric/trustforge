@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -135,6 +137,7 @@ ALLOWED_MANIFEST_KEYS = frozenset(
     }
 )
 _DYLD_CACHE_DIGEST_CACHE: dict[tuple[str, int, int, int], str] = {}
+_SEALED_EXEC_TEST_HOOK: Any = None
 
 
 class BuildBlocked(RuntimeError):
@@ -168,6 +171,78 @@ def _run(
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)
         raise BuildBlocked(f"command failed: {argv[0]}: {detail.strip()}") from exc
+    return result.stdout.strip()
+
+
+def _run_sealed(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    sealed_paths: list[Path],
+) -> str:
+    def identity(path: Path, *, include_digest: bool) -> tuple[Any, ...]:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o222:
+            raise BuildBlocked(f"sealed tool is not readonly regular file: {path}")
+        base = (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+        return (*base, _digest(path)) if include_digest else base
+
+    before = {path: identity(path, include_digest=True) for path in sealed_paths}
+    directory_before = {
+        path: (path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+        for path in {item.parent for item in sealed_paths}
+    }
+    if _SEALED_EXEC_TEST_HOOK is not None:
+        _SEALED_EXEC_TEST_HOOK(sealed_paths)
+    changed = threading.Event()
+
+    def monitor() -> None:
+        while not changed.is_set():
+            try:
+                for path, expected in before.items():
+                    if identity(path, include_digest=False) != expected[:-1]:
+                        changed.set()
+                        return
+                for path, expected in directory_before.items():
+                    info = path.stat()
+                    if (info.st_ino, info.st_mtime_ns, info.st_ctime_ns) != expected:
+                        changed.set()
+                        return
+            except (OSError, BuildBlocked):
+                changed.set()
+                return
+            time.sleep(0.001)
+
+    watcher = threading.Thread(target=monitor, daemon=True)
+    watcher.start()
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    finally:
+        stop_was_change = changed.is_set()
+        changed.set()
+        watcher.join()
+    if stop_was_change or any(
+        identity(path, include_digest=True) != expected
+        for path, expected in before.items()
+    ):
+        raise BuildBlocked("sealed tool pathname changed during execution")
+    if result.returncode:
+        raise BuildBlocked(f"sealed build command failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
 
@@ -213,15 +288,20 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
             raise BuildBlocked(f"{label} schema is not exact")
         return record
 
-    def digest_entries(entries: Any, label: str) -> None:
+    def digest_entries(
+        entries: Any, label: str, *, allow_absolute: bool = False
+    ) -> None:
         if not isinstance(entries, list) or not entries:
             raise BuildBlocked(f"{label} cardinality is invalid")
         for entry in entries:
             exact(entry, {"path", "mode", "size", "sha256"}, label)
             if (
                 not isinstance(entry["path"], str)
-                or not isinstance(entry["mode"], str)
+                or (entry["path"].startswith("/") and not allow_absolute)
+                or ".." in Path(entry["path"]).parts
+                or not re.fullmatch(r"[0-7]{4}", entry["mode"])
                 or not isinstance(entry["size"], int)
+                or entry["size"] < 0
                 or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
             ):
                 raise BuildBlocked(f"{label} field type is invalid")
@@ -261,6 +341,26 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
         or len(cargo_resolution["packages"]) != 1
     ):
         raise BuildBlocked("Cargo package cardinality is invalid")
+    package = exact(
+        cargo_resolution["packages"][0], {"name", "version"}, "Cargo package"
+    )
+    if package != {
+        "name": "trustforge-native-foundation",
+        "version": "0.1.0",
+    }:
+        raise BuildBlocked("Cargo package enum is invalid")
+    if not isinstance(cargo_resolution["third_party_dependencies"], list):
+        raise BuildBlocked("third-party Cargo dependency type is invalid")
+    for dependency in cargo_resolution["third_party_dependencies"]:
+        exact(
+            dependency,
+            {"name", "version", "source", "checksum"},
+            "third-party Cargo dependency",
+        )
+    if not isinstance(cargo_resolution["vendor_entries"], list):
+        raise BuildBlocked("vendor entry type is invalid")
+    if cargo_resolution["vendor_entries"]:
+        digest_entries(cargo_resolution["vendor_entries"], "vendor entry")
     if cargo_resolution["third_party_dependencies"] != []:
         if cargo_resolution["vendor_entries"] == []:
             raise BuildBlocked("third-party Cargo closure lacks vendor entries")
@@ -271,6 +371,8 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
         r"[0-9a-f]{64}", generated["sha256"]
     ):
         raise BuildBlocked("generated field type is invalid")
+    if generated["path"] != "generated/source_epoch.rs" or generated["size"] <= 0:
+        raise BuildBlocked("generated field enum is invalid")
     toolchain = value["toolchain"]
     exact(
         toolchain,
@@ -292,6 +394,13 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
         record = exact(toolchain[name], {"name", "size", "sha256", "version"}, name)
         if record["name"] != ("rust-lld" if name == "linker" else name):
             raise BuildBlocked(f"{name} enum is invalid")
+        if (
+            not isinstance(record["size"], int)
+            or record["size"] <= 0
+            or not isinstance(record["version"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+        ):
+            raise BuildBlocked(f"{name} field format is invalid")
     digest_entries(toolchain["target_libdir_entries"], "target sysroot")
     digest_entries(toolchain["host_sysroot_entries"], "host sysroot")
     exact(toolchain["host_platform"], {"os_build", "kernel"}, "host platform")
@@ -306,26 +415,44 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
         },
         "builder runtime",
     )
-    digest_entries(runtime["python_entries"], "Python runtime")
+    digest_entries(runtime["python_entries"], "Python runtime", allow_absolute=True)
     if not isinstance(runtime["dynamic_dependencies"], list) or not all(
         isinstance(item, str) for item in runtime["dynamic_dependencies"]
     ):
         raise BuildBlocked("dynamic dependency schema is invalid")
-    exact(
+    map_record = exact(
         runtime["dyld_cache_map"],
         {"path", "mode", "size", "sha256"},
         "dyld cache map",
     )
-    exact(
+    cache_record = exact(
         runtime["dyld_cache"],
         {"path", "mode", "size", "sha256", "uuid", "code_directory_sha256"},
         "dyld cache",
     )
-    exact(
+    subcache_record = exact(
         runtime["dyld_subcache"],
         {"path", "mode", "size", "sha256", "code_directory_sha256"},
         "dyld subcache",
     )
+    for label, record in (
+        ("dyld cache map", map_record),
+        ("dyld cache", cache_record),
+        ("dyld subcache", subcache_record),
+    ):
+        if (
+            not isinstance(record["path"], str)
+            or record["mode"] != "0755"
+            or not isinstance(record["size"], int)
+            or record["size"] <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+        ):
+            raise BuildBlocked(f"{label} field format is invalid")
+    if not re.fullmatch(r"[0-9a-f]{32}", cache_record["uuid"]):
+        raise BuildBlocked("dyld cache UUID format is invalid")
+    for record in (cache_record, subcache_record):
+        if not re.fullmatch(r"[0-9a-f]{64}", record["code_directory_sha256"]):
+            raise BuildBlocked("dyld cache CDHash format is invalid")
     if set(value["build"]) != {
         "argv",
         "offline",
@@ -340,6 +467,26 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
         value["build"]["target"],
     ) != (True, True, True, TARGET):
         raise BuildBlocked("build schema or enum is invalid")
+    if (
+        not isinstance(value["build"]["argv"], list)
+        or value["build"]["argv"]
+        != [
+            "cargo",
+            "build",
+            "--manifest-path",
+            "/build-input/Cargo.toml",
+            "--release",
+            "--target",
+            TARGET,
+            "--target-dir",
+            "/build-output",
+            "--locked",
+            "--offline",
+            "--frozen",
+        ]
+        or not isinstance(value["build"]["rustflags"], str)
+    ):
+        raise BuildBlocked("build argv/rustflags schema is invalid")
     if set(value["runtime_closure"]) != {"method", "pt_interp", "dt_needed"}:
         raise BuildBlocked("runtime closure schema is not exact")
     if value["runtime_closure"] != {
@@ -366,6 +513,28 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
     }
     if set(value["environment"]) != expected_environment:
         raise BuildBlocked("environment allowlist schema is not exact")
+    expected_values = {
+        "PATH": "toolchain:bin-only",
+        "HOME": "isolated:non-user-empty-home",
+        "CARGO_HOME": "isolated:fresh-empty-cargo-home",
+        "RUSTC": "toolchain:locked-rustc",
+        "SOURCE_DATE_EPOCH": str(EPOCH),
+        "TZ": "UTC",
+        "LC_ALL": "C",
+        "LANG": "C",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER": ("toolchain:locked-rust-lld"),
+        "RUSTUP_TOOLCHAIN": "1.96.0",
+        "WRAPPER_AND_AMBIENT_KNOBS": "rejected:not-in-subprocess-environment",
+    }
+    for key, expected in expected_values.items():
+        if value["environment"][key] != expected:
+            raise BuildBlocked(f"environment enum is invalid: {key}")
+    if not isinstance(value["environment"]["RUSTFLAGS"], str):
+        raise BuildBlocked("RUSTFLAGS type is invalid")
+    if value["environment"]["RUSTFLAGS"] != value["build"]["rustflags"]:
+        raise BuildBlocked("RUSTFLAGS binding is inconsistent")
     if (
         not isinstance(value["package_entries"], list)
         or len(value["package_entries"]) != 5
@@ -378,6 +547,25 @@ def _validate_manifest_shape(value: dict[str, Any]) -> None:
             else {"path", "type", "mode", "size", "sha256"}
         )
         exact(entry, expected, "package entry")
+        if (
+            not isinstance(entry["path"], str)
+            or entry["type"] not in {"directory", "file"}
+            or entry["mode"] not in {"0444", "0555"}
+        ):
+            raise BuildBlocked("package entry field format is invalid")
+        if entry["type"] == "file" and (
+            not isinstance(entry["size"], int)
+            or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+        ):
+            raise BuildBlocked("package file field format is invalid")
+    if {entry["path"] for entry in value["package_entries"]} != {
+        "bin",
+        "config",
+        "bin/trustforge-native-foundation",
+        "config/fixed-config.json",
+        "config/public-metadata-format.json",
+    }:
+        raise BuildBlocked("package path enum is invalid")
 
 
 def _git_identity(source_root: Path) -> dict[str, str]:
@@ -895,6 +1083,20 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     ):
         if _digest(path) != toolchain[logical]["sha256"]:
             raise BuildBlocked(f"sealed {logical} snapshot digest mismatch")
+    for path in _regular_files(tool_snapshot):
+        os.chmod(
+            path,
+            0o555
+            if path in {cargo, rustc, linker, tool_snapshot / "bin/rustup"}
+            else 0o444,
+        )
+    for path in sorted(
+        (item for item in tool_snapshot.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        os.chmod(path, 0o555)
+    os.chmod(tool_snapshot, 0o555)
     build_crate = output_dir / ".build-input"
     shutil.copytree(crate, build_crate)
     builder_snapshot = output_dir / ".builder-input.py"
@@ -953,7 +1155,12 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
             "--offline",
             "--frozen",
         ]
-        _run(command, cwd=build_crate, env=environment)
+        _run_sealed(
+            command,
+            cwd=build_crate,
+            env=environment,
+            sealed_paths=[cargo, rustc, linker, tool_snapshot / "bin/rustup"],
+        )
 
     runtime = target_dir / TARGET / "release/trustforge-native-foundation"
     stage = output_dir / ".stage"
@@ -1043,6 +1250,11 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     if current_entries != source_entries[:-1]:
         raise BuildBlocked("source inputs changed during build")
     end_toolchain = _toolchain(cargo, rustc, source_root)
+    for field in ("host_sysroot_entries", "target_libdir_entries"):
+        initial_modes = {item["path"]: item["mode"] for item in toolchain[field]}
+        for item in end_toolchain[field]:
+            if item["path"] in initial_modes:
+                item["mode"] = initial_modes[item["path"]]
     end_builder_runtime = _builder_runtime(source_root)
     _validate_toolchain_lock(crate, end_toolchain, end_builder_runtime)
     if end_toolchain != toolchain:
@@ -1068,6 +1280,11 @@ def build(source_root: Path, output_dir: Path) -> dict[str, Any]:
     }
     shutil.rmtree(build_crate)
     builder_snapshot.unlink()
+    for path in (tool_snapshot, *tool_snapshot.rglob("*")):
+        if path.is_dir():
+            os.chmod(path, 0o755)
+        elif path.is_file():
+            os.chmod(path, 0o644)
     shutil.rmtree(tool_snapshot)
     (output_dir / "native-hermetic-digests.json").write_bytes(_canonical_json(result))
     return result

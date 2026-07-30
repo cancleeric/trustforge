@@ -285,25 +285,57 @@ def test_two_independent_clean_clones_are_byte_identical(tmp_path: Path) -> None
     malformed["package_entries"].append(malformed["package_entries"][0])
     with pytest.raises(MODULE.BuildBlocked, match="cardinality"):
         MODULE._validate_manifest_shape(malformed)
+    mutations = [
+        (
+            lambda value: value["sources"][0].update(mode="invalid"),
+            "source entry field type",
+        ),
+        (
+            lambda value: value["cargo_resolution"]["packages"][0].update(
+                source="ambient"
+            ),
+            "Cargo package schema",
+        ),
+        (
+            lambda value: value["cargo_resolution"].update(vendor_entries={}),
+            "vendor entry type",
+        ),
+        (
+            lambda value: value["builder_runtime"]["dyld_cache"].update(uuid="bad"),
+            "UUID format",
+        ),
+        (
+            lambda value: value["builder_runtime"]["dyld_subcache"].update(
+                code_directory_sha256="bad"
+            ),
+            "CDHash format",
+        ),
+        (
+            lambda value: value["environment"].update(HOME=123),
+            "environment enum",
+        ),
+        (
+            lambda value: value["package_entries"][0].update(path="../escape"),
+            "package path enum",
+        ),
+    ]
+    for mutate, match in mutations:
+        malformed = copy.deepcopy(manifest)
+        mutate(malformed)
+        with pytest.raises(MODULE.BuildBlocked, match=match):
+            MODULE._validate_manifest_shape(malformed)
 
 
 def test_concurrent_source_change_blocks_at_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _source_repo(tmp_path)
-    original_run = MODULE._run
-    changed = False
 
-    def run_and_mutate(argv, *, cwd, env=None):
-        nonlocal changed
-        result = original_run(argv, cwd=cwd, env=env)
-        if len(argv) > 1 and argv[1] == "build" and not changed:
-            changed = True
-            path = source / "native/hermetic-package/src/main.rs"
-            path.write_bytes(path.read_bytes() + b"\n// concurrent mutation\n")
-        return result
+    def mutate(_sealed_paths):
+        path = source / "native/hermetic-package/src/main.rs"
+        path.write_bytes(path.read_bytes() + b"\n// concurrent mutation\n")
 
-    monkeypatch.setattr(MODULE, "_run", run_and_mutate)
+    monkeypatch.setattr(MODULE, "_SEALED_EXEC_TEST_HOOK", mutate)
     with pytest.raises(MODULE.BuildBlocked, match="dirty|VCS identity|source inputs"):
         MODULE.build(source, tmp_path / "output")
 
@@ -334,27 +366,20 @@ def test_aba_mutation_of_original_inputs_cannot_change_snapshot_build(
 ) -> None:
     source = _source_repo(tmp_path)
     baseline = MODULE.build(source, tmp_path / "baseline")
-    original_run = MODULE._run
-    mutated = False
     relative_paths = (
         "package/fixed-config.json",
         "Cargo.lock",
         "generated/source_epoch.rs",
     )
 
-    def aba_after_compile(argv, *, cwd, env=None):
-        nonlocal mutated
-        result = original_run(argv, cwd=cwd, env=env)
-        if len(argv) > 1 and argv[1] == "build" and not mutated:
-            mutated = True
-            for relative in relative_paths:
-                path = source / "native/hermetic-package" / relative
-                original = path.read_bytes()
-                path.write_bytes(b"attacker ABA bytes")
-                path.write_bytes(original)
-        return result
+    def aba(_sealed_paths):
+        for relative in relative_paths:
+            path = source / "native/hermetic-package" / relative
+            original = path.read_bytes()
+            path.write_bytes(b"attacker ABA bytes")
+            path.write_bytes(original)
 
-    monkeypatch.setattr(MODULE, "_run", aba_after_compile)
+    monkeypatch.setattr(MODULE, "_SEALED_EXEC_TEST_HOOK", aba)
     assert MODULE.build(source, tmp_path / "aba") == baseline
 
 
@@ -371,26 +396,18 @@ def test_tool_path_swap_restore_cannot_change_sealed_execution(
             return discovered_cargo
         return original_resolve(name, sysroot=sysroot)
 
-    original_run = MODULE._run
-    swapped = False
-
-    def swap_restore(argv, *, cwd, env=None):
-        nonlocal swapped
-        if len(argv) > 1 and argv[1] == "build" and not swapped:
-            swapped = True
-            original = discovered_cargo.read_bytes()
-            discovered_cargo.write_bytes(b"attacker transient tool")
-            try:
-                return original_run(argv, cwd=cwd, env=env)
-            finally:
-                discovered_cargo.write_bytes(original)
-                discovered_cargo.chmod(0o755)
-        return original_run(argv, cwd=cwd, env=env)
+    def swap_restore(sealed_paths):
+        snapshot_cargo = next(path for path in sealed_paths if path.name == "cargo")
+        original = snapshot_cargo.read_bytes()
+        snapshot_cargo.chmod(0o755)
+        snapshot_cargo.write_bytes(b"attacker transient tool")
+        snapshot_cargo.write_bytes(original)
+        snapshot_cargo.chmod(0o555)
 
     monkeypatch.setattr(MODULE, "_resolve_tool", resolve)
-    monkeypatch.setattr(MODULE, "_run", swap_restore)
-    result = MODULE.build(source, tmp_path / "output")
-    assert len(result["runtime_sha256"]) == 64
+    monkeypatch.setattr(MODULE, "_SEALED_EXEC_TEST_HOOK", swap_restore)
+    with pytest.raises(MODULE.BuildBlocked, match="sealed tool pathname changed"):
+        MODULE.build(source, tmp_path / "output")
 
 
 @pytest.mark.parametrize(
