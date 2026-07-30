@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trustforge.local/schemas/acceptance-summary.schema.json",
+  "title": "TrustForge production acceptance summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "disposition", "manifest", "cases"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "release_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "disposition": {"enum": ["production_accepted", "deployed_not_accepted", "deployment_failed"]},
+    "manifest": {"$ref": "acceptance-artifact-manifest.schema.json"},
+    "cases": {
+      "type": "array",
+      "items": {"$ref": "acceptance-case.schema.json"}
+    }
+  }
+}
