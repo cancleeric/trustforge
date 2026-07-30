@@ -359,6 +359,7 @@ class QuotaKeyRetirementAuthority:
             decision.lifecycle_generation,
             decision.previous_quota_key_version,
             self._lifecycle_authority._nonce,
+            decision._serial,
         )
 
 

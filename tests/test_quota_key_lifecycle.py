@@ -396,3 +396,39 @@ def test_authority_rejects_another_provider_material():
                 current=foreign,
             )
         )
+
+
+def test_durable_authority_rejects_future_activation():
+    client = DurableClockClient(2_000_000_000)
+    clock = PreviewTrustedClock(
+        dynamodb_client=client,
+        table_name="preview-store",
+        monotonic_clock=lambda: 0.0,
+        wall_clock=lambda: float(client.second),
+    )
+    provider = QuotaKeyMaterialProvider()
+    authority = DurableQuotaKeyLifecycleAuthority(
+        clock,
+        dynamodb_client=client,
+        table_name="preview-store",
+        key_material_provider=provider,
+    )
+    future = provider.verify(
+        version=1,
+        key_id="quota-future",
+        key_bytes=bytes(range(32)),
+        activated=2_000_000_001,
+        source_revision="future-revision",
+        authenticated_revision=True,
+        csprng_provenance=True,
+    )
+    with pytest.raises(ValueError, match="stale lifecycle transition"):
+        authority.install(
+            QuotaKeyLifecycle(
+                generation=1,
+                issued=TrustedUtcInterval(
+                    1_999_999_950, 1_999_999_951
+                ),
+                current=future,
+            )
+        )

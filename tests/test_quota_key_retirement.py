@@ -385,9 +385,12 @@ def test_capability_retires_overlap_in_one_transaction_and_cannot_replay() -> No
     lifecycle_authority._durable_fingerprint = "exact-transition"
     retirement = _authority(client, lifecycle_authority)
     capability = retirement.consume(retirement.evaluate())
+    independent = retirement.consume(retirement.evaluate())
+    assert capability != independent
 
     assert lifecycle_authority.retire_previous(capability) is True
     assert lifecycle_authority.retire_previous(capability) is False
+    assert lifecycle_authority.retire_previous(independent) is False
     write = next(
         call
         for call in client.calls
@@ -398,6 +401,72 @@ def test_capability_retires_overlap_in_one_transaction_and_cannot_replay() -> No
     assert all(
         "ConditionCheck" in action for action in write["TransactItems"][1:]
     )
+
+
+def test_proven_uncommitted_retirement_allows_fresh_decision_retry() -> None:
+    class RetryClient(Client):
+        fail_once = True
+
+        def transact_write_items(
+            self, **kwargs: object
+        ) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("confirmed uncommitted")
+            return {
+                "ResponseMetadata": {
+                    "HTTPStatusCode": 200,
+                    "RequestId": "retry-retired",
+                }
+            }
+
+    client = RetryClient()
+    clock = PreviewTrustedClock(
+        dynamodb_client=client,
+        table_name="table",
+        monotonic_clock=lambda: 1.0,
+        wall_clock=lambda: 200.0,
+    )
+    provider = QuotaKeyMaterialProvider()
+    lifecycle_authority = DurableQuotaKeyLifecycleAuthority(
+        clock,
+        dynamodb_client=client,
+        table_name="table",
+        key_material_provider=provider,
+    )
+    current = provider.verify(
+        version=2,
+        key_id="quota-retry-2",
+        key_bytes=bytes(range(1, 33)),
+        activated=100,
+        source_revision="retry-v2",
+        authenticated_revision=True,
+        csprng_provenance=True,
+    )
+    previous = provider.verify(
+        version=1,
+        key_id="quota-retry-1",
+        key_bytes=bytes(range(32)),
+        activated=0,
+        source_revision="retry-v1",
+        superseded=100,
+        retire_not_before=100 + MIN_OVERLAP_SECONDS,
+        authenticated_revision=True,
+        csprng_provenance=True,
+    )
+    lifecycle_authority._lifecycle = QuotaKeyLifecycle(
+        2, TrustedUtcInterval(99, 100), current, previous
+    )
+    lifecycle_authority._durable_fingerprint = "exact-transition"
+    retirement = _authority(client, lifecycle_authority)
+    first = retirement.consume(retirement.evaluate())
+    assert lifecycle_authority.retire_previous(first) is False
+    assert lifecycle_authority.retire_previous(first) is False
+
+    fresh = retirement.consume(retirement.evaluate())
+    assert fresh != first
+    assert lifecycle_authority.retire_previous(fresh) is True
 
 
 def test_writer_accepts_no_caller_controlled_boundaries() -> None:

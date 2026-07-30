@@ -49,10 +49,16 @@ class RetirementCapability:
     lifecycle_generation: int
     previous_quota_key_version: int
     _authority: object = field(repr=False)
+    _decision_nonce: object = field(repr=False)
 
     @classmethod
     def _mint(
-        cls, token: object, generation: int, version: int, authority: object
+        cls,
+        token: object,
+        generation: int,
+        version: int,
+        authority: object,
+        decision_nonce: object,
     ) -> "RetirementCapability":
         if token is not _RETIREMENT_TOKEN:
             raise ValueError("invalid retirement capability")
@@ -60,6 +66,7 @@ class RetirementCapability:
         object.__setattr__(result, "lifecycle_generation", generation)
         object.__setattr__(result, "previous_quota_key_version", version)
         object.__setattr__(result, "_authority", authority)
+        object.__setattr__(result, "_decision_nonce", decision_nonce)
         return result
 
 
@@ -556,6 +563,7 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
                 return self._snapshot(now)
             if (
                 lifecycle.issued.latest > now.earliest
+                or lifecycle.current.activated > now.earliest
                 or now.latest - lifecycle.issued.earliest > MAX_SNAPSHOT_AGE_SECONDS
             ):
                 raise ValueError("stale lifecycle transition")
