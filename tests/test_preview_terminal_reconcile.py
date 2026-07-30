@@ -47,6 +47,9 @@ def _request(*, previous: str | None = None) -> AdmissionCompileRequest:
         reservation_id=str(uuid.uuid4()),
         reserved_tokens=100,
         reserved_micro_usd=200,
+        lifecycle_generation=2 if previous else 1,
+        current_quota_key_version=2 if previous else 1,
+        previous_quota_key_version=1 if previous else None,
     )
 
 
