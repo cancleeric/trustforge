@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import platform
+import secrets
 import shutil
 import stat
 import subprocess
@@ -57,9 +58,12 @@ FIXED_TOOLCHAIN_RECEIPT_SHA256 = (
 CANONICAL_SOURCE_ROOT = "/workspace/trustforge"
 CANONICAL_BUILD_PARENT = Path("/run/trustforge-nf3-build-input")
 CANONICAL_BUILD_SOURCE = CANONICAL_BUILD_PARENT / "source"
-HANDOFF_ROOT = Path("/run/trustforge-nf3-handoff")
+HANDOFF_ROOT = Path("/var/lib/trustforge-nf3-handoff")
 SYSTEMD_EXEC_WRAPPER = "/usr/bin/env"
 SYSTEMD_SCRIPT_WRAPPER = "/bin/bash"
+LOCAL_HANDOFF_FILESYSTEMS = frozenset(
+    {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs"}
+)
 BLOCKED_RECEIPT = "0" * 64
 ACCEPTED_NF1_COMMIT = "e28a675f03ee517dcd69fba0d7705ec8828d24cd"
 TARGET = "x86_64-unknown-linux-musl"
@@ -137,25 +141,116 @@ def _file_generation(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _validate_handoff_directory() -> int:
-    """Open the empty systemd-owned handoff without following path components."""
+def _mountinfo_unescape(value: str) -> str:
+    for encoded, decoded in (
+        ("\\040", " "),
+        ("\\011", "\t"),
+        ("\\012", "\n"),
+        ("\\134", "\\"),
+    ):
+        value = value.replace(encoded, decoded)
+    return value
+
+
+def handoff_mount_identity(
+    mountinfo: str, handoff_root: Path = HANDOFF_ROOT
+) -> dict[str, str]:
+    """Select and validate the most specific local executable mount."""
+    resolved = str(handoff_root)
+    candidates: list[tuple[int, list[str], list[str]]] = []
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            continue
+        if separator < 6 or len(fields) < separator + 4:
+            continue
+        mountpoint = _mountinfo_unescape(fields[4])
+        if resolved == mountpoint or resolved.startswith(mountpoint.rstrip("/") + "/"):
+            candidates.append((len(mountpoint), fields, fields[separator + 1 :]))
+    if not candidates:
+        block("NF3 handoff StateDirectory mount identity is unavailable")
+    _, fields, filesystem = max(candidates, key=lambda item: item[0])
+    mount_options = set(fields[5].split(","))
+    super_options = set(filesystem[2].split(","))
+    if "noexec" in mount_options or "noexec" in super_options:
+        block("NF3 handoff StateDirectory mount is noexec")
+    filesystem_type = filesystem[0]
+    if filesystem_type not in LOCAL_HANDOFF_FILESYSTEMS:
+        block("NF3 handoff StateDirectory is not on an accepted local filesystem")
+    return {
+        "mount_id": fields[0],
+        "major_minor": fields[2],
+        "root": _mountinfo_unescape(fields[3]),
+        "mountpoint": _mountinfo_unescape(fields[4]),
+        "filesystem_type": filesystem_type,
+        "source": _mountinfo_unescape(filesystem[1]),
+        "mount_options": fields[5],
+        "super_options": filesystem[2],
+    }
+
+
+def _validate_handoff_directory(
+    reviewed_commit: str,
+) -> tuple[int, int, str, dict[str, str]]:
+    """Open an empty systemd StateDirectory and create one exact generation."""
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        descriptor = os.open(HANDOFF_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for component in ("var", "lib", "trustforge-nf3-handoff"):
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            metadata = os.fstat(child)
+            if (
+                metadata.st_uid != 0
+                or metadata.st_gid != 0
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                os.close(child)
+                block(f"unsafe NF3 handoff path component: {component}")
+            os.close(descriptor)
+            descriptor = child
     except OSError:
-        block("systemd NF3 handoff RuntimeDirectory is unavailable")
-    metadata = os.fstat(descriptor)
+        os.close(descriptor)
+        block("systemd NF3 handoff StateDirectory is unavailable")
+    parent_metadata = os.fstat(descriptor)
+    if stat.S_IMODE(parent_metadata.st_mode) != 0o700:
+        os.close(descriptor)
+        block("systemd NF3 handoff StateDirectory metadata is unsafe")
+    if os.listdir(descriptor):
+        os.close(descriptor)
+        block("systemd NF3 handoff StateDirectory contains stale or unknown state")
+    mount_identity = handoff_mount_identity(Path("/proc/self/mountinfo").read_text())
+    generation = f"{reviewed_commit}-{secrets.token_hex(16)}"
+    os.mkdir(generation, 0o700, dir_fd=descriptor)
+    generation_fd = os.open(
+        generation,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=descriptor,
+    )
+    metadata = os.fstat(generation_fd)
     if (
         metadata.st_uid != 0
         or metadata.st_gid != 0
-        or stat.S_IMODE(metadata.st_mode) != 0o700
         or metadata.st_nlink != 2
+        or stat.S_IMODE(metadata.st_mode) != 0o700
     ):
-        os.close(descriptor)
-        block("systemd NF3 handoff RuntimeDirectory metadata is unsafe")
-    if os.listdir(descriptor):
-        os.close(descriptor)
-        block("systemd NF3 handoff RuntimeDirectory is not empty")
-    return descriptor
+        block("NF3 handoff generation metadata is unsafe")
+    active = os.open(
+        "ACTIVE",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o400,
+        dir_fd=generation_fd,
+    )
+    os.write(active, (reviewed_commit + "\n").encode())
+    os.fsync(active)
+    os.close(active)
+    os.fsync(generation_fd)
+    os.fsync(descriptor)
+    return descriptor, generation_fd, generation, mount_identity
 
 
 def stage_handoff_file(
@@ -237,6 +332,41 @@ def cleanup_handoff_file(
         block(f"handoff cleanup generation mismatch: {destination}")
     os.unlink(destination, dir_fd=handoff_fd)
     os.fsync(handoff_fd)
+
+
+def finalize_handoff_generation(
+    parent_fd: int,
+    generation_fd: int,
+    generation: str,
+    artifacts: dict[str, tuple[int, ...]],
+) -> None:
+    """Transition ACTIVE to TERMINAL, then remove only this exact generation."""
+    active = os.stat("ACTIVE", dir_fd=generation_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(active.st_mode)
+        or active.st_uid != 0
+        or active.st_gid != 0
+        or active.st_nlink != 1
+        or stat.S_IMODE(active.st_mode) != 0o400
+    ):
+        block("NF3 handoff ACTIVE lifecycle marker is unsafe")
+    os.rename("ACTIVE", "TERMINAL", src_dir_fd=generation_fd, dst_dir_fd=generation_fd)
+    os.fsync(generation_fd)
+    for name, artifact_generation in reversed(artifacts.items()):
+        cleanup_handoff_file(generation_fd, name, artifact_generation)
+    terminal = os.stat("TERMINAL", dir_fd=generation_fd, follow_symlinks=False)
+    if not stat.S_ISREG(terminal.st_mode) or terminal.st_nlink != 1:
+        block("NF3 handoff TERMINAL lifecycle marker is unsafe")
+    os.unlink("TERMINAL", dir_fd=generation_fd)
+    os.fsync(generation_fd)
+    if os.listdir(generation_fd):
+        block("NF3 handoff generation has unknown entries at terminal cleanup")
+    os.close(generation_fd)
+    os.rmdir(generation, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+    if os.listdir(parent_fd):
+        block("NF3 handoff StateDirectory is not empty after terminal cleanup")
+    os.close(parent_fd)
 
 
 def load_nf2_harness(repo: Path):
@@ -825,7 +955,10 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="trustforge-nf3-b-") as raw:
         scratch = Path(raw)
-        handoff_fd = _validate_handoff_directory()
+        handoff_parent_fd, handoff_fd, handoff_generation, handoff_mount = (
+            _validate_handoff_directory(head)
+        )
+        handoff_path = HANDOFF_ROOT / handoff_generation
         handoff_generations: dict[str, tuple[int, ...]] = {}
         toolchain = verified_rust_toolchain(repo, scratch / "toolchain-environment")
         source_a = copy_reviewed_build_inputs(repo, scratch / "source-a")
@@ -916,8 +1049,8 @@ def main() -> int:
                 "--property=PrivateTmp=yes",
                 "--property=RuntimeDirectory=trustforge-nf3-build",
                 "--property=RuntimeDirectoryMode=0700",
-                "--property=BindReadOnlyPaths=/run/trustforge-nf3-handoff/release-receipt.v1:/run/trustforge-nf3-build/receipt.v1",
-                "--property=BindReadOnlyPaths=/run/trustforge-nf3-handoff/release-probe:/run/trustforge-nf3-release-probe",
+                f"--property=BindReadOnlyPaths={handoff_path / 'release-receipt.v1'}:/run/trustforge-nf3-build/receipt.v1",
+                f"--property=BindReadOnlyPaths={handoff_path / 'release-probe'}:/run/trustforge-nf3-release-probe",
                 SYSTEMD_EXEC_WRAPPER,
                 "/run/trustforge-nf3-release-probe",
             ],
@@ -1044,11 +1177,11 @@ def main() -> int:
             "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL",
             "RuntimeDirectory=trustforge-nf3-build",
             "RuntimeDirectoryMode=0700",
-            "BindReadOnlyPaths=/run/trustforge-nf3-handoff/evidence-receipt.v1:/run/trustforge-nf3-build/receipt.v1",
+            f"BindReadOnlyPaths={handoff_path / 'evidence-receipt.v1'}:/run/trustforge-nf3-build/receipt.v1",
             f"BindReadOnlyPaths={install}:/opt/trustforge/native-foundation/current",
-            f"BindReadOnlyPaths=/run/trustforge-nf3-handoff/evidence-helper:{service_helper}",
-            f"BindReadOnlyPaths=/run/trustforge-nf3-handoff/evidence-nf2.rlib:{service_rlib}",
-            "BindReadOnlyPaths=/run/trustforge-nf3-handoff/run-integrated-linux:/run/trustforge-nf3-run-integrated-linux",
+            f"BindReadOnlyPaths={handoff_path / 'evidence-helper'}:{service_helper}",
+            f"BindReadOnlyPaths={handoff_path / 'evidence-nf2.rlib'}:{service_rlib}",
+            f"BindReadOnlyPaths={handoff_path / 'run-integrated-linux'}:/run/trustforge-nf3-run-integrated-linux",
             "ReadWritePaths=/root",
             "TimeoutStartSec=20min",
         ]
@@ -1126,6 +1259,12 @@ def main() -> int:
                 "source_remap": CANONICAL_SOURCE_ROOT,
                 "cross_host_substitution": "forbidden",
             },
+            "handoff": {
+                "state_directory": str(HANDOFF_ROOT),
+                "generation": handoff_generation,
+                "mount_identity": handoff_mount,
+                "lifecycle": "ACTIVE_TO_TERMINAL_CLEAN",
+            },
             "evidence_build_receipt_sha256": digest(evidence_receipt),
             "release_build_receipt_sha256": digest(release_receipt),
             "foundation_sha256": EXPECTED_FOUNDATION_SHA256,
@@ -1176,11 +1315,12 @@ def main() -> int:
             json.dumps(evidence, sort_keys=True, indent=2) + "\n"
         )
         os.chmod(arguments.evidence_out, stat.S_IRUSR | stat.S_IWUSR)
-        for name, generation in reversed(handoff_generations.items()):
-            cleanup_handoff_file(handoff_fd, name, generation)
-        if os.listdir(handoff_fd):
-            block("systemd NF3 handoff has unknown entries after cleanup")
-        os.close(handoff_fd)
+        finalize_handoff_generation(
+            handoff_parent_fd,
+            handoff_fd,
+            handoff_generation,
+            handoff_generations,
+        )
     print("PASS: NF3 integrated native root/systemd evidence")
     return 0
 

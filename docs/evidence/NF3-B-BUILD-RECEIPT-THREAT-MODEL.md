@@ -17,17 +17,22 @@ systemd-managed, root-owned mode-0700 build view,
 pre-rustc package-source disambiguator from observing different checkout paths.
 Every verified Cargo/Rust invocation then maps that fixed view to
 `/workspace/trustforge`; the canonical profile and toolchain receipts bind this
-remap. The outer evidence service must declare both
-`RuntimeDirectory=trustforge-nf3-build-input trustforge-nf3-handoff` and
-`RuntimeDirectoryMode=0700`; the orchestrator refuses to create or use an
-unverified parent. Before starting a nested unit it copies each retained,
-verified artifact generation into the empty root-owned handoff with
+remap. The outer evidence service must declare
+`RuntimeDirectory=trustforge-nf3-build-input`, `RuntimeDirectoryMode=0700`,
+`StateDirectory=trustforge-nf3-handoff`, and `StateDirectoryMode=0700`; the
+orchestrator refuses to create or use an unverified parent. It validates every
+path component without following symlinks and requires an executable,
+accepted-local-filesystem mount from `/proc/self/mountinfo`. A stale or unknown
+parent blocks acceptance and is never automatically cleaned. Before starting a
+nested unit it creates an exact commit-plus-random generation, writes its
+`ACTIVE` marker, and copies each retained, verified artifact into it with
 `O_EXCL|O_NOFOLLOW`, rechecks owner, mode, link count, size, digest and
 generation, and fsyncs both file and directory. A retained Cargo output may
 already have multiple hard links; its complete metadata generation binds that
 source while every newly staged destination must have exactly one link. Nested
-units bind only these host-visible staged paths. Successful cleanup removes
-only the exact staged generations and rejects unknown entries. The accepted
+units bind only paths in that generation. Successful completion transitions
+the lifecycle to `TERMINAL`, removes only exact recorded generations, and
+requires both generation and parent to be empty before PASS. The accepted
 exact-commit probe produced identical A/B release rlib, release probe, evidence
 rlib, and evidence helper objects from the two inputs through this canonical
 view. Those reviewed

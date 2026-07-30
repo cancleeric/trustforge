@@ -81,11 +81,12 @@ def test_native_receipts_bind_the_reviewed_canonical_view_probe():
 
 def test_nested_units_use_only_secure_host_visible_handoff_artifacts():
     value = source()
-    assert 'HANDOFF_ROOT = Path("/run/trustforge-nf3-handoff")' in value
+    assert 'HANDOFF_ROOT = Path("/var/lib/trustforge-nf3-handoff")' in value
     assert "O_EXCL | os.O_NOFOLLOW" in value
     assert "os.fsync(handoff_fd)" in value
     assert "handoff cleanup generation mismatch" in value
-    assert "systemd NF3 handoff RuntimeDirectory is not empty" in value
+    assert "StateDirectory contains stale or unknown state" in value
+    assert "ACTIVE_TO_TERMINAL_CLEAN" in value
     nested = value[value.index("release_profile_line = run(") :]
     nested = nested[: nested.index("evidence = {")]
     assert "BindReadOnlyPaths={release_receipt}" not in nested
@@ -94,7 +95,31 @@ def test_nested_units_use_only_secure_host_visible_handoff_artifacts():
     assert "BindReadOnlyPaths={helper_a}" not in nested
     assert "BindReadOnlyPaths={evidence_rlib_a}" not in nested
     assert "BindReadOnlyPaths={repo}" not in nested
-    assert nested.count("BindReadOnlyPaths=/run/trustforge-nf3-handoff/") == 6
+    assert nested.count("BindReadOnlyPaths={handoff_path /") == 6
+
+
+def test_handoff_mount_identity_accepts_executable_local_mount():
+    mountinfo = (
+        "25 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n"
+        "26 25 8:2 / /var rw,nodev - xfs /dev/sda2 rw\n"
+    )
+    identity = orchestrator.handoff_mount_identity(mountinfo)
+    assert identity["mount_id"] == "26"
+    assert identity["filesystem_type"] == "xfs"
+    assert identity["mountpoint"] == "/var"
+
+
+@pytest.mark.parametrize(
+    "mountinfo",
+    [
+        "25 1 8:1 / / rw,noexec - ext4 /dev/sda1 rw",
+        "25 1 0:42 / / rw - nfs server:/export rw",
+    ],
+)
+def test_handoff_mount_identity_rejects_noexec_and_nonlocal(mountinfo):
+    with pytest.raises(SystemExit) as failure:
+        orchestrator.handoff_mount_identity(mountinfo)
+    assert failure.value.code == orchestrator.BLOCKED
 
 
 def test_handoff_rejects_non_plain_destination(tmp_path):
