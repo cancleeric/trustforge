@@ -69,6 +69,7 @@ MODES: dict[str, tuple[QuestionType, str]] = {
     "news": (QuestionType.MULTI_SOURCE, "整理{coin}最新事件，區分事實、推論與未證實主張。"),
     "catalyst": (QuestionType.HYPOTHESIS, "檢驗{coin}近期催化因素是否足以改變現有判斷。"),
 }
+RELEASE_CANARY_PREFIX = "Production release canary "
 QUESTION_TYPES = {**{mode: item[0] for mode, item in MODES.items()}, "comparison": QuestionType.COMPARISON}
 QUEUE_CAPACITY = 500
 MULTI_ANGLE_MAX_CLAIM_DOCS = 50
@@ -816,20 +817,44 @@ class AnalysisFlow:
             raise ValueError("unsupported coin or mode")
         if not question or len(question) > 1000:
             raise ValueError("question must contain 1..1000 characters")
+        if (
+            origin != "manual"
+            and question.casefold().startswith(RELEASE_CANARY_PREFIX.casefold())
+        ):
+            raise ValueError("production release canary prefix is reserved")
+        # Old release canaries are the only legacy manual rows whose origin is
+        # unambiguous without a schema change: the verifier owns this reserved
+        # prefix, and scheduled registration above rejects it.  Do not guess for
+        # arbitrary historical text; an active scheduled question without an
+        # enqueued job is otherwise indistinguishable from an old manual row and
+        # must remain counted fail-closed.
         existing = self._conn().execute(
-            "SELECT count(*) FROM analysis_questions WHERE coin=? AND mode=? AND active=1", (coin, mode),
+            """
+            SELECT count(*) FROM analysis_questions AS q
+            WHERE q.coin=? AND q.mode=? AND q.active=1
+              AND q.question NOT LIKE ?
+            """,
+            (coin, mode, f"{RELEASE_CANARY_PREFIX}%"),
         ).fetchone()[0]
         known = self._conn().execute(
-            "SELECT 1 FROM analysis_questions WHERE coin=? AND mode=? AND question=?", (coin, mode, question),
+            "SELECT active FROM analysis_questions WHERE coin=? AND mode=? AND question=?",
+            (coin, mode, question),
         ).fetchone()
-        if existing >= 20 and known is None:
+        if (
+            origin != "manual"
+            and existing >= 20
+            and (known is None or known["active"] == 0)
+        ):
             raise ValueError("active question limit reached")
         now = time.time()
         question_id = "question-" + hashlib.sha256(f"{coin}\0{mode}\0{question}".encode()).hexdigest()[:20]
+        active = 0 if origin == "manual" else 1
         self._conn().execute("""
-          INSERT INTO analysis_questions VALUES(?,?,?,?,1,?,?)
-          ON CONFLICT(coin,mode,question) DO UPDATE SET active=1,updated_at=excluded.updated_at
-        """, (question_id, coin, mode, question, now, now))
+            INSERT INTO analysis_questions VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(coin,mode,question) DO UPDATE SET
+                active=MAX(analysis_questions.active, excluded.active),
+                updated_at=excluded.updated_at
+        """, (question_id, coin, mode, question, active, now, now))
         message_id = "message-" + hashlib.sha256(
             f"user\0{question_id}\0{int(now)}".encode(),
         ).hexdigest()[:20]
@@ -858,7 +883,9 @@ class AnalysisFlow:
         # Validate and persist the intent before collecting live sources.  Bad
         # input must never trigger a chargeable/network ingestion attempt.
         coin, mode, question = coin.strip().upper(), mode.strip(), question.strip()
-        question_id, _ = self.register_question(coin, mode, question, enqueue=False)
+        question_id, _ = self.register_question(
+            coin, mode, question, enqueue=False, origin="manual"
+        )
         locale = normalize_locale(locale)
         canonical_key = f"{coin}\0{mode}\0{question}"
         with _manual_dedup_lock(self.path, canonical_key):
@@ -1722,9 +1749,9 @@ class AnalysisFlow:
             WHERE r2.coin=q.coin AND r2.mode=q.mode AND r2.question=q.question
             ORDER BY r2.published_at DESC LIMIT 1
           )
-          WHERE q.active=1
+          WHERE q.active=1 AND q.question NOT LIKE ?
           ORDER BY q.updated_at DESC LIMIT 300
-        """).fetchall()
+        """, (f"{RELEASE_CANARY_PREFIX}%",)).fetchall()
         candidates: list[dict[str, Any]] = []
         for row in rows:
             similarity = _question_similarity(question, row["question"])
@@ -1877,8 +1904,10 @@ class AnalysisFlow:
             default = (questions or {}).get(mode) or template.format(coin=coin)
             self.register_question(coin, mode, default, enqueue=False)
             active = self._conn().execute(
-                "SELECT question FROM analysis_questions WHERE coin=? AND mode=? AND active=1 ORDER BY created_at",
-                (coin, mode),
+                "SELECT question FROM analysis_questions "
+                "WHERE coin=? AND mode=? AND active=1 AND question NOT LIKE ? "
+                "ORDER BY created_at",
+                (coin, mode, f"{RELEASE_CANARY_PREFIX}%"),
             ).fetchall()
             for item in active:
                 job_id = self.enqueue_job(snapshot_id, mode, item["question"], origin="scheduled")
@@ -3341,8 +3370,10 @@ class AnalysisFlow:
           FROM analysis_stage_runs GROUP BY stage ORDER BY stage
         """).fetchall()
         questions = [row[0] for row in self._conn().execute(
-            "SELECT question FROM analysis_questions WHERE active=1 ORDER BY updated_at DESC LIMIT ?",
-            (max(1, min(limit, 2000)),),
+            "SELECT question FROM analysis_questions "
+            "WHERE active=1 AND question NOT LIKE ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (f"{RELEASE_CANARY_PREFIX}%", max(1, min(limit, 2000))),
         ).fetchall()]
         similar_pairs = 0
         compared_pairs = 0
