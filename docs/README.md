@@ -83,6 +83,7 @@ Governance index:
 
 | 文件 | 說明 |
 |------|------|
+| [HERMES-CAPABILITIES-REVIEW.md](HERMES-CAPABILITIES-REVIEW.md) | Hermes Agent 能力與生產證據：14 工具、5 技能約束、Bedrock、校準訓練、three-track、AGOS、資料流與正式啟用狀態（2026-07-30） |
 | [plans/AI-AGENT-CONTEXT-GAP-AUDIT-2026-07-27.md](plans/AI-AGENT-CONTEXT-GAP-AUDIT-2026-07-27.md) | AI Agent 新手脈絡三模組缺口稽核：已落地證據、未達標項、P0/P1/P2 改善順序與驗證紀錄 |
 | [reports/OUTER-FRAMEWORK-UPGRADE-GOVERNANCE-2026-07-27.md](reports/OUTER-FRAMEWORK-UPGRADE-GOVERNANCE-2026-07-27.md) | 外框模組與升級治理：31 個控制面模組、5 個 policy family、sandbox、人審 gate、active pointer 與 rollback 邊界 |
 | [reports/FIRST-PRINCIPLES-REVIEW-2026-07-27.md](reports/FIRST-PRINCIPLES-REVIEW-2026-07-27.md) | 第一性原理審視報告：Evidence-first 閉環、真正護城河、主要風險、不可變原則與 P0/P1/P2 建議路線 |
