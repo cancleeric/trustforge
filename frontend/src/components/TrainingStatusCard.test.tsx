@@ -130,4 +130,35 @@ describe('TrainingStatusCard', () => {
     expect(screen.queryByText(/HTTP 404/)).not.toBeInTheDocument()
     expect(screen.queryByText(/⚠/)).not.toBeInTheDocument()
   })
+
+  it('clears previously rendered data when a 200 response is malformed', async () => {
+    const intervalHandlers: TimerHandler[] = []
+    vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
+      intervalHandlers.push(handler)
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    const malformed = trainingStatusData()
+    malformed.training_data.direction_ratio = 2
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, data: trainingStatusData() }))
+      .mockResolvedValue(jsonResponse(200, { ok: true, data: malformed }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<HermesI18nProvider><TrainingStatusCard /></HermesI18nProvider>)
+    expect(await screen.findByText('80 / 100')).toBeInTheDocument()
+
+    await act(async () => {
+      const handler = intervalHandlers[0]
+      if (typeof handler === 'function') handler()
+    })
+
+    const message = await screen.findByText('⚠ 資料讀取異常')
+    expect(message).toHaveAttribute(
+      'data-training-status-diagnostic',
+      'parse_error: malformed success response',
+    )
+    expect(screen.queryByText('80 / 100')).not.toBeInTheDocument()
+    expect(screen.queryByText('120')).not.toBeInTheDocument()
+  })
 })

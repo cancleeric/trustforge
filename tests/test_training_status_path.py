@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import builtins
 import os
 from pathlib import Path
 
@@ -61,6 +60,24 @@ def test_training_status_rejects_relative_configured_directory(monkeypatch) -> N
     assert _payload(body)["error"]["code"] == "training_data_unavailable"
 
 
+def test_training_status_rejects_malformed_record_instead_of_partial_count(
+    monkeypatch, tmp_path: Path
+) -> None:
+    training_dir = tmp_path / "training"
+    training_dir.mkdir()
+    (training_dir / "btc.jsonl").write_text(
+        '{"direction":"bullish"}\n{"direction":\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TRUSTFORGE_TRAINING_DATA_DIR", str(training_dir))
+
+    status, body = web._handle_api_training_status()
+
+    assert status == 503
+    assert _payload(body)["error"]["code"] == "training_data_unavailable"
+    assert "data" not in _payload(body)
+
+
 def test_training_status_unreadable_file_fails_instead_of_returning_partial_count(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -69,14 +86,14 @@ def test_training_status_unreadable_file_fails_instead_of_returning_partial_coun
     blocked = training_dir / "btc.jsonl"
     blocked.write_text('{"direction":"bullish"}\n', encoding="utf-8")
     monkeypatch.setenv("TRUSTFORGE_TRAINING_DATA_DIR", str(training_dir))
-    real_open = builtins.open
+    real_open = os.open
 
     def guarded_open(path, *args, **kwargs):
         if Path(path) == blocked:
             raise PermissionError("test unreadable file")
         return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(os, "open", guarded_open)
 
     status, body = web._handle_api_training_status()
 
