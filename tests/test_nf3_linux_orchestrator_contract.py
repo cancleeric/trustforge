@@ -283,6 +283,67 @@ def test_nf1_source_allows_only_canonical_or_owner_write_modes():
     assert "os.fchmod(destination, mode)" in staging
 
 
+def _case_evidence(case: int, fault: str = "SIGKILL") -> dict[str, object]:
+    outcome = {
+        "attempt": 1,
+        "definite_success": 1,
+        "retry_attempt_delta": 0,
+        "terminal_state": "TOMBSTONED",
+    }
+    return {
+        "actual": outcome.copy(),
+        "case": case,
+        "expected": outcome.copy(),
+        "fault": fault,
+        "log_sha256": "a" * 64,
+        "terminal_head": "head-a",
+        "terminal_record_sha256": "b" * 64,
+        "witness_sha256": "c" * 64,
+    }
+
+
+def test_case_semantic_digest_excludes_volatile_artifact_identity():
+    first = _case_evidence(1)
+    second = _case_evidence(1)
+    second["log_sha256"] = "d" * 64
+    second["terminal_head"] = "head-b"
+    second["terminal_record_sha256"] = "e" * 64
+    second["witness_sha256"] = "f" * 64
+    first_record = orchestrator._case_semantic_record("case-001", first)
+    second_record = orchestrator._case_semantic_record("case-001", second)
+    assert first_record == second_record
+    assert orchestrator.case_semantic_collection_sha256(
+        [first_record]
+    ) == orchestrator.case_semantic_collection_sha256([second_record])
+
+
+def test_case_semantic_record_rejects_schema_type_identity_and_outcome_drift():
+    invalid_values = []
+    missing_key = _case_evidence(1)
+    del missing_key["fault"]
+    invalid_values.append(("case-001", missing_key))
+    bool_case = _case_evidence(1)
+    bool_case["case"] = True
+    invalid_values.append(("case-001", bool_case))
+    wrong_directory = _case_evidence(2)
+    invalid_values.append(("case-001", wrong_directory))
+    outcome_drift = _case_evidence(1)
+    outcome_drift["actual"]["attempt"] = 2
+    invalid_values.append(("case-001", outcome_drift))
+    for directory, value in invalid_values:
+        with pytest.raises(RuntimeError):
+            orchestrator._case_semantic_record(directory, value)
+
+
+def test_case_collection_records_both_semantic_and_artifact_digests():
+    value = source()
+    assert '"case_artifact_collection_sha256"' in value
+    assert '"case_evidence_collection_sha256"' in value
+    assert "trustforge.nf3.case-semantic-collection.v1" in value
+    assert 'separators=(",", ":")' in value
+    assert 'len(payload).to_bytes(8, "big")' in value
+
+
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
     normalized = "".join(value.split())

@@ -480,6 +480,79 @@ def _accepted_nf1_source_modes(canonical_mode: int) -> frozenset[int]:
     return frozenset((canonical_mode, canonical_mode | stat.S_IWUSR))
 
 
+def _case_semantic_record(case_directory_name: str, value: object) -> dict[str, object]:
+    evidence_keys = {
+        "actual",
+        "case",
+        "expected",
+        "fault",
+        "log_sha256",
+        "terminal_head",
+        "terminal_record_sha256",
+        "witness_sha256",
+    }
+    outcome_keys = {
+        "attempt",
+        "definite_success",
+        "retry_attempt_delta",
+        "terminal_state",
+    }
+    if not isinstance(value, dict) or set(value) != evidence_keys:
+        raise RuntimeError(f"case evidence schema mismatch: {case_directory_name}")
+    case = value["case"]
+    fault = value["fault"]
+    if (
+        type(case) is not int
+        or not 1 <= case <= 60
+        or case_directory_name != f"case-{case:03d}"
+        or type(fault) is not str
+        or not fault
+    ):
+        raise RuntimeError(f"case identity mismatch: {case_directory_name}")
+    for label in ("actual", "expected"):
+        outcome = value[label]
+        if not isinstance(outcome, dict) or set(outcome) != outcome_keys:
+            raise RuntimeError(f"case outcome schema mismatch: {case_directory_name}")
+        if (
+            any(
+                type(outcome[field]) is not int
+                for field in ("attempt", "definite_success", "retry_attempt_delta")
+            )
+            or type(outcome["terminal_state"]) is not str
+        ):
+            raise RuntimeError(f"case outcome type mismatch: {case_directory_name}")
+    for field in (
+        "log_sha256",
+        "terminal_head",
+        "terminal_record_sha256",
+        "witness_sha256",
+    ):
+        if type(value[field]) is not str or not value[field]:
+            raise RuntimeError(
+                f"case artifact identity mismatch: {case_directory_name}"
+            )
+    if value["actual"] != value["expected"]:
+        raise RuntimeError(f"case outcome mismatch: {case_directory_name}")
+    return {
+        "actual": value["actual"],
+        "case": case,
+        "expected": value["expected"],
+        "fault": fault,
+    }
+
+
+def case_semantic_collection_sha256(records: list[dict[str, object]]) -> str:
+    value = hashlib.sha256()
+    value.update(b"trustforge.nf3.case-semantic-collection.v1\0")
+    for record in records:
+        payload = json.dumps(
+            record, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode()
+        value.update(len(payload).to_bytes(8, "big"))
+        value.update(payload)
+    return value.hexdigest()
+
+
 def stage_nf1_install(
     generation_fd: int, source: Path, archive: Path, harness
 ) -> dict[str, tuple[str, str, int, int]]:
@@ -1606,18 +1679,24 @@ def main() -> int:
             if len(case_directories) != 60:
                 raise RuntimeError("integrated per-case evidence count is not 60")
             case_receipts: list[str] = []
-            for case_directory in case_directories:
+            case_semantic_records: list[dict[str, object]] = []
+            for expected_case, case_directory in enumerate(case_directories, start=1):
                 evidence_file = case_directory / "evidence.json"
                 receipt = (case_directory / "evidence.json.sha256").read_text().strip()
                 if digest(evidence_file) != receipt:
                     raise RuntimeError(f"case receipt mismatch: {case_directory.name}")
                 value = json.loads(evidence_file.read_bytes())
-                if value["actual"] != value["expected"]:
-                    raise RuntimeError(f"case outcome mismatch: {case_directory.name}")
+                semantic_record = _case_semantic_record(case_directory.name, value)
+                if semantic_record["case"] != expected_case:
+                    raise RuntimeError("case evidence ordering is not contiguous")
+                case_semantic_records.append(semantic_record)
                 case_receipts.append(f"{case_directory.name}={receipt}\n")
-            case_collection_sha256 = hashlib.sha256(
+            case_artifact_collection_sha256 = hashlib.sha256(
                 "".join(case_receipts).encode()
             ).hexdigest()
+            case_evidence_collection_sha256 = case_semantic_collection_sha256(
+                case_semantic_records
+            )
             cases_destination = arguments.evidence_out.with_suffix(".cases")
             if cases_destination.exists():
                 raise RuntimeError("case evidence destination already exists")
@@ -1706,7 +1785,8 @@ def main() -> int:
                     "integrated_other": "positive/replay/32-concurrency/stale",
                 },
                 "case_evidence_directory": str(cases_destination),
-                "case_evidence_collection_sha256": case_collection_sha256,
+                "case_artifact_collection_sha256": case_artifact_collection_sha256,
+                "case_evidence_collection_sha256": case_evidence_collection_sha256,
                 "non_claims": [
                     "no signer/capability/authorization/release authority",
                     "build receipt is not a trust verifier or signer",

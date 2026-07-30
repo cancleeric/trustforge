@@ -79,6 +79,15 @@ matrix, exact closed-set cleanup removes it; unknown objects or source
 generation changes prevent PASS, while the external accepted install remains
 unchanged.
 
+The aggregate evidence separates semantic reproducibility from raw artifact
+identity. `case_evidence_collection_sha256` is a domain-separated,
+length-framed canonical digest over the ordered 60 stable records containing
+only `case`, `fault`, `expected`, and `actual`, after exact schema/type checks
+and equality of expected and actual outcomes.
+`case_artifact_collection_sha256` retains the ordered digest of the complete
+per-case receipts, including volatile terminal-head, log, and witness hashes;
+it is expected to differ across otherwise equivalent executions.
+
 The reviewed canonical-view receipts are:
 
 - release NF2 rlib: `1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4`;
