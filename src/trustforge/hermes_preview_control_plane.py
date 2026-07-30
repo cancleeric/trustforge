@@ -16,6 +16,7 @@ import math
 import re
 import uuid
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from trustforge.preview_admission_compiler import AdmissionCompileRequest
 from trustforge.preview_admission_deployment import (
@@ -76,8 +77,11 @@ class PreviewPolicy:
     policy_digest: str
     source_policy_version: str
     model_price_policy_version: str
+    tokenizer_package: str
     tokenizer_version: str
-    reserved_micro_usd: int
+    tokenizer_vocab_hash: str
+    allowed_model_id: str
+    planner_identity: str
     input_micro_usd_per_million_tokens: int
     output_micro_usd_per_million_tokens: int
     valid_from_epoch: int
@@ -96,7 +100,10 @@ class PreviewPolicy:
         versions = (
             self.source_policy_version,
             self.model_price_policy_version,
+            self.tokenizer_package,
             self.tokenizer_version,
+            self.allowed_model_id,
+            self.planner_identity,
         )
         if (
             not _DIGEST_RE.fullmatch(self.policy_digest)
@@ -107,22 +114,18 @@ class PreviewPolicy:
                 or value != value.strip()
                 for value in versions
             )
-            or type(self.reserved_micro_usd) is not int
-            or not 1 <= self.reserved_micro_usd <= 50_000
+            or not _DIGEST_RE.fullmatch(self.tokenizer_vocab_hash)
             or type(self.input_micro_usd_per_million_tokens) is not int
             or self.input_micro_usd_per_million_tokens < 1
             or type(self.output_micro_usd_per_million_tokens) is not int
             or self.output_micro_usd_per_million_tokens < 1
-            or self.reserved_micro_usd
-            != math.ceil(
-                (
-                    MAX_INPUT_TOKENS
-                    * self.input_micro_usd_per_million_tokens
-                    + MAX_OUTPUT_TOKENS
-                    * self.output_micro_usd_per_million_tokens
-                )
-                / 1_000_000
+            or _ceil_micro_usd(
+                MAX_INPUT_TOKENS,
+                MAX_OUTPUT_TOKENS,
+                self.input_micro_usd_per_million_tokens,
+                self.output_micro_usd_per_million_tokens,
             )
+            > 50_000
             or type(self.valid_from_epoch) is not int
             or type(self.valid_until_epoch) is not int
             or not 0 <= self.valid_from_epoch < self.valid_until_epoch
@@ -189,20 +192,19 @@ class PreviewRequest:
 
 @dataclass(frozen=True, slots=True)
 class TrustedProxyPolicy:
-    trusted_peer_networks: tuple[str, ...]
-    _networks: tuple[object, ...] = field(init=False, repr=False)
+    trusted_peer_ips: tuple[str, ...]
+    _peers: tuple[object, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         try:
-            networks = tuple(
-                ipaddress.ip_network(value, strict=True)
-                for value in self.trusted_peer_networks
+            peers = tuple(
+                ipaddress.ip_address(value) for value in self.trusted_peer_ips
             )
         except (TypeError, ValueError):
             raise ValueError("invalid trusted proxy policy") from None
-        if not networks:
+        if not peers or len(set(peers)) != len(peers):
             raise ValueError("invalid trusted proxy policy")
-        object.__setattr__(self, "_networks", networks)
+        object.__setattr__(self, "_peers", peers)
 
     def canonical_identity(
         self,
@@ -214,7 +216,7 @@ class TrustedProxyPolicy:
             peer = ipaddress.ip_address(peer_ip)
         except ValueError:
             raise ValueError("unsafe ingress identity") from None
-        if not any(peer in network for network in self._networks):
+        if peer not in self._peers:
             raise ValueError("unsafe ingress identity")
         try:
             client = ipaddress.ip_address(canonical_client_ip or "")
@@ -223,8 +225,39 @@ class TrustedProxyPolicy:
         return f"pap1-client-ip:{client.compressed}".encode()
 
 
+@dataclass(frozen=True, slots=True)
+class PreviewTopology:
+    app_bind_host: str
+    allowed_origin: str
+    proxy_policy: TrustedProxyPolicy
+    ingress_overwrites_forwarded_headers: bool
+
+    def __post_init__(self) -> None:
+        try:
+            bind = ipaddress.ip_address(self.app_bind_host)
+            origin = urlsplit(self.allowed_origin)
+        except ValueError:
+            raise ValueError("invalid preview topology") from None
+        if (
+            not bind.is_loopback
+            or origin.scheme != "https"
+            or not origin.hostname
+            or origin.username is not None
+            or origin.password is not None
+            or origin.path not in {"", "/"}
+            or origin.query
+            or origin.fragment
+            or "*" in self.allowed_origin
+            or type(self.proxy_policy) is not TrustedProxyPolicy
+            or self.ingress_overwrites_forwarded_headers is not True
+        ):
+            raise ValueError("invalid preview topology")
+
+
 class ExactTokenizer(Protocol):
+    package: str
     version: str
+    vocab_hash: str
 
     def count(self, payload: bytes) -> int: ...
 
@@ -246,23 +279,48 @@ class PlannerResult:
 
 
 class HermesPlannerPort(Protocol):
+    identity: str
+    model_id: str
+    capabilities: tuple[str, ...]
+
     def plan(
         self,
         payload: bytes,
         *,
         max_output_tokens: int,
-        timeout_seconds: int,
-        total_deadline_seconds: int,
+        provider_deadline: float,
+        total_deadline: float,
         attempts: int,
     ) -> PlannerResult: ...
 
 
+_PLANNER_FAILURE_TOKEN = object()
+
+
 class PlannerPortFailure(RuntimeError):
-    def __init__(self, terminal_class: PreviewTerminalClass) -> None:
-        if type(terminal_class) is not PreviewTerminalClass:
+    def __init__(
+        self, terminal_class: PreviewTerminalClass, token: object
+    ) -> None:
+        if (
+            token is not _PLANNER_FAILURE_TOKEN
+            or type(terminal_class) is not PreviewTerminalClass
+            or terminal_class
+            not in {
+                PreviewTerminalClass.KNOWN_PROVIDER_FAILURE,
+                PreviewTerminalClass.PROVIDER_TRANSPORT,
+                PreviewTerminalClass.PROVIDER_TIMEOUT,
+                PreviewTerminalClass.PROVIDER_THROTTLE,
+                PreviewTerminalClass.PROVIDER_5XX,
+                PreviewTerminalClass.CLIENT_ABORT,
+            }
+        ):
             raise ValueError("invalid planner failure")
         self.terminal_class = terminal_class
         super().__init__(terminal_class.value)
+
+    @classmethod
+    def provider(cls, terminal_class: PreviewTerminalClass) -> "PlannerPortFailure":
+        return cls(terminal_class, _PLANNER_FAILURE_TOKEN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,16 +346,60 @@ class PreviewObservation:
     policy_version: int
 
 
+class MonotonicAuthority(Protocol):
+    def now(self) -> float: ...
+
+
 class ZeroSensitiveObserver:
     """Accept only fixed, low-cardinality fields; never arbitrary labels."""
 
-    def __init__(self) -> None:
-        self.events: list[PreviewObservation] = []
+    def __init__(
+        self,
+        *,
+        clock: MonotonicAuthority,
+        retention_seconds: int = 7 * 86_400,
+        capacity: int = 1024,
+    ) -> None:
+        if (
+            not callable(getattr(clock, "now", None))
+            or type(retention_seconds) is not int
+            or not 1 <= retention_seconds <= 7 * 86_400
+            or type(capacity) is not int
+            or not 1 <= capacity <= 4096
+        ):
+            raise ValueError("invalid preview observer")
+        self._clock = clock
+        self._retention = retention_seconds
+        self._capacity = capacity
+        self._events: list[tuple[float, PreviewObservation]] = []
 
     def record(self, observation: PreviewObservation) -> None:
         if type(observation) is not PreviewObservation:
             raise ValueError("invalid preview observation")
-        self.events.append(observation)
+        now = self._now()
+        self._prune(now)
+        self._events.append((now, observation))
+        if len(self._events) > self._capacity:
+            del self._events[: len(self._events) - self._capacity]
+
+    @property
+    def events(self) -> list[PreviewObservation]:
+        self._prune(self._now())
+        return [observation for _, observation in self._events]
+
+    def _now(self) -> float:
+        value = self._clock.now()
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("invalid observer clock")
+        return float(value)
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self._retention
+        self._events = [
+            (timestamp, observation)
+            for timestamp, observation in self._events
+            if timestamp > cutoff
+        ]
 
 
 class HermesPreviewControlPlane:
@@ -308,16 +410,23 @@ class HermesPreviewControlPlane:
         policy: PreviewPolicy,
         tokenizer: ExactTokenizer,
         planner: HermesPlannerPort,
-        proxy_policy: TrustedProxyPolicy,
+        topology: PreviewTopology,
+        monotonic: MonotonicAuthority,
         observer: ZeroSensitiveObserver,
     ) -> None:
         if (
             type(runtime) is not PreviewAdmissionProductionRuntime
             or type(policy) is not PreviewPolicy
+            or tokenizer.package != policy.tokenizer_package
             or tokenizer.version != policy.tokenizer_version
+            or tokenizer.vocab_hash != policy.tokenizer_vocab_hash
             or not callable(getattr(tokenizer, "count", None))
             or not callable(getattr(planner, "plan", None))
-            or type(proxy_policy) is not TrustedProxyPolicy
+            or planner.identity != policy.planner_identity
+            or planner.model_id != policy.allowed_model_id
+            or planner.capabilities != ("plan",)
+            or type(topology) is not PreviewTopology
+            or not callable(getattr(monotonic, "now", None))
             or type(observer) is not ZeroSensitiveObserver
         ):
             raise ValueError("invalid preview control plane")
@@ -325,7 +434,9 @@ class HermesPreviewControlPlane:
         self._policy = policy
         self._tokenizer = tokenizer
         self._planner = planner
-        self._proxy = proxy_policy
+        self._topology = topology
+        self._proxy = topology.proxy_policy
+        self._monotonic = monotonic
         self._observer = observer
 
     def execute(
@@ -335,6 +446,12 @@ class HermesPreviewControlPlane:
         peer_ip: str,
         canonical_client_ip: str | None,
     ) -> PreviewExecution:
+        try:
+            started = self._now()
+        except ValueError:
+            return PreviewExecution(
+                PreviewControlStatus.UNAVAILABLE, "deadline_unavailable"
+            )
         admission = self.admit(
             request,
             peer_ip=peer_ip,
@@ -342,17 +459,39 @@ class HermesPreviewControlPlane:
         )
         if admission.status is not PreviewControlStatus.ADMITTED:
             return PreviewExecution(admission.status, admission.reason)
+        total_deadline = started + TOTAL_DEADLINE_SECONDS
+        try:
+            before_dispatch = self._now()
+        except ValueError:
+            before_dispatch = total_deadline
+        if before_dispatch >= total_deadline:
+            self.reconcile(
+                admission,
+                terminal_class=PreviewTerminalClass.CLIENT_ABORT,
+                provider_dispatched=False,
+            )
+            return PreviewExecution(
+                PreviewControlStatus.UNAVAILABLE, "deadline_unavailable"
+            )
+        provider_deadline = min(
+            before_dispatch + PROVIDER_TIMEOUT_SECONDS, total_deadline
+        )
         try:
             result = self._planner.plan(
                 admission.payload,
                 max_output_tokens=MAX_OUTPUT_TOKENS,
-                timeout_seconds=PROVIDER_TIMEOUT_SECONDS,
-                total_deadline_seconds=TOTAL_DEADLINE_SECONDS,
+                provider_deadline=provider_deadline,
+                total_deadline=total_deadline,
                 attempts=ATTEMPTS,
             )
             if type(result) is not PlannerResult:
-                raise PlannerPortFailure(PreviewTerminalClass.SCHEMA_FAILURE)
-            terminal_class = PreviewTerminalClass.SUCCESS
+                terminal_class = PreviewTerminalClass.SCHEMA_FAILURE
+                result = None
+            elif self._now() > provider_deadline:
+                terminal_class = PreviewTerminalClass.PROVIDER_TIMEOUT
+                result = None
+            else:
+                terminal_class = PreviewTerminalClass.SUCCESS
         except PlannerPortFailure as exc:
             terminal_class = exc.terminal_class
             if not self.reconcile(admission, terminal_class=terminal_class):
@@ -363,7 +502,15 @@ class HermesPreviewControlPlane:
                 PreviewControlStatus.UNAVAILABLE, "planner_unavailable"
             )
         except Exception:
-            terminal_class = PreviewTerminalClass.PROVIDER_TRANSPORT
+            terminal_class = PreviewTerminalClass.SCHEMA_FAILURE
+            if not self.reconcile(admission, terminal_class=terminal_class):
+                return PreviewExecution(
+                    PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
+                )
+            return PreviewExecution(
+                PreviewControlStatus.UNAVAILABLE, "planner_unavailable"
+            )
+        if result is None:
             if not self.reconcile(admission, terminal_class=terminal_class):
                 return PreviewExecution(
                     PreviewControlStatus.UNAVAILABLE, "terminal_unavailable"
@@ -405,6 +552,14 @@ class HermesPreviewControlPlane:
                 or not 1 <= input_tokens <= MAX_INPUT_TOKENS
             ):
                 raise ValueError
+            reserved_micro_usd = _ceil_micro_usd(
+                input_tokens,
+                MAX_OUTPUT_TOKENS,
+                self._policy.input_micro_usd_per_million_tokens,
+                self._policy.output_micro_usd_per_million_tokens,
+            )
+            if not 1 <= reserved_micro_usd <= self._policy.minute_micro_usd:
+                raise ValueError
             clock = self._runtime.executor._durable_gate._trusted_clock
             interval = clock.trusted_interval()
             buckets = clock.buckets()
@@ -434,7 +589,7 @@ class HermesPreviewControlPlane:
                 ),
                 reservation_id=reservation_id,
                 reserved_tokens=input_tokens + MAX_OUTPUT_TOKENS,
-                reserved_micro_usd=self._policy.reserved_micro_usd,
+                reserved_micro_usd=reserved_micro_usd,
                 lifecycle_generation=snapshot.lifecycle.generation,
                 current_quota_key_version=snapshot.lifecycle.current.version,
                 previous_quota_key_version=(
@@ -465,24 +620,35 @@ class HermesPreviewControlPlane:
         terminal_class: PreviewTerminalClass,
         actual_tokens: int | None = None,
         actual_micro_usd: int | None = None,
+        provider_dispatched: bool = True,
     ) -> bool:
         if (
             type(admission) is not PreviewAdmission
             or admission.status is not PreviewControlStatus.ADMITTED
             or admission.handle is None
             or type(terminal_class) is not PreviewTerminalClass
+            or type(provider_dispatched) is not bool
         ):
             return False
-        known = terminal_class is PreviewTerminalClass.SUCCESS or (
-            terminal_class is PreviewTerminalClass.KNOWN_PROVIDER_FAILURE
-            and type(actual_tokens) is int
+        handle = admission.handle
+        usage_valid = (
+            type(actual_tokens) is int
             and type(actual_micro_usd) is int
+            and 0 <= actual_tokens <= handle.reserved_tokens
+            and 0 <= actual_micro_usd <= handle.reserved_micro_usd
+        )
+        known = usage_valid and terminal_class in (
+            PreviewTerminalClass.SUCCESS,
+            PreviewTerminalClass.KNOWN_PROVIDER_FAILURE,
         )
         disposition = (
+            TerminalDisposition.PRE_PROVIDER_ABORT
+            if not provider_dispatched
+            else
             TerminalDisposition.KNOWN_SUCCESS
-            if terminal_class is PreviewTerminalClass.SUCCESS
+            if terminal_class is PreviewTerminalClass.SUCCESS and known
             else TerminalDisposition.KNOWN_FAILURE
-            if terminal_class is PreviewTerminalClass.KNOWN_PROVIDER_FAILURE
+            if terminal_class is PreviewTerminalClass.KNOWN_PROVIDER_FAILURE and known
             else TerminalDisposition.UNCERTAIN
         )
         try:
@@ -510,6 +676,12 @@ class HermesPreviewControlPlane:
         )
         return reconciled
 
+    def _now(self) -> float:
+        value = self._monotonic.now()
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("invalid deadline clock")
+        return float(value)
+
     def _result(
         self,
         status: PreviewControlStatus,
@@ -530,3 +702,13 @@ def _uuid4(value: str) -> bool:
     except (TypeError, ValueError, AttributeError):
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+def _ceil_micro_usd(
+    input_tokens: int,
+    output_tokens: int,
+    input_rate: int,
+    output_rate: int,
+) -> int:
+    numerator = input_tokens * input_rate + output_tokens * output_rate
+    return (numerator + 999_999) // 1_000_000
