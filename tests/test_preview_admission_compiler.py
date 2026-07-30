@@ -48,6 +48,9 @@ def request(
         reservation_id=reservation_id,
         reserved_tokens=tokens,
         reserved_micro_usd=micros,
+        lifecycle_generation=2 if previous else 1,
+        current_quota_key_version=2 if previous else 1,
+        previous_quota_key_version=1 if previous else None,
     )
 
 
@@ -111,8 +114,11 @@ def test_request_is_strict_and_matches_trusted_buckets(change):
         "identity_digest": DIGEST_A,
         "previous_identity_digest": None,
         "reservation_id": RESERVATION,
-        "reserved_tokens": 512,
-        "reserved_micro_usd": 1000,
+            "reserved_tokens": 512,
+            "reserved_micro_usd": 1000,
+            "lifecycle_generation": 1,
+            "current_quota_key_version": 1,
+            "previous_quota_key_version": None,
     }
     fields.update(change)
     with pytest.raises(ValueError):
@@ -301,7 +307,7 @@ def test_handle_and_reservation_item_have_exact_safe_parity():
     assert type(handle) is AdmissionHandle
     assert handle == AdmissionHandle(
         RESERVATION, OWNER, DIGEST_A, DIGEST_B, 1, "19700101", 512, 1000,
-        60, 61, 76, 1, POLICY, None, 1, 1, 1,
+        60, 61, 76, 1, POLICY, None, 1, 1, 1, 2, 2, 1,
     )
     item = plan.write_request["TransactItems"][-1]["Put"]["Item"]
     expected = {
@@ -310,6 +316,8 @@ def test_handle_and_reservation_item_have_exact_safe_parity():
         "epoch_minute", "utc_day", "reserved_tokens", "reserved_micro_usd",
         "created_lower", "created_upper", "lease_until", "expiry_shard",
         "policy_digest", "policy_version", "key_version", "schema_version",
+        "lifecycle_generation", "current_quota_key_version",
+        "previous_quota_key_version",
     }
     assert set(item) == expected
     for field in expected - {"pk", "sk", "kind", "status", "version", "ttl"}:
@@ -326,7 +334,7 @@ def test_expired_open_circuit_records_only_canonical_half_open_owner():
     base = request()
     req = AdmissionCompileRequest(
         base.interval, base.buckets, POLICY, OWNER, DIGEST_A, None,
-        RESERVATION, 512, 1000,
+        RESERVATION, 512, 1000, 1, 1, None,
     )
     decoded = absent_snapshots(req)
     plan = compile_admission(
