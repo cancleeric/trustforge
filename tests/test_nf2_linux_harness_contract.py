@@ -5,6 +5,8 @@ import tempfile
 import os
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/test_nf2_zero_capability_linux.py"
 SPEC = importlib.util.spec_from_file_location("nf2_linux_harness", SCRIPT)
@@ -122,6 +124,7 @@ def test_elf_parser_accepts_static_x86_64_without_dynamic_dependencies(tmp_path)
     HARNESS.verify_static_x86_64_elf(path)
 
 
+@pytest.mark.serial
 def test_setuid_tool_mode_uses_canonical_four_digit_octal(tmp_path):
     tool = tmp_path / "mount"
     tool.write_bytes(b"fixture")
