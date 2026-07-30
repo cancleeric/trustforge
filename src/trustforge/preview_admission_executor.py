@@ -22,7 +22,7 @@ from trustforge.preview_durable_admission_gate import (
     DurableAdmissionGate,
     append_quarantine_action,
 )
-from trustforge.preview_trusted_clock import PreviewTrustedClock, TrustedUtcInterval
+from trustforge.preview_trusted_clock import TrustedUtcInterval
 from trustforge.quota_key_lifecycle import (
     BoundAdmissionRequest,
     DurableQuotaKeyLifecycleAuthority,
@@ -247,28 +247,11 @@ class PreviewAdmissionExecutor:
         lifecycle_authority: DurableQuotaKeyLifecycleAuthority,
         region_name: str | None = None,
     ) -> "PreviewAdmissionExecutor":
-        """Create a low-level client whose SDK performs exactly one attempt."""
+        """Reject construction that could split durable authority."""
 
-        import boto3
-        from botocore.config import Config
-
-        client = boto3.client(
-            "dynamodb",
-            region_name=region_name,
-            config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
-        )
-        return cls(
-            client,
-            table_name,
-            durable_gate=DurableAdmissionGate(
-                client,
-                table_name,
-                trusted_clock=PreviewTrustedClock(
-                    dynamodb_client=client,
-                    table_name=table_name,
-                ),
-            ),
-            lifecycle_authority=lifecycle_authority,
+        del table_name, lifecycle_authority, region_name
+        raise ValueError(
+            "construct with one exact client, table, gate, and lifecycle authority"
         )
 
     def execute(self, bound: BoundAdmissionRequest) -> AdmissionExecutionResult:

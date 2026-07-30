@@ -44,7 +44,6 @@ from trustforge.preview_trusted_clock import (
 from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
     LIFECYCLE_CONTROL_KEY,
-    QuotaKey,
     QuotaKeyLifecycle,
     QuotaKeyMaterialProvider,
 )

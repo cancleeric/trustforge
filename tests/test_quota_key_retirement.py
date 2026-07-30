@@ -15,7 +15,6 @@ from trustforge.quota_key_retirement import (
 from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
     MIN_OVERLAP_SECONDS,
-    QuotaKey,
     QuotaKeyLifecycle,
     QuotaKeyMaterialProvider,
 )

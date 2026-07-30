@@ -35,8 +35,8 @@ from trustforge.preview_trusted_clock import PreviewTrustedClock
 from trustforge.quota_key_lifecycle import (
     DurableQuotaKeyLifecycleAuthority,
     LIFECYCLE_CONTROL_KEY,
-    QuotaKey,
     QuotaKeyLifecycle,
+    QuotaKeyMaterialProvider,
 )
 
 
@@ -218,6 +218,7 @@ def _executor(client, table_name: str = "preview-store"):
 
 
 def _lifecycle_authority(client, table_name: str):
+    provider = QuotaKeyMaterialProvider()
     authority = DurableQuotaKeyLifecycleAuthority(
         PreviewTrustedClock(
             dynamodb_client=client,
@@ -227,17 +228,20 @@ def _lifecycle_authority(client, table_name: str):
         ),
         dynamodb_client=client,
         table_name=table_name,
+        key_material_provider=provider,
     )
     authority.install(
         QuotaKeyLifecycle(
             generation=1,
             issued=TrustedUtcInterval(1_999_999_950, 1_999_999_951),
-            current=QuotaKey(
+            current=provider.verify(
                 version=1,
                 key_id="quota-1",
                 key_bytes=bytes(range(32)),
                 activated=1_999_999_960,
                 source_revision="ssm-v1",
+                authenticated_revision=True,
+                csprng_provenance=True,
             ),
         )
     )
@@ -547,32 +551,22 @@ def test_write_gate_prevents_second_dispatch_crossing_ambiguity():
     assert len(client.write_calls) == 1
 
 
-def test_factory_configures_exactly_one_sdk_attempt(monkeypatch):
-    captured = {}
+def test_factory_rejects_split_external_authority(monkeypatch):
     fake = FakeClient(_request())
 
     def client(service_name, **kwargs):
-        captured["service_name"] = service_name
-        captured.update(kwargs)
-        return fake
+        raise AssertionError("factory must not create an independent client")
 
     monkeypatch.setattr(boto3, "client", client)
 
-    executor = PreviewAdmissionExecutor.from_boto3(
-        "preview-store",
-        lifecycle_authority=_lifecycle_authority(fake, "preview-store"),
-        region_name="us-east-1",
-    )
-
-    assert captured["service_name"] == "dynamodb"
-    assert captured["region_name"] == "us-east-1"
-    assert captured["config"].retries == {
-        "total_max_attempts": 1,
-        "mode": "standard",
-    }
-    assert executor._durable_gate._client is fake
-    assert executor._durable_gate._trusted_clock._client is fake
-    assert executor._durable_gate._trusted_clock._table_name == "preview-store"
+    with pytest.raises(ValueError, match="one exact client"):
+        PreviewAdmissionExecutor.from_boto3(
+            "preview-store",
+            lifecycle_authority=_lifecycle_authority(
+                fake, "preview-store"
+            ),
+            region_name="us-east-1",
+        )
 
 
 def test_source_has_no_provider_or_retry_boundary():
