@@ -144,8 +144,6 @@ def validate_acceptance(
             raise AcceptanceValidationError(f"hard flag mismatch for {case_id}")
         if case["release_id"] != release_id:
             raise AcceptanceValidationError(f"release mismatch for {case_id}")
-        if requirement["hard"] and case["status"] != "pass":
-            raise AcceptanceValidationError(f"hard case is not pass: {case_id}={case['status']}")
         for evidence in case["evidence"]:
             _validate_artifact_path(evidence["path"], release_id)
             if evidence["path"] not in manifest_paths:
@@ -179,6 +177,10 @@ def validate_acceptance(
         )
 
 
+def is_production_accepted(summary: dict[str, Any]) -> bool:
+    return summary.get("disposition") == "production_accepted"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, default=Path("qa/requirements.json"))
@@ -190,6 +192,12 @@ def main() -> int:
     except (AcceptanceValidationError, json.JSONDecodeError) as exc:
         print(f"QA acceptance validation failed: {exc}", file=sys.stderr)
         return 1
+    if not is_production_accepted(load_json(args.summary)):
+        print(
+            f"QA acceptance evidence is valid but not accepted: {args.summary}",
+            file=sys.stderr,
+        )
+        return 2
     print(f"QA acceptance validation passed: {args.summary}")
     return 0
 

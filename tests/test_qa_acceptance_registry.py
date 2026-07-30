@@ -88,11 +88,28 @@ def test_complete_release_bound_summary_passes() -> None:
 
 
 @pytest.mark.parametrize("status", ["fail", "skipped", "not_run"])
-def test_hard_case_must_pass(status: str) -> None:
+def test_failed_deployment_case_requires_failed_disposition(status: str) -> None:
     summary = _valid_summary()
     summary["cases"][0]["status"] = status
-    with pytest.raises(AcceptanceValidationError, match="hard case is not pass"):
+    with pytest.raises(AcceptanceValidationError, match="disposition must be deployment_failed"):
         _validate(summary)
+    summary["disposition"] = "deployment_failed"
+    _validate(summary)
+
+
+def test_failed_competition_case_requires_deployed_not_accepted() -> None:
+    summary = _valid_summary()
+    competition_case = next(
+        case for case in summary["cases"] if case["requirement_id"] == "CA-01"
+    )
+    competition_case["status"] = "fail"
+    with pytest.raises(
+        AcceptanceValidationError,
+        match="disposition must be deployed_not_accepted",
+    ):
+        _validate(summary)
+    summary["disposition"] = "deployed_not_accepted"
+    _validate(summary)
 
 
 def test_missing_case_fails_closed() -> None:
