@@ -138,6 +138,52 @@ tags:
       405——連端點存在性都不暴露。
 
 paths:
+  /api/analysis-plan:
+    post:
+      tags: [analysis]
+      operationId: previewAnalysisPlan
+      summary: Hermes 意圖與資料需求規劃預覽（不建立正式工作）
+      description: |
+        僅產生 advisory plan；不建立 analysis job、receipt、dedup lock，
+        也不授權或執行任何工具。需要 exact release Origin，回應禁止快取。
+        Durable admission 先按 2,048 input + 512 output tokens 的最壞情況
+        原子保留；通過後才呼叫 Bedrock CountTokens（non-inference）精確計算
+        與 eventual Converse 完全相同的 messages。CountTokens 超過 2,048
+        或不可用時不呼叫 Converse，安全回 503。
+      parameters:
+        - in: header
+          name: Origin
+          required: true
+          schema:
+            type: string
+            format: uri
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalysisPlanRequest"
+      responses:
+        "200":
+          description: Strict Hermes planning projection
+          headers:
+            Cache-Control:
+              schema: {const: "private, no-store"}
+            Vary:
+              schema: {const: Origin}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisPlanSuccessEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidPlanRequest"
+        "429":
+          $ref: "#/components/responses/PlanRateLimited"
+        "503":
+          $ref: "#/components/responses/PlanUnavailable"
+        "504":
+          $ref: "#/components/responses/PlanTimeout"
+
   /api/health:
     get:
       tags: [meta]
@@ -2264,6 +2310,150 @@ paths:
 
 components:
   schemas:
+    AnalysisPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [question, locale]
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        locale:
+          type: string
+          enum: [zh-TW, en]
+        asset_hints:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 16
+            pattern: "^[A-Z0-9][A-Z0-9._:-]{0,15}$"
+        client_request_id:
+          type: string
+          format: uuid
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    AnalysisPlanSuccessEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: {const: true}
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/AnalysisPlanReady"
+            - $ref: "#/components/schemas/AnalysisPlanNeedsClarification"
+          discriminator:
+            propertyName: outcome
+    AnalysisPlanReady:
+      type: object
+      additionalProperties: false
+      required: [outcome, detected_assets, intent_shape, intents, source_classes, strategy_summary, clarifications, warnings, confidence, provenance]
+      properties:
+            outcome: {const: ready}
+            detected_assets: {$ref: "#/components/schemas/AnalysisPlanAssets"}
+            intent_shape: {$ref: "#/components/schemas/AnalysisPlanIntentShape"}
+            intents: {$ref: "#/components/schemas/AnalysisPlanIntents"}
+            source_classes: {$ref: "#/components/schemas/AnalysisPlanSourceClasses"}
+            strategy_summary: {type: string, minLength: 1, maxLength: 600}
+            clarifications: {$ref: "#/components/schemas/AnalysisPlanClarifications"}
+            warnings: {$ref: "#/components/schemas/AnalysisPlanWarnings"}
+            confidence: {$ref: "#/components/schemas/AnalysisPlanConfidence"}
+            provenance: {$ref: "#/components/schemas/AnalysisPlanProvenance"}
+    AnalysisPlanNeedsClarification:
+      type: object
+      additionalProperties: false
+      required: [outcome, detected_assets, intent_shape, intents, source_classes, strategy_summary, clarifications, warnings, confidence, provenance]
+      properties:
+            outcome: {const: needs_clarification}
+            detected_assets: {$ref: "#/components/schemas/AnalysisPlanAssets"}
+            intent_shape: {$ref: "#/components/schemas/AnalysisPlanIntentShape"}
+            intents: {$ref: "#/components/schemas/AnalysisPlanIntents"}
+            source_classes: {$ref: "#/components/schemas/AnalysisPlanSourceClasses"}
+            strategy_summary: {type: string, minLength: 1, maxLength: 600}
+            clarifications:
+              allOf:
+                - $ref: "#/components/schemas/AnalysisPlanClarifications"
+                - minItems: 1
+            warnings: {$ref: "#/components/schemas/AnalysisPlanWarnings"}
+            confidence: {$ref: "#/components/schemas/AnalysisPlanConfidence"}
+            provenance: {$ref: "#/components/schemas/AnalysisPlanProvenance"}
+    AnalysisPlanAssets:
+      type: array
+      maxItems: 8
+      uniqueItems: true
+      items: {type: string, pattern: "^[A-Z0-9][A-Z0-9._:-]{0,15}$"}
+    AnalysisPlanIntentShape:
+      type: string
+      enum: [single, multiple, unknown]
+    AnalysisPlanIntents:
+      type: array
+      maxItems: 8
+      items:
+        type: object
+        additionalProperties: false
+        required: [label, rationale]
+        properties:
+          label: {type: string, minLength: 1, maxLength: 64}
+          rationale: {type: string, minLength: 1, maxLength: 240}
+    AnalysisPlanSourceClasses:
+      type: array
+      maxItems: 12
+      uniqueItems: true
+      items:
+        type: string
+        enum: [market_price, derivatives, on_chain, news, social, regulatory, macroeconomic, project_primary, exchange, security_incident, governance, research]
+    AnalysisPlanClarifications:
+      type: array
+      maxItems: 3
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, question, options]
+        properties:
+          id: {type: string, minLength: 1, maxLength: 32, pattern: "^[A-Za-z0-9._-]+$"}
+          question: {type: string, minLength: 1, maxLength: 240}
+          options:
+            type: array
+            maxItems: 6
+            items: {type: string, minLength: 1, maxLength: 80}
+    AnalysisPlanWarnings:
+      type: array
+      maxItems: 8
+      items: {type: string, minLength: 1, maxLength: 160}
+    AnalysisPlanConfidence:
+      type: object
+      additionalProperties: false
+      required: [level, rationale]
+      properties:
+        level: {type: string, enum: [low, medium, high]}
+        rationale: {type: string, minLength: 1, maxLength: 160}
+    AnalysisPlanProvenance:
+      type: object
+      additionalProperties: false
+      required: [planner, provider, policy_version]
+      properties:
+        planner: {const: hermes}
+        provider: {const: aws-bedrock}
+        policy_version: {type: string, minLength: 1, maxLength: 32, pattern: "^[A-Za-z0-9._-]+$"}
+    AnalysisPlanErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [ok, error]
+      properties:
+        ok: {const: false}
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, retryable]
+          properties:
+            code:
+              type: string
+              enum: [invalid_plan_request, plan_rate_limited, plan_temporarily_unavailable, plan_timeout]
+            message: {type: string}
+            retryable: {type: boolean}
     OkEnvelope:
       type: object
       required: [ok, data]
@@ -3251,6 +3441,26 @@ components:
           description: 可能缺席，語意同 `OverviewCoinSnapshot.manip_score_mean`
 
   responses:
+    InvalidPlanRequest:
+      description: Strict request/origin validation failed
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
+    PlanRateLimited:
+      description: Independent planning quota denied
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
+    PlanUnavailable:
+      description: Planner, policy, schema, circuit, or shared authority unavailable
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
+    PlanTimeout:
+      description: Single provider attempt exceeded its deadline
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/AnalysisPlanErrorEnvelope"}
     RateLimited:
       description: |
         per-IP 滑動視窗超過門檻（見本文件頂部「Rate limit 語意」），無

@@ -100,12 +100,14 @@ SWAGGER_ENABLED = os.getenv("TRUSTFORGE_SWAGGER", "0") == "1"
 _ENDPOINT_MANIFEST_BODY: bytes | None = None
 _PREVIEW_ADMISSION_RUNTIME: object | None = None
 _PREVIEW_ADMISSION_STATUS = "disabled"
+_ANALYSIS_PLAN_RUNTIME: object | None = None
 
 
 def _initialize_preview_admission() -> None:
     """Internal #956 handoff only; never changes health or formal analysis."""
 
     global _PREVIEW_ADMISSION_RUNTIME, _PREVIEW_ADMISSION_STATUS
+    configure_analysis_plan_runtime(None)
     raw = os.getenv("TRUSTFORGE_PREVIEW_ADMISSION_ENABLED", "0")
     _PREVIEW_ADMISSION_RUNTIME = None
     if raw == "0":
@@ -125,8 +127,33 @@ def _initialize_preview_admission() -> None:
         )
         if readiness.enabled:
             _PREVIEW_ADMISSION_RUNTIME = readiness.runtime()
+            plan_enabled = os.getenv("TRUSTFORGE_ANALYSIS_PLAN_ENABLED", "0")
+            if plan_enabled not in {"0", "1"}:
+                raise ValueError("invalid analysis plan feature flag")
+            if plan_enabled == "1":
+                from .analysis_plan import (
+                    initialize_analysis_plan_runtime_from_env,
+                )
+
+                configure_analysis_plan_runtime(
+                    initialize_analysis_plan_runtime_from_env(
+                        _PREVIEW_ADMISSION_RUNTIME
+                    )
+                )
     except Exception:
         _PREVIEW_ADMISSION_STATUS = "unavailable"
+
+
+def configure_analysis_plan_runtime(runtime: object | None) -> None:
+    """Install the strictly composed preview runtime during trusted startup."""
+
+    global _ANALYSIS_PLAN_RUNTIME
+    if runtime is not None:
+        from .analysis_plan import AnalysisPlanRuntime
+
+        if type(runtime) is not AnalysisPlanRuntime:
+            raise ValueError("invalid analysis plan runtime")
+    _ANALYSIS_PLAN_RUNTIME = runtime
 
 
 # The stdlib ThreadingHTTPServer has no worker bound: a slow SQLite read plus
@@ -8218,6 +8245,134 @@ def _read_admin_put_body(headers, rfile) -> tuple[dict | None, tuple[int, str] |
     return payload, None
 
 
+_ANALYSIS_PLAN_MAX_BODY_BYTES = 16 * 1024
+_ANALYSIS_PLAN_ERROR_COPY = {
+    400: (
+        "invalid_plan_request",
+        "請檢查問題、語系與資產提示格式。",
+        False,
+    ),
+    429: (
+        "plan_rate_limited",
+        "規劃請求過於頻繁。你可以返回編輯，或稍後再試。",
+        True,
+    ),
+    503: (
+        "plan_temporarily_unavailable",
+        "Hermes 規劃暫時不可用。你可以返回編輯。",
+        True,
+    ),
+    504: (
+        "plan_timeout",
+        "Hermes 規劃逾時。你可以返回編輯。",
+        True,
+    ),
+}
+
+
+def _analysis_plan_error(status: int) -> str:
+    code, message, retryable = _ANALYSIS_PLAN_ERROR_COPY[status]
+    return json.dumps(
+        {
+            "ok": False,
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _read_analysis_plan_body(headers, rfile):
+    ctype = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    raw_length = (headers.get("Content-Length") or "").strip()
+    if ctype != "application/json" or not raw_length.isascii() or not raw_length.isdigit():
+        return None
+    length = int(raw_length)
+    if not 1 <= length <= _ANALYSIS_PLAN_MAX_BODY_BYTES:
+        return None
+    raw = rfile.read(length)
+    if len(raw) != length:
+        return None
+
+    def strict_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError
+            value[key] = item
+        return value
+
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=strict_pairs,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if type(payload) is not dict or set(payload) - {
+        "question",
+        "locale",
+        "asset_hints",
+        "client_request_id",
+    }:
+        return None
+    if not {"question", "locale"} <= set(payload):
+        return None
+    try:
+        from .hermes_preview_control_plane import PreviewRequest
+
+        hints = payload.get("asset_hints", [])
+        if type(hints) is not list:
+            raise ValueError
+        return PreviewRequest(
+            question=payload["question"],
+            locale=payload["locale"],
+            asset_hints=tuple(hints),
+            client_request_id=payload.get("client_request_id"),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _handle_api_analysis_plan(headers, rfile, peer_ip: str) -> tuple[int, str]:
+    """Strict, no-cache plan preview; it never creates a formal analysis job."""
+
+    runtime = _ANALYSIS_PLAN_RUNTIME
+    if runtime is None:
+        return 503, _analysis_plan_error(503)
+    # Origin is a mandatory exact release-policy value.  Absence is not
+    # interpreted as same-origin because this is a paid public write.
+    origin = headers.get("Origin")
+    allowed_origin = runtime.control_plane._topology.allowed_origin
+    if type(origin) is not str or origin != allowed_origin:
+        return 400, _analysis_plan_error(400)
+    request = _read_analysis_plan_body(headers, rfile)
+    if request is None:
+        return 400, _analysis_plan_error(400)
+    canonical_client_ip = headers.get("X-Real-IP")
+    result = runtime.execute(
+        request,
+        peer_ip=peer_ip,
+        canonical_client_ip=canonical_client_ip,
+    )
+    if result.status.value == "admitted":
+        return 200, json.dumps(
+            {"ok": True, "data": result.value},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    if result.status.value == "denied":
+        return 429, _analysis_plan_error(429)
+    if result.reason == "planner_timeout":
+        return 504, _analysis_plan_error(504)
+    return 503, _analysis_plan_error(503)
+
+
 _ADMIN_PUT_ALLOWED_FIELDS = frozenset(
     {
         "daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled",
@@ -9151,6 +9306,19 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/analysis-question":
             code, body = _handle_api_analysis_question(getattr(self, "headers", {}), self.rfile, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-plan":
+            code, body = _handle_api_analysis_plan(
+                getattr(self, "headers", {}), self.rfile, self.client_address[0]
+            )
+            return self._send(
+                code,
+                body,
+                "application/json; charset=utf-8",
+                extra_headers={
+                    "Cache-Control": "private, no-store",
+                    "Vary": "Origin",
+                },
+            )
         if u.path == "/api/analysis-comparison-question":
             code, body = _handle_api_analysis_comparison_question(getattr(self, "headers", {}), self.rfile, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
