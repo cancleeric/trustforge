@@ -52,6 +52,19 @@ if ! aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" >/dev/
   aws dynamodb wait table-exists --region "$REGION" --table-name "$TABLE"
 fi
 
+HASH_KEY="$(aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" \
+  --query "Table.KeySchema[?KeyType=='HASH'].AttributeName | [0]" --output text)"
+RANGE_KEY="$(aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" \
+  --query "Table.KeySchema[?KeyType=='RANGE'].AttributeName | [0]" --output text)"
+PK_TYPE="$(aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" \
+  --query "Table.AttributeDefinitions[?AttributeName=='pk'].AttributeType | [0]" --output text)"
+SK_TYPE="$(aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" \
+  --query "Table.AttributeDefinitions[?AttributeName=='sk'].AttributeType | [0]" --output text)"
+if [[ "$HASH_KEY" != "pk" || "$RANGE_KEY" != "sk" || "$PK_TYPE" != "S" || "$SK_TYPE" != "S" ]]; then
+  echo "existing atomic authority table has incompatible key schema: expected pk(HASH,S)+sk(RANGE,S)" >&2
+  exit 1
+fi
+
 PITR_STATUS="$(aws dynamodb describe-continuous-backups --region "$REGION" \
   --table-name "$TABLE" \
   --query 'ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus' \

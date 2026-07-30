@@ -127,9 +127,24 @@ def _verify_artifact(
     artifact_root: Path,
 ) -> None:
     _validate_artifact_path(artifact["path"], release_id)
-    path = artifact_root / artifact["path"]
+    root = artifact_root.resolve()
+    path = root / artifact["path"]
+    current = root
+    for component in PurePosixPath(artifact["path"]).parts:
+        current = current / component
+        if current.is_symlink():
+            raise AcceptanceValidationError(f"artifact path contains symlink: {artifact['path']}")
     if not path.is_file():
         raise AcceptanceValidationError(f"artifact does not exist: {artifact['path']}")
+    expected = (root / "out" / "acceptance" / release_id).resolve()
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(expected)
+    except ValueError as exc:
+        raise AcceptanceValidationError(
+            f"artifact resolves outside acceptance directory: {artifact['path']}"
+        ) from exc
+    path = resolved
     payload = path.read_bytes()
     if len(payload) != artifact["size_bytes"]:
         raise AcceptanceValidationError(f"artifact size mismatch: {artifact['path']}")

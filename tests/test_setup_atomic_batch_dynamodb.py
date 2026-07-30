@@ -38,4 +38,9 @@ def test_atomic_authority_enables_pitr_and_uses_composite_key():
 
     assert "AttributeName=pk,KeyType=HASH" in script
     assert "AttributeName=sk,KeyType=RANGE" in script
+    assert 'HASH_KEY" != "pk"' in script
+    assert 'RANGE_KEY" != "sk"' in script
+    assert 'PK_TYPE" != "S"' in script
+    assert 'SK_TYPE" != "S"' in script
+    assert "incompatible key schema" in script
     assert "PointInTimeRecoveryEnabled=true" in script

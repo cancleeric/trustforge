@@ -169,6 +169,19 @@ def test_release_binding_and_artifact_boundary_are_enforced(tmp_path: Path) -> N
         _validate(summary, tmp_path)
 
 
+def test_symlinked_artifact_fails_closed(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
+    artifact = summary["manifest"]["artifacts"][0]
+    path = tmp_path / artifact["path"]
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(outside)
+
+    with pytest.raises(AcceptanceValidationError, match="contains symlink"):
+        _validate(summary, tmp_path)
+
+
 def test_evidence_must_exist_in_manifest(tmp_path: Path) -> None:
     summary = _valid_summary(tmp_path)
     summary["cases"][0]["evidence"][0]["path"] = (
