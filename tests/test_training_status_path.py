@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import builtins
+import os
 from pathlib import Path
 
 from trustforge import web
@@ -76,6 +77,27 @@ def test_training_status_unreadable_file_fails_instead_of_returning_partial_coun
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", guarded_open)
+
+    status, body = web._handle_api_training_status()
+
+    assert status == 503
+    assert _payload(body)["error"]["code"] == "training_data_unavailable"
+
+
+def test_training_status_unenumerable_directory_fails_instead_of_returning_zero(
+    monkeypatch, tmp_path: Path
+) -> None:
+    training_dir = tmp_path / "training"
+    training_dir.mkdir()
+    monkeypatch.setenv("TRUSTFORGE_TRAINING_DATA_DIR", str(training_dir))
+    real_scandir = os.scandir
+
+    def guarded_scandir(path):
+        if Path(path) == training_dir:
+            raise PermissionError("test unenumerable directory")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
 
     status, body = web._handle_api_training_status()
 

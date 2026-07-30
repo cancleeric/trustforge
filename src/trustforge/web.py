@@ -5966,7 +5966,12 @@ def _handle_api_training_status() -> tuple[int, str]:
     per_coin: dict[str, dict[str, int]] = {}
 
     try:
-        jsonl_files = sorted(training_data_dir.glob("*.jsonl"))
+        with os.scandir(training_data_dir) as entries:
+            jsonl_files = sorted(
+                Path(entry.path)
+                for entry in entries
+                if entry.is_file() and entry.name.endswith(".jsonl")
+            )
     except OSError:
         return 503, _json_envelope_err(
             "training_data_unavailable", "訓練資料目錄無法讀取"
