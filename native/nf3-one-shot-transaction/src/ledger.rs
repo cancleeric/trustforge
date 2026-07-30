@@ -8,7 +8,7 @@ use std::{marker::PhantomData, rc::Rc};
 const RECORD_MAX: usize = 4096;
 const STORE_MAX_ENTRIES: usize = 1024;
 // Reserve burn, PREPARED, CLAIMED, terminal, and poison before accepting work.
-const RESERVED_RECOVERY_SLOTS: usize = 5;
+const RESERVED_RECOVERY_SLOTS: usize = 8;
 const MAX_FUTURE_NS: u64 = 300_000_000_000;
 const PRODUCTION_ROOT: &str = "/var/lib/trustforge/native-foundation/nf3";
 const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -259,9 +259,33 @@ impl LedgerStore {
 
     fn records(&self, _lock: &StoreLockGuard<'_>) -> Result<Vec<Record>, Error> {
         let entries = _lock.entries_in(&self.heads)?;
+        let record_entries = entries
+            .iter()
+            .filter(|e| e.name.ends_with(".record"))
+            .collect::<Vec<_>>();
+        let marker_entries = entries
+            .iter()
+            .filter(|e| e.name.ends_with(".record.durable"))
+            .collect::<Vec<_>>();
+        if record_entries.len() != marker_entries.len() || record_entries.len() * 2 != entries.len()
+        {
+            return Err(Error::UnsafeObject("STORE_POISONED"));
+        }
         let mut records: Vec<Record> = Vec::new();
         let mut previous = ZERO.to_owned();
-        for (sequence, entry) in entries.iter().enumerate() {
+        for (sequence, entry) in record_entries.iter().enumerate() {
+            let marker_name = format!("{}.durable", entry.name);
+            if !marker_entries
+                .iter()
+                .any(|marker| marker.name == marker_name)
+            {
+                return Err(Error::UnsafeObject("STORE_POISONED"));
+            }
+            if _lock.read_in(&self.heads, &marker_name, RECORD_MAX)?
+                != format!("v1\nrecord={}\n", entry.name).as_bytes()
+            {
+                return Err(Error::UnsafeObject("STORE_POISONED"));
+            }
             let bytes = _lock.read_in(&self.heads, &entry.name, RECORD_MAX)?;
             let record = parse_record(&bytes)?;
             let hash = hash_bytes(&bytes, RECORD_MAX)?;
@@ -346,10 +370,13 @@ impl LedgerStore {
             .unwrap_or_else(|| ZERO.into());
         let bytes = encode_record(sequence, state, binding, &self.store_id, &previous);
         let hash = hash_bytes(&bytes, RECORD_MAX)?;
+        let record_name = format!("{sequence:08}-{hash}.record");
+        lock.create_in(&self.heads, &record_name, &bytes, RECORD_MAX)?;
+        let marker = format!("v1\nrecord={record_name}\n");
         lock.create_in(
             &self.heads,
-            &format!("{sequence:08}-{hash}.record"),
-            &bytes,
+            &format!("{record_name}.durable"),
+            marker.as_bytes(),
             RECORD_MAX,
         )?;
         let reread = self.checked_records(lock)?;

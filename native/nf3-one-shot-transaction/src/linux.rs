@@ -205,16 +205,40 @@ impl Dir {
             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
             0o600,
         )?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_CREATE",
+        )?;
         sys::fchmod(&fd, 0o600)?;
         verify_file(&fd, self.uid, Some(0o600), None)?;
         write_loop(&fd, bytes)?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_WRITE",
+        )?;
         sys::fdatasync(&fd)?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_FDATASYNC",
+        )?;
         let stat = verify_file(&fd, self.uid, Some(0o600), None)?;
         let named = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
         if identity(&stat) != identity(&named) {
             return Err(Error::IdentityChanged);
         }
         sys::fsync(&self.fd)?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_DIR_FSYNC",
+        )?;
         Ok(entry(name.to_str().map_err(|_| Error::InvalidName)?, &stat))
     }
 
@@ -367,6 +391,54 @@ impl Dir {
             return Err(Error::IdentityChanged);
         }
         Ok(fd)
+    }
+}
+
+#[cfg(feature = "adversarial-test-hooks")]
+fn adversarial_create_point(name: &str, bytes: &[u8], stage: &str) -> Result<(), Error> {
+    use std::io::Write;
+    let artifact = if name.ends_with(".burn") {
+        "BURN"
+    } else if bytes
+        .windows(b"state=PREPARED".len())
+        .any(|w| w == b"state=PREPARED")
+    {
+        "PREPARED"
+    } else if bytes
+        .windows(b"state=CLAIMED".len())
+        .any(|w| w == b"state=CLAIMED")
+    {
+        "CLAIMED"
+    } else if bytes
+        .windows(b"state=COMMITTED".len())
+        .any(|w| w == b"state=COMMITTED")
+    {
+        "COMMIT"
+    } else if bytes
+        .windows(b"state=TOMBSTONED".len())
+        .any(|w| w == b"state=TOMBSTONED")
+    {
+        "TOMBSTONE"
+    } else {
+        return Ok(());
+    };
+    if std::env::var("TRUSTFORGE_NF3_HOOK_ARTIFACT").as_deref() != Ok(artifact)
+        || std::env::var("TRUSTFORGE_NF3_HOOK_STAGE").as_deref() != Ok(stage)
+    {
+        return Ok(());
+    }
+    if let Ok(kind) = std::env::var("TRUSTFORGE_NF3_HOOK_ERROR") {
+        return Err(std::io::Error::from_raw_os_error(match kind.as_str() {
+            "EIO" => 5,
+            "ENOSPC" => 28,
+            _ => return Err(Error::UnsafeObject("invalid adversarial error")),
+        })
+        .into());
+    }
+    println!("PAUSED artifact={artifact} stage={stage}");
+    std::io::stdout().flush()?;
+    loop {
+        std::thread::park()
     }
 }
 
