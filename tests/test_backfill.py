@@ -18,7 +18,7 @@ from trustforge.backfill import (
 
 
 @pytest.fixture(autouse=True)
-def _no_real_network(monkeypatch):
+def _isolated_backfill_runtime(monkeypatch, tmp_path):
     """Block real HTTP calls in backfill tests.
 
     ``BackfillWorker._load_historical_sources`` fetches full Fear & Greed +
@@ -36,6 +36,10 @@ def _no_real_network(monkeypatch):
     monkeypatch.setattr(
         "trustforge.ingestion.safe_fetch.fetch_url", _fail,
     )
+    monkeypatch.setenv(
+        "TRUSTFORGE_TRAINING_DATA_DIR",
+        str(tmp_path / "training"),
+    )
 
 
 @pytest.fixture
@@ -47,9 +51,20 @@ def tmp_env(tmp_path):
         "TRUSTFORGE_BACKFILL_STATE_PATH": str(state_file),
         "TRUSTFORGE_BACKFILL_ENABLED": "",  # clear env override
         "TRUSTFORGE_HOME": str(tmp_path),
+        "TRUSTFORGE_TRAINING_DATA_DIR": str(tmp_path / "data" / "training"),
     }
     with patch.dict(os.environ, env, clear=False):
         yield {"state": state_file, "db": db_file, "tmp": tmp_path}
+
+
+def test_worker_and_status_api_share_configured_training_directory(monkeypatch, tmp_path):
+    training_dir = tmp_path / "canonical-training"
+    monkeypatch.setenv("TRUSTFORGE_TRAINING_DATA_DIR", str(training_dir))
+
+    worker = BackfillWorker(db_path=tmp_path / "backfill.sqlite3")
+
+    assert worker.training_data_dir == training_dir
+    worker.close()
 
 
 # ─── 啟停控制 ─────────────────────────────────────────────────────────────
@@ -559,6 +574,7 @@ def isolated_env(tmp_path):
         "TRUSTFORGE_BACKFILL_STATE_PATH": str(state_file),
         "TRUSTFORGE_BACKFILL_ENABLED": "",
         "TRUSTFORGE_HOME": str(tmp_path),
+        "TRUSTFORGE_TRAINING_DATA_DIR": str(tmp_path / "data" / "training"),
     }
     with patch.dict(os.environ, env, clear=False):
         yield {"state": state_file, "db": db_file, "tmp": tmp_path}
