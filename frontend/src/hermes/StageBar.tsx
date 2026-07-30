@@ -4,6 +4,7 @@ import type { HermesWorkspaceModule } from './HermesModuleDeck'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import type { AnalysisFlowData } from '../lib/endpoints'
 import { moduleStageLabels } from './stagePresentation'
+import { workspaceStageId } from './workspaceStageDetails'
 
 interface StageBarProps {
   selCoin: GalaxyCoin
@@ -19,7 +20,6 @@ interface StageBarProps {
 export default function StageBar({ selCoin, derivation, selectedStage, onSelectStage, mode = null, telemetry = null, activity, flow }: StageBarProps) {
   const { locale, t } = useHermesI18n()
   const moduleLabels = moduleStageLabels(locale)
-  const hasTypedDetails = mode === null
   const liveFlow = !telemetry?.runId && flow?.stages.some((stage) => stage.current || stage.queued > 0)
   const engineStages = mode === 'analyze' && liveFlow ? flow?.stages.map((stage) => ({
     id: stage.id,
@@ -62,20 +62,15 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
       </div>
       <div className="hermes-energy-nodes">
         {stages.map((stage, index) => {
-          const selected = selectedStage === stage.id
+          const stageSelectionId = mode ? workspaceStageId(mode, index) : stage.id
+          const selected = selectedStage === stageSelectionId
           return (
             <button
               type="button"
               key={stage.id}
               aria-pressed={selected}
-              disabled={!hasTypedDetails}
-              aria-label={!hasTypedDetails
-                ? `${stage.label} · ${locale === 'zh-TW' ? '階段資料尚未提供，無法開啟明細' : 'stage data unavailable; details cannot be opened'}`
-                : undefined}
-              title={!hasTypedDetails
-                ? (locale === 'zh-TW' ? '此工作區尚未提供可驗證的階段資料與明細。' : 'This workspace does not yet provide verifiable stage data or details.')
-                : undefined}
-              onClick={() => onSelectStage(stage.id)}
+              aria-label={stage.label}
+              onClick={() => onSelectStage(stageSelectionId)}
               className={`hermes-energy-station${selected ? ' is-selected' : ''}`}
               style={{ '--station-color': stage.color } as React.CSSProperties}
             >

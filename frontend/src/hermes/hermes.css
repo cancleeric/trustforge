@@ -800,6 +800,26 @@
   overflow: hidden;
 }
 
+.hermes-workspace-stage-drilldown{display:flex;flex-direction:column;background:rgba(8,14,22,.96);border:1px solid var(--color-hermes-bd2);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:hermes-panel-in .22s ease-out}
+.hermes-workspace-stage-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--color-hermes-bd)}
+.hermes-workspace-stage-header>div{display:grid;gap:4px}
+.hermes-workspace-stage-header small{font-size:9px;letter-spacing:1.2px;color:var(--color-hermes-cyan)}
+.hermes-workspace-stage-header strong{font-size:14px;color:var(--color-hermes-tx)}
+.hermes-workspace-stage-header button{background:transparent;border:1px solid var(--color-hermes-bd2);border-radius:5px;color:var(--color-hermes-tx2);font-size:10px;padding:4px 9px;cursor:pointer}
+.hermes-workspace-stage-body{display:grid;gap:14px;overflow:auto;padding:16px 18px}
+.hermes-workspace-stage-body>section{padding:10px 12px;border-left:2px solid;background:rgba(4,10,17,.72)}
+.hermes-workspace-stage-body small{font-size:9px;letter-spacing:1px;color:var(--color-hermes-tx2)}
+.hermes-workspace-stage-body p{margin:5px 0 0;font-size:11.5px;line-height:1.65;color:var(--color-hermes-tx)}
+.hermes-workspace-stage-metric{display:grid;gap:5px;padding:12px;border:1px solid var(--color-hermes-bd2);background:var(--color-hermes-inset)}
+.hermes-workspace-stage-metric strong{font-size:22px;color:var(--color-hermes-cyan)}
+.hermes-workspace-stage-metric span{font-size:11px;color:var(--color-hermes-tx2)}
+.hermes-workspace-stage-body dl{display:grid;gap:6px;margin:0}
+.hermes-workspace-stage-body dl div{display:flex;gap:12px;padding:7px 9px;border-bottom:1px solid var(--color-hermes-bd)}
+.hermes-workspace-stage-body dt{min-width:110px;color:var(--color-hermes-tx3);font-size:10px}
+.hermes-workspace-stage-body dd{margin:0;color:var(--color-hermes-tx);font-size:10.5px;overflow-wrap:anywhere}
+.hermes-workspace-stage-missing{padding:14px;border:1px solid rgba(232,179,77,.45);background:rgba(232,179,77,.07)}
+.hermes-workspace-stage-missing strong{font-size:11px;color:var(--color-hermes-amber)}
+
 /* 主艦橋內嵌工作台：所有分析資料留在首頁，不再跳離星系艙。 */
 .hermes-module-deck {
   position: absolute;

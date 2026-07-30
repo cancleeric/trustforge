@@ -149,7 +149,7 @@ describe('HermesDashboard workspace navigation', () => {
     expect(registerAnalysisQuestion).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('closes an open stage drilldown when switching to a status-only workspace', async () => {
+  it('closes an open homepage drilldown when switching workspaces and exposes workspace details', async () => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
@@ -163,7 +163,10 @@ describe('HermesDashboard workspace navigation', () => {
     fireEvent.click(screen.getByText('compare entry'))
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    expect(screen.getByRole('button', { name: '市場 A · 階段資料尚未提供，無法開啟明細' })).toBeDisabled()
+    const marketA = screen.getByRole('button', { name: '市場 A' })
+    expect(marketA).toBeEnabled()
+    fireEvent.click(marketA)
+    expect(screen.getByRole('dialog', { name: '市場 A' })).toHaveTextContent('尚無可驗證階段資料')
   })
 
   it('renders only the dashboard composer when Analyze is embedded on desktop', () => {
