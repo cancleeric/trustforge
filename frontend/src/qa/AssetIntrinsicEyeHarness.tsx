@@ -61,18 +61,19 @@ function payload(long = false) {
 function fixture(scenario: string) {
   if (scenario === 'malformed') return { mode: 'official', affects_official_score: true }
   const value = payload(scenario === 'long')
-  if (scenario === 'official') {
+  if (scenario === 'official-forgery') {
     return {
       ...value,
       mode: 'official',
       affects_official_score: true,
-      release_capability: { capability: 'asset_intrinsic', promoted_at: '2026-07-28T00:00:00Z' },
-      promotion_receipt: {
-        receipt_id: 'rc-eye-878',
-        policy_digest: 'sha256:policy-eye-878',
-        decision: 'pass',
-        reasons: ['non-inferiority gate met'],
-        calibration_claim: {},
+      official_state: {
+        schema_version: 'trustforge.intrinsic-official-state/v1',
+        state: 'official',
+        capability_id: 'asset-intrinsic-v1',
+        verified_at: '2026-07-28T00:00:00Z',
+        expires_at: null,
+        release_id: 'release-eye',
+        reason: 'verified',
       },
     }
   }

@@ -817,6 +817,174 @@
     "title": "TrustForge AssetIntrinsicProfile",
     "type": "object"
   },
+  "ComparisonReport": {
+    "$id": "https://trustforge.local/contracts/comparison-report/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "coin_a": {
+        "maxLength": 32,
+        "minLength": 1,
+        "type": "string"
+      },
+      "coin_b": {
+        "maxLength": 32,
+        "minLength": 1,
+        "type": "string"
+      },
+      "conclusion": {
+        "maxLength": 16384,
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "confidence": {
+        "maximum": 1,
+        "minimum": 0,
+        "type": "number"
+      },
+      "could_flip": {
+        "items": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "maxItems": 1000,
+        "type": "array"
+      },
+      "dimensions": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "a_evidence_refs": {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 10000,
+              "type": "array"
+            },
+            "b_evidence_refs": {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxItems": 10000,
+              "type": "array"
+            },
+            "confidence": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "decision": {
+              "enum": [
+                "abstain",
+                "insufficient",
+                "normal"
+              ]
+            },
+            "dimension": {
+              "enum": [
+                "價格動能",
+                "鏈上活動",
+                "市場情緒",
+                "生態發展"
+              ]
+            },
+            "finding": {
+              "maxLength": 16384,
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 16384,
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dimension",
+            "label",
+            "finding",
+            "a_evidence_refs",
+            "b_evidence_refs",
+            "confidence",
+            "decision"
+          ],
+          "type": "object"
+        },
+        "maxItems": 32,
+        "type": "array"
+      },
+      "generated_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "limits": {
+        "items": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "maxItems": 1000,
+        "type": "array"
+      },
+      "query": {
+        "maxLength": 16384,
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "supporting_evidence_a": {
+        "items": {
+          "type": "object"
+        },
+        "maxItems": 10000,
+        "type": "array"
+      },
+      "supporting_evidence_b": {
+        "items": {
+          "type": "object"
+        },
+        "maxItems": 10000,
+        "type": "array"
+      },
+      "supporting_report_a": {
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "supporting_report_b": {
+        "type": [
+          "object",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "coin_a",
+      "coin_b",
+      "query",
+      "conclusion",
+      "dimensions",
+      "confidence",
+      "limits",
+      "could_flip",
+      "generated_at",
+      "supporting_report_a",
+      "supporting_report_b",
+      "supporting_evidence_a",
+      "supporting_evidence_b"
+    ],
+    "title": "TrustForge ComparisonReport",
+    "type": "object"
+  },
   "DependencyEdge": {
     "$id": "https://trustforge.local/contracts/dependency-edge/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1004,6 +1172,90 @@
       "trust_components"
     ],
     "title": "TrustForge Evidence",
+    "type": "object"
+  },
+  "IntrinsicOfficialState": {
+    "$id": "https://trustforge.local/contracts/intrinsic-official-state/v1",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "capability_id": {
+        "anyOf": [
+          {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "expires_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "maxLength": 64,
+            "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reason": {
+        "enum": [
+          "authority_unavailable",
+          "shadow_only",
+          "promotion_blocked",
+          "verified",
+          "expired",
+          "invalid_authority"
+        ]
+      },
+      "release_id": {
+        "anyOf": [
+          {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "schema_version": {
+        "const": "trustforge.intrinsic-official-state/v1"
+      },
+      "state": {
+        "enum": [
+          "shadow",
+          "blocked",
+          "official",
+          "error"
+        ]
+      },
+      "verified_at": {
+        "format": "date-time",
+        "maxLength": 64,
+        "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "state",
+      "capability_id",
+      "verified_at",
+      "expires_at",
+      "release_id",
+      "reason"
+    ],
+    "title": "TrustForge IntrinsicOfficialState",
     "type": "object"
   },
   "PeerMetricsSnapshot": {
@@ -1670,6 +1922,90 @@
         ],
         "type": "object"
       },
+      "IntrinsicOfficialState": {
+        "$id": "https://trustforge.local/contracts/intrinsic-official-state/v1",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "capability_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "maxLength": 64,
+                "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "enum": [
+              "authority_unavailable",
+              "shadow_only",
+              "promotion_blocked",
+              "verified",
+              "expired",
+              "invalid_authority"
+            ]
+          },
+          "release_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "const": "trustforge.intrinsic-official-state/v1"
+          },
+          "state": {
+            "enum": [
+              "shadow",
+              "blocked",
+              "official",
+              "error"
+            ]
+          },
+          "verified_at": {
+            "format": "date-time",
+            "maxLength": 64,
+            "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "state",
+          "capability_id",
+          "verified_at",
+          "expires_at",
+          "release_id",
+          "reason"
+        ],
+        "title": "TrustForge IntrinsicOfficialState",
+        "type": "object"
+      },
       "TermAnnotation": {
         "additionalProperties": false,
         "properties": {
@@ -1727,6 +2063,16 @@
         "anyOf": [
           {
             "$ref": "#/$defs/AssetIntrinsicAssessment"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "asset_intrinsic_official_state": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/IntrinsicOfficialState"
           },
           {
             "type": "null"
