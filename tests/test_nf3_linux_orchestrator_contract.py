@@ -122,6 +122,30 @@ def test_handoff_mount_identity_rejects_noexec_and_nonlocal(mountinfo):
     assert failure.value.code == orchestrator.BLOCKED
 
 
+def test_probe_and_pin_gates_precede_persistent_handoff_creation():
+    value = source()
+    assert value.index("if arguments.probe_remapped_builds:") < value.index(
+        "with handoff_session(head)"
+    )
+    assert value.index("release_probe_hash != EXPECTED_RELEASE_PROBE_SHA256") < (
+        value.index("with handoff_session(head)")
+    )
+
+
+def test_handoff_session_finalizes_on_exception():
+    opened = (-1, -2, "commit-random", {"mount_id": "1"})
+    with (
+        mock.patch.object(
+            orchestrator, "_validate_handoff_directory", return_value=opened
+        ),
+        mock.patch.object(orchestrator, "finalize_handoff_generation") as finalize,
+        pytest.raises(RuntimeError, match="controlled failure"),
+    ):
+        with orchestrator.handoff_session("commit"):
+            raise RuntimeError("controlled failure")
+    finalize.assert_called_once_with(-1, -2, "commit-random", {})
+
+
 def test_handoff_rejects_non_plain_destination(tmp_path):
     with pytest.raises(ValueError, match="one plain filename"):
         orchestrator.stage_handoff_file(
@@ -172,23 +196,25 @@ def test_nested_execstart_uses_existing_fixed_wrappers_without_shell_strings():
     assert 'SYSTEMD_SCRIPT_WRAPPER = "/bin/bash"' in value
     release = value[value.index("release_profile_line = run(") :]
     release = release[: release.index("expected_release_fields =")]
-    assert (
-        'SYSTEMD_EXEC_WRAPPER,\n                "/run/trustforge-nf3-release-probe",'
-    ) in release
+    assert '"/run/trustforge-nf3-release-probe"' in release
+    assert release.index("SYSTEMD_EXEC_WRAPPER") < release.index(
+        '"/run/trustforge-nf3-release-probe"'
+    )
     integrated = value[value.index('command = ["systemd-run"') :]
     integrated = integrated[: integrated.index("run(command, cwd=repo)")]
-    assert (
-        "SYSTEMD_SCRIPT_WRAPPER,\n"
-        '                "/run/trustforge-nf3-run-integrated-linux",'
-    ) in integrated
+    assert '"/run/trustforge-nf3-run-integrated-linux"' in integrated
+    assert integrated.index("SYSTEMD_SCRIPT_WRAPPER") < integrated.index(
+        '"/run/trustforge-nf3-run-integrated-linux"'
+    )
     assert '"/bin/bash -c"' not in value
     assert '"sh", "-c"' not in value
 
 
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
-    test_invocation = value[
-        value.index('harness.host_tool("cargo"),\n                "test"') :
+    normalized = "".join(value.split())
+    test_invocation = normalized[
+        normalized.index('harness.host_tool("cargo"),"test"') :
     ]
     assert '"--lib"' in test_invocation
     assert '"--tests"' in test_invocation

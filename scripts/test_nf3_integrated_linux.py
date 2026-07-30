@@ -9,6 +9,7 @@ BLOCKED_EXTERNAL_LINUX, never PASS.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -226,31 +227,53 @@ def _validate_handoff_directory(
     mount_identity = handoff_mount_identity(Path("/proc/self/mountinfo").read_text())
     generation = f"{reviewed_commit}-{secrets.token_hex(16)}"
     os.mkdir(generation, 0o700, dir_fd=descriptor)
-    generation_fd = os.open(
-        generation,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        dir_fd=descriptor,
-    )
-    metadata = os.fstat(generation_fd)
-    if (
-        metadata.st_uid != 0
-        or metadata.st_gid != 0
-        or metadata.st_nlink != 2
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
-        block("NF3 handoff generation metadata is unsafe")
-    active = os.open(
-        "ACTIVE",
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o400,
-        dir_fd=generation_fd,
-    )
-    os.write(active, (reviewed_commit + "\n").encode())
-    os.fsync(active)
-    os.close(active)
-    os.fsync(generation_fd)
-    os.fsync(descriptor)
-    return descriptor, generation_fd, generation, mount_identity
+    generation_fd = -1
+    active = -1
+    try:
+        generation_fd = os.open(
+            generation,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=descriptor,
+        )
+        metadata = os.fstat(generation_fd)
+        if (
+            metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or metadata.st_nlink != 2
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            block("NF3 handoff generation metadata is unsafe")
+        active = os.open(
+            "ACTIVE",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o400,
+            dir_fd=generation_fd,
+        )
+        os.write(active, (reviewed_commit + "\n").encode())
+        os.fsync(active)
+        os.close(active)
+        active = -1
+        os.fsync(generation_fd)
+        os.fsync(descriptor)
+        return descriptor, generation_fd, generation, mount_identity
+    except BaseException:
+        if active >= 0:
+            os.close(active)
+        if generation_fd >= 0:
+            entries = os.listdir(generation_fd)
+            if entries == ["ACTIVE"]:
+                active_metadata = os.stat(
+                    "ACTIVE", dir_fd=generation_fd, follow_symlinks=False
+                )
+                if stat.S_ISREG(active_metadata.st_mode):
+                    os.unlink("ACTIVE", dir_fd=generation_fd)
+            if os.listdir(generation_fd):
+                block("NF3 handoff initialization cleanup found unknown state")
+            os.close(generation_fd)
+        os.rmdir(generation, dir_fd=descriptor)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        raise
 
 
 def stage_handoff_file(
@@ -317,6 +340,15 @@ def stage_handoff_file(
             block(f"staged handoff metadata mismatch: {destination}")
         os.fsync(handoff_fd)
         return _file_generation(staged)
+    except BaseException:
+        if destination_fd >= 0:
+            staged = os.fstat(destination_fd)
+            named = os.stat(destination, dir_fd=handoff_fd, follow_symlinks=False)
+            if _file_generation(staged) != _file_generation(named):
+                block(f"partial handoff cleanup generation mismatch: {destination}")
+            os.unlink(destination, dir_fd=handoff_fd)
+            os.fsync(handoff_fd)
+        raise
     finally:
         if destination_fd >= 0:
             os.close(destination_fd)
@@ -367,6 +399,24 @@ def finalize_handoff_generation(
     if os.listdir(parent_fd):
         block("NF3 handoff StateDirectory is not empty after terminal cleanup")
     os.close(parent_fd)
+
+
+@contextlib.contextmanager
+def handoff_session(reviewed_commit: str):
+    """Own one exact handoff generation and always drive it to terminal cleanup."""
+    parent_fd, generation_fd, generation, mount_identity = _validate_handoff_directory(
+        reviewed_commit
+    )
+    artifacts: dict[str, tuple[int, ...]] = {}
+    try:
+        yield generation_fd, generation, mount_identity, artifacts
+    finally:
+        finalize_handoff_generation(
+            parent_fd,
+            generation_fd,
+            generation,
+            artifacts,
+        )
 
 
 def load_nf2_harness(repo: Path):
@@ -955,11 +1005,6 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="trustforge-nf3-b-") as raw:
         scratch = Path(raw)
-        handoff_parent_fd, handoff_fd, handoff_generation, handoff_mount = (
-            _validate_handoff_directory(head)
-        )
-        handoff_path = HANDOFF_ROOT / handoff_generation
-        handoff_generations: dict[str, tuple[int, ...]] = {}
         toolchain = verified_rust_toolchain(repo, scratch / "toolchain-environment")
         source_a = copy_reviewed_build_inputs(repo, scratch / "source-a")
         source_b = copy_reviewed_build_inputs(repo, scratch / "different-source-b")
@@ -1015,312 +1060,318 @@ def main() -> int:
             block("integrated helper is not the pinned native-host object")
         if evidence_rlib_hashes[0] != EXPECTED_EVIDENCE_RLIB_SHA256:
             block("exact NF2 rlib consumed by evidence helper differs")
-        release_receipt = scratch / "release-receipt.v1"
-        write_build_receipt(
-            release_receipt,
-            "release",
-            release_probe_hash,
-            EXPECTED_RELEASE_RLIB_SHA256,
-        )
-        handoff_generations["release-receipt.v1"] = stage_handoff_file(
-            handoff_fd,
-            release_receipt,
-            "release-receipt.v1",
-            expected_sha256=digest(release_receipt),
-        )
-        handoff_generations["release-probe"] = stage_handoff_file(
-            handoff_fd,
-            release_probe_a,
-            "release-probe",
-            expected_sha256=release_probe_hash,
-            executable=True,
-        )
-        release_profile_line = run(
-            [
-                "systemd-run",
-                "--wait",
-                "--collect",
-                "--pipe",
-                f"--unit=trustforge-nf3-release-receipt-{head[:12]}",
-                "--property=Type=oneshot",
-                "--property=User=root",
-                "--property=NoNewPrivileges=yes",
-                "--property=ProtectSystem=strict",
-                "--property=PrivateTmp=yes",
-                "--property=RuntimeDirectory=trustforge-nf3-build",
-                "--property=RuntimeDirectoryMode=0700",
-                f"--property=BindReadOnlyPaths={handoff_path / 'release-receipt.v1'}:/run/trustforge-nf3-build/receipt.v1",
-                f"--property=BindReadOnlyPaths={handoff_path / 'release-probe'}:/run/trustforge-nf3-release-probe",
-                SYSTEMD_EXEC_WRAPPER,
-                "/run/trustforge-nf3-release-probe",
-            ],
-            cwd=repo,
-            capture=True,
-        )
-        expected_release_fields = {
-            "profile": "release",
-            "source": "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc",
-            "rlib": EXPECTED_RELEASE_RLIB_SHA256,
-            "profile_receipt": RELEASE_PROFILE_RECEIPT_SHA256,
-            "foundation": "e5bb12ff9bc2bd371cd2e196399838a7f7ae1b803b5481861f36fca16b09e245",
-        }
-        tokens = release_profile_line.split()
-        if len(tokens) != 6 or tokens[0] != "BOUND_PROFILE":
-            block("release profile probe shape mismatch")
-        actual_release_fields = dict(token.split("=", 1) for token in tokens[1:])
-        if actual_release_fields != expected_release_fields:
-            block("release profile probe identity mismatch")
-        evidence_receipt = scratch / "evidence-receipt.v1"
-        write_build_receipt(
-            evidence_receipt,
-            "evidence",
-            helper_hashes[0],
-            EXPECTED_EVIDENCE_RLIB_SHA256,
-        )
-        handoff_generations["evidence-receipt.v1"] = stage_handoff_file(
-            handoff_fd,
-            evidence_receipt,
-            "evidence-receipt.v1",
-            expected_sha256=digest(evidence_receipt),
-        )
-        handoff_generations["evidence-helper"] = stage_handoff_file(
-            handoff_fd,
-            helper_a,
-            "evidence-helper",
-            expected_sha256=helper_hashes[0],
-            executable=True,
-        )
-        handoff_generations["evidence-nf2.rlib"] = stage_handoff_file(
-            handoff_fd,
-            evidence_rlib_a,
-            "evidence-nf2.rlib",
-            expected_sha256=EXPECTED_EVIDENCE_RLIB_SHA256,
-        )
-        integrated_script = (
-            repo / "native/nf3-one-shot-transaction/tests/run_integrated_linux.sh"
-        )
-        handoff_generations["run-integrated-linux"] = stage_handoff_file(
-            handoff_fd,
-            integrated_script,
-            "run-integrated-linux",
-            expected_sha256=digest(integrated_script),
-            executable=True,
-        )
-        verify_release_rejects_hooks(
-            canonical_source, scratch / "release-hook-rejection", toolchain
-        )
-
-        harness, base_environment, target_tree, target_entries = toolchain
-        test_environment = cargo_environment(
-            base_environment, canonical_source, scratch / "tests"
-        )
-        run(
-            [
-                harness.host_tool("cargo"),
-                "test",
-                "--manifest-path",
-                str(canonical_source / "native/nf3-one-shot-transaction/Cargo.toml"),
-                "--target",
-                TARGET,
-                "--lib",
-                "--tests",
-                "--bins",
-                "--locked",
-                "--offline",
-                "--frozen",
-            ],
-            cwd=canonical_source,
-            environment=test_environment,
-            pass_fds=harness.verified_pass_fds(),
-        )
-        verify_target_tree(harness, target_tree, target_entries)
-
-        run(
-            [
-                str(repo / "scripts/test_nf2_zero_capability_linux.py"),
-                "--source-tree",
-                str(repo),
-                "--reviewed-commit",
-                arguments.reviewed_commit,
-                "--accepted-install",
-                str(install),
-                "--accepted-archive",
-                str(archive),
-            ],
-            cwd=repo,
-        )
-        run(
-            [
-                str(repo / "native/nf3-one-shot-transaction/tests/run_crash_matrix.sh"),
-                str(helper_a),
-                "/root",
-            ],
-            cwd=repo,
-        )
-        unit = f"trustforge-nf3-b-{head[:12]}"
-        cases_root = Path(tempfile.mkdtemp(prefix=f"{unit}-cases-", dir="/root"))
-        os.chmod(cases_root, 0o700)
-        service_helper = Path(f"/run/{unit}-helper")
-        service_rlib = Path(f"/run/{unit}-nf2.rlib")
-        properties = [
-            "Type=oneshot",
-            "User=root",
-            "Group=root",
-            "NoNewPrivileges=yes",
-            "PrivateTmp=yes",
-            "ProtectSystem=strict",
-            "ProtectHome=read-only",
-            "ProtectKernelTunables=yes",
-            "ProtectKernelModules=yes",
-            "ProtectControlGroups=yes",
-            "RestrictAddressFamilies=AF_UNIX",
-            "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL",
-            "RuntimeDirectory=trustforge-nf3-build",
-            "RuntimeDirectoryMode=0700",
-            f"BindReadOnlyPaths={handoff_path / 'evidence-receipt.v1'}:/run/trustforge-nf3-build/receipt.v1",
-            f"BindReadOnlyPaths={install}:/opt/trustforge/native-foundation/current",
-            f"BindReadOnlyPaths={handoff_path / 'evidence-helper'}:{service_helper}",
-            f"BindReadOnlyPaths={handoff_path / 'evidence-nf2.rlib'}:{service_rlib}",
-            f"BindReadOnlyPaths={handoff_path / 'run-integrated-linux'}:/run/trustforge-nf3-run-integrated-linux",
-            "ReadWritePaths=/root",
-            "TimeoutStartSec=20min",
-        ]
-        command = ["systemd-run", "--wait", "--collect", "--pipe", f"--unit={unit}"]
-        for prop in properties:
-            command.extend(["--property", prop])
-        command.extend(
-            [
-                SYSTEMD_SCRIPT_WRAPPER,
-                "/run/trustforge-nf3-run-integrated-linux",
-                str(service_helper),
-                str(service_rlib),
-                helper_hashes[0],
-                "/root",
-                str(cases_root),
-            ]
-        )
-        run(command, cwd=repo)
-        if list(Path("/root").glob("trustforge-nf3-integrated-*")):
-            raise RuntimeError("integrated harness store cleanup incomplete")
-        case_directories = sorted(cases_root.glob("case-*"))
-        if len(case_directories) != 60:
-            raise RuntimeError("integrated per-case evidence count is not 60")
-        case_receipts: list[str] = []
-        for case_directory in case_directories:
-            evidence_file = case_directory / "evidence.json"
-            receipt = (case_directory / "evidence.json.sha256").read_text().strip()
-            if digest(evidence_file) != receipt:
-                raise RuntimeError(f"case receipt mismatch: {case_directory.name}")
-            value = json.loads(evidence_file.read_bytes())
-            if value["actual"] != value["expected"]:
-                raise RuntimeError(f"case outcome mismatch: {case_directory.name}")
-            case_receipts.append(f"{case_directory.name}={receipt}\n")
-        case_collection_sha256 = hashlib.sha256(
-            "".join(case_receipts).encode()
-        ).hexdigest()
-        cases_destination = arguments.evidence_out.with_suffix(".cases")
-        if cases_destination.exists():
-            raise RuntimeError("case evidence destination already exists")
-        shutil.copytree(cases_root, cases_destination)
-        shutil.rmtree(cases_root)
-
-        evidence = {
-            "schema": "trustforge.nf3.integrated-evidence.v1",
-            "gray_plan_amendment": (
-                "fixed /run receipt verifies actual executable before claim; "
-                "authority-neutral build evidence only"
-            ),
-            "commit": head,
-            "tree": tree,
-            "kernel": platform.release(),
-            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-            "accepted_nf1_commit": arguments.accepted_nf1_commit,
-            "accepted_nf1_source": str(nf1_source),
-            "accepted_archive_sha256": digest(archive),
-            "accepted_nf2_merge": ACCEPTED_NF2_MERGE,
-            "accepted_nf2_tree": nf2_tree,
-            "accepted_nf2_source_tree_receipt_sha256": (
-                ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256
-            ),
-            "accepted_nf2_linked_source_sha256": source_sha256,
-            "separate_nohook_release_nf2_rlib_sha256": rlib_hashes[0],
-            "release_profile_probe_sha256": release_probe_hash,
-            "linked_nf2_evidence_rlib_sha256": evidence_rlib_hashes[0],
-            "evidence_profile_receipt_sha256": EVIDENCE_PROFILE_RECEIPT_SHA256,
-            "release_profile_receipt_sha256": RELEASE_PROFILE_RECEIPT_SHA256,
-            "evidence_profile": EVIDENCE_PROFILE,
-            "release_profile": RELEASE_PROFILE,
-            "integrated_helper_sha256": helper_hashes[0],
-            "build_receipt_provenance": {
-                "kind": "canonical-native-double-build",
-                "host_class": "non-container Linux x86_64 root/systemd",
-                "reviewed_commit": arguments.reviewed_commit,
-                "canonical_build_view": str(CANONICAL_BUILD_SOURCE),
-                "source_remap": CANONICAL_SOURCE_ROOT,
-                "cross_host_substitution": "forbidden",
-            },
-            "handoff": {
-                "state_directory": str(HANDOFF_ROOT),
-                "generation": handoff_generation,
-                "mount_identity": handoff_mount,
-                "lifecycle": "ACTIVE_TO_TERMINAL_CLEAN",
-            },
-            "evidence_build_receipt_sha256": digest(evidence_receipt),
-            "release_build_receipt_sha256": digest(release_receipt),
-            "foundation_sha256": EXPECTED_FOUNDATION_SHA256,
-            "witness_semantics": {
-                "ATTEMPT": "durable boundary immediately before NF2 call; not proof of action",
-                "DEFINITE_SUCCESS": "NF2 returned its fixed Completed outcome",
-            },
-            "tool_sha256": {
-                **{
-                    name: tool.expected
-                    for name, tool in harness.VERIFIED_HOST_TOOLS.items()
-                    if name in ("rustup", "cargo", "rustc", "rust-lld")
-                },
-                **{
-                    name: digest(Path(path))
-                    for name in (
-                        "git",
-                        "systemctl",
-                        "systemd-run",
-                        "systemd-detect-virt",
-                        "bash",
-                        "python3",
-                    )
-                    if (path := shutil.which(name)) is not None
-                },
-            },
-            "composed_matrices": {
-                "nf2_positive_adversarial": "PASS",
-                "a2_durability_cases": 60,
-                "integrated_success_before_commit": {
-                    "SIGKILL": 20,
-                    "EIO": 20,
-                    "ENOSPC": 20,
-                },
-                "integrated_other": "positive/replay/32-concurrency/stale",
-            },
-            "case_evidence_directory": str(cases_destination),
-            "case_evidence_collection_sha256": case_collection_sha256,
-            "non_claims": [
-                "no signer/capability/authorization/release authority",
-                "build receipt is not a trust verifier or signer",
-                "malicious root authoring a false build receipt is excluded",
-                "no malicious-root whole-volume rollback resistance",
-            ],
-        }
-        arguments.evidence_out.parent.mkdir(parents=True, exist_ok=True)
-        arguments.evidence_out.write_text(
-            json.dumps(evidence, sort_keys=True, indent=2) + "\n"
-        )
-        os.chmod(arguments.evidence_out, stat.S_IRUSR | stat.S_IWUSR)
-        finalize_handoff_generation(
-            handoff_parent_fd,
+        with handoff_session(head) as (
             handoff_fd,
             handoff_generation,
+            handoff_mount,
             handoff_generations,
-        )
+        ):
+            handoff_path = HANDOFF_ROOT / handoff_generation
+            release_receipt = scratch / "release-receipt.v1"
+            write_build_receipt(
+                release_receipt,
+                "release",
+                release_probe_hash,
+                EXPECTED_RELEASE_RLIB_SHA256,
+            )
+            handoff_generations["release-receipt.v1"] = stage_handoff_file(
+                handoff_fd,
+                release_receipt,
+                "release-receipt.v1",
+                expected_sha256=digest(release_receipt),
+            )
+            handoff_generations["release-probe"] = stage_handoff_file(
+                handoff_fd,
+                release_probe_a,
+                "release-probe",
+                expected_sha256=release_probe_hash,
+                executable=True,
+            )
+            release_profile_line = run(
+                [
+                    "systemd-run",
+                    "--wait",
+                    "--collect",
+                    "--pipe",
+                    f"--unit=trustforge-nf3-release-receipt-{head[:12]}",
+                    "--property=Type=oneshot",
+                    "--property=User=root",
+                    "--property=NoNewPrivileges=yes",
+                    "--property=ProtectSystem=strict",
+                    "--property=PrivateTmp=yes",
+                    "--property=RuntimeDirectory=trustforge-nf3-build",
+                    "--property=RuntimeDirectoryMode=0700",
+                    f"--property=BindReadOnlyPaths={handoff_path / 'release-receipt.v1'}:/run/trustforge-nf3-build/receipt.v1",
+                    f"--property=BindReadOnlyPaths={handoff_path / 'release-probe'}:/run/trustforge-nf3-release-probe",
+                    SYSTEMD_EXEC_WRAPPER,
+                    "/run/trustforge-nf3-release-probe",
+                ],
+                cwd=repo,
+                capture=True,
+            )
+            expected_release_fields = {
+                "profile": "release",
+                "source": "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc",
+                "rlib": EXPECTED_RELEASE_RLIB_SHA256,
+                "profile_receipt": RELEASE_PROFILE_RECEIPT_SHA256,
+                "foundation": "e5bb12ff9bc2bd371cd2e196399838a7f7ae1b803b5481861f36fca16b09e245",
+            }
+            tokens = release_profile_line.split()
+            if len(tokens) != 6 or tokens[0] != "BOUND_PROFILE":
+                block("release profile probe shape mismatch")
+            actual_release_fields = dict(token.split("=", 1) for token in tokens[1:])
+            if actual_release_fields != expected_release_fields:
+                block("release profile probe identity mismatch")
+            evidence_receipt = scratch / "evidence-receipt.v1"
+            write_build_receipt(
+                evidence_receipt,
+                "evidence",
+                helper_hashes[0],
+                EXPECTED_EVIDENCE_RLIB_SHA256,
+            )
+            handoff_generations["evidence-receipt.v1"] = stage_handoff_file(
+                handoff_fd,
+                evidence_receipt,
+                "evidence-receipt.v1",
+                expected_sha256=digest(evidence_receipt),
+            )
+            handoff_generations["evidence-helper"] = stage_handoff_file(
+                handoff_fd,
+                helper_a,
+                "evidence-helper",
+                expected_sha256=helper_hashes[0],
+                executable=True,
+            )
+            handoff_generations["evidence-nf2.rlib"] = stage_handoff_file(
+                handoff_fd,
+                evidence_rlib_a,
+                "evidence-nf2.rlib",
+                expected_sha256=EXPECTED_EVIDENCE_RLIB_SHA256,
+            )
+            integrated_script = (
+                repo / "native/nf3-one-shot-transaction/tests/run_integrated_linux.sh"
+            )
+            handoff_generations["run-integrated-linux"] = stage_handoff_file(
+                handoff_fd,
+                integrated_script,
+                "run-integrated-linux",
+                expected_sha256=digest(integrated_script),
+                executable=True,
+            )
+            verify_release_rejects_hooks(
+                canonical_source, scratch / "release-hook-rejection", toolchain
+            )
+
+            harness, base_environment, target_tree, target_entries = toolchain
+            test_environment = cargo_environment(
+                base_environment, canonical_source, scratch / "tests"
+            )
+            run(
+                [
+                    harness.host_tool("cargo"),
+                    "test",
+                    "--manifest-path",
+                    str(
+                        canonical_source / "native/nf3-one-shot-transaction/Cargo.toml"
+                    ),
+                    "--target",
+                    TARGET,
+                    "--lib",
+                    "--tests",
+                    "--bins",
+                    "--locked",
+                    "--offline",
+                    "--frozen",
+                ],
+                cwd=canonical_source,
+                environment=test_environment,
+                pass_fds=harness.verified_pass_fds(),
+            )
+            verify_target_tree(harness, target_tree, target_entries)
+
+            run(
+                [
+                    str(repo / "scripts/test_nf2_zero_capability_linux.py"),
+                    "--source-tree",
+                    str(repo),
+                    "--reviewed-commit",
+                    arguments.reviewed_commit,
+                    "--accepted-install",
+                    str(install),
+                    "--accepted-archive",
+                    str(archive),
+                ],
+                cwd=repo,
+            )
+            run(
+                [
+                    str(
+                        repo
+                        / "native/nf3-one-shot-transaction/tests/run_crash_matrix.sh"
+                    ),
+                    str(helper_a),
+                    "/root",
+                ],
+                cwd=repo,
+            )
+            unit = f"trustforge-nf3-b-{head[:12]}"
+            cases_root = Path(tempfile.mkdtemp(prefix=f"{unit}-cases-", dir="/root"))
+            os.chmod(cases_root, 0o700)
+            service_helper = Path(f"/run/{unit}-helper")
+            service_rlib = Path(f"/run/{unit}-nf2.rlib")
+            properties = [
+                "Type=oneshot",
+                "User=root",
+                "Group=root",
+                "NoNewPrivileges=yes",
+                "PrivateTmp=yes",
+                "ProtectSystem=strict",
+                "ProtectHome=read-only",
+                "ProtectKernelTunables=yes",
+                "ProtectKernelModules=yes",
+                "ProtectControlGroups=yes",
+                "RestrictAddressFamilies=AF_UNIX",
+                "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_KILL",
+                "RuntimeDirectory=trustforge-nf3-build",
+                "RuntimeDirectoryMode=0700",
+                f"BindReadOnlyPaths={handoff_path / 'evidence-receipt.v1'}:/run/trustforge-nf3-build/receipt.v1",
+                f"BindReadOnlyPaths={install}:/opt/trustforge/native-foundation/current",
+                f"BindReadOnlyPaths={handoff_path / 'evidence-helper'}:{service_helper}",
+                f"BindReadOnlyPaths={handoff_path / 'evidence-nf2.rlib'}:{service_rlib}",
+                f"BindReadOnlyPaths={handoff_path / 'run-integrated-linux'}:/run/trustforge-nf3-run-integrated-linux",
+                "ReadWritePaths=/root",
+                "TimeoutStartSec=20min",
+            ]
+            command = ["systemd-run", "--wait", "--collect", "--pipe", f"--unit={unit}"]
+            for prop in properties:
+                command.extend(["--property", prop])
+            command.extend(
+                [
+                    SYSTEMD_SCRIPT_WRAPPER,
+                    "/run/trustforge-nf3-run-integrated-linux",
+                    str(service_helper),
+                    str(service_rlib),
+                    helper_hashes[0],
+                    "/root",
+                    str(cases_root),
+                ]
+            )
+            run(command, cwd=repo)
+            if list(Path("/root").glob("trustforge-nf3-integrated-*")):
+                raise RuntimeError("integrated harness store cleanup incomplete")
+            case_directories = sorted(cases_root.glob("case-*"))
+            if len(case_directories) != 60:
+                raise RuntimeError("integrated per-case evidence count is not 60")
+            case_receipts: list[str] = []
+            for case_directory in case_directories:
+                evidence_file = case_directory / "evidence.json"
+                receipt = (case_directory / "evidence.json.sha256").read_text().strip()
+                if digest(evidence_file) != receipt:
+                    raise RuntimeError(f"case receipt mismatch: {case_directory.name}")
+                value = json.loads(evidence_file.read_bytes())
+                if value["actual"] != value["expected"]:
+                    raise RuntimeError(f"case outcome mismatch: {case_directory.name}")
+                case_receipts.append(f"{case_directory.name}={receipt}\n")
+            case_collection_sha256 = hashlib.sha256(
+                "".join(case_receipts).encode()
+            ).hexdigest()
+            cases_destination = arguments.evidence_out.with_suffix(".cases")
+            if cases_destination.exists():
+                raise RuntimeError("case evidence destination already exists")
+            shutil.copytree(cases_root, cases_destination)
+            shutil.rmtree(cases_root)
+
+            evidence = {
+                "schema": "trustforge.nf3.integrated-evidence.v1",
+                "gray_plan_amendment": (
+                    "fixed /run receipt verifies actual executable before claim; "
+                    "authority-neutral build evidence only"
+                ),
+                "commit": head,
+                "tree": tree,
+                "kernel": platform.release(),
+                "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                "accepted_nf1_commit": arguments.accepted_nf1_commit,
+                "accepted_nf1_source": str(nf1_source),
+                "accepted_archive_sha256": digest(archive),
+                "accepted_nf2_merge": ACCEPTED_NF2_MERGE,
+                "accepted_nf2_tree": nf2_tree,
+                "accepted_nf2_source_tree_receipt_sha256": (
+                    ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256
+                ),
+                "accepted_nf2_linked_source_sha256": source_sha256,
+                "separate_nohook_release_nf2_rlib_sha256": rlib_hashes[0],
+                "release_profile_probe_sha256": release_probe_hash,
+                "linked_nf2_evidence_rlib_sha256": evidence_rlib_hashes[0],
+                "evidence_profile_receipt_sha256": EVIDENCE_PROFILE_RECEIPT_SHA256,
+                "release_profile_receipt_sha256": RELEASE_PROFILE_RECEIPT_SHA256,
+                "evidence_profile": EVIDENCE_PROFILE,
+                "release_profile": RELEASE_PROFILE,
+                "integrated_helper_sha256": helper_hashes[0],
+                "build_receipt_provenance": {
+                    "kind": "canonical-native-double-build",
+                    "host_class": "non-container Linux x86_64 root/systemd",
+                    "reviewed_commit": arguments.reviewed_commit,
+                    "canonical_build_view": str(CANONICAL_BUILD_SOURCE),
+                    "source_remap": CANONICAL_SOURCE_ROOT,
+                    "cross_host_substitution": "forbidden",
+                },
+                "handoff": {
+                    "state_directory": str(HANDOFF_ROOT),
+                    "generation": handoff_generation,
+                    "mount_identity": handoff_mount,
+                    "lifecycle": "ACTIVE_TO_TERMINAL_CLEAN",
+                },
+                "evidence_build_receipt_sha256": digest(evidence_receipt),
+                "release_build_receipt_sha256": digest(release_receipt),
+                "foundation_sha256": EXPECTED_FOUNDATION_SHA256,
+                "witness_semantics": {
+                    "ATTEMPT": "durable boundary immediately before NF2 call; not proof of action",
+                    "DEFINITE_SUCCESS": "NF2 returned its fixed Completed outcome",
+                },
+                "tool_sha256": {
+                    **{
+                        name: tool.expected
+                        for name, tool in harness.VERIFIED_HOST_TOOLS.items()
+                        if name in ("rustup", "cargo", "rustc", "rust-lld")
+                    },
+                    **{
+                        name: digest(Path(path))
+                        for name in (
+                            "git",
+                            "systemctl",
+                            "systemd-run",
+                            "systemd-detect-virt",
+                            "bash",
+                            "python3",
+                        )
+                        if (path := shutil.which(name)) is not None
+                    },
+                },
+                "composed_matrices": {
+                    "nf2_positive_adversarial": "PASS",
+                    "a2_durability_cases": 60,
+                    "integrated_success_before_commit": {
+                        "SIGKILL": 20,
+                        "EIO": 20,
+                        "ENOSPC": 20,
+                    },
+                    "integrated_other": "positive/replay/32-concurrency/stale",
+                },
+                "case_evidence_directory": str(cases_destination),
+                "case_evidence_collection_sha256": case_collection_sha256,
+                "non_claims": [
+                    "no signer/capability/authorization/release authority",
+                    "build receipt is not a trust verifier or signer",
+                    "malicious root authoring a false build receipt is excluded",
+                    "no malicious-root whole-volume rollback resistance",
+                ],
+            }
+            arguments.evidence_out.parent.mkdir(parents=True, exist_ok=True)
+            arguments.evidence_out.write_text(
+                json.dumps(evidence, sort_keys=True, indent=2) + "\n"
+            )
+            os.chmod(arguments.evidence_out, stat.S_IRUSR | stat.S_IWUSR)
     print("PASS: NF3 integrated native root/systemd evidence")
     return 0
 

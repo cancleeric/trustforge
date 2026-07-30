@@ -27,15 +27,18 @@ orchestrator refuses to create or use an unverified parent. It validates every
 path component without following symlinks and requires an executable,
 accepted-local-filesystem mount from `/proc/self/mountinfo`. A stale or unknown
 parent blocks acceptance and is never automatically cleaned. Before starting a
-nested unit it creates an exact commit-plus-random generation, writes its
-`ACTIVE` marker, and copies each retained, verified artifact into it with
+nested unit—and only after the A/B reproducibility probe and all fixed-pin
+comparisons have passed—it creates an exact commit-plus-random generation,
+writes its `ACTIVE` marker, and copies each retained, verified artifact into it with
 `O_EXCL|O_NOFOLLOW`, rechecks owner, mode, link count, size, digest and
 generation, and fsyncs both file and directory. A retained Cargo output may
 already have multiple hard links; its complete metadata generation binds that
 source while every newly staged destination must have exactly one link. Nested
 units bind only paths in that generation. Successful completion transitions
 the lifecycle to `TERMINAL`, removes only exact recorded generations, and
-requires both generation and parent to be empty before PASS. The accepted
+requires both generation and parent to be empty before PASS. The same terminal
+cleanup runs synchronously for errors and controlled exits; cleanup failure
+supersedes the original result and prevents PASS. The accepted
 exact-commit probe produced identical A/B release rlib, release probe, evidence
 rlib, and evidence helper objects from the two inputs through this canonical
 view. Those reviewed
