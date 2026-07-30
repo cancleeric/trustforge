@@ -11,12 +11,19 @@ TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
 
 
 def verify_store(client: object, table: str, table_arn: str, kms_key_arn: str) -> None:
-    described = client.describe_table(TableName=table)["Table"]
-    ttl = client.describe_time_to_live(TableName=table)["TimeToLiveDescription"]
-    backups = client.describe_continuous_backups(TableName=table)[
-        "ContinuousBackupsDescription"
-    ]
-    tags = client.list_tags_of_resource(ResourceArn=table_arn)["Tags"]
+    described = _confirmed_payload(
+        client.describe_table(TableName=table), "Table"
+    )
+    ttl = _confirmed_payload(
+        client.describe_time_to_live(TableName=table), "TimeToLiveDescription"
+    )
+    backups = _confirmed_payload(
+        client.describe_continuous_backups(TableName=table),
+        "ContinuousBackupsDescription",
+    )
+    tags = _confirmed_payload(
+        client.list_tags_of_resource(ResourceArn=table_arn), "Tags"
+    )
     if (
         described.get("TableName") != table
         or described.get("TableArn") != table_arn
@@ -52,6 +59,21 @@ def verify_store(client: object, table: str, table_arn: str, kms_key_arn: str) -
         != "preview-admission"
     ):
         raise RuntimeError("preview store verification failed")
+
+
+def _confirmed_payload(response: object, name: str) -> object:
+    if type(response) is not dict or name not in response:
+        raise RuntimeError("preview store verification failed")
+    metadata = response.get("ResponseMetadata")
+    if (
+        type(metadata) is not dict
+        or type(metadata.get("HTTPStatusCode")) is not int
+        or not 200 <= metadata["HTTPStatusCode"] < 300
+        or type(metadata.get("RequestId")) is not str
+        or not metadata["RequestId"]
+    ):
+        raise RuntimeError("preview store verification failed")
+    return response[name]
 
 
 def _put_if_absent(client: object, table: str, item: dict[str, object]) -> None:

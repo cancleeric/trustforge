@@ -695,21 +695,37 @@ def bounded_admin_recover_and_disable_check(
         watermark = _decode_recovery(_decode_item(rows[1]))
         _require_open(_decode_item(rows[2]))
         lifecycle = _decode_lifecycle_any(_decode_item(rows[3]))
-        if lifecycle["mode"] != "single":
-            return PreviewDisableDecision(False, "rotation_overlap_active")
-        if (
-            watermark.version < waterline.required_recovery_version
-            or watermark.shard <= waterline.last_old_expiry_shard
-        ):
-            return PreviewDisableDecision(False, "recovery_not_converged")
-        if (
-            watermark.shard > int(interval.latest // 60)
-            or interval.earliest < waterline.retention_until
-        ):
-            return PreviewDisableDecision(False, "cleanup_time_not_converged")
-        return PreviewDisableDecision(True, "cleanup_safe_retain_state")
+        return _evaluate_cleanup_snapshot(
+            waterline, watermark, lifecycle, interval
+        )
     except Exception:
         return PreviewDisableDecision(False, "admin_probe_unavailable")
+
+
+def _evaluate_cleanup_snapshot(
+    waterline: object,
+    watermark: object,
+    lifecycle: dict[str, object],
+    interval: TrustedUtcInterval,
+) -> PreviewDisableDecision:
+    if lifecycle["mode"] != "single":
+        return PreviewDisableDecision(False, "rotation_overlap_active")
+    if (
+        lifecycle["generation"] != waterline.lifecycle_generation + 1
+        or lifecycle["current_version"] != waterline.current_quota_key_version
+    ):
+        return PreviewDisableDecision(False, "waterline_lifecycle_mismatch")
+    if (
+        watermark.version < waterline.required_recovery_version
+        or watermark.shard <= waterline.last_old_expiry_shard
+    ):
+        return PreviewDisableDecision(False, "recovery_not_converged")
+    if (
+        watermark.shard > int(interval.latest // 60)
+        or interval.earliest <= waterline.retention_until
+    ):
+        return PreviewDisableDecision(False, "cleanup_time_not_converged")
+    return PreviewDisableDecision(True, "cleanup_safe_retain_state")
 
 
 def advance_release_stage(

@@ -460,6 +460,31 @@ def test_bootstrap_metadata_mismatch_performs_zero_writes(mutate):
     assert client.writes == []
 
 
+def test_bootstrap_unconfirmed_metadata_performs_zero_writes():
+    module = _deploy_module("deploy/bootstrap_preview_admission_store.py")
+
+    class Unconfirmed(Client):
+        def __init__(self):
+            super().__init__()
+            self.writes = []
+
+        def describe_table(self, **kwargs):
+            return {
+                "Table": deepcopy(self.table),
+                "ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": ""},
+            }
+
+        def put_item(self, **kwargs):
+            self.writes.append(kwargs)
+
+    client = Unconfirmed()
+    with pytest.raises(RuntimeError, match="verification failed"):
+        module.verify_and_bootstrap(
+            client, DEFAULT_TABLE, TABLE_ARN, KMS_ARN, 123
+        )
+    assert client.writes == []
+
+
 def test_ready_means_verified_store_and_composed_runtime():
     client = Client()
     runtime = object()
@@ -601,6 +626,41 @@ def test_release_state_machine_requires_readiness_canary_and_safe_rollback():
         )
         is PreviewReleaseStage.DISABLED
     )
+
+
+def test_cleanup_snapshot_binds_waterline_to_post_retirement_lifecycle():
+    import trustforge.preview_admission_deployment as deployment
+
+    waterline = SimpleNamespace(
+        lifecycle_generation=4,
+        current_quota_key_version=5,
+        required_recovery_version=9,
+        last_old_expiry_shard=100,
+        retention_until=1_000,
+    )
+    recovery = SimpleNamespace(version=9, shard=101)
+    lifecycle = {"mode": "single", "generation": 5, "current_version": 5}
+    interval = TrustedUtcInterval(1_001, 6_600)
+    assert deployment._evaluate_cleanup_snapshot(
+        waterline, recovery, lifecycle, interval
+    ).safe_to_disable
+
+    mutations = [
+        ({**lifecycle, "generation": 4}, recovery, interval),
+        ({**lifecycle, "current_version": 6}, recovery, interval),
+        (lifecycle, SimpleNamespace(version=8, shard=101), interval),
+        (lifecycle, SimpleNamespace(version=9, shard=100), interval),
+        (lifecycle, SimpleNamespace(version=9, shard=111), interval),
+        (lifecycle, recovery, TrustedUtcInterval(1_000, 6_600)),
+        ({**lifecycle, "mode": "overlap"}, recovery, interval),
+    ]
+    for changed_lifecycle, changed_recovery, changed_interval in mutations:
+        assert not deployment._evaluate_cleanup_snapshot(
+            waterline,
+            changed_recovery,
+            changed_lifecycle,
+            changed_interval,
+        ).safe_to_disable
 
 
 def test_cloudformation_is_default_off_retained_and_least_privilege():
@@ -758,6 +818,62 @@ def test_release_gate_off_skips_preview_and_unavailable_aborts(tmp_path):
         text=True,
     )
     assert ready.returncode == 0
+
+
+def test_update_reconciles_requested_preview_env_and_rollback_restores(tmp_path):
+    service = tmp_path / "trustforge.service"
+    backup = tmp_path / "trustforge.service.bak"
+    fake_python = tmp_path / "python"
+    promoted = tmp_path / "promoted"
+    service.write_text(
+        "[Service]\nEnvironment=PYTHONPATH=/opt/trustforge\n"
+        "Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=0\n"
+        "Environment=TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION=1\n"
+        "ExecStart=/usr/bin/python\n",
+        encoding="utf-8",
+    )
+    backup.write_bytes(service.read_bytes())
+    fake_python.write_text(
+        "#!/bin/sh\nprintf 'preview_admission_smoke=unavailable\\n'\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = {
+        **os.environ,
+        "TRUSTFORGE_PREVIEW_SERVICE_FILE": str(service),
+        "TRUSTFORGE_PREVIEW_APP_ROOT": os.getcwd(),
+        "TRUSTFORGE_PREVIEW_PYTHON_BIN": str(fake_python),
+    }
+    command = (
+        "bash deploy/reconcile_preview_service_env.sh "
+        "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=1 "
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION=2 "
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION=rotation-2 "
+        "TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS=8000 "
+        "TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS=51200 "
+        "TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD=50000 "
+        "TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD=500000 "
+        "&& bash deploy/preview_admission_release_gate.sh "
+        f"&& touch {promoted}"
+    )
+    update = subprocess.run(
+        ["bash", "-c", command],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert update.returncode != 0
+    assert not promoted.exists()
+    text = service.read_text(encoding="utf-8")
+    assert "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=1" in text
+    assert "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION=2" in text
+    assert "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION=1" not in text
+
+    service.write_bytes(backup.read_bytes())
+    restored = service.read_text(encoding="utf-8")
+    assert "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=0" in restored
+    assert "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION=1" in restored
 
 
 def test_web_preview_startup_is_default_off_and_fail_isolated(monkeypatch):
