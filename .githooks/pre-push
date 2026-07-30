@@ -148,6 +148,15 @@ run_gate \
 run_gate \
   "NF2 Linux harness syntax" \
   "$PYTHON" -m py_compile scripts/test_nf2_zero_capability_linux.py
+run_gate \
+  "NF3 retained-dirfd host tests" \
+  env CARGO_TARGET_DIR=out/nf3-cargo-target \
+    cargo test --manifest-path native/nf3-one-shot-transaction/Cargo.toml --locked
+run_gate \
+  "NF3 retained-dirfd x86_64-musl clippy" \
+  env CARGO_TARGET_DIR=out/nf3-cargo-target \
+    cargo clippy --manifest-path native/nf3-one-shot-transaction/Cargo.toml \
+    --target x86_64-unknown-linux-musl --all-targets --locked -- -D warnings
 run_gate "competition QA" env TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 "$PYTHON" scripts/run_question_bank.py --limit 24 --out out/pre-push/question-bank-results.json
 if [ ! -x frontend/node_modules/.bin/vitest ]; then
   # The caller may export NODE_ENV=production (for example, OpenClaw and
