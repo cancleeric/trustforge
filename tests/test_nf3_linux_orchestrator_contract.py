@@ -210,6 +210,18 @@ def test_nested_execstart_uses_existing_fixed_wrappers_without_shell_strings():
     assert '"sh", "-c"' not in value
 
 
+def test_nonexecutable_nf2_python_harness_uses_fixed_interpreter_argv():
+    value = source()
+    assert 'SYSTEM_PYTHON = "/usr/bin/python3"' in value
+    invocation = value[
+        value.index('str(repo / "scripts/test_nf2_zero_capability_linux.py")') :
+    ]
+    invocation = invocation[: invocation.index("cwd=repo")]
+    assert value.rfind("SYSTEM_PYTHON", 0, value.index(invocation)) >= 0
+    assert '"python3 -c"' not in value
+    assert "SYSTEM_PYTHON,\n                    str(repo /" in value
+
+
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
     normalized = "".join(value.split())

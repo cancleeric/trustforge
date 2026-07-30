@@ -62,6 +62,7 @@ CANONICAL_BUILD_SOURCE = CANONICAL_BUILD_PARENT / "source"
 HANDOFF_ROOT = Path("/var/lib/trustforge-nf3-handoff")
 SYSTEMD_EXEC_WRAPPER = "/usr/bin/env"
 SYSTEMD_SCRIPT_WRAPPER = "/bin/bash"
+SYSTEM_PYTHON = "/usr/bin/python3"
 LOCAL_HANDOFF_FILESYSTEMS = frozenset(
     {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs"}
 )
@@ -1191,6 +1192,7 @@ def main() -> int:
 
             run(
                 [
+                    SYSTEM_PYTHON,
                     str(repo / "scripts/test_nf2_zero_capability_linux.py"),
                     "--source-tree",
                     str(repo),
