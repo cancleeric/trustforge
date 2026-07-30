@@ -720,11 +720,101 @@ def test_cloudformation_is_default_off_retained_and_least_privilege():
 def test_zero_downtime_canary_inherits_exact_default_off_flag():
     text = open("deploy/zero_downtime_restart.sh", encoding="utf-8").read()
     assert "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0" in text
-    assert (
-        "Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED="
-        "$PREVIEW_ADMISSION_ENABLED"
-    ) in text
+    assert "preview_properties" in text
+    assert "preview_admission_smoke=ready" in text
     assert '!= "0"' in text and '!= "1"' in text
+
+
+def test_zero_downtime_canary_receives_authoritative_full_preview_env(tmp_path):
+    service = tmp_path / "trustforge.service"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls"
+    for name, body in {
+        "curl": "#!/bin/sh\nexit 0\n",
+        "systemctl": "#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >> \"$MOCK_LOG\"\n",
+        "systemd-run": "#!/bin/sh\nprintf 'systemd-run %s\\n' \"$*\" >> \"$MOCK_LOG\"\n",
+    }.items():
+        path = bin_dir / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    fake_python = bin_dir / "python"
+    fake_python.write_text(
+        "#!/bin/sh\nprintf 'python %s\\n' \"$*\" >> \"$MOCK_LOG\"\n"
+        "case \"$*\" in *preview_admission_smoke.py*) "
+        "printf 'preview_admission_smoke=ready\\n';; esac\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    full = {
+        "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED": "1",
+        "TRUSTFORGE_PREVIEW_ADMISSION_TABLE": DEFAULT_TABLE,
+        "TRUSTFORGE_PREVIEW_TABLE_ARN": TABLE_ARN,
+        "TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN": KMS_ARN,
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER":
+            "/trustforge/preview-admission/quota-hmac",
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION": "2",
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION": "rotation-2",
+        "TRUSTFORGE_PREVIEW_QUOTA_LIFECYCLE_GENERATION": "3",
+        "TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED": "100",
+        "TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST": "90",
+        "TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST": "91",
+        **CAP_ENV,
+    }
+    service.write_text(
+        "[Service]\n"
+        + "".join(f"Environment={key}={value}\n" for key, value in full.items()),
+        encoding="utf-8",
+    )
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "MOCK_LOG": str(log),
+        "TRUSTFORGE_PREVIEW_SERVICE_FILE": str(service),
+        "TRUSTFORGE_PREVIEW_APP_ROOT": os.getcwd(),
+        "TRUSTFORGE_PREVIEW_PYTHON_BIN": str(fake_python),
+    }
+    result = subprocess.run(
+        ["bash", "deploy/zero_downtime_restart.sh"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8")
+    for key, value in full.items():
+        assert f"Environment={key}={value}" in calls
+    assert "preview_admission_smoke.py" in calls
+
+    service.write_text(
+        "[Service]\nEnvironment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=1\n",
+        encoding="utf-8",
+    )
+    log.unlink()
+    missing = subprocess.run(
+        ["bash", "deploy/zero_downtime_restart.sh"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode != 0
+    assert not log.exists()
+
+    service.write_text(
+        "[Service]\nEnvironment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=0\n",
+        encoding="utf-8",
+    )
+    off = subprocess.run(
+        ["bash", "deploy/zero_downtime_restart.sh"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert off.returncode == 0
+    assert "preview_admission_smoke.py" not in log.read_text(encoding="utf-8")
 
 
 def test_off_smoke_needs_no_other_environment_or_aws_import(monkeypatch, capsys):

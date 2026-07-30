@@ -33,7 +33,59 @@ PRIMARY_PORT="${1:-8080}"
 BACKUP_PORT="${2:-8081}"
 HEALTH_TIMEOUT="${TRUSTFORGE_HEALTH_TIMEOUT:-30}"
 HEALTH_INTERVAL="${TRUSTFORGE_HEALTH_INTERVAL:-1}"
+SERVICE_FILE="${TRUSTFORGE_PREVIEW_SERVICE_FILE:-/etc/systemd/system/trustforge.service}"
+APP_ROOT="${TRUSTFORGE_PREVIEW_APP_ROOT:-/opt/trustforge}"
+PYTHON_BIN="${TRUSTFORGE_PREVIEW_PYTHON_BIN:-/usr/bin/python3.11}"
 PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
+PREVIEW_ENV_KEYS=(
+  TRUSTFORGE_PREVIEW_ADMISSION_ENABLED
+  TRUSTFORGE_PREVIEW_ADMISSION_TABLE TRUSTFORGE_PREVIEW_TABLE_ARN
+  TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_VERSION
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_QUOTA_LIFECYCLE_GENERATION
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_RETIRE_NOT_BEFORE
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD
+  TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD
+)
+PREVIEW_REQUIRED_KEYS=(
+  TRUSTFORGE_PREVIEW_ADMISSION_ENABLED
+  TRUSTFORGE_PREVIEW_ADMISSION_TABLE TRUSTFORGE_PREVIEW_TABLE_ARN
+  TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN TRUSTFORGE_PREVIEW_QUOTA_KEY_PARAMETER
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION
+  TRUSTFORGE_PREVIEW_QUOTA_LIFECYCLE_GENERATION
+  TRUSTFORGE_PREVIEW_QUOTA_KEY_ACTIVATED
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST
+  TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD
+  TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD
+)
+preview_assignments=()
+preview_properties=()
+if [ -r "$SERVICE_FILE" ]; then
+  for key in "${PREVIEW_ENV_KEYS[@]}"; do
+    matches=$(sed -n "s/^Environment=${key}=//p" "$SERVICE_FILE")
+    count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
+    [ "$count" -le 1 ] || { echo "[zero-downtime] ERROR: duplicate preview env" >&2; exit 1; }
+    if [ -n "$matches" ]; then
+      [[ "$matches" =~ ^[A-Za-z0-9_./:-]+$ ]] || {
+        echo "[zero-downtime] ERROR: malformed preview env" >&2; exit 1;
+      }
+      preview_assignments+=("${key}=${matches}")
+      preview_properties+=("--property=Environment=${key}=${matches}")
+      [ "$key" = "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED" ] &&
+        PREVIEW_ADMISSION_ENABLED="$matches"
+    fi
+  done
+fi
 CANARY_UNIT="trustforge-canary-$$"
 MODEL_ID="${BEDROCK_MODEL_ID-}"
 if [ -z "$MODEL_ID" ] && [ -r /etc/systemd/system/trustforge.service ]; then
@@ -46,6 +98,18 @@ fi
 if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
   echo "[zero-downtime] ERROR: preview admission flag must be exactly 0 or 1" >&2
   exit 1
+fi
+if [ "$PREVIEW_ADMISSION_ENABLED" = "1" ]; then
+  for key in "${PREVIEW_REQUIRED_KEYS[@]}"; do
+    found=0
+    for assignment in "${preview_assignments[@]}"; do
+      [[ "$assignment" == "${key}="* ]] && found=1
+    done
+    [ "$found" -eq 1 ] || {
+      echo "[zero-downtime] ERROR: missing enabled preview env" >&2
+      exit 1
+    }
+  done
 fi
 
 log() { printf '[zero-downtime] %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -84,17 +148,26 @@ systemd-run --unit="$CANARY_UNIT" \
   --property="Environment=CACHE_BACKEND=${CACHE_BACKEND:-dynamodb}" \
   --property="Environment=TRUSTFORGE_CACHE_TABLE=${TRUSTFORGE_CACHE_TABLE:-trustforge-connector-cache}" \
   --property="Environment=TRUSTFORGE_COST_LEDGER_TABLE=${TRUSTFORGE_COST_LEDGER_TABLE:-trustforge-cost-ledger}" \
-  --property="Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=$PREVIEW_ADMISSION_ENABLED" \
+  "${preview_properties[@]}" \
   --property="Environment=COST_LEDGER_BACKEND=${COST_LEDGER_BACKEND:-dynamodb}" \
   --property="Environment=BEDROCK_MODEL_ID=${MODEL_ID}" \
   --property="Type=exec" \
-  /usr/bin/python3.11 -m trustforge.web
+  "$PYTHON_BIN" -m trustforge.web
 
 # Step 2: Wait for canary to be healthy
 if ! wait_for_health "$BACKUP_PORT" "canary"; then
   log "Canary failed to start; aborting (primary still running, no interruption)"
   systemctl stop "$CANARY_UNIT" 2>/dev/null || true
   exit 1
+fi
+if [ "$PREVIEW_ADMISSION_ENABLED" = "1" ]; then
+  preview_result=$(cd "$APP_ROOT" && env "${preview_assignments[@]}" \
+    "$PYTHON_BIN" deploy/preview_admission_smoke.py)
+  if [ "$preview_result" != "preview_admission_smoke=ready" ]; then
+    log "ERROR: canary preview readiness unavailable"
+    systemctl stop "$CANARY_UNIT" 2>/dev/null || true
+    exit 1
+  fi
 fi
 
 # Step 3: Restart primary — nginx will failover to canary within 1s (max_fails=1)
