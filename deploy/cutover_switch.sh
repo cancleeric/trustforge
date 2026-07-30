@@ -111,6 +111,19 @@ if [ "$MODE" = "react-http" ] && [ "${TF_ALLOW_INSECURE_HTTP_CUTOVER:-}" != "yes
 fi
 
 REGION="${REGION:-ap-southeast-2}"
+HEALTH_RETRIES="${TF_CUTOVER_HEALTH_RETRIES:-120}"
+HEALTH_DELAY="${TF_CUTOVER_HEALTH_DELAY:-5}"
+case "$HEALTH_RETRIES" in
+  ''|*[!0-9]*|0|0*) echo "❌ TF_CUTOVER_HEALTH_RETRIES 必須是 1..120 的無前導零整數" >&2; exit 2 ;;
+esac
+case "$HEALTH_DELAY" in
+  ''|*[!0-9]*|0|0*) echo "❌ TF_CUTOVER_HEALTH_DELAY 必須是 1..10 的無前導零整數秒" >&2; exit 2 ;;
+esac
+if [ "$HEALTH_RETRIES" -lt 1 ] || [ "$HEALTH_RETRIES" -gt 120 ] ||
+   [ "$HEALTH_DELAY" -lt 1 ] || [ "$HEALTH_DELAY" -gt 10 ]; then
+  echo "❌ cutover health wait 超出安全上限（retries=1..120，delay=1..10）" >&2
+  exit 2
+fi
 
 # react（TLS）mode 的 public smoke check 要打真正的 domain（見
 # deploy/nginx.conf server_name），不能打 bare 127.0.0.1——TLS conf 把 80
@@ -580,10 +593,22 @@ if [ \"\$ACTIVE_MODE_LINE\" != \"Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}
 fi
 [ \"\$ACTIVE_MODE_LINE\" = \"Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}\" ]
 
-if ! curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
-  echo '❌ [cutover] 完成後驗證失敗：python /healthz 未回應' >&2
+TF_CUTOVER_HEALTH_RETRIES=\"${HEALTH_RETRIES}\"
+TF_CUTOVER_HEALTH_DELAY=\"${HEALTH_DELAY}\"
+_tf_wait_for_python() {
+  local _tf_health_i
+  for _tf_health_i in \$(seq 1 \"\$TF_CUTOVER_HEALTH_RETRIES\"); do
+    if curl -fsS --connect-timeout 1 --max-time 3 -o /dev/null http://127.0.0.1:8080/healthz; then
+      return 0
+    fi
+    sleep \"\$TF_CUTOVER_HEALTH_DELAY\"
+  done
+  return 1
+}
+if ! _tf_wait_for_python; then
+  echo \"❌ [cutover] 完成後驗證失敗：python /healthz 在 \${TF_CUTOVER_HEALTH_RETRIES} 次、每次間隔 \${TF_CUTOVER_HEALTH_DELAY} 秒的等待後仍未回應\" >&2
+  false
 fi
-curl -fsS -o /dev/null http://127.0.0.1:8080/healthz
 
 # ---- Step 4b 共用：public smoke check 重試工具（codex 複審，HIGH：真部署
 #      cutover_switch.sh health-check 誤報 ROLLBACK-FAILED——nginx reload
@@ -661,8 +686,40 @@ CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --parameters "file://${_TF_PARAMS_FILE}" \
   --query 'Command.CommandId' --output text)
 rm -f "${_TF_PARAMS_FILE}"
-aws ssm wait command-executed --region "$REGION" --command-id "$CMDID" --instance-id "$IID" 2>/dev/null || true
-STATUS=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" --query Status --output text)
+# AWS CLI 內建 waiter 的等待窗短於上方允許的慢啟動窗；改成明確 bounded
+# polling，只有 terminal state 才進入成功/失敗判斷，避免遠端仍在 cutover
+# 時本機先啟動 rollback。
+STATUS="InProgress"
+_TF_SSM_TERMINAL=0
+_TF_SSM_POLL_LIMIT=$(( (HEALTH_RETRIES * (HEALTH_DELAY + 3) + 300 + 4) / 5 ))
+for _TF_SSM_POLL in $(seq 1 "$_TF_SSM_POLL_LIMIT"); do
+  STATUS=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" --query Status --output text 2>/dev/null || true)
+  case "$STATUS" in
+    Success|Failed|TimedOut|Cancelled|Undeliverable|Terminated)
+      _TF_SSM_TERMINAL=1
+      break
+      ;;
+  esac
+  sleep 5
+done
+if [ "$_TF_SSM_TERMINAL" != "1" ]; then
+  echo "⚠️ [cutover] SSM 等待逾時（Status=${STATUS:-unknown}），先取消遠端命令，禁止與後續復原競爭。" >&2
+  aws ssm cancel-command --region "$REGION" --command-id "$CMDID" --instance-ids "$IID" >/dev/null 2>&1 || true
+  for _TF_SSM_CANCEL_POLL in $(seq 1 60); do
+    STATUS=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" --query Status --output text 2>/dev/null || true)
+    case "$STATUS" in
+      Success|Failed|TimedOut|Cancelled|Undeliverable|Terminated)
+        _TF_SSM_TERMINAL=1
+        break
+        ;;
+    esac
+    sleep 2
+  done
+fi
+if [ "$_TF_SSM_TERMINAL" != "1" ]; then
+  echo "🆘 [cutover] SSM 遠端狀態無法確認為 terminal（Status=${STATUS:-unknown}）；不應自動 rollback，需人工介入。" >&2
+  exit 96
+fi
 # codex 四次複審 HIGH：遠端腳本會發 distinct exit code（97=ROLLBACK-FAILED、
 # 98=lock contention、一般失敗=其他非零值），但這裡以前只看 Status，
 # 全部非 Success 都 exit 1，把三種情況塌成同一個訊號，監控/自動化分不出來。
@@ -679,6 +736,7 @@ echo "❌ 切換失敗：Status=$STATUS ResponseCode=$RESPONSE_CODE" >&2
 aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" \
   --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
 case "$RESPONSE_CODE" in
+  96) exit 96 ;;
   97) exit 97 ;;
   98) exit 98 ;;
   *) exit 1 ;;
