@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HOYA BIT 命題文件 — 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽（評分權重更新版）</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --orange: #d29922;
+  --red: #f85149;
+  --purple: #bc8cff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, 'Microsoft JhengHei', 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.8;
+  padding: 2rem;
+  max-width: 960px;
+  margin: 0 auto;
+}
+h1 { font-size: 1.8rem; margin-bottom: 0.3rem; color: var(--accent); }
+h2 { font-size: 1.4rem; margin: 2.5rem 0 0.8rem; color: var(--green); border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+h3 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; color: var(--orange); }
+h4 { font-size: 1rem; margin: 1rem 0 0.3rem; color: var(--purple); }
+p { margin: 0.6rem 0; }
+ul, ol { margin: 0.6rem 0 0.6rem 1.5rem; }
+li { margin: 0.3rem 0; }
+.subtitle { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 2rem; }
+.box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  margin: 1rem 0;
+}
+.box.important { border-left: 4px solid var(--accent); }
+.box.warning { border-left: 4px solid var(--red); }
+.box.info { border-left: 4px solid var(--green); }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.8rem 0;
+  font-size: 0.9rem;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.7rem;
+  text-align: left;
+}
+th { background: var(--surface); color: var(--accent); }
+code {
+  background: var(--surface);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.tag {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: bold;
+  margin-right: 0.3rem;
+}
+.tag-red { background: #f8514922; color: var(--red); border: 1px solid var(--red); }
+.tag-green { background: #3fb95022; color: var(--green); border: 1px solid var(--green); }
+.tag-blue { background: #58a6ff22; color: var(--accent); border: 1px solid var(--accent); }
+.weight-bar {
+  display: flex;
+  margin: 0.5rem 0;
+  border-radius: 6px;
+  overflow: hidden;
+  height: 28px;
+  font-size: 0.75rem;
+  font-weight: bold;
+}
+.weight-bar > div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+</style>
+</head>
+<body>
+
+<h1>HOYA BIT 命題文件</h1>
+<p class="subtitle">2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽 ｜ 評分權重更新版</p>
+
+<!-- ===== 命題單位 ===== -->
+<h2>命題單位</h2>
+<div class="box info">
+<p><strong>HOYA BIT（禾亞數位科技股份有限公司）</strong></p>
+<p>台灣合規加密貨幣交易所，2022 年創立。持有金管會洗錢防制登記（金管證券字第 1140349566 號），通過 ISO/IEC 27001 國際資安認證。</p>
+<p>2026 年推出 AI 交易入口「AI Native Exchange OS」，整合六大核心功能（入金引導、幣種即時報價與市場趨勢、個人資產總覽、閃兌與定期定額下單、日日生幣投入與歷史回測試算、到價通知設定與訂單查詢），讓用戶透過自然語言完成操作。</p>
+<p>定位：不代替用戶做投資決策，而是更直覺的操作入口。所有涉及金額異動均設有明確確認機制。</p>
+</div>
+
+<!-- ===== 命題 ===== -->
+<h2>命題主題</h2>
+<table>
+<tr><th>類別</th><td>智慧交易</td></tr>
+<tr><th>主題</th><td><strong>加密市場分析 AI Agent：多源資訊的信任提煉</strong></td></tr>
+</table>
+
+<!-- ===== 命題說明 ===== -->
+<h2>命題說明</h2>
+
+<h3>背景情境</h3>
+<p>加密貨幣市場全天運作，資訊高度碎片化，價格、新聞、鏈上數據、社群情緒與總體經濟事件經常互相牽動。要在這樣的環境中即時整合多源資料、辨識市場雜訊，並形成可解釋、可回溯的判斷，對人類分析師而言也是一項挑戰。</p>
+<p>隨著大型語言模型從單純對話逐漸發展到具備推理、工具調用與 Agent 工作流程能力，本命題希望驗證參賽者是否能在有限時間與成本限制下，打造一套能產出真正有洞察分析報告的加密市場分析 AI Agent。</p>
+
+<div class="box warning">
+<p><strong>⚠️ 本題重點：</strong></p>
+<ul>
+<li><strong>不是</strong>單篇新聞摘要</li>
+<li><strong>不是</strong>單純技術指標回測</li>
+<li><strong>是</strong>真正的多源整合、有層次推理（事實→推論→結論）、對不確定性的清醒判斷、超越表面資訊的分析角度</li>
+</ul>
+</div>
+
+<h3>欲打造之應用</h3>
+<p>參賽者需打造一套「加密市場分析 AI Agent」，針對主辦方指定之幣種與題目，在限定時間內蒐集、整理並分析相關資訊，產出具備證據支撐的市場分析報告。</p>
+<p>比賽當日將從題目池中抽選一題，並搭配指定幣種。參賽者需依題目要求，分析該幣種的當前市場狀況，並說明市場判斷、關鍵依據與信心限制。</p>
+
+<!-- ===== 五大能力 ===== -->
+<h2>參賽作品應展現的 5 項能力</h2>
+
+<table>
+<tr><th>#</th><th>能力</th><th>說明</th></tr>
+<tr><td>1</td><td><strong>多源資料整合</strong></td><td>能整合價格、鏈上、新聞、官方公告、社群情緒、總體經濟等，非僅單一文章摘要。</td></tr>
+<tr><td>2</td><td><strong>有層次的推理</strong></td><td>能清楚區分事實、推論與結論，並說明各項證據如何支持最終判斷。</td></tr>
+<tr><td>3</td><td><strong>不確定性與限制說明</strong></td><td>資料不足、訊號矛盾或來源可信度有限時，需明確指出限制，不硬給結論。</td></tr>
+<tr><td>4</td><td><strong>可回溯的證據管理</strong></td><td>所有關鍵結論需能回溯至具體資料來源（來源網址、取得時間、引用片段）。</td></tr>
+<tr><td>5</td><td><strong>具洞察的分析角度</strong></td><td>鼓勵提出評審未必預期的分析切入點：跨資料來源連結、反方證據、風險因子、非顯而易見的市場脈絡。</td></tr>
+</table>
+
+<!-- ===== 題目 ===== -->
+<h2>題目格式</h2>
+
+<h3>報告模板（至少需包含）</h3>
+<ol>
+<li><strong>市場判斷</strong></li>
+<li><strong>關鍵依據</strong>（需包含來源、時間與解釋）</li>
+<li><strong>信心說明</strong>（需包含已知限制）</li>
+</ol>
+<p>正反方分析、風險與不確定性、後續觀察重點等不強制，但將納入推理品質與完整度評分。</p>
+
+<h3>範例題型</h3>
+
+<h4>範例一｜多源整合</h4>
+<div class="box">
+<p>分析【幣種】過去兩週的市場表現，整合價格走勢、鏈上活躍度、主要新聞事件與社群討論熱度，給出整體市場狀態判斷，並說明各類資料之間的一致程度。</p>
+</div>
+
+<h4>範例二｜假設驗證</h4>
+<div class="box">
+<p>市場上有聲音認為【幣種】短期內將維持盤整、缺乏明確方向，請蒐集支持與反對此觀點的證據，並說明你最終的判斷與理由。</p>
+</div>
+
+<h4>範例三｜比較分析</h4>
+<div class="box">
+<p>比較【幣種 A】與【幣種 B】在當前宏觀環境下各自的市場位置與風險特徵，說明兩者在流動性、市場關注度或風險敞口上的主要差異，以及在什麼條件下各自更值得優先關注。</p>
+</div>
+
+<div class="box important">
+<p><strong>📌 注意：</strong>正式題目涵蓋但不限於以上範例。建議依據核心能力要求準備，而非針對特定題目設計固定解法。</p>
+</div>
+
+<!-- ===== 幣種池 ===== -->
+<h2>幣種池</h2>
+<p style="font-size:1.3rem; font-weight:bold; color:var(--accent);">BTC / ETH / SOL / BNB / XRP</p>
+<p>皆為主流加密資產，具備相對充足的價格、新聞、鏈上與市場討論資料，可降低因資料稀缺造成的抽題難度差異。</p>
+
+<!-- ===== 提交項目 ===== -->
+<h2>提交項目（4 件）</h2>
+
+<table>
+<tr><th>#</th><th>交付物</th><th>格式</th><th>說明</th></tr>
+<tr><td>1</td><td><strong>分析報告 Final Report</strong></td><td>Markdown / PDF / HTML / Dashboard</td><td><span class="tag tag-red">主要評分對象</span></td></tr>
+<tr><td>2</td><td><strong>證據清單 Evidence List</strong></td><td>JSON / CSV / 表格</td><td>列出支撐重要結論的資料來源</td></tr>
+<tr><td>3</td><td><strong>執行紀錄 Execution Log</strong></td><td>任意格式</td><td>時間戳 + 工具呼叫 + 資料取得 + 流程摘要</td></tr>
+<tr><td>4</td><td><strong>程式碼與配置</strong></td><td>GitHub</td><td>Agent 程式碼 + 設定檔 + 執行說明</td></tr>
+</table>
+
+<h3>分析報告至少需包含</h3>
+<ul>
+<li><strong>結論 / 市場判斷：</strong>對指定幣種與題目的主要判斷</li>
+<li><strong>關鍵依據：</strong>需對應 Evidence List，說明證據如何支撐判斷</li>
+<li><strong>信心說明：</strong>判斷信心、已知限制、資料不足之處、可能推翻結論的條件</li>
+</ul>
+
+<h3>每筆 Evidence 至少需包含</h3>
+<table>
+<tr><th>欄位</th><th>說明</th></tr>
+<tr><td><code>source</code></td><td>資料來源名稱或來源網址</td></tr>
+<tr><td><code>fetched_at</code></td><td>資料取得時間</td></tr>
+<tr><td><code>content_reference</code></td><td>引用片段、資料區間、查詢條件、指標數值或摘要</td></tr>
+<tr><td><code>related_claim</code></td><td>該證據對應的報告判斷或結論</td></tr>
+</table>
+<p>網頁類建議附 <code>source_url</code> + 引用片段；API/CSV/鏈上類需附 endpoint、參數、時間範圍、交易對、地址、query 名稱等。</p>
+<div class="box warning">
+<p><strong>⚠️ 主辦方將抽查 Evidence List</strong>，確認來源可回溯性、引用內容真實性，以及證據與結論之間的對應關係。</p>
+</div>
+
+<!-- ===== 執行限制 ===== -->
+<h2>執行限制</h2>
+<div class="box warning">
+<ul>
+<li>⏱ 執行時間<strong>最多 15 分鐘</strong>。超時後主辦方可停止執行或不採計超時後產出。</li>
+<li>🎲 原則上每隊<strong>僅有一次正式執行機會</strong>。</li>
+<li>若因主辦方環境或不可歸責問題導致失敗，可允許重跑一次，需保留重跑紀錄。</li>
+</ul>
+</div>
+
+<!-- ===== 決賽交付 ===== -->
+<h2>決賽交付內容</h2>
+<ol>
+<li><strong>提案簡報</strong>（需涵蓋：解題方向、AI 技術應用、數據資料應用、AWS 架構圖）</li>
+<li><strong>Live Demo 部署網址</strong>及現場執行錄製影片連結（若涉及私有 API 金鑰，請附完整錄製影片，需清楚呈現完整執行流程與輸出結果）</li>
+<li><strong>GitHub 連結</strong>：含完整原始碼、設定檔與執行說明</li>
+<li><strong>數據與資源文件</strong>：Evidence List、Execution Log 及分析報告</li>
+</ol>
+
+<!-- ===== 資料 ===== -->
+<h2>數據與資源</h2>
+
+<h3>主辦提供的共同基準資料</h3>
+<div class="box info">
+<p><strong>BTC / ETH / SOL / BNB / XRP 近五年 Daily OHLCV 歷史資料</strong></p>
+<ul>
+<li>格式：CSV</li>
+<li>時間基準：UTC 日期</li>
+<li>欄位：<code>date, open, high, low, close, volume</code></li>
+<li>date 格式：YYYY-MM-DD</li>
+</ul>
+</div>
+
+<h3>其餘資料（自行取得）</h3>
+<p>新聞、官方公告、鏈上資料、社群情緒、總體經濟、政策與監管事件等均由參賽者自行取得。</p>
+
+<h4>可使用的資料來源</h4>
+<ul>
+<li><strong>公開 API：</strong>CoinGecko、CryptoCompare、交易所公開 API 等</li>
+<li><strong>公開新聞：</strong>新聞媒體、官方公告、公開研究報告</li>
+<li><strong>公開社群：</strong>Reddit、X 公開內容、官方社群公告</li>
+<li><strong>鏈上資料：</strong>Etherscan、Solscan、Dune 公開 query、區塊鏈瀏覽器</li>
+<li><strong>付費資料：</strong>可使用，但需揭露來源，且不得作為唯一關鍵依據</li>
+</ul>
+<p>可使用自備 API key 存取公開或付費資料來源（含模型推理服務）。付費資料或商業 API 需於報告或 Evidence List 中揭露。</p>
+
+<h3>反作弊鐵則</h3>
+<div class="box warning">
+<p><strong>🚫 外部服務可作為資料取得、檢索、整理或輔助分析用途，但不得：</strong></p>
+<p>將第三方服務已產出的完整市場判斷、交易訊號、買賣建議或投資分析報告，作為主要分析結果直接提交。</p>
+<p><strong>✅ 核心判斷、推理鏈與最終報告，應由參賽者自行設計之 Agent 流程產生，並需能說明資料如何被整合、取捨與推論。</strong></p>
+</div>
+
+<h3>評分觀察點</h3>
+<ul>
+<li>來源類型是否多樣（價格、鏈上、新聞、情緒等）</li>
+<li>來源是否具備獨立性（避免單一來源或同一文章重複引用）</li>
+<li>是否過度依賴分析師文章而缺乏自行推理與交叉驗證</li>
+<li>關鍵結論是否能回溯至具體資料來源</li>
+</ul>
+
+<!-- ===== 評分標準 ===== -->
+<h2>評分標準</h2>
+
+<div class="weight-bar">
+<div style="width:30%; background:#f85149;">主題 30%</div>
+<div style="width:25%; background:#3fb950;">商業 25%</div>
+<div style="width:20%; background:#58a6ff;">技術 20%</div>
+<div style="width:15%; background:#bc8cff;">創意 15%</div>
+<div style="width:10%; background:#d29922;">完成 10%</div>
+</div>
+
+<table>
+<tr><th>權重</th><th>項目</th><th>評分重點</th></tr>
+<tr>
+<td><strong>30%</strong></td>
+<td>主題切合度</td>
+<td>是否切合「加密市場分析 AI Agent」主題。需展現多源資料整合、證據回溯、矛盾訊號處理、信心校準與限制說明。若高度依賴單一第三方分析服務結論而缺乏自有 Agent 流程，將影響此項評分。</td>
+</tr>
+<tr>
+<td><strong>25%</strong></td>
+<td>商業應用性</td>
+<td>產出內容是否能解決加密市場資訊分散、雜訊過多、判斷依據不透明等問題。分析結果是否具備可讀性、可採信性，並能協助使用者更有效率地理解市場狀況。</td>
+</tr>
+<tr>
+<td><strong>20%</strong></td>
+<td>技術可行性</td>
+<td>系統是否具備可運行的 Agent 架構（資料蒐集、工具調用、資料整理、推理分析、報告生成、執行紀錄保存）。若使用 AWS 服務或其他 Agent framework，需展現合理架構與穩定執行。</td>
+</tr>
+<tr>
+<td><strong>15%</strong></td>
+<td>創意度</td>
+<td>是否提出具原創性的分析方法、資料來源使用方式或 Agent 設計。能否提出非表面化、非單純摘要的市場洞察，從多源資料中建立有價值的分析角度。</td>
+</tr>
+<tr>
+<td><strong>10%</strong></td>
+<td>完成度</td>
+<td>系統功能是否完整（輸入題目幣種→完成分析→產出報告/Evidence/Log/程式碼）。Demo 或提交成果需清楚、穩定且易於理解。</td>
+</tr>
+<tr>
+<td><strong>+10%</strong></td>
+<td>加分</td>
+<td>採用 <strong>AWS Kiro</strong> 作為 AI 整合開發環境之工具。</td>
+</tr>
+</table>
+
+<!-- ===== 聯繫窗口 ===== -->
+<h2>命題文件聯繫窗口</h2>
+<table>
+<tr><th>姓名</th><td>Mars Li</td></tr>
+<tr><th>職稱</th><td>Head of AI Engineering</td></tr>
+<tr><th>Email</th><td>chengzheli@hoyabit.com</td></tr>
+<tr><th>電話</th><td>0983083514</td></tr>
+</table>
+
+<!-- ===== TrustForge 對應 ===== -->
+<h2 style="color: var(--purple); border-color: var(--purple);">📋 TrustForge 在各評分項目的對應</h2>
+
+<h3>主題切合度（30%）— 我們的核心戰場</h3>
+<table>
+<tr><th>評分要求</th><th>TrustForge 做到了什麼</th><th>位置</th></tr>
+<tr>
+<td>多源資料整合</td>
+<td>✅ 6 類連接器同時抓取：價格 OHLCV、新聞 RSS、社群 X/Reddit、鏈上 on-chain、HOYA BIT 行情、監管公告</td>
+<td><code>src/trustforge/ingestion/</code></td>
+</tr>
+<tr>
+<td>證據回溯</td>
+<td>✅ 每個結論帶溯源鏈（Provenance）：source URL + fetched_at + 引用片段 + claim_id 對應</td>
+<td><code>evidence.json</code> 交付件</td>
+</tr>
+<tr>
+<td>矛盾訊號處理</td>
+<td>✅ 交叉佐證（Cross-Source Corroboration）偵測來源間一致/矛盾，反方證據主動呈現</td>
+<td><code>trust/scoring.py</code> corroboration 模組</td>
+</tr>
+<tr>
+<td>信心校準</td>
+<td>✅ 資訊完整度分數（不硬給結論）+ Conformal Prediction 統計校準</td>
+<td><code>trust/conformal.py</code></td>
+</tr>
+<tr>
+<td>限制說明</td>
+<td>✅ 報告自動附「已知限制」段落：資料不足時降級信心、標記來源可信度有限</td>
+<td><code>agent/orchestrator.py</code> 報告生成</td>
+</tr>
+<tr>
+<td>非單一第三方結論</td>
+<td>✅ 反作弊設計：判斷由 pipeline 自產（TrustScore 公式），Bedrock 只負責行文</td>
+<td><code>bedrock.py</code> + 信任引擎分離</td>
+</tr>
+</table>
+
+<h3>商業應用性（25%）— 權重最新上升</h3>
+<table>
+<tr><th>評分要求</th><th>TrustForge 做到了什麼</th><th>位置</th></tr>
+<tr>
+<td>解決資訊分散問題</td>
+<td>✅ 多源整合後用信任分數加權，使用者不需要自己一個一個看來源</td>
+<td>三層架構整體</td>
+</tr>
+<tr>
+<td>解決雜訊問題</td>
+<td>✅ 操縱偵測（Manipulation Penalty）自動扣分：拉盤喊單、bot 轉發、情緒極端煽動</td>
+<td><code>trust/scoring.py</code></td>
+</tr>
+<tr>
+<td>判斷依據透明</td>
+<td>✅ 溯源面板：每個結論可點開看原始來源 URL 和引用片段</td>
+<td>前端 Web UI</td>
+</tr>
+<tr>
+<td>可讀性</td>
+<td>✅ 報告結構：結論→關鍵依據→信心說明，白話文輸出</td>
+<td><code>out/report.md</code></td>
+</tr>
+<tr>
+<td>可採信性</td>
+<td>✅ 每個數字都有來源：TrustScore 四維拆解（信譽/佐證/時效/操縱）可展開檢視</td>
+<td>前端信任橫條 + 四分項拆解</td>
+</tr>
+<tr>
+<td>協助使用者理解市場</td>
+<td>✅ Live Demo Dashboard：選幣種/題型→一鍵分析→即時看結果，非技術人也能用</td>
+<td><code>http://3.106.220.68/</code></td>
+</tr>
+</table>
+
+<h3>技術可行性（20%）</h3>
+<table>
+<tr><th>評分要求</th><th>TrustForge 做到了什麼</th><th>位置</th></tr>
+<tr>
+<td>可運行的 Agent 架構</td>
+<td>✅ 完整 Pipeline：蒐集→信任評分→AI 分析→報告產出，一條指令跑完</td>
+<td><code>python -m trustforge.cli analyze</code></td>
+</tr>
+<tr>
+<td>資料蒐集 + 工具調用</td>
+<td>✅ 14 個連接器並行抓取，含真實 API（CoinGecko、Blockchain.info、SEC EDGAR）</td>
+<td><code>ingestion/</code></td>
+</tr>
+<tr>
+<td>推理分析</td>
+<td>✅ Claim 抽取 → TrustScore 評分（確定性公式，非黑箱）→ 信任加權聚合</td>
+<td><code>trust/scoring.py</code> + <code>trust/kernel.py</code></td>
+</tr>
+<tr>
+<td>報告生成</td>
+<td>✅ AWS Bedrock（唯一 LLM 入口）帶溯源生成分析</td>
+<td><code>bedrock.py</code></td>
+</tr>
+<tr>
+<td>執行紀錄保存</td>
+<td>✅ 自動產出 execution_log.jsonl（時戳 + 每步驟耗時 + 工具呼叫 + 15 分鐘預算追蹤）</td>
+<td><code>execlog.py</code></td>
+</tr>
+<tr>
+<td>使用 AWS 服務</td>
+<td>✅ Bedrock 直連（Claude）、EC2 部署、DynamoDB 快取/成本帳本</td>
+<td><code>deploy/</code> + <code>bedrock.py</code></td>
+</tr>
+<tr>
+<td>合理架構 + 穩定執行</td>
+<td>✅ 15 分鐘預算控管（13× 餘裕）、失敗降級不崩、4100+ 測試覆蓋率 ~86%</td>
+<td><code>budget_guard.py</code> + <code>tests/</code></td>
+</tr>
+</table>
+
+<h3>創意度（15%）</h3>
+<table>
+<tr><th>評分要求</th><th>TrustForge 做到了什麼</th><th>位置</th></tr>
+<tr>
+<td>原創分析方法</td>
+<td>✅ Trust Layer（信任提煉層）：業界首見的「先打信任分再讓 AI 摘要」架構，非 RAG→LLM 直出</td>
+<td>三層架構設計</td>
+</tr>
+<tr>
+<td>原創資料使用方式</td>
+<td>✅ Dawid-Skene EM 動態學習來源信譽（不是固定名單，會自動降低不可靠來源的權重）</td>
+<td><code>trust/dawid_skene.py</code></td>
+</tr>
+<tr>
+<td>原創 Agent 設計</td>
+<td>✅ 四步推理：Claim 抽取 → 信任評分 → 帶溯源行文 → 限制複審（非一步到位）</td>
+<td><code>agent/orchestrator.py</code></td>
+</tr>
+<tr>
+<td>非表面摘要的洞察</td>
+<td>✅ 跨源背離偵測（不同來源說法矛盾時主動標記）、操縱懲罰（偵測帶風向）、時效衰減（舊消息自動打折）</td>
+<td><code>trust/scoring.py</code></td>
+</tr>
+<tr>
+<td>有價值的分析角度</td>
+<td>✅ 反方證據主動呈現、資訊完整度分級（不是只給支持方、告訴你「還缺什麼資料」）</td>
+<td>報告 + UI</td>
+</tr>
+</table>
+
+<h3>完成度（10%）</h3>
+<table>
+<tr><th>評分要求</th><th>TrustForge 做到了什麼</th><th>位置</th></tr>
+<tr>
+<td>輸入題目幣種→完成分析</td>
+<td>✅ CLI 一條指令 + Web UI 一鍵操作，支援全部 5 幣種 × 3 題型</td>
+<td>CLI + Web UI</td>
+</tr>
+<tr>
+<td>產出完整報告</td>
+<td>✅ 自動產出 report.md / evidence.json / execution_log.jsonl</td>
+<td><code>out/&lt;coin&gt;/</code></td>
+</tr>
+<tr>
+<td>Demo 清楚穩定</td>
+<td>✅ Live Demo 已上線（EC2 固定 IP），可公開存取</td>
+<td><code>http://3.106.220.68/</code></td>
+</tr>
+<tr>
+<td>程式碼與設定</td>
+<td>✅ GitHub repo + README 完整執行說明</td>
+<td><code>github.com/cancleeric/trustforge</code></td>
+</tr>
+</table>
+
+<h3>加分項目（+10%）</h3>
+<table>
+<tr><th>要求</th><th>TrustForge 做到了什麼</th></tr>
+<tr>
+<td>採用 AWS Kiro</td>
+<td>✅ 全程在 Kiro 中開發：Steering 管理規範 + Hooks 自動品質控管 + Specs 需求追蹤 + Session 歷史作為開發過程證據</td>
+</tr>
+</table>
+
+<div class="box important" style="margin-top: 2rem;">
+<h3 style="margin-top:0; color: var(--green);">✅ 總結：全部評分項目皆有對應實作</h3>
+<p>TrustForge 的設計從一開始就是針對這份命題文件的每個評分點來做的。核心差異化（Trust Layer）直接命中最大權重的「主題切合度 30%」，而「商業應用性 25%」透過溯源面板、白話報告、一鍵操作 Demo 來覆蓋。</p>
+</div>
+
+<footer>
+來源：HOYA BIT 官方命題文件（評分權重更新版）· 整理日期：2026-07-30<br>
+TrustForge 對應分析：HurricaneSoft 團隊內部參考
+</footer>
+
+</body>
+</html>
