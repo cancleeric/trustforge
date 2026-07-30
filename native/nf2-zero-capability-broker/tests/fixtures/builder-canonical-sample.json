@@ -1,0 +1,1 @@
+{"package_entries":[{"mode":"0555","path":"bin","type":"directory"},{"mode":"0555","path":"bin/trustforge-native-foundation","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":42,"type":"file"}],"schema":"trustforge.native-hermetic-provenance/v1","unicode_probe":"\ud83d\ude80"}
