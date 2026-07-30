@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import importlib.util
 import os
+import runpy
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -11,6 +13,10 @@ from trustforge.preview_admission_deployment import (
     DEFAULT_TABLE,
     FEATURE_ENV,
     KEY_PARAMETER_ENV,
+    MAX_DAY_MICRO_USD_ENV,
+    MAX_DAY_TOKENS_ENV,
+    MAX_MINUTE_MICRO_USD_ENV,
+    MAX_MINUTE_TOKENS_ENV,
     TABLE_ENV,
     PreviewAdmissionRuntimeComposer,
     PreviewAdmissionProductionRuntime,
@@ -21,6 +27,7 @@ from trustforge.preview_admission_deployment import (
     PreviewReleaseStage,
     advance_release_stage,
     evaluate_preview_disable,
+    initialize_preview_runtime_from_env,
 )
 from trustforge.preview_admission_executor import PreviewAdmissionExecutor
 from trustforge.preview_admission_executor import (
@@ -42,6 +49,16 @@ TABLE_ARN = (
     "table/trustforge-preview-admission"
 )
 KMS_ARN = "arn:aws:kms:ap-southeast-2:123456789012:key/key-1"
+CAP_ENV = {
+    MAX_MINUTE_TOKENS_ENV: "8000",
+    MAX_DAY_TOKENS_ENV: "51200",
+    MAX_MINUTE_MICRO_USD_ENV: "50000",
+    MAX_DAY_MICRO_USD_ENV: "500000",
+}
+
+
+def _deploy_module(path):
+    return SimpleNamespace(**runpy.run_path(path, run_name="__deploy_test__"))
 
 
 def _ok(payload):
@@ -141,7 +158,7 @@ def test_env_flag_is_exact_default_off_and_has_no_fallback():
     enabled = PreviewDeploymentConfig.from_env(
         expected_kms_key_arn=KMS_ARN,
         expected_table_arn=TABLE_ARN,
-        environ={**base, FEATURE_ENV: "1"},
+        environ={**base, **CAP_ENV, FEATURE_ENV: "1"},
     )
     assert disabled.requested is False
     assert enabled.requested is True
@@ -157,6 +174,7 @@ def test_env_flag_is_exact_default_off_and_has_no_fallback():
 def test_config_requires_exact_adjacent_previous_revision_and_incarnation():
     values = {
         FEATURE_ENV: "1",
+        **CAP_ENV,
         KEY_PARAMETER_ENV: "/trustforge/preview-admission/current",
         "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION": "3",
         "TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION": "incarnation-3",
@@ -240,6 +258,26 @@ def test_lifecycle_config_mismatch_returns_before_any_aws_io(monkeypatch):
     )
     assert result.status is PreviewDeploymentStatus.UNAVAILABLE
     assert result.reason == "lifecycle_config_mismatch"
+    assert calls == []
+
+
+def test_enabled_missing_or_malformed_caps_fail_before_aws(monkeypatch):
+    import boto3
+
+    calls = []
+    monkeypatch.setattr(
+        boto3, "client", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    base = {
+        FEATURE_ENV: "1",
+        TABLE_ENV: DEFAULT_TABLE,
+        KEY_PARAMETER_ENV: "/trustforge/preview-admission/quota-hmac",
+        "TRUSTFORGE_PREVIEW_TABLE_KMS_KEY_ARN": KMS_ARN,
+        "TRUSTFORGE_PREVIEW_TABLE_ARN": TABLE_ARN,
+    }
+    for caps in ({}, {**CAP_ENV, MAX_DAY_MICRO_USD_ENV: "500000.0"}):
+        result = initialize_preview_runtime_from_env({**base, **caps})
+        assert result.status is PreviewDeploymentStatus.UNAVAILABLE
     assert calls == []
 
 
@@ -339,12 +377,7 @@ def test_exact_binding_supports_later_single_generations():
 
 
 def test_bootstrap_is_conditional_idempotent_and_never_contains_secret_bytes():
-    spec = importlib.util.spec_from_file_location(
-        "preview_bootstrap", "deploy/bootstrap_preview_admission_store.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+    module = _deploy_module("deploy/bootstrap_preview_admission_store.py")
 
     class BootstrapClient:
         def __init__(self):
@@ -367,13 +400,7 @@ def test_bootstrap_is_conditional_idempotent_and_never_contains_secret_bytes():
 
 
 def test_bootstrap_collision_requires_exact_existing_row():
-    spec = importlib.util.spec_from_file_location(
-        "preview_bootstrap_collision",
-        "deploy/bootstrap_preview_admission_store.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+    module = _deploy_module("deploy/bootstrap_preview_admission_store.py")
 
     class Collision(Exception):
         response = {"Error": {"Code": "ConditionalCheckFailedException"}}
@@ -394,6 +421,43 @@ def test_bootstrap_collision_requires_exact_existing_row():
         module._put_if_absent(
             ClientWithCollision({"pk": {"S": "other"}}), DEFAULT_TABLE, item
         )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda client: client.table.update(TableStatus="CREATING"),
+        lambda client: client.table["BillingModeSummary"].update(
+            BillingMode="PROVISIONED"
+        ),
+        lambda client: client.table["SSEDescription"].update(Status="DISABLED"),
+        lambda client: setattr(
+            client, "ttl", {"TimeToLiveStatus": "DISABLED", "AttributeName": "ttl"}
+        ),
+        lambda client: client.backups.update(
+            ContinuousBackupsStatus="DISABLED"
+        ),
+        lambda client: setattr(client, "tags", []),
+    ],
+)
+def test_bootstrap_metadata_mismatch_performs_zero_writes(mutate):
+    module = _deploy_module("deploy/bootstrap_preview_admission_store.py")
+
+    class BootstrapVerifier(Client):
+        def __init__(self):
+            super().__init__()
+            self.writes = []
+
+        def put_item(self, **kwargs):
+            self.writes.append(kwargs)
+
+    client = BootstrapVerifier()
+    mutate(client)
+    with pytest.raises(RuntimeError, match="verification failed"):
+        module.verify_and_bootstrap(
+            client, DEFAULT_TABLE, TABLE_ARN, KMS_ARN, 123
+        )
+    assert client.writes == []
 
 
 def test_ready_means_verified_store_and_composed_runtime():
@@ -604,12 +668,7 @@ def test_zero_downtime_canary_inherits_exact_default_off_flag():
 
 
 def test_off_smoke_needs_no_other_environment_or_aws_import(monkeypatch, capsys):
-    spec = importlib.util.spec_from_file_location(
-        "preview_smoke", "deploy/preview_admission_smoke.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+    module = _deploy_module("deploy/preview_admission_smoke.py")
     for key in tuple(os.environ):
         if key.startswith("TRUSTFORGE_PREVIEW_"):
             monkeypatch.delenv(key, raising=False)
@@ -631,6 +690,74 @@ def test_production_deploy_and_admin_have_strict_preview_controls():
     assert "TableKmsKeyArn" in open(
         "deploy/preview-admission-store.yaml", encoding="utf-8"
     ).read()
+    for cap_name in CAP_ENV:
+        assert cap_name in deploy
+
+
+def test_release_paths_gate_enabled_preview_before_promotion_and_skip_off():
+    activate = open("deploy/activate_release.sh", encoding="utf-8").read()
+    deploy = open("deploy/deploy_ec2.sh", encoding="utf-8").read()
+    assert "PREVIEW_READINESS_COMMAND" in activate
+    assert activate.index("PREVIEW_READINESS_COMMAND") < activate.index(
+        "Step 6: promoting pointers"
+    )
+    assert "preview_admission_release_gate.sh" in activate
+    assert deploy.index('verify_preview_admission "$IID"') < deploy.index(
+        's3 cp - "s3://${BUCKET}/pointers/active.json"'
+    )
+    assert "preview_admission_release_gate.sh" in deploy
+
+
+def test_release_gate_off_skips_preview_and_unavailable_aborts(tmp_path):
+    service = tmp_path / "trustforge.service"
+    fake_python = tmp_path / "python"
+    calls = tmp_path / "calls"
+    fake_python.write_text(
+        "#!/bin/sh\nprintf called >> \"$MOCK_CALLS\"\nprintf '%s\\n' \"$MOCK_OUTPUT\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = {
+        **os.environ,
+        "TRUSTFORGE_PREVIEW_SERVICE_FILE": str(service),
+        "TRUSTFORGE_PREVIEW_APP_ROOT": os.getcwd(),
+        "TRUSTFORGE_PREVIEW_PYTHON_BIN": str(fake_python),
+        "MOCK_CALLS": str(calls),
+    }
+    service.write_text(
+        "Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=0\n",
+        encoding="utf-8",
+    )
+    off = subprocess.run(
+        ["bash", "deploy/preview_admission_release_gate.sh"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert off.returncode == 0
+    assert not calls.exists()
+
+    service.write_text(
+        "Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=1\n",
+        encoding="utf-8",
+    )
+    unavailable = subprocess.run(
+        ["bash", "deploy/preview_admission_release_gate.sh"],
+        env={**environment, "MOCK_OUTPUT": "preview_admission_smoke=unavailable"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert unavailable.returncode == 1
+    ready = subprocess.run(
+        ["bash", "deploy/preview_admission_release_gate.sh"],
+        env={**environment, "MOCK_OUTPUT": "preview_admission_smoke=ready"},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert ready.returncode == 0
 
 
 def test_web_preview_startup_is_default_off_and_fail_isolated(monkeypatch):

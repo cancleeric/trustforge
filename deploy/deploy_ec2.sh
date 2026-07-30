@@ -28,6 +28,10 @@ PREVIEW_ENV_KEYS=(
   TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_RETIRE_NOT_BEFORE
   TRUSTFORGE_PREVIEW_QUOTA_ISSUED_EARLIEST
   TRUSTFORGE_PREVIEW_QUOTA_ISSUED_LATEST
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS
+  TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD
+  TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD
 )
 
 if [ -n "$TOKEN_SSM_PREFIX" ] && ! [[ "$TOKEN_SSM_PREFIX" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
@@ -44,6 +48,15 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
 fi
 if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
   echo "[ec2] ERROR: preview admission flag must be exactly 0 or 1" >&2
+  exit 1
+fi
+if [ "$PREVIEW_ADMISSION_ENABLED" = "1" ] && {
+  [ "${TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS-}" != "8000" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS-}" != "51200" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD-}" != "50000" ] ||
+  [ "${TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD-}" != "500000" ];
+}; then
+  echo "[ec2] ERROR: preview cost cap contract missing or invalid" >&2
   exit 1
 fi
 for key in "${PREVIEW_ENV_KEYS[@]}"; do
@@ -149,6 +162,19 @@ verify_web_healthz() {
     return 1
   fi
   echo "[ec2] web healthz passed"
+}
+
+verify_preview_admission() {
+  local iid="$1" cmdid status
+  cmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript \
+    --parameters commands='["set -e","cd /opt/trustforge","bash deploy/preview_admission_release_gate.sh"]' \
+    --query 'Command.CommandId' --output text)
+  status=$(poll_ssm_terminal_status "$cmdid" "$iid" 120 5) || true
+  if [ "$status" != "Success" ]; then
+    echo "[ec2] preview admission readiness failed" >&2
+    return 1
+  fi
 }
 
 # 0) Discover existing instances (same as before) -------------------------------------
@@ -464,6 +490,7 @@ for _i in $(seq 1 60); do
 done
 
 verify_web_healthz "$IID"
+verify_preview_admission "$IID"
 verify_fetch_scheduler "$IID"
 
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \

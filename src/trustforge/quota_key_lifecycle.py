@@ -724,6 +724,26 @@ class DurableQuotaKeyLifecycleAuthority(QuotaKeyLifecycleAuthority):
             self._durable_fingerprint = desired["config_fingerprint"]
             return self._snapshot(now)
 
+    def attach_existing(
+        self, lifecycle: QuotaKeyLifecycle
+    ) -> QuotaLifecycleSnapshot:
+        """Attach to exact durable metadata without any write capability."""
+
+        if (
+            type(lifecycle) is not QuotaKeyLifecycle
+            or not self._owns_material(lifecycle)
+        ):
+            raise ValueError("invalid quota lifecycle")
+        with self._lock:
+            now = self._trusted_now()
+            desired = _lifecycle_metadata(lifecycle)
+            if self._read_metadata() != desired:
+                raise ValueError("durable lifecycle mismatch")
+            self._lifecycle = lifecycle
+            self._observed = now
+            self._durable_fingerprint = desired["config_fingerprint"]
+            return self._snapshot(now)
+
     def durable_current(self, snapshot: QuotaLifecycleSnapshot) -> bool:
         try:
             return (

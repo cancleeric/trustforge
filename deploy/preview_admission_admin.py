@@ -72,8 +72,7 @@ def main() -> int:
     sub.add_parser("probe")
     sub.add_parser("install-lifecycle")
     sub.add_parser("recover")
-    disable = sub.add_parser("disable-check")
-    disable.add_argument("--required-shard", required=True, type=int)
+    sub.add_parser("disable-check")
     args = parser.parse_args()
     if not args.allow_aws:
         parser.error("--allow-aws is required")
@@ -113,9 +112,7 @@ def main() -> int:
         result = runtime.lease_recovery.run(interval)
         print(f"preview_admission_admin={result.outcome.value}")
         return 0 if result.outcome.value != "unavailable" else 1
-    decision = bounded_admin_recover_and_disable_check(
-        runtime, required_shard=args.required_shard
-    )
+    decision = bounded_admin_recover_and_disable_check(runtime)
     print(f"preview_admission_admin={decision.reason}")
     return 0 if decision.safe_to_disable else 1
 

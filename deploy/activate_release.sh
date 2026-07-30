@@ -47,6 +47,7 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
 fi
 
 MODEL_RECONCILE_COMMAND="true"
+PREVIEW_READINESS_COMMAND="bash deploy/preview_admission_release_gate.sh"
 if [ -n "$MODEL" ]; then
   MODEL_RECONCILE_COMMAND="if grep -q '^Environment=BEDROCK_MODEL_ID=' /etc/systemd/system/trustforge.service; then sed -i 's|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID=${MODEL}|' /etc/systemd/system/trustforge.service; else sed -i '/^Environment=PYTHONPATH=/a Environment=BEDROCK_MODEL_ID=${MODEL}' /etc/systemd/system/trustforge.service; fi"
 fi
@@ -430,7 +431,7 @@ echo "[activate] artifact verified"
 # Step 5: Restart service (zero-downtime)
 echo "[activate] Step 5: restarting service..."
 RCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","echo \"[activate] service restarted\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$RCMDID" ] || [ "$RCMDID" = "None" ]; then
   echo "[activate] ERROR: restart send-command failed" >&2

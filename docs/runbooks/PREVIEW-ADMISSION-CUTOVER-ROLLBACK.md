@@ -25,6 +25,12 @@ defaults to `0`; the formal service remains isolated.
    table/TTL/PITR/KMS/tag/key/lifecycle/clock evidence must remain unavailable.
    `deploy/preview_admission_smoke.py` must first report `off` with the flag
    absent, then report `ready` in dark mode before canary traffic is admitted.
+   Enabled deployments require the compiler-aligned non-secret caps:
+   `MAX_MINUTE_TOKENS=8000`, `MAX_DAY_TOKENS=51200`,
+   `MAX_MINUTE_MICRO_USD=50000`, and `MAX_DAY_MICRO_USD=500000`, each with the
+   `TRUSTFORGE_PREVIEW_` environment prefix. Missing or different values fail
+   before provider I/O. Both first deploy and update promotion execute
+   `preview_admission_release_gate.sh`; unavailable aborts promotion/rolls back.
 
 ## Canary
 
@@ -42,8 +48,10 @@ remains owned by #956.
 3. Run bounded D2 recovery until the strong recovery watermark is beyond the
    required shard. The durable admission gate must be exact OPEN with no
    pending binding, and lifecycle mode must be SINGLE.
-4. Only a positive `preview_admission_admin.py --allow-aws disable-check
-   --required-shard SHARD` result permits cleanup/retirement. An error, ABSENT
+4. Only a positive `preview_admission_admin.py --allow-aws disable-check`
+   result permits cleanup/retirement. The required shard/version comes only
+   from the durable retirement waterline in the same strong transaction; it is
+   never supplied by the operator. An error, ABSENT
    ambiguity, overlap, unavailable reaper, stale/low shard, or lag is not proof.
 5. Retain table and key revisions for at least reservation retention plus the
    completed rotation period. This runbook contains no delete command.

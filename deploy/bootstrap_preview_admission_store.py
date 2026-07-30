@@ -16,10 +16,13 @@ def verify_store(client: object, table: str, table_arn: str, kms_key_arn: str) -
     backups = client.describe_continuous_backups(TableName=table)[
         "ContinuousBackupsDescription"
     ]
+    tags = client.list_tags_of_resource(ResourceArn=table_arn)["Tags"]
     if (
         described.get("TableName") != table
         or described.get("TableArn") != table_arn
         or described.get("TableStatus") != "ACTIVE"
+        or described.get("BillingModeSummary", {}).get("BillingMode")
+        != "PAY_PER_REQUEST"
         or described.get("KeySchema")
         != [
             {"AttributeName": "pk", "KeyType": "HASH"},
@@ -32,12 +35,21 @@ def verify_store(client: object, table: str, table_arn: str, kms_key_arn: str) -
         ]
         or described.get("SSEDescription", {}).get("KMSMasterKeyArn")
         != kms_key_arn
+        or described.get("SSEDescription", {}).get("Status") != "ENABLED"
+        or described.get("SSEDescription", {}).get("SSEType") != "KMS"
         or ttl
         != {"TimeToLiveStatus": "ENABLED", "AttributeName": "ttl"}
         or backups.get("PointInTimeRecoveryDescription", {}).get(
             "PointInTimeRecoveryStatus"
         )
         != "ENABLED"
+        or backups.get("ContinuousBackupsStatus") != "ENABLED"
+        or {
+            item.get("Key"): item.get("Value")
+            for item in tags
+            if type(item) is dict
+        }.get("TrustForgeComponent")
+        != "preview-admission"
     ):
         raise RuntimeError("preview store verification failed")
 
@@ -98,6 +110,17 @@ def bootstrap(client: object, table: str, initial_shard: int) -> None:
     )
 
 
+def verify_and_bootstrap(
+    client: object,
+    table: str,
+    table_arn: str,
+    kms_key_arn: str,
+    initial_shard: int,
+) -> None:
+    verify_store(client, table, table_arn, kms_key_arn)
+    bootstrap(client, table, initial_shard)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--allow-aws", action="store_true")
@@ -117,8 +140,13 @@ def main() -> None:
         region_name=args.region,
         config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
     )
-    verify_store(client, args.table, args.table_arn, args.table_kms_key_arn)
-    bootstrap(client, args.table, args.initial_shard)
+    verify_and_bootstrap(
+        client,
+        args.table,
+        args.table_arn,
+        args.table_kms_key_arn,
+        args.initial_shard,
+    )
 
 
 if __name__ == "__main__":

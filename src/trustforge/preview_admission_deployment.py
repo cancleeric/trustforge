@@ -17,6 +17,12 @@ from trustforge.preview_admission_executor import (
     AwsQuotaLifecycleBootstrap,
     PreviewAdmissionExecutor,
 )
+from trustforge.preview_admission_compiler import (
+    MAX_DAY_MICRO_USD,
+    MAX_DAY_TOKENS,
+    MAX_MINUTE_MICRO_USD,
+    MAX_MINUTE_TOKENS,
+)
 from trustforge.preview_lease_recovery import (
     PreviewAmbiguityRecovery,
     PreviewLeaseRecovery,
@@ -33,6 +39,10 @@ KEY_INCARNATION_ENV = "TRUSTFORGE_PREVIEW_QUOTA_KEY_INCARNATION"
 PREVIOUS_KEY_PARAMETER_ENV = "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_PARAMETER"
 PREVIOUS_KEY_VERSION_ENV = "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_VERSION"
 PREVIOUS_KEY_INCARNATION_ENV = "TRUSTFORGE_PREVIEW_PREVIOUS_QUOTA_KEY_INCARNATION"
+MAX_MINUTE_TOKENS_ENV = "TRUSTFORGE_PREVIEW_MAX_MINUTE_TOKENS"
+MAX_DAY_TOKENS_ENV = "TRUSTFORGE_PREVIEW_MAX_DAY_TOKENS"
+MAX_MINUTE_MICRO_USD_ENV = "TRUSTFORGE_PREVIEW_MAX_MINUTE_MICRO_USD"
+MAX_DAY_MICRO_USD_ENV = "TRUSTFORGE_PREVIEW_MAX_DAY_MICRO_USD"
 DEFAULT_TABLE = "trustforge-preview-admission"
 TTL_ATTRIBUTE = "ttl"
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
@@ -65,6 +75,10 @@ class PreviewDeploymentConfig:
     previous_quota_key_parameter: str | None = None
     previous_quota_key_version: int | None = None
     previous_quota_key_incarnation: str | None = None
+    max_minute_tokens: int = MAX_MINUTE_TOKENS
+    max_day_tokens: int = MAX_DAY_TOKENS
+    max_minute_micro_usd: int = MAX_MINUTE_MICRO_USD
+    max_day_micro_usd: int = MAX_DAY_MICRO_USD
 
     def __post_init__(self) -> None:
         if (
@@ -105,6 +119,13 @@ class PreviewDeploymentConfig:
             and previous[2] != self.quota_key_incarnation
         ):
             raise ValueError("invalid previous quota key")
+        if (
+            self.max_minute_tokens != MAX_MINUTE_TOKENS
+            or self.max_day_tokens != MAX_DAY_TOKENS
+            or self.max_minute_micro_usd != MAX_MINUTE_MICRO_USD
+            or self.max_day_micro_usd != MAX_DAY_MICRO_USD
+        ):
+            raise ValueError("preview cap contract mismatch")
 
     @classmethod
     def from_env(
@@ -118,6 +139,18 @@ class PreviewDeploymentConfig:
         raw = values.get(FEATURE_ENV, "0")
         if raw not in {"0", "1"}:
             raise ValueError("preview flag must be exactly 0 or 1")
+        if raw == "1":
+            required_caps = {
+                MAX_MINUTE_TOKENS_ENV: MAX_MINUTE_TOKENS,
+                MAX_DAY_TOKENS_ENV: MAX_DAY_TOKENS,
+                MAX_MINUTE_MICRO_USD_ENV: MAX_MINUTE_MICRO_USD,
+                MAX_DAY_MICRO_USD_ENV: MAX_DAY_MICRO_USD,
+            }
+            if any(
+                _positive_int(values.get(name)) != expected
+                for name, expected in required_caps.items()
+            ):
+                raise ValueError("preview cap contract mismatch")
         return cls(
             requested=raw == "1",
             table_name=values.get(TABLE_ENV, DEFAULT_TABLE),
@@ -137,6 +170,10 @@ class PreviewDeploymentConfig:
             previous_quota_key_incarnation=values.get(
                 PREVIOUS_KEY_INCARNATION_ENV
             ),
+            max_minute_tokens=MAX_MINUTE_TOKENS,
+            max_day_tokens=MAX_DAY_TOKENS,
+            max_minute_micro_usd=MAX_MINUTE_MICRO_USD,
+            max_day_micro_usd=MAX_DAY_MICRO_USD,
         )
 
 
@@ -217,6 +254,28 @@ class PreviewAdmissionProductionRuntime:
         """Use the executor's attempts=1 clients and share every authority."""
 
         executor = PreviewAdmissionExecutor.from_aws_components(
+            table_name, lifecycle=lifecycle, region_name=region_name
+        )
+        client = executor._client
+        terminal = PreviewTerminalReconciler(client, table_name)
+        return cls(
+            executor=executor,
+            terminal=terminal,
+            lease_recovery=PreviewLeaseRecovery(client, table_name, terminal),
+            ambiguity_recovery=PreviewAmbiguityRecovery(
+                client, table_name, terminal, executor._durable_gate
+            ),
+        )
+
+    @classmethod
+    def attach_aws_components(
+        cls,
+        table_name: str,
+        *,
+        lifecycle: AwsQuotaLifecycleBootstrap,
+        region_name: str | None = None,
+    ) -> "PreviewAdmissionProductionRuntime":
+        executor = PreviewAdmissionExecutor.from_aws_components_attach_only(
             table_name, lifecycle=lifecycle, region_name=region_name
         )
         client = executor._client
@@ -342,7 +401,7 @@ class PreviewAdmissionRuntimeComposer:
             )
             checks = verifier._verify_store()
             _probe_authority_rows(probe_client, config.table_name)
-            runtime = PreviewAdmissionProductionRuntime.from_aws_components(
+            runtime = PreviewAdmissionProductionRuntime.attach_aws_components(
                 config.table_name,
                 lifecycle=lifecycle,
                 region_name=region_name,
@@ -602,22 +661,16 @@ def evaluate_preview_disable(
 
 def bounded_admin_recover_and_disable_check(
     runtime: PreviewAdmissionProductionRuntime,
-    *,
-    required_shard: int,
 ) -> PreviewDisableDecision:
     """Run only bounded #993 recovery, then strongly re-observe disable proof."""
 
     if (
         type(runtime) is not PreviewAdmissionProductionRuntime
-        or type(required_shard) is not int
-        or required_shard < 0
     ):
         return PreviewDisableDecision(False, "malformed_admin_request")
     try:
         clock = runtime.executor._durable_gate._trusted_clock
         interval = clock.refresh()
-        if required_shard < int(interval.latest // 60):
-            return PreviewDisableDecision(False, "required_shard_too_low")
         gate = runtime.executor._durable_gate
         if not gate.ready and not runtime.executor.recover_pending(
             runtime.ambiguity_recovery
@@ -626,19 +679,35 @@ def bounded_admin_recover_and_disable_check(
         recovery = runtime.lease_recovery.run(interval)
         if recovery.outcome is RecoveryOutcome.UNAVAILABLE:
             return PreviewDisableDecision(False, "recovery_unavailable")
-        rows = _strong_authority_snapshot(
+        from trustforge.quota_key_lifecycle import _decode_lifecycle_any
+        from trustforge.quota_key_retirement import (
+            _decode_item,
+            _decode_recovery,
+            _decode_waterline,
+            _require_open,
+            _strong_read,
+        )
+
+        rows = _strong_read(
             runtime.executor._client, runtime.executor._table_name
         )
-        control, watermark, lifecycle = rows
-        return evaluate_preview_disable(
-            PreviewDisableObservation(
-                control_state=_ddb_s(control, "state"),
-                pending_binding=_ddb_s(control, "state") != "open",
-                recovery_shard=_ddb_n(watermark, "shard"),
-                required_shard=required_shard,
-                lifecycle_mode=_ddb_s(lifecycle, "mode"),
-            )
-        )
+        waterline = _decode_waterline(_decode_item(rows[0]))
+        watermark = _decode_recovery(_decode_item(rows[1]))
+        _require_open(_decode_item(rows[2]))
+        lifecycle = _decode_lifecycle_any(_decode_item(rows[3]))
+        if lifecycle["mode"] != "single":
+            return PreviewDisableDecision(False, "rotation_overlap_active")
+        if (
+            watermark.version < waterline.required_recovery_version
+            or watermark.shard <= waterline.last_old_expiry_shard
+        ):
+            return PreviewDisableDecision(False, "recovery_not_converged")
+        if (
+            watermark.shard > int(interval.latest // 60)
+            or interval.earliest < waterline.retention_until
+        ):
+            return PreviewDisableDecision(False, "cleanup_time_not_converged")
+        return PreviewDisableDecision(True, "cleanup_safe_retain_state")
     except Exception:
         return PreviewDisableDecision(False, "admin_probe_unavailable")
 
@@ -737,19 +806,16 @@ def _probe_authority_rows(client: object, table_name: str) -> None:
     """One strong, read-only transaction; no lifecycle install or transition."""
 
     control, watermark, lifecycle = _strong_authority_snapshot(client, table_name)
-    if (
-        _ddb_s(control, "kind") != "preview_admission_quarantine"
-        or _ddb_n(control, "schema_version") != 1
-        or _ddb_s(control, "state") not in {"open", "dispatching", "quarantined"}
-        or _ddb_s(watermark, "kind") != "preview_recovery_watermark"
-        or _ddb_n(watermark, "schema_version") != 1
-        or _ddb_n(watermark, "shard") < 0
-        or _ddb_s(lifecycle, "kind") != "quota_key_lifecycle_control"
-        or _ddb_n(lifecycle, "schema_version") != 1
-        or _ddb_s(lifecycle, "mode") not in {"single", "overlap"}
-        or _ddb_n(lifecycle, "generation") < 1
-    ):
-        raise ValueError("authority row malformed")
+    from trustforge.quota_key_lifecycle import _decode_lifecycle_any
+    from trustforge.quota_key_retirement import (
+        _decode_item,
+        _decode_recovery,
+        _require_open,
+    )
+
+    _require_open(_decode_item({"Item": control}))
+    _decode_recovery(_decode_item({"Item": watermark}))
+    _decode_lifecycle_any(_decode_item({"Item": lifecycle}))
 
 
 def _strong_authority_snapshot(
