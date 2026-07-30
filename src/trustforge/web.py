@@ -8357,7 +8357,23 @@ def _handle_api_admin_whale_alert_get() -> tuple[int, str]:
     return 200, _json_envelope_ok(state)
 
 
-def _handle_api_admin_whale_alert_post(headers, rfile) -> tuple[int, str]:
+def _whale_alert_admin_transport_is_secure(headers) -> bool:
+    """Whale Alert 憑證管理端點整體 TLS-only gate（與 `_live_token_over_insecure_transport`
+    同立場）：`TRUST_PROXY` 開且 nginx 忠實轉發的 `X-Forwarded-Proto=https` 才放行；
+    預設（直連、0.0.0.0）不放行。必須在讀 request body（含明文 key）之前判定。"""
+    return bool(TRUST_PROXY) and (headers.get("X-Forwarded-Proto", "") or "").strip().lower() == "https"
+
+
+def _handle_api_admin_whale_alert_post(headers, rfile, client_ip: str) -> tuple[int, str]:
+    # 憑證管理端點整體 TLS-only：必須在讀 body（含明文 key）「之前」判定 transport，
+    # 否則明文已跨線才回 426 等於沒防到暴露。action 在 body 內無法先知是否為 set，
+    # 故整個端點讀 body 前即 gate（管理付費 API key 的端點 TLS-only 為正確 posture）。
+    if not _whale_alert_admin_transport_is_secure(headers):
+        return 426, _json_envelope_err(
+            "upgrade_required",
+            "Whale Alert 憑證管理端點須經 HTTPS（TLS 反代）；本服務預設不開放明文連線管理 secret。"
+            "請透過 nginx TLS 反代並設 TRUSTFORGE_TRUST_PROXY=1。",
+        )
     payload, error = _read_admin_put_body(headers, rfile)
     if error is not None:
         return error
@@ -8392,7 +8408,10 @@ def _handle_api_admin_whale_alert_post(headers, rfile) -> tuple[int, str]:
         return 502, _json_envelope_err(
             "upstream_error", "Whale Alert API 設定操作失敗，請稍後再試"
         )
-    logging.info("TrustForge Whale Alert credential audit action=%s result=success", action)
+    logging.info(
+        "TrustForge Whale Alert credential audit action=%s result=success client_ip=%s",
+        action, client_ip,
+    )
     return 200, _json_envelope_ok(state.as_dict())
 
 
@@ -9479,7 +9498,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(code, body, "application/json; charset=utf-8")
             if u.path == "/api/admin/whale-alert":
                 code, body = _handle_api_admin_whale_alert_post(
-                    getattr(self, "headers", {}), self.rfile
+                    getattr(self, "headers", {}), self.rfile, client_ip
                 )
                 return self._send(code, body, "application/json; charset=utf-8")
             if u.path in actions:

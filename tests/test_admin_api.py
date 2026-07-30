@@ -169,11 +169,15 @@ def test_whale_alert_admin_set_is_write_only(admin_enabled, monkeypatch):
         return web.whale_alert_secret.SecretStatus(True, "ssm", None)
 
     monkeypatch.setattr(web.whale_alert_secret, "put_api_key", fake_put)
+    # P1#1：set 動作現需 HTTPS transport gate，固定安全 transport 讓本測試只測
+    # write-only 行為（比照 test_put_live_token_rules 固定 TRUST_PROXY=True 慣例）。
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
     status, body, _ = _request(
         "POST",
         "/api/admin/whale-alert",
         token=admin_enabled,
         body=json.dumps({"action": "set", "api_key": secret}),
+        headers={"X-Forwarded-Proto": "https"},
     )
 
     assert status == 200
@@ -198,11 +202,15 @@ def test_whale_alert_admin_clear_and_test(admin_enabled, monkeypatch, action):
         lambda: called.append("test") or result,
     )
 
+    # 憑證管理端點整體 TLS-only（codex P1：clear/test 亦須經 HTTPS，否則在讀
+    # body 前即 426）
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
     status, body, _ = _request(
         "POST",
         "/api/admin/whale-alert",
         token=admin_enabled,
         body=json.dumps({"action": action}),
+        headers={"X-Forwarded-Proto": "https"},
     )
 
     assert status == 200
@@ -210,16 +218,133 @@ def test_whale_alert_admin_clear_and_test(admin_enabled, monkeypatch, action):
     assert "api_key" not in body
 
 
-def test_whale_alert_admin_rejects_non_string_action(admin_enabled):
+@pytest.mark.parametrize("action", ["clear", "test"])
+def test_whale_alert_admin_clear_test_also_require_secure_transport(
+    admin_enabled, monkeypatch, action
+):
+    """codex P1：端點整體 TLS-only。clear/test 在非安全 transport 亦 426，
+    且不觸發 clear_api_key/verify_connection。"""
+    called = []
+    monkeypatch.setattr(web, "TRUST_PROXY", False)
+    monkeypatch.setattr(
+        web.whale_alert_secret, "clear_api_key", lambda: called.append("clear")
+    )
+    monkeypatch.setattr(
+        web.whale_alert_secret, "verify_connection", lambda: called.append("test")
+    )
+    status, body, _ = _request(
+        "POST",
+        "/api/admin/whale-alert",
+        token=admin_enabled,
+        body=json.dumps({"action": action}),
+    )
+    assert status == 426
+    assert json.loads(body)["error"]["code"] == "upgrade_required"
+    assert called == []
+
+
+def test_whale_alert_admin_rejects_non_string_action(admin_enabled, monkeypatch):
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
     status, body, _ = _request(
         "POST",
         "/api/admin/whale-alert",
         token=admin_enabled,
         body=json.dumps({"action": ["set"], "api_key": "not-used-key-123456"}),
+        headers={"X-Forwarded-Proto": "https"},
     )
 
     assert status == 400
     assert json.loads(body)["error"]["code"] == "bad_request"
+
+
+# ── P1#1（codex）：set 動作 transport gate；harper Medium：audit client_ip ──
+
+
+@pytest.mark.parametrize(
+    ("trust_proxy", "proto"),
+    [
+        (False, "https"),  # TRUST_PROXY 未開 → 即便 proto=https 也不可信
+        (True, "http"),    # 明文 HTTP
+        (True, ""),        # 無 proto header（直連）
+    ],
+)
+def test_whale_alert_admin_set_rejected_without_secure_transport(
+    admin_enabled, monkeypatch, trust_proxy, proto
+):
+    """P1#1：set 動作在非安全 transport → 426 upgrade_required，且不碰 put_api_key。"""
+    called = []
+    monkeypatch.setattr(web, "TRUST_PROXY", trust_proxy)
+    monkeypatch.setattr(
+        web.whale_alert_secret,
+        "put_api_key",
+        lambda v: called.append(v) or web.whale_alert_secret.SecretStatus(True, "ssm", None),
+    )
+    headers = {"X-Forwarded-Proto": proto} if proto else {}
+    status, body, _ = _request(
+        "POST",
+        "/api/admin/whale-alert",
+        token=admin_enabled,
+        body=json.dumps({"action": "set", "api_key": "some-key-1234567890"}),
+        headers=headers,
+    )
+
+    assert status == 426
+    assert json.loads(body)["error"]["code"] == "upgrade_required"
+    assert called == []  # 未寫入
+
+
+def test_whale_alert_admin_set_allowed_over_https_transport(admin_enabled, monkeypatch):
+    """P1#1：set 動作在 TRUST_PROXY=True 且 X-Forwarded-Proto=https → 200，
+    且 body 不含明文。"""
+    secret = "secure-whale-key-1234567890"
+    observed = []
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    monkeypatch.setattr(
+        web.whale_alert_secret,
+        "put_api_key",
+        lambda v: observed.append(v) or web.whale_alert_secret.SecretStatus(True, "ssm", None),
+    )
+    status, body, _ = _request(
+        "POST",
+        "/api/admin/whale-alert",
+        token=admin_enabled,
+        body=json.dumps({"action": "set", "api_key": secret}),
+        headers={"X-Forwarded-Proto": "https"},
+    )
+
+    assert status == 200
+    assert observed == [secret]
+    assert secret not in body
+
+
+def test_whale_alert_admin_set_audit_logs_client_ip(admin_enabled, monkeypatch, caplog):
+    """harper Medium：set 成功時 audit log 含 client_ip（絕不可記 api_key 值）。"""
+    secret = "audit-whale-key-1234567890"
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    monkeypatch.setattr(
+        web.whale_alert_secret,
+        "put_api_key",
+        lambda v: web.whale_alert_secret.SecretStatus(True, "ssm", None),
+    )
+    with caplog.at_level("INFO"):
+        status, _body, _ = _request(
+            "POST",
+            "/api/admin/whale-alert",
+            token=admin_enabled,
+            body=json.dumps({"action": "set", "api_key": secret}),
+            headers={"X-Forwarded-Proto": "https"},
+            ip="198.51.100.7",
+        )
+
+    assert status == 200
+    audit_msgs = [
+        r.getMessage()
+        for r in caplog.records
+        if "Whale Alert credential audit" in r.getMessage()
+    ]
+    joined = " ".join(audit_msgs)
+    assert "client_ip=198.51.100.7" in joined
+    assert secret not in joined  # api_key 明文絕不入 log
 
 
 def _put_config(

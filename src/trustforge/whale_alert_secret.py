@@ -80,29 +80,42 @@ def invalidate_cache() -> None:
         _cached_at = 0.0
 
 
-def resolve_api_key(*, force_refresh: bool = False) -> tuple[str | None, str]:
+def _fallback_local_or_env() -> tuple[str | None, str]:
+    """本機檔案 / 環境變數 fallback（SSM 未啟用或參數尚未建立時使用）。
+
+    抽自 `resolve_api_key`，讓「SSM ParameterNotFound = 遷移中」的回落與
+    「SSM 未啟用」的回落共用同一份邏輯（保既有安裝升級後不靜默斷料）。
+    """
+    key_file = os.getenv(_LOCAL_KEY_FILE_ENV, "").strip()
+    if key_file:
+        try:
+            path_stat = os.lstat(key_file)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or stat.S_IMODE(path_stat.st_mode) != 0o600
+                or path_stat.st_uid != os.getuid()
+                or path_stat.st_size > 512
+            ):
+                return None, "unavailable"
+            with open(key_file, encoding="utf-8") as handle:
+                local_file_value = handle.read(513).strip()
+            return _validate_secret(local_file_value), "file"
+        except (OSError, ValueError):
+            return None, "unavailable"
+    local = os.getenv(_LOCAL_KEY_ENV, "").strip()
+    return (local or None), ("environment" if local else "unconfigured")
+
+
+def resolve_api_key(
+    *,
+    force_refresh: bool = False,
+    allow_env_fallback_on_missing_ssm: bool = True,
+) -> tuple[str | None, str]:
     """Resolve the secret without ever logging or returning it through Admin APIs."""
     global _cached_value, _cached_at
     parameter = os.getenv(_PARAMETER_ENV, "").strip()
     if not parameter:
-        key_file = os.getenv(_LOCAL_KEY_FILE_ENV, "").strip()
-        if key_file:
-            try:
-                path_stat = os.lstat(key_file)
-                if (
-                    not stat.S_ISREG(path_stat.st_mode)
-                    or stat.S_IMODE(path_stat.st_mode) != 0o600
-                    or path_stat.st_uid != os.getuid()
-                    or path_stat.st_size > 512
-                ):
-                    return None, "unavailable"
-                with open(key_file, encoding="utf-8") as handle:
-                    local_file_value = handle.read(513).strip()
-                return _validate_secret(local_file_value), "file"
-            except (OSError, ValueError):
-                return None, "unavailable"
-        local = os.getenv(_LOCAL_KEY_ENV, "").strip()
-        return (local or None), ("environment" if local else "unconfigured")
+        return _fallback_local_or_env()
 
     now = time.monotonic()
     with _lock:
@@ -114,8 +127,18 @@ def resolve_api_key(*, force_refresh: bool = False) -> tuple[str | None, str]:
             Name=_parameter_name(),
             WithDecryption=True,
         )
-    except Exception:
+    except Exception as exc:
         invalidate_cache()
+        # ParameterNotFound = SSM 參數尚未建立（部署升級遷移中）→ 回落
+        # env/file 保既有安裝不停料；其他錯誤（網路/權限/解密失敗）= 真故障
+        # → fail-closed unavailable。用 getattr 鴨子型別判定，不耦合 botocore。
+        # allow_env_fallback_on_missing_ssm=False 時（put 驗證）即使是
+        # ParameterNotFound 也 fail-closed unavailable——避免把 env 值誤判成
+        # 啟用成功，也讓 clear 後的 status 如實反映 SSM 已不存在。
+        response = getattr(exc, "response", None)
+        code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+        if code == "ParameterNotFound" and allow_env_fallback_on_missing_ssm:
+            return _fallback_local_or_env()
         return None, "unavailable"
     value = response.get("Parameter", {}).get("Value")
     if not isinstance(value, str) or not value.strip():
@@ -167,8 +190,12 @@ def put_api_key(value: str) -> SecretStatus:
         TagKeys=["TrustForgeLastVerifiedAt"],
     )
     invalidate_cache()
-    resolved, source = resolve_api_key(force_refresh=True)
-    if resolved != clean:
+    resolved, source = resolve_api_key(
+        force_refresh=True, allow_env_fallback_on_missing_ssm=False
+    )
+    # 只有 SSM 真的回傳寫入值（source=="ssm" 且值一致）才算啟用成功；
+    # 否則（值 drift、或回落到 env 把同值當成功）一律 RuntimeError。
+    if source != "ssm" or resolved != clean:
         invalidate_cache()
         raise RuntimeError("Whale Alert API key activation verification failed")
     _last_verified_at = None
@@ -186,7 +213,12 @@ def clear_api_key() -> SecretStatus:
             raise
     invalidate_cache()
     _last_verified_at = None
-    return SecretStatus(False, "unconfigured", _last_verified_at)
+    # 不 reread SSM：SSM eventual consistency 可能在剛 delete 後仍回傳舊值並被
+    # cache 300s，反而讓攝取續用已撤銷憑證。直接由 env/file fallback 決定
+    # post-clear 真實狀態（SSM 已知不存在）：only-SSM→(None,"unconfigured")=
+    # 撤銷成功；env/file 並存→如實揭露仍在現役，操作員須另行移除才完整撤銷。
+    value, source = _fallback_local_or_env()
+    return SecretStatus(bool(value), source, _last_verified_at)
 
 
 def verify_connection(
