@@ -481,14 +481,35 @@ def _accepted_nf1_source_modes(canonical_mode: int) -> frozenset[int]:
 
 
 def stage_nf1_install(
-    generation_fd: int, source: Path, archive: Path
+    generation_fd: int, source: Path, archive: Path, harness
 ) -> dict[str, tuple[str, str, int, int]]:
     """Cross-check and atomically stage the closed NF1 archive/install set."""
-    expected: dict[str, tuple[str, str, int, int]] = {}
+    if digest(archive) != harness.ACCEPTED_ARCHIVE:
+        block("NF1 archive differs from reviewed NF2 receipt")
+    manifest = source / "native-hermetic-provenance.json"
+    try:
+        manifest_metadata = manifest.stat(follow_symlinks=False)
+    except OSError:
+        block("NF1 accepted manifest is absent")
+    if (
+        not stat.S_ISREG(manifest_metadata.st_mode)
+        or manifest_metadata.st_nlink != 1
+        or digest(manifest) != harness.ACCEPTED_MANIFEST
+    ):
+        block("NF1 accepted manifest differs from reviewed NF2 receipt")
+    expected: dict[str, tuple[str, str, int, int]] = {
+        "native-hermetic-provenance.json": (
+            "file",
+            harness.ACCEPTED_MANIFEST,
+            0o444,
+            manifest_metadata.st_size,
+        ),
+        "package": ("dir", "", 0o555, 0),
+    }
     with tarfile.open(archive, "r:") as stream:
         for member in stream:
             parts = _safe_archive_name(member.name)
-            name = "/".join(parts)
+            name = "/".join(("package", *parts))
             if name in expected or member.uid != 0 or member.gid != 0:
                 block("NF1 archive metadata or closed-set identity is invalid")
             if member.isdir():
@@ -513,7 +534,13 @@ def stage_nf1_install(
                 value = hashlib.sha256()
                 for chunk in iter(lambda: payload.read(1024 * 1024), b""):
                     value.update(chunk)
-                expected[name] = ("file", value.hexdigest(), mode, member.size)
+                payload_digest = value.hexdigest()
+                if (
+                    name == "package/bin/trustforge-native-foundation"
+                    and payload_digest != harness.ACCEPTED_RUNTIME
+                ):
+                    block("NF1 runtime differs from reviewed NF2 receipt")
+                expected[name] = ("file", payload_digest, mode, member.size)
             else:
                 block("NF1 archive contains a non-regular object")
 
@@ -1524,11 +1551,13 @@ def main() -> int:
                 cwd=repo,
             )
             unit = f"trustforge-nf3-b-{head[:12]}"
+            staged_nf1_expected = stage_nf1_install(
+                handoff_fd, install, archive, harness
+            )
+            staged_nf1_install = handoff_path / "nf1-install"
             os.mkdir("cases", 0o700, dir_fd=handoff_fd)
             os.fsync(handoff_fd)
             cases_root = handoff_path / "cases"
-            staged_nf1_expected = stage_nf1_install(handoff_fd, install, archive)
-            staged_nf1_install = handoff_path / "nf1-install"
             service_helper = Path(f"/run/{unit}-helper")
             service_rlib = Path(f"/run/{unit}-nf2.rlib")
             properties = [

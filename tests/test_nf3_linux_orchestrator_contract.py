@@ -250,6 +250,12 @@ def test_nf1_nested_bind_uses_atomic_closed_set_staging_not_raw_install():
     staging = value[value.index("def stage_nf1_install(") :]
     staging = staging[: staging.index("def cleanup_nf1_install(")]
     assert "actual_names != set(expected)" in staging
+    assert '"native-hermetic-provenance.json"' in staging
+    assert '"package": ("dir", "", 0o555, 0)' in staging
+    assert 'name = "/".join(("package", *parts))' in staging
+    assert "harness.ACCEPTED_MANIFEST" in staging
+    assert "harness.ACCEPTED_RUNTIME" in staging
+    assert "harness.ACCEPTED_ARCHIVE" in staging
     assert "member.uid != 0 or member.gid != 0" in staging
     assert "member.mode != 0o555" in staging
     assert "metadata.st_nlink != 1" in staging
@@ -261,6 +267,9 @@ def test_nf1_nested_bind_uses_atomic_closed_set_staging_not_raw_install():
     assert "BindReadOnlyPaths={install}" not in integrated
     assert "BindReadOnlyPaths={staged_nf1_install}" in integrated
     assert "cleanup_nf1_install(handoff_fd, staged_nf1_expected)" in integrated
+    assert integrated.index("stage_nf1_install(") < integrated.index(
+        'os.mkdir("cases", 0o700, dir_fd=handoff_fd)'
+    )
 
 
 def test_nf1_source_allows_only_canonical_or_owner_write_modes():

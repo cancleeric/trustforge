@@ -65,7 +65,10 @@ and then removes the verified case tree before terminal generation cleanup.
 The accepted NF1 install is never bound directly into the nested unit. The
 orchestrator validates the archive as a closed set, opens install components
 without following symlinks, requires root ownership and single-link regular
-files, and cross-checks every file against its archive payload. The trusted
+files, and cross-checks the exact accepted-install topology: the reviewed
+`native-hermetic-provenance.json` at the root plus the reviewed archive payload
+under a fixed `package/` directory. The manifest, runtime, and archive digests
+come from the reviewed NF2 harness. The trusted
 provisioning source may have either canonical modes or only the owner-write bit
 added (`0555`/`0755` for directories and runtime; `0444`/`0644` for data);
 group/other write is forbidden. It rechecks all retained source generations,
