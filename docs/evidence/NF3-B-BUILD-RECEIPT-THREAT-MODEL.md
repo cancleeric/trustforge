@@ -31,9 +31,9 @@ receipt and exact-commit review.
 The reviewed canonical-view receipts are:
 
 - release NF2 rlib: `1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4`;
-- release profile probe: `aeaa11176f0061b2a44f26b52393e95fa6c10d5cf3f4406dcb1a6f1710a0ee2a`;
+- release profile probe: `1db21394225521a2fb22ee81e73a35697a14d2e8275bc6008097684a026ecb93`;
 - evidence NF2 rlib: `84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1`;
-- evidence helper: `bac9d162cf023e8f5ac5389cc4a4e87b221706e976ae9aef6e1f7437c4aaca04`.
+- evidence helper: `db9f6e1f95d1aea350fe43d4a0c2392fd9f67c284a8c6207bc5d56b341798830`.
 
 Covered failures include a missing receipt, malformed or extra fields, an
 executable or component digest mismatch, symlink/hardlink substitution,
