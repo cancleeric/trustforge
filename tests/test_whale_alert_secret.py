@@ -31,6 +31,9 @@ class FakeSSM:
     def add_tags_to_resource(self, **kwargs):
         self.tags = kwargs["Tags"]
 
+    def remove_tags_from_resource(self, **kwargs):
+        self.removed_tags = kwargs["TagKeys"]
+
 
 def test_write_is_secure_string_and_status_never_contains_plaintext(monkeypatch):
     fake = FakeSSM()
@@ -53,6 +56,7 @@ def test_write_is_secure_string_and_status_never_contains_plaintext(monkeypatch)
             "Tier": "Standard",
         }
     ]
+    assert fake.removed_tags == ["TrustForgeLastVerifiedAt"]
     assert result == {
         "configured": True,
         "source": "ssm",

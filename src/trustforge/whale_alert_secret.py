@@ -153,12 +153,18 @@ def status() -> SecretStatus:
 def put_api_key(value: str) -> SecretStatus:
     global _last_verified_at
     clean = _validate_secret(value)
-    _ssm_client().put_parameter(
+    client = _ssm_client()
+    client.put_parameter(
         Name=_parameter_name(),
         Value=clean,
         Type="SecureString",
         Overwrite=True,
         Tier="Standard",
+    )
+    client.remove_tags_from_resource(
+        ResourceType="Parameter",
+        ResourceId=_parameter_name(),
+        TagKeys=["TrustForgeLastVerifiedAt"],
     )
     invalidate_cache()
     resolved, source = resolve_api_key(force_refresh=True)

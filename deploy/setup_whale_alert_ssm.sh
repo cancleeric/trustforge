@@ -28,7 +28,7 @@ fi
 PARAMETER_PATH="${PARAMETER#/}"
 PARAMETER_ARN="arn:aws:ssm:${REGION}:${ACCOUNT}:parameter/${PARAMETER_PATH}"
 POLICY=$(cat <<JSON
-{"Version":"2012-10-17","Statement":[{"Sid":"WhaleAlertExactSecureString","Effect":"Allow","Action":["ssm:GetParameter","ssm:PutParameter","ssm:DeleteParameter","ssm:AddTagsToResource","ssm:ListTagsForResource"],"Resource":"${PARAMETER_ARN}"}]}
+{"Version":"2012-10-17","Statement":[{"Sid":"WhaleAlertExactSecureString","Effect":"Allow","Action":["ssm:GetParameter","ssm:PutParameter","ssm:DeleteParameter","ssm:AddTagsToResource","ssm:RemoveTagsFromResource","ssm:ListTagsForResource"],"Resource":"${PARAMETER_ARN}"}]}
 JSON
 )
 

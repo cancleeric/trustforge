@@ -28,6 +28,7 @@ def test_policy_is_limited_to_exact_whale_alert_parameter():
         "ssm:PutParameter",
         "ssm:DeleteParameter",
         "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
         "ssm:ListTagsForResource",
     }
     assert "*" not in statement["Resource"]
