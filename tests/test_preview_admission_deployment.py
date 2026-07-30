@@ -956,7 +956,7 @@ def test_update_reconciles_requested_preview_env_and_rollback_restores(tmp_path)
     assert update.returncode != 0
     assert not promoted.exists()
     text = service.read_text(encoding="utf-8")
-    assert "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=1" in text
+    assert "TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=1" in text, update.stderr
     assert "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION=2" in text
     assert "TRUSTFORGE_PREVIEW_QUOTA_KEY_VERSION=1" not in text
 
