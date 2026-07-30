@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
+import os
 import signal
 import time
 import logging
@@ -27,8 +28,19 @@ def main() -> int:
     p.add_argument("--schedule-seconds", type=float, default=1800.0,
                    help="minimum interval between low-priority scheduled refreshes")
     args = p.parse_args()
-    flow = AnalysisFlow(workers_per_stage=args.workers_per_stage)
+    shared_flow_path = os.getenv("TRUSTFORGE_SHARED_ANALYSIS_DB_PATH", "").strip()
+    flow = AnalysisFlow(
+        shared_flow_path or None,
+        workers_per_stage=args.workers_per_stage,
+    )
     flow.start()
+    formal_worker = None
+    if (
+        os.getenv("TRUSTFORGE_FORMAL_RUN_SQLITE_PATH", "").strip()
+        or os.getenv("TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE", "").strip()
+    ):
+        from trustforge.formal_run_runtime import formal_run_worker
+        formal_worker = formal_run_worker(flow)
 
     # ── 歷史回填 worker（獨立 daemon thread，不阻擋 analysis flow）────────
     backfill_worker = None
@@ -56,6 +68,13 @@ def main() -> int:
                 flow.adopt_pending()
                 flow.reap_stale_running()
                 flow.adopt_due_retries()
+                if formal_worker is not None:
+                    formal_worker.reconcile_staged()
+                    # Bound each daemon iteration so a large formal backlog
+                    # cannot starve recovery, pruning, or scheduled refreshes.
+                    for _ in range(100):
+                        if formal_worker.run_once() == "idle":
+                            break
                 # The switch controls only low-priority scheduled snapshots.
                 # Workers stay alive to serve durable manual jobs immediately.
                 enabled, source = autonomy_enabled()

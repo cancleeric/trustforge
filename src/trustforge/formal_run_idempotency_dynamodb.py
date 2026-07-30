@@ -19,6 +19,7 @@ from .formal_run_idempotency import (
     FormalRunIdentity,
     FormalRunLookup,
     FormalRunReceipt,
+    HmacValue,
     IdempotencyInProgress,
     IdempotencyUnavailable,
     StaleFencingToken,
@@ -84,6 +85,22 @@ def _conditional(exc: ClientError) -> bool:
     )
 
 
+def _only_action_conditional_failed(exc: ClientError, index: int, count: int) -> bool:
+    if exc.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return False
+    reasons = exc.response.get("CancellationReasons")
+    if not isinstance(reasons, list) or len(reasons) != count:
+        return False
+    codes = [
+        reason.get("Code") if isinstance(reason, Mapping) else None
+        for reason in reasons
+    ]
+    return (
+        codes[index] == "ConditionalCheckFailed"
+        and all(code in {None, "None"} for offset, code in enumerate(codes) if offset != index)
+    )
+
+
 class DynamoDbFormalRunIdempotencyStore:
     """Strongly consistent, conditionally fenced multi-instance authority.
 
@@ -125,6 +142,16 @@ class DynamoDbFormalRunIdempotencyStore:
         return {
             "pk": "formal-run#guard#" + hashlib.sha256(material.encode()).hexdigest(),
             "sk": kind,
+        }
+
+    @staticmethod
+    def _content_key(identity: FormalRunIdentity, content: HmacValue) -> dict[str, object]:
+        material = "\x1f".join(
+            (identity.namespace, identity.scope_locator, content.key_id, content.digest)
+        )
+        return {
+            "pk": "formal-run#content#" + hashlib.sha256(material.encode()).hexdigest(),
+            "sk": "content",
         }
 
     def _get(self, key: Mapping[str, object]) -> dict[str, object] | None:
@@ -414,6 +441,7 @@ class DynamoDbFormalRunIdempotencyStore:
         now: datetime, provider_operation_id: str | None = None,
         cost_policy_version: str | None = None, cost_policy_digest: str | None = None,
         settlement_state: str | None = None, reconciliation_state: str | None = None,
+        _content_guard: dict[str, object] | None = None,
     ) -> None:
         now_ts = _timestamp(now)
         chargeable = self._validate_bind(
@@ -475,10 +503,25 @@ class DynamoDbFormalRunIdempotencyStore:
                     "ConditionExpression": "attribute_not_exists(#pk)",
                     "ExpressionAttributeNames": {"#pk": "pk"},
                 }})
+        if _content_guard is not None:
+            actions.append({"Put": {
+                "TableName": self._table,
+                "Item": _marshal(_content_guard),
+                "ConditionExpression": "attribute_not_exists(#pk) OR expires_at<=:now",
+                "ExpressionAttributeNames": {"#pk": "pk"},
+                "ExpressionAttributeValues": _marshal({":now": now_ts}),
+            }})
         try:
             self._client.transact_write_items(TransactItems=actions)
         except ClientError as exc:
             if _conditional(exc):
+                if (
+                    _content_guard is not None
+                    and _only_action_conditional_failed(exc, len(actions) - 1, len(actions))
+                    and self._get({"pk": _content_guard["pk"], "sk": _content_guard["sk"]})
+                    is not None
+                ):
+                    raise IdempotencyInProgress("shared content decision raced") from exc
                 current = self._get(self._key(identity))
                 if current is not None and (
                     current.get("state") != "acquired"
@@ -491,6 +534,82 @@ class DynamoDbFormalRunIdempotencyStore:
             raise IdempotencyUnavailable("DynamoDB bind transaction unavailable") from exc
         except (BotoCoreError, TimeoutError) as exc:
             raise IdempotencyUnavailable("DynamoDB bind transaction unavailable") from exc
+
+    def bind_with_content_decision(
+        self, *, identity: FormalRunIdentity, fencing_token: int,
+        receipt: FormalRunReceipt, operation_id: str, content: HmacValue,
+        fresh: bool, now: datetime, reservation_id: str, max_reserved_cost: str,
+        provider_operation_id: str, cost_policy_version: str,
+        cost_policy_digest: str,
+    ) -> FormalRunReceipt | None:
+        """Atomically bind a fresh creation or reuse a 300-second scoped guard."""
+        if not isinstance(fresh, bool):
+            raise ValueError("fresh must be boolean")
+        if receipt.result_id is None:
+            raise ValueError("content decision requires deterministic result id")
+        if receipt.disposition != ("fresh-created" if fresh else "created"):
+            raise ValueError("receipt disposition does not match fresh decision")
+        now_ts = _timestamp(now)
+        key = self._content_key(identity, content)
+
+        def reuse(item: Mapping[str, object]) -> FormalRunReceipt | None:
+            expires = _stored_decimal(item.get("expires_at"), "content expiry")
+            if expires <= now_ts:
+                return None
+            if item.get("locale") != receipt.locale:
+                return None
+            job_id, result_id = item.get("job_id"), item.get("result_id")
+            if not isinstance(job_id, str) or not isinstance(result_id, str):
+                raise IdempotencyUnavailable("stored content decision is invalid")
+            reused = replace(
+                receipt, job_id=job_id, result_id=result_id, disposition="reused"
+            )
+            self.bind(
+                identity=identity, fencing_token=fencing_token, receipt=reused,
+                operation_id=operation_id, outbox_state="none",
+                dispatch_state="not_dispatched", reservation_id=None,
+                max_reserved_cost=None, now=now,
+            )
+            return reused
+
+        if not fresh:
+            existing = self._get(key)
+            if existing is not None:
+                expires = _stored_decimal(existing.get("expires_at"), "content expiry")
+                if expires > now_ts:
+                    return reuse(existing)
+        guard = None if fresh else {
+            **key, "entity_type": "formal_run_content_guard",
+            "namespace": identity.namespace, "scope_locator": identity.scope_locator,
+            "content_key_id": content.key_id, "content_digest": content.digest,
+            "job_id": receipt.job_id, "result_id": receipt.result_id,
+            "locale": receipt.locale, "expires_at": now_ts + 300,
+        }
+        try:
+            self.bind(
+                identity=identity, fencing_token=fencing_token, receipt=receipt,
+                operation_id=operation_id, outbox_state="pending",
+                dispatch_state="not_dispatched", reservation_id=reservation_id,
+                max_reserved_cost=max_reserved_cost, now=now,
+                provider_operation_id=provider_operation_id,
+                cost_policy_version=cost_policy_version,
+                cost_policy_digest=cost_policy_digest,
+                settlement_state="reserved", reconciliation_state="pending",
+                _content_guard=guard,
+            )
+            return receipt
+        except IdempotencyInProgress:
+            raced = None
+            # A successful DynamoDB transaction is immediately visible to a
+            # strong read.  The tiny bounded loop also accommodates moto's
+            # thread scheduling without introducing an unbounded retry path.
+            for _ in range(3):
+                raced = self._get(key)
+                if raced is not None:
+                    break
+            if raced is None:
+                raise
+            return reuse(raced)
 
     def claim_dispatch(
         self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
@@ -524,6 +643,120 @@ class DynamoDbFormalRunIdempotencyStore:
         except (BotoCoreError, TimeoutError) as exc:
             raise IdempotencyUnavailable("DynamoDB dispatch claim unavailable") from exc
         return provider
+
+    def pending_projection_token(self, *, identity: FormalRunIdentity) -> int | None:
+        """Expose a fence solely for recovering a still-undispatched projection."""
+        item = self._get(self._key(identity))
+        if item is None:
+            return None
+        if (
+            item.get("state") == "bound"
+            and item.get("disposition") in {"created", "fresh-created"}
+            and item.get("outbox_state") == "pending"
+            and item.get("dispatch_state") == "not_dispatched"
+        ):
+            return int(
+                _stored_decimal(
+                    item.get("owner_fencing_token"), "fencing token", integral=True
+                )
+            )
+        return None
+
+    def dispatch_resolution(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> str:
+        item = self._get(self._key(identity))
+        if item is None:
+            return "none"
+        token = _stored_decimal(
+            item.get("owner_fencing_token"), "fencing token", integral=True
+        )
+        if token != Decimal(fencing_token):
+            return "none"
+        state, outbox, dispatch = (
+            item.get("state"),
+            item.get("outbox_state"),
+            item.get("dispatch_state"),
+        )
+        if state == "execution_uncertain" or dispatch == "uncertain":
+            return "uncertain"
+        if outbox == "pending" and dispatch == "not_dispatched":
+            return "pending"
+        if outbox == "claimed" and dispatch == "possibly_dispatched":
+            return "claimed"
+        if outbox == "completed" and dispatch == "dispatched":
+            return "completed"
+        return "none"
+
+    def provider_operation(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> str | None:
+        item = self._get(self._key(identity))
+        if item is None:
+            return None
+        token = _stored_decimal(
+            item.get("owner_fencing_token"), "fencing token", integral=True
+        )
+        value = item.get("provider_operation_id")
+        return value if token == Decimal(fencing_token) and isinstance(value, str) else None
+
+    def reservation_details(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> tuple[str, str] | None:
+        item = self._get(self._key(identity))
+        if item is None:
+            return None
+        token = _stored_decimal(
+            item.get("owner_fencing_token"), "fencing token", integral=True
+        )
+        reservation, maximum = item.get("reservation_id"), item.get("max_reserved_cost")
+        if (
+            token != Decimal(fencing_token)
+            or not isinstance(reservation, str)
+            or not isinstance(maximum, str)
+        ):
+            return None
+        return reservation, maximum
+
+    def complete_dispatch(
+        self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
+    ) -> None:
+        try:
+            self._client.update_item(
+                TableName=self._table,
+                Key=_marshal(self._key(identity)),
+                UpdateExpression=(
+                    "SET outbox_state=:completed, dispatch_state=:dispatched, "
+                    "updated_at=:now"
+                ),
+                ConditionExpression=(
+                    "#state=:bound AND owner_fencing_token=:token AND "
+                    "(disposition=:created OR disposition=:fresh) AND "
+                    "outbox_state=:claimed AND dispatch_state=:possible"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues=_marshal(
+                    {
+                        ":completed": "completed",
+                        ":dispatched": "dispatched",
+                        ":now": _timestamp(now),
+                        ":bound": "bound",
+                        ":token": fencing_token,
+                        ":created": "created",
+                        ":fresh": "fresh-created",
+                        ":claimed": "claimed",
+                        ":possible": "possibly_dispatched",
+                    }
+                ),
+            )
+        except ClientError as exc:
+            if _conditional(exc):
+                raise IdempotencyInProgress(
+                    "dispatch is not authoritatively claimed"
+                ) from exc
+            raise IdempotencyUnavailable("DynamoDB dispatch completion unavailable") from exc
+        except (BotoCoreError, TimeoutError) as exc:
+            raise IdempotencyUnavailable("DynamoDB dispatch completion unavailable") from exc
 
     def mark_execution_uncertain(
         self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -314,6 +315,67 @@ def test_batch_allocation_skips_legacy_reserve_release_but_ledgers(
     assert ledger[0]["total_cost_usd"] == 0.01
 
 
+def test_formal_live_missing_usage_is_uncertain_and_never_receipted(
+    monkeypatch,
+):
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: True)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.narrative_model_priced",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.daily_cap_usd",
+        lambda: 1.0,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.try_reserve_request_budget",
+        lambda **_kwargs: pytest.fail("formal allocation must not reserve twice"),
+    )
+    receipts = []
+
+    with (
+        pytest.raises(MultiAngleAuthorityError, match="uncertain"),
+        _bedrock_live_attempt(
+            ExecutionLog(run_id="formal-timeout"),
+            formal_pre_reserved=True,
+            on_accounted=receipts.append,
+        ) as live,
+    ):
+        assert live
+
+    assert receipts == []
+
+
+def test_formal_offline_attempt_persists_cancelled_zero_cost_receipt(
+    monkeypatch,
+):
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: False)
+
+    def persist(record):
+        record["run_id"] = "formal-offline-receipt"
+        return True
+
+    monkeypatch.setattr("trustforge.analysis_flow.append_run", persist)
+    receipts = []
+    with _bedrock_live_attempt(
+        ExecutionLog(run_id="formal-offline"),
+        formal_pre_reserved=True,
+        on_accounted=receipts.append,
+    ) as live:
+        assert not live
+
+    assert receipts == [
+        {
+            "ledger_receipt": "formal-offline-receipt",
+            "accounting_token": receipts[0]["accounting_token"],
+            "actual_cost_usd": Decimal("0.0"),
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "outcome": "cancelled_offline",
+        }
+    ]
+
+
 def _allow_legacy_live_attempt(monkeypatch, reservation=0.25):
     monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: True)
     monkeypatch.setattr(
@@ -467,6 +529,51 @@ def test_live_usage_ledger_failure_charges_actual_before_release(monkeypatch):
         )
 
     assert order == [("unledgered", 0.04), ("release", 0.25)]
+
+
+def test_unified_sqlite_lease_without_usage_is_durably_retained_across_instances(
+    tmp_path, monkeypatch,
+):
+    from trustforge.formal_budget_reservation import SqliteFormalBudgetAuthority
+
+    path = tmp_path / "shared-live-budget.sqlite3"
+    monkeypatch.setenv("TRUSTFORGE_ENV", "test")
+    monkeypatch.setenv("TRUSTFORGE_FORMAL_BUDGET_SQLITE_PATH", str(path))
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda: True)
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.narrative_model_priced", lambda: True
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.daily_cap_exceeded", lambda: False
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.daily_cap_usd", lambda: 0.25
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.request_max_cost_usd", lambda: 0.25
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.daily_nonformal_cost_usd",
+        lambda *_args, **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.budget_guard.record_unledgered_spend",
+        lambda _amount: None,
+    )
+
+    with pytest.raises(TimeoutError):
+        with _bedrock_live_attempt(ExecutionLog(run_id="unified-timeout")) as live:
+            assert live is True
+            raise TimeoutError("unknown outcome")
+
+    restarted = SqliteFormalBudgetAuthority(path, environment="test")
+    assert restarted.reserve(
+        reservation_id="legacy-next-instance",
+        spent=Decimal("0"),
+        cost=Decimal("0.25"),
+        cap=Decimal("0.25"),
+        now=datetime.now(timezone.utc),
+    ) is None
 
 
 def test_shared_usage_ledger_failure_retains_reservation_despite_local_fallback(
@@ -703,8 +810,13 @@ def test_same_package_step1_retry_cannot_consume_twice(tmp_path, monkeypatch):
 
 def test_same_package_step2_retry_cannot_consume_twice(tmp_path, monkeypatch):
     @contextmanager
-    def live_gate(_log, *, batch_allocation=False):
+    def live_gate(
+        _log, *, batch_allocation=False, formal_pre_reserved=False,
+        on_accounted=None,
+    ):
         assert batch_allocation
+        assert not formal_pre_reserved
+        assert on_accounted is None
         yield True
 
     monkeypatch.setattr("trustforge.analysis_flow._bedrock_live_attempt", live_gate)

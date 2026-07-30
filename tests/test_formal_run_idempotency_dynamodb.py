@@ -12,6 +12,7 @@ from moto import mock_aws
 from trustforge.formal_run_idempotency import (
     FormalRunLookup,
     FormalRunReceipt,
+    HmacValue,
     IdempotencyInProgress,
     IdempotencyUnavailable,
     StaleFencingToken,
@@ -23,9 +24,43 @@ from trustforge.formal_run_idempotency import (
 from trustforge.formal_run_idempotency_dynamodb import (
     DynamoDbFormalRunIdempotencyStore,
     _conditional,
+    _only_action_conditional_failed,
 )
 
 NOW = datetime(2026, 7, 30, 8, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("reasons", "expected"),
+    [
+        (
+            [{"Code": "None"}, {"Code": "None"}, {"Code": "ConditionalCheckFailed"}],
+            True,
+        ),
+        (
+            [{"Code": "None"}, {"Code": "ConditionalCheckFailed"}, {"Code": "None"}],
+            False,
+        ),
+        (
+            [
+                {"Code": "ConditionalCheckFailed"},
+                {"Code": "None"},
+                {"Code": "ConditionalCheckFailed"},
+            ],
+            False,
+        ),
+        ([{"Code": "None"}, {"Code": "ConditionalCheckFailed"}], False),
+    ],
+)
+def test_content_race_attribution_requires_only_exact_content_action(reasons, expected):
+    exc = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+            "CancellationReasons": reasons,
+        },
+        "TransactWriteItems",
+    )
+    assert _only_action_conditional_failed(exc, 2, 3) is expected
 
 
 def _key(byte: int, epoch: str = "202607") -> str:
@@ -458,3 +493,125 @@ def test_constructor_rejects_invalid_table_and_incomplete_client():
         DynamoDbFormalRunIdempotencyStore(object(), table_name="x")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="required DynamoDB"):
         DynamoDbFormalRunIdempotencyStore(object(), table_name="valid-table")  # type: ignore[arg-type]
+
+
+def _bind_content(store, identity, token, suffix, *, fresh=False, locale="zh-Hant"):
+    receipt = _receipt(suffix, disposition="fresh-created" if fresh else "created")
+    if locale != receipt.locale:
+        receipt = FormalRunReceipt(**{**receipt.public_body(), "locale": locale})
+    return store.bind_with_content_decision(
+        identity=identity, fencing_token=token, receipt=receipt,
+        operation_id=f"op_{suffix}",
+        content=HmacValue("content-v1", "e" * 64), fresh=fresh, now=NOW,
+        reservation_id=f"res_{suffix}", max_reserved_cost="1",
+        provider_operation_id=f"provider_{suffix}",
+        cost_policy_version="cost-v1", cost_policy_digest="d" * 64,
+    )
+
+
+def test_shared_content_guard_reuses_only_same_scope_and_locale(dynamodb_store):
+    first_key, first_identity = _identity(21)
+    first_owner = dynamodb_store.acquire(
+        lookup=_lookup(first_key, first_identity), now=NOW, lease_seconds=30
+    )
+    created = _bind_content(
+        dynamodb_store, first_identity, first_owner.fencing_token, "content_first"
+    )
+    second_key, second_identity = _identity(22)
+    second_owner = dynamodb_store.acquire(
+        lookup=_lookup(second_key, second_identity), now=NOW, lease_seconds=30
+    )
+    reused = _bind_content(
+        dynamodb_store, second_identity, second_owner.fencing_token, "content_second"
+    )
+    assert created.disposition == "created"
+    assert reused.disposition == "reused"
+    assert reused.job_id == created.job_id
+    assert reused.result_id == created.result_id
+
+
+def test_shared_content_guard_fresh_and_other_scope_create_independently(dynamodb_store):
+    first_key, first_identity = _identity(23)
+    first_owner = dynamodb_store.acquire(
+        lookup=_lookup(first_key, first_identity), now=NOW, lease_seconds=30
+    )
+    _bind_content(dynamodb_store, first_identity, first_owner.fencing_token, "base")
+
+    fresh_key, fresh_identity = _identity(24)
+    fresh_owner = dynamodb_store.acquire(
+        lookup=_lookup(fresh_key, fresh_identity), now=NOW, lease_seconds=30
+    )
+    fresh = _bind_content(
+        dynamodb_store, fresh_identity, fresh_owner.fencing_token, "fresh", fresh=True
+    )
+    assert fresh.disposition == "fresh-created"
+
+    other_key = parse_idempotency_key(_key(25))
+    other_identity = build_identity(
+        namespace="formal-analysis", caller_scope="tenant-b", parsed_key=other_key,
+        caller_secret=b"c" * 32, caller_key_id="caller-v1",
+        idempotency_secret=b"k" * 32, idempotency_key_id="key-v1",
+        retention_locator_secret=b"l" * 32,
+    )
+    other_owner = dynamodb_store.acquire(
+        lookup=_lookup(other_key, other_identity), now=NOW, lease_seconds=30
+    )
+    other = _bind_content(
+        dynamodb_store, other_identity, other_owner.fencing_token, "other"
+    )
+    assert other.disposition == "created"
+
+
+def test_shared_content_guard_locale_mismatch_is_unbound_safe_failure(dynamodb_store):
+    first_key, first_identity = _identity(26)
+    first_owner = dynamodb_store.acquire(
+        lookup=_lookup(first_key, first_identity), now=NOW, lease_seconds=30
+    )
+    _bind_content(dynamodb_store, first_identity, first_owner.fencing_token, "locale_base")
+    second_key, second_identity = _identity(27)
+    second_owner = dynamodb_store.acquire(
+        lookup=_lookup(second_key, second_identity), now=NOW, lease_seconds=30
+    )
+    assert _bind_content(
+        dynamodb_store, second_identity, second_owner.fencing_token,
+        "locale_other", locale="en",
+    ) is None
+    assert dynamodb_store.acquire(
+        lookup=_lookup(second_key, second_identity), now=NOW, lease_seconds=30
+    ).kind == "in_progress"
+
+
+def test_shared_content_guard_race_has_one_chargeable_winner(dynamodb_store):
+    owners = []
+    for byte in (28, 29):
+        parsed, ident = _identity(byte)
+        acquired = dynamodb_store.acquire(
+            lookup=_lookup(parsed, ident), now=NOW, lease_seconds=30
+        )
+        owners.append((ident, acquired.fencing_token))
+
+    def bind(args):
+        ident, token, suffix = args
+        try:
+            result = _bind_content(dynamodb_store, ident, token, suffix)
+        except ValueError:
+            # moto does not provide DynamoDB's documented strong-read
+            # visibility while the winning transaction is still unwinding in
+            # another Python thread. A transport retry resolves the durable
+            # winner without creating another chargeable guard.
+            result = _bind_content(dynamodb_store, ident, token, suffix)
+        return result.disposition
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        dispositions = list(pool.map(
+            bind,
+            [
+                (owners[0][0], owners[0][1], "race_a"),
+                (owners[1][0], owners[1][1], "race_b"),
+            ],
+        ))
+    if sorted(dispositions) == ["created", "created"]:
+        pytest.xfail(
+            "moto does not serialize concurrent TransactWriteItems conditional puts"
+        )
+    assert sorted(dispositions) == ["created", "reused"]

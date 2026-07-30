@@ -10,6 +10,23 @@ import HermesRightRail from '../hermes/HermesRightRail'
 import { HermesI18nProvider, useHermesI18n } from '../hermes/hermesI18n'
 import HermesDashboard from './HermesDashboard'
 
+function dashboardFormalReceipt() {
+  return {
+    schema_version: 'formal-run-receipt/v1' as const,
+    receipt_id: 'frc_test-question',
+    question_id: 'test-question',
+    job_id: 'test-job',
+    result_id: 'result_test-job',
+    state: 'accepted' as const,
+    origin: 'manual' as const,
+    disposition: 'created' as const,
+    locale: 'zh-Hant' as const,
+    created_at: '2026-07-30T08:00:00Z',
+    expires_at: null,
+    fingerprint_version: 'analysis-question/v1' as const,
+  }
+}
+
 vi.mock('../lib/endpoints', () => ({
   getOverview: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getCosts: vi.fn().mockResolvedValue({ ok: true, data: { total_cost_usd: 0 } }),
@@ -29,7 +46,24 @@ vi.mock('../lib/endpoints', () => ({
   getAnalysisQuestionContext: vi.fn().mockResolvedValue({ ok: true, data: { query: '', matches: [], conversation: [], retrieval: 'test' } }),
   getHermesUpgrades: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'no_request', message: 'no request' } }),
-  registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { accepted: true } }),
+  currentNarrativeLocale: vi.fn(() => 'zh-Hant'),
+  registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: dashboardFormalReceipt() }),
+  getAnalysisJob: vi.fn().mockResolvedValue({
+    ok: true,
+    data: {
+      job_id: 'test-job',
+      state: 'failed',
+      current_stage: 'source_ingestion',
+      coin: 'BTC',
+      mode: 'risk',
+      question: '分析BTC近期市場狀況，整合多源資料',
+      error: 'test failure',
+      origin: 'manual',
+      priority: 0,
+      queue_position: null,
+      result: null,
+    },
+  }),
   getWhaleSummary: vi.fn().mockResolvedValue({ ok: true, data: { coin: 'BTC', period_hours: 24, total_count: 0, total_usd: 0, net_exchange_flow_usd: 0, exchange_inflow_usd: 0, exchange_outflow_usd: 0, max_single_usd: 0, whale_transfer_count: 0, exchange_inflow_count: 0, exchange_outflow_count: 0 } }),
 }))
 
@@ -79,7 +113,7 @@ describe('HermesDashboard workspace navigation', () => {
     vi.clearAllMocks()
     vi.mocked(registerAnalysisQuestion).mockResolvedValue({
       ok: true,
-      data: { question_id: 'test-question', job_id: null, state: 'queued', origin: 'manual' },
+      data: dashboardFormalReceipt(),
     })
     vi.mocked(getAnalysisQuestionContext).mockResolvedValue({
       ok: true,
@@ -305,7 +339,7 @@ describe('HermesDashboard workspace navigation', () => {
     await act(async () => {
       settleRegistration({
         ok: true,
-        data: { question_id: 'test-question', job_id: null, state: 'queued', origin: 'manual' },
+        data: dashboardFormalReceipt(),
       })
       await registrationSettled
     })

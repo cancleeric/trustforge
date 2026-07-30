@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { getAnalysisJob, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
+import { currentNarrativeLocale, getAnalysisJob, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeParams } from '../lib/endpoints'
 import type { AnalysisJobStatus } from '../lib/endpoints'
+import { beginFormalRunIntent, completeFormalRunIntent, formalRunIntent } from '../lib/formalRun'
 import type { AnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import { BEGINNER_INTENTS, beginnerQuestion, beginnerTypeForMode, type BeginnerIntent } from '../lib/beginnerExperience'
@@ -59,6 +60,14 @@ function writeStoredJobId(key: string, jobId: string): void {
   }
 }
 
+function clearStoredJobId(key: string): void {
+  try {
+    window.sessionStorage.removeItem(key)
+  } catch {
+    // The unresolved formal intent remains authoritative even if cleanup fails.
+  }
+}
+
 function useEmbeddedMobileComposer(embedded: boolean): boolean {
   const [mobile, setMobile] = useState(false)
 
@@ -92,6 +101,8 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
   const [loading, setLoading] = useState(false)
   const [manualJob, setManualJob] = useState<AnalysisJobStatus | null>(null)
   const [requestNonce, setRequestNonce] = useState(0)
+  const [freshIntentNonce, setFreshIntentNonce] = useState<number | null>(null)
+  const [transportRetryNonce, setTransportRetryNonce] = useState(0)
   // N13 fix: the embedded host (HermesDashboard's own left-rail "立即重新
   // 分析" button) doesn't go through `handleSubmit` below — it drives the
   // shared URL search params directly (see HermesModuleDeck/HermesDashboard).
@@ -109,9 +120,11 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
   useEffect(() => {
     if (resubmitSignal !== undefined && resubmitSignal !== prevResubmitSignal.current) {
       prevResubmitSignal.current = resubmitSignal
-      setRequestNonce((value) => value + 1)
+      const nextNonce = requestNonce + 1
+      setFreshIntentNonce(nextNonce)
+      setRequestNonce(nextNonce)
     }
-  }, [resubmitSignal])
+  }, [requestNonce, resubmitSignal])
   const processedRequestKeys = useRef(new Set<string>())
   const [focusCoin, setFocusCoin] = useState(params.coin)
   const [focusIntent, setFocusIntent] = useState<BeginnerIntent>('trust')
@@ -212,14 +225,14 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
       runSample(0)
       return () => { controller.abort(); timers.forEach(window.clearTimeout) }
     }
-    const poll = (jobId: string, fromUrl = false) => {
+    const poll = (jobId: string, fromUrl = false, formalKey?: string) => {
       void getAnalysisJob(jobId, controller.signal).then((res) => {
         if (controller.signal.aborted) return
         if (!res.ok) {
           if (Date.now() - lastContactAt < INACTIVITY_TIMEOUT_MS) {
             // 後端還在（或至少最近才失聯），無論是 server_busy 還是短暫的
             // network hiccup，都先重試，而不是把還活著的 job 判死刑。
-            setTrackedTimeout(() => poll(jobId, fromUrl), BUSY_BASE_DELAY_MS)
+            setTrackedTimeout(() => poll(jobId, fromUrl, formalKey), BUSY_BASE_DELAY_MS)
             return
           }
           setLoading(false)
@@ -234,14 +247,16 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
         }
         setManualJob(res.data)
         if (res.data.state === 'completed' && res.data.result) {
+          if (formalKey) completeFormalRunIntent('analyze', formalKey)
           setData(res.data.result)
           setLoading(false)
         } else if (res.data.state === 'failed') {
+          if (formalKey) completeFormalRunIntent('analyze', formalKey)
           setLoading(false)
           setError({ code: 'analysis_failed', message: res.data.error || '分析工作失敗' })
         } else {
           // queued / running：job 還活著，持續輪詢，不設人為秒數上限（見 N8）。
-          setTrackedTimeout(() => poll(jobId, fromUrl), 1200)
+          setTrackedTimeout(() => poll(jobId, fromUrl, formalKey), 1200)
         }
       })
     }
@@ -254,7 +269,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
       poll(reconnectJobId, true)
       return () => { controller.abort(); timers.forEach(window.clearTimeout) }
     }
-    const requestKey = `${params.coin}\n${mode}\n${params.q}\n${params.sample ?? ''}\n${requestNonce}`
+    const requestKey = `${params.coin}\n${mode}\n${params.q}\n${params.sample ?? ''}\n${requestNonce}\n${transportRetryNonce}`
     if (requestNonce === 0 && processedRequestKeys.current.has(requestKey)) {
       setLoading(false)
       return () => { controller.abort(); timers.forEach(window.clearTimeout) }
@@ -278,8 +293,30 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     let requestSettled = false
     const processedKeys = processedRequestKeys.current
     processedKeys.add(requestKey)
+    const locale = currentNarrativeLocale()
+    // The nonce is part of the browser-side intent identity: StrictMode and
+    // transport retries keep the same key, while each explicit rerun gets a
+    // distinct key even when every visible field is unchanged.
+    const visibleIntent = formalRunIntent(params.coin, mode, params.q, locale)
+    const activeIntent = beginFormalRunIntent(
+      'analyze',
+      visibleIntent,
+      `${requestNonce}`,
+      freshIntentNonce === requestNonce,
+      requestNonce === 0,
+    )
+    const { fresh, key: idempotencyKey } = activeIntent
+    if (fresh) clearStoredJobId(storageKey)
     const submit = (attempt: number) => {
-      void registerAnalysisQuestion(params.coin, mode, params.q, controller.signal).then((res) => {
+      void registerAnalysisQuestion(
+        params.coin,
+        mode,
+        params.q,
+        idempotencyKey,
+        fresh,
+        controller.signal,
+        locale,
+      ).then((res) => {
         if (controller.signal.aborted) return
         requestSettled = true
         if (!res.ok || !res.data.job_id) {
@@ -294,7 +331,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
         // N9/point4 fix: 把拿到的 job_id 存進 sessionStorage，reload 頁面時
         // 由上面的 `reconnectJobId` 接回同一個工作（見 jobMatchesRequest）。
         writeStoredJobId(storageKey, res.data.job_id)
-        poll(res.data.job_id)
+        poll(res.data.job_id, false, idempotencyKey)
       })
     }
     submit(0)
@@ -307,7 +344,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     // re-running it on a locale switch would resubmit an in-flight request. `t()`
     // above is only used to build a one-off error message, never part of the request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, urlJobId])
+  }, [freshIntentNonce, hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, transportRetryNonce, urlJobId])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return
@@ -351,7 +388,9 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     next.set('mode', values.mode)
     if (params.sample) next.set('sample', params.sample)
     setSearchParams(next)
-    setRequestNonce((value) => value + 1)
+    const nextNonce = requestNonce + 1
+    setFreshIntentNonce(hasExplicitRequest ? nextNonce : null)
+    setRequestNonce(nextNonce)
   }
 
   const handleFocusStart = () => {
@@ -363,6 +402,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     next.set('mode', intent.mode)
     next.set('focus', '1')
     setSearchParams(next)
+    setFreshIntentNonce(null)
     setRequestNonce((value) => value + 1)
   }
 
@@ -456,7 +496,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
                 <i /> {t('analyzingNewSnapshot')}
               </div>
             )}
-            {!loading && error && !data && <ErrorState code={error.code} message={error.message} onRetry={() => setRequestNonce((value) => value + 1)} />}
+            {!loading && error && !data && <ErrorState code={error.code} message={error.message} onRetry={() => setTransportRetryNonce((value) => value + 1)} />}
             {data && focusMode && (
               <BeginnerResult data={data} onShowFullAnalysis={showFullAnalysis} />
             )}

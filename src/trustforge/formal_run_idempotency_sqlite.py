@@ -20,6 +20,7 @@ from .formal_run_idempotency import (
     FormalRunIdentity,
     FormalRunLookup,
     FormalRunReceipt,
+    HmacValue,
     IdempotencyUnavailable,
     IdempotencyInProgress,
     StaleFencingToken,
@@ -124,6 +125,19 @@ class SqliteFormalRunIdempotencyStore:
                     key_epoch TEXT NOT NULL,
                     retain_until REAL,
                     PRIMARY KEY (namespace, caller_key_id, caller_scope_hmac, key_key_id, key_hmac)
+                );
+                CREATE TABLE IF NOT EXISTS formal_run_content_guard (
+                    namespace TEXT NOT NULL,
+                    scope_locator TEXT NOT NULL,
+                    content_key_id TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    result_id TEXT NOT NULL,
+                    locale TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    PRIMARY KEY (
+                        namespace, scope_locator, content_key_id, content_digest
+                    )
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_formal_operation_scope
                     ON formal_run_idempotency(namespace, scope_locator, operation_id)
@@ -465,6 +479,162 @@ class SqliteFormalRunIdempotencyStore:
                 raise ValueError("formal-run identity is already bound in this caller scope") from exc
             db.commit()
 
+    def bind_with_content_decision(
+        self,
+        *,
+        identity: FormalRunIdentity,
+        fencing_token: int,
+        receipt: FormalRunReceipt,
+        operation_id: str,
+        content: HmacValue,
+        fresh: bool,
+        now: datetime,
+        reservation_id: str,
+        max_reserved_cost: str,
+        provider_operation_id: str,
+        cost_policy_version: str,
+        cost_policy_digest: str,
+    ) -> FormalRunReceipt | None:
+        """Atomically choose scoped content reuse or a new chargeable run."""
+        if not isinstance(fresh, bool):
+            raise ValueError("fresh must be boolean")
+        if receipt.result_id is None:
+            raise ValueError("content decision requires deterministic result id")
+        if receipt.disposition != ("fresh-created" if fresh else "created"):
+            raise ValueError("receipt disposition does not match fresh decision")
+        now_ts = _timestamp(now)
+        content_args = (
+            identity.namespace,
+            identity.scope_locator,
+            content.key_id,
+            content.digest,
+        )
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not fresh:
+                guard = db.execute(
+                    """SELECT job_id, result_id, locale, expires_at
+                       FROM formal_run_content_guard
+                       WHERE namespace=? AND scope_locator=? AND content_key_id=?
+                         AND content_digest=?""",
+                    content_args,
+                ).fetchone()
+                if guard is not None and guard["expires_at"] > now_ts:
+                    if guard["locale"] != receipt.locale:
+                        db.commit()
+                        return None
+                    reused = replace(
+                        receipt,
+                        job_id=str(guard["job_id"]),
+                        result_id=str(guard["result_id"]),
+                        disposition="reused",
+                    )
+                    self._fenced_update(
+                        db,
+                        identity,
+                        fencing_token,
+                        """UPDATE formal_run_idempotency SET state='bound', receipt_body=?,
+                           receipt_id=?, question_id=?, job_id=?, result_id=?,
+                           disposition=?, locale=?, operation_id=?, outbox_state='none',
+                           dispatch_state='not_dispatched', lease_expires_at=NULL,
+                           updated_at=?""",
+                        (
+                            json.dumps(
+                                reused.public_body(),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            reused.receipt_id,
+                            reused.question_id,
+                            reused.job_id,
+                            reused.result_id,
+                            reused.disposition,
+                            reused.locale,
+                            operation_id,
+                            now_ts,
+                        ),
+                    )
+                    db.commit()
+                    return reused
+
+            # Validate all chargeable invariants before mutating either table.
+            try:
+                reserved_cost = Decimal(max_reserved_cost)
+            except InvalidOperation as exc:
+                raise ValueError(
+                    "maximum reserved cost must be a positive finite decimal"
+                ) from exc
+            if (
+                _STRICT_ID.fullmatch(operation_id) is None
+                or _STRICT_ID.fullmatch(reservation_id) is None
+                or _STRICT_ID.fullmatch(provider_operation_id) is None
+                or _STRICT_ID.fullmatch(cost_policy_version) is None
+                or _HEX_64.fullmatch(cost_policy_digest) is None
+                or not reserved_cost.is_finite()
+                or reserved_cost <= 0
+            ):
+                raise ValueError("invalid chargeable content decision metadata")
+            try:
+                self._fenced_update(
+                    db,
+                    identity,
+                    fencing_token,
+                    """UPDATE formal_run_idempotency SET state='bound', receipt_body=?,
+                       receipt_id=?, question_id=?, job_id=?, result_id=?, disposition=?,
+                       locale=?, operation_id=?, outbox_state='pending',
+                       dispatch_state='not_dispatched', provider_operation_id=?,
+                       cost_policy_version=?, cost_policy_digest=?, reservation_id=?,
+                       max_reserved_cost=?, settlement_state='reserved',
+                       reconciliation_state='pending', lease_expires_at=NULL, updated_at=?""",
+                    (
+                        json.dumps(
+                            receipt.public_body(),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        receipt.receipt_id,
+                        receipt.question_id,
+                        receipt.job_id,
+                        receipt.result_id,
+                        receipt.disposition,
+                        receipt.locale,
+                        operation_id,
+                        provider_operation_id,
+                        cost_policy_version,
+                        cost_policy_digest,
+                        reservation_id,
+                        max_reserved_cost,
+                        now_ts,
+                    ),
+                )
+                if not fresh:
+                    db.execute(
+                        """INSERT INTO formal_run_content_guard (
+                               namespace, scope_locator, content_key_id, content_digest,
+                               job_id, result_id, locale, expires_at
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(namespace, scope_locator, content_key_id, content_digest)
+                           DO UPDATE SET job_id=excluded.job_id, result_id=excluded.result_id,
+                               locale=excluded.locale, expires_at=excluded.expires_at
+                           WHERE formal_run_content_guard.expires_at<=?""",
+                        (
+                            *content_args,
+                            receipt.job_id,
+                            receipt.result_id,
+                            receipt.locale,
+                            now_ts + 300,
+                            now_ts,
+                        ),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    "formal-run identity is already bound in this caller scope"
+                ) from exc
+            db.commit()
+            return receipt
+
     def claim_dispatch(
         self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
     ) -> str:
@@ -495,6 +665,83 @@ class SqliteFormalRunIdempotencyStore:
             db.commit()
             return str(row["provider_operation_id"])
 
+    def pending_projection_token(self, *, identity: FormalRunIdentity) -> int | None:
+        """Return recovery authority only before any dispatch claim."""
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT owner_fencing_token, state, disposition, outbox_state,
+                          dispatch_state
+                   FROM formal_run_idempotency
+                   WHERE namespace=? AND scope_locator=? AND caller_key_id=?
+                     AND caller_scope_hmac=? AND key_key_id=? AND key_hmac=?""",
+                self._identity_args(identity),
+            ).fetchone()
+        if row is None:
+            return None
+        if (
+            row["state"] == "bound"
+            and row["disposition"] in {"created", "fresh-created"}
+            and row["outbox_state"] == "pending"
+            and row["dispatch_state"] == "not_dispatched"
+        ):
+            token = row["owner_fencing_token"]
+            if isinstance(token, int) and token > 0:
+                return token
+            raise IdempotencyUnavailable("stored fencing token is invalid")
+        return None
+
+    def dispatch_resolution(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> str:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT owner_fencing_token, state, outbox_state, dispatch_state
+                   FROM formal_run_idempotency
+                   WHERE namespace=? AND scope_locator=? AND caller_key_id=?
+                     AND caller_scope_hmac=? AND key_key_id=? AND key_hmac=?""",
+                self._identity_args(identity),
+            ).fetchone()
+        if row is None or row["owner_fencing_token"] != fencing_token:
+            return "none"
+        if row["state"] == "execution_uncertain" or row["dispatch_state"] == "uncertain":
+            return "uncertain"
+        if row["outbox_state"] == "pending" and row["dispatch_state"] == "not_dispatched":
+            return "pending"
+        if row["outbox_state"] == "claimed" and row["dispatch_state"] == "possibly_dispatched":
+            return "claimed"
+        if row["outbox_state"] == "completed" and row["dispatch_state"] == "dispatched":
+            return "completed"
+        return "none"
+
+    def provider_operation(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> str | None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT provider_operation_id FROM formal_run_idempotency
+                   WHERE namespace=? AND scope_locator=? AND caller_key_id=?
+                     AND caller_scope_hmac=? AND key_key_id=? AND key_hmac=?
+                     AND owner_fencing_token=?""",
+                (*self._identity_args(identity), fencing_token),
+            ).fetchone()
+        value = row["provider_operation_id"] if row else None
+        return str(value) if value is not None else None
+
+    def reservation_details(
+        self, *, identity: FormalRunIdentity, fencing_token: int
+    ) -> tuple[str, str] | None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT reservation_id,max_reserved_cost FROM formal_run_idempotency
+                   WHERE namespace=? AND scope_locator=? AND caller_key_id=?
+                     AND caller_scope_hmac=? AND key_key_id=? AND key_hmac=?
+                     AND owner_fencing_token=?""",
+                (*self._identity_args(identity), fencing_token),
+            ).fetchone()
+        if row is None or row["reservation_id"] is None or row["max_reserved_cost"] is None:
+            return None
+        return str(row["reservation_id"]), str(row["max_reserved_cost"])
+
     def mark_execution_uncertain(
         self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
     ) -> None:
@@ -523,6 +770,27 @@ class SqliteFormalRunIdempotencyStore:
                 (json.dumps(receipt.public_body(), ensure_ascii=False, sort_keys=True, separators=(",", ":")), now_ts),
                 allowed_state="bound",
             )
+            db.commit()
+
+    def complete_dispatch(
+        self, *, identity: FormalRunIdentity, fencing_token: int, now: datetime
+    ) -> None:
+        now_ts = _timestamp(now)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                """UPDATE formal_run_idempotency
+                   SET outbox_state='completed', dispatch_state='dispatched', updated_at=?
+                   WHERE namespace=? AND scope_locator=? AND caller_key_id=?
+                     AND caller_scope_hmac=? AND key_key_id=? AND key_hmac=?
+                     AND owner_fencing_token=? AND state='bound'
+                     AND disposition IN ('created','fresh-created')
+                     AND outbox_state='claimed'
+                     AND dispatch_state='possibly_dispatched'""",
+                (now_ts, *self._identity_args(identity), fencing_token),
+            )
+            if cursor.rowcount != 1:
+                raise IdempotencyInProgress("dispatch is not authoritatively claimed")
             db.commit()
 
     def fail_terminal(
