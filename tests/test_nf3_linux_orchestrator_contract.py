@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from unittest import mock
 
@@ -144,6 +145,71 @@ def test_handoff_session_finalizes_on_exception():
         with orchestrator.handoff_session("commit"):
             raise RuntimeError("controlled failure")
     finalize.assert_called_once_with(-1, -2, "commit-random", {})
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ["staging", "post-staging", "nested", "evidence-validation"],
+)
+def test_handoff_session_cleans_registered_directories_before_finalize(
+    tmp_path, failure_point
+):
+    generation = tmp_path / "generation"
+    generation.mkdir()
+    opened = (-1, -2, "commit-random", {"mount_id": "1"})
+
+    def finalize(*_args):
+        assert not list(generation.iterdir())
+
+    with (
+        mock.patch.object(
+            orchestrator, "_validate_handoff_directory", return_value=opened
+        ),
+        mock.patch.object(
+            orchestrator, "finalize_handoff_generation", side_effect=finalize
+        ) as finalizer,
+        pytest.raises(RuntimeError, match=failure_point),
+    ):
+        with orchestrator.handoff_session("commit") as session:
+            cleanups = session[4]
+            nf1 = generation / ".nf1-install.tmp-test"
+            nf1.mkdir()
+            (nf1 / "partial").write_text("partial")
+            cleanups.register("nf1-install", lambda: shutil.rmtree(nf1))
+            if failure_point != "staging":
+                cases = generation / "cases"
+                cases.mkdir()
+                (cases / "partial").write_text("partial")
+                cleanups.register("cases", lambda: shutil.rmtree(cases))
+            raise RuntimeError(failure_point)
+    finalizer.assert_called_once()
+
+
+def test_handoff_cleanup_failure_supersedes_and_preserves_unknown_entry(tmp_path):
+    generation = tmp_path / "generation"
+    generation.mkdir()
+    cases = generation / "cases"
+    cases.mkdir()
+    unknown = cases / "unknown"
+    unknown.write_text("unsafe")
+    opened = (-1, -2, "commit-random", {"mount_id": "1"})
+
+    def reject_unknown():
+        if list(cases.iterdir()):
+            raise RuntimeError("unknown registered entry")
+
+    with (
+        mock.patch.object(
+            orchestrator, "_validate_handoff_directory", return_value=opened
+        ),
+        mock.patch.object(orchestrator, "finalize_handoff_generation") as finalizer,
+        pytest.raises(RuntimeError, match="unknown registered entry"),
+    ):
+        with orchestrator.handoff_session("commit") as session:
+            session[4].register("cases", reject_unknown)
+            raise RuntimeError("original failure")
+    assert unknown.exists()
+    finalizer.assert_not_called()
 
 
 def test_handoff_rejects_non_plain_destination(tmp_path):

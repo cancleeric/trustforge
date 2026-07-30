@@ -61,6 +61,13 @@ child is also passed as both the secure store parent and evidence directory;
 artifact siblings are never writable. After evidence is copied out, dirfd-based
 cleanup rejects unknown entries, symlinks, hardlinks, unsafe ownership/modes,
 and then removes the verified case tree before terminal generation cleanup.
+The handoff session registers each owned directory immediately at creation and
+runs those exact cleanups in reverse order on success, exception, or
+`SystemExit`, before artifact and lifecycle-marker removal. Partial NF1 staging
+accepts only a subset of the reviewed package topology; partial case cleanup
+accepts only harness-owned case/store root names and safe root-owned directory
+and regular-file descendants. An unknown or unsafe object stops cleanup,
+supersedes the original failure, and preserves the generation for inspection.
 
 The accepted NF1 install is never bound directly into the nested unit. The
 orchestrator validates the archive as a closed set, opens install components

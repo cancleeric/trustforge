@@ -368,6 +368,112 @@ def cleanup_handoff_file(
     os.fsync(handoff_fd)
 
 
+class HandoffCleanupRegistry:
+    """LIFO ownership for non-file generation entries."""
+
+    def __init__(self) -> None:
+        self._entries: list[tuple[str, object]] = []
+
+    def register(self, name: str, cleanup) -> None:
+        if any(entry_name == name for entry_name, _ in self._entries):
+            block(f"duplicate handoff cleanup registration: {name}")
+        self._entries.append((name, cleanup))
+
+    def discard(self, name: str) -> None:
+        if not self._entries or self._entries[-1][0] != name:
+            block(f"handoff cleanup order mismatch: {name}")
+        self._entries.pop()
+
+    def cleanup_all(self) -> None:
+        while self._entries:
+            _, cleanup = self._entries[-1]
+            cleanup()
+            self._entries.pop()
+
+
+def _remove_registered_tree(root_fd: int) -> None:
+    """Remove a registered subtree after rejecting unsafe inode types."""
+    for name in sorted(os.listdir(root_fd)):
+        metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if metadata.st_uid != 0 or metadata.st_gid != 0:
+            block(f"registered handoff subtree ownership is unsafe: {name}")
+        if stat.S_ISDIR(metadata.st_mode):
+            if stat.S_IMODE(metadata.st_mode) & 0o022:
+                block(f"registered handoff subtree directory is unsafe: {name}")
+            child = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            _remove_registered_tree(child)
+            os.fsync(child)
+            os.close(child)
+            os.rmdir(name, dir_fd=root_fd)
+        elif (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_nlink == 1
+            and metadata.st_size <= 128 * 1024 * 1024
+            and not stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            os.unlink(name, dir_fd=root_fd)
+        else:
+            block(f"registered handoff subtree object is unsafe: {name}")
+    os.fsync(root_fd)
+
+
+def cleanup_partial_cases_tree(generation_fd: int) -> None:
+    """Remove only known harness roots from a partially populated cases tree."""
+    try:
+        cases_fd = os.open(
+            "cases",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=generation_fd,
+        )
+    except FileNotFoundError:
+        return
+    metadata = os.fstat(cases_fd)
+    if (
+        metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        block("partial NF3 cases directory metadata is unsafe")
+    for name in os.listdir(cases_fd):
+        case_number = name.removeprefix("case-")
+        if not (
+            (
+                len(case_number) == 3
+                and case_number.isdigit()
+                and 1 <= int(case_number) <= 60
+            )
+            or name.startswith("trustforge-nf3-integrated-")
+            or name.startswith("trustforge-nf3-witness-")
+        ):
+            os.close(cases_fd)
+            block(f"partial NF3 cases directory contains unknown entry: {name}")
+        child = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=cases_fd,
+        )
+        child_metadata = os.fstat(child)
+        if (
+            child_metadata.st_uid != 0
+            or child_metadata.st_gid != 0
+            or stat.S_IMODE(child_metadata.st_mode) & 0o022
+        ):
+            os.close(child)
+            os.close(cases_fd)
+            block(f"partial NF3 case root is unsafe: {name}")
+        _remove_registered_tree(child)
+        os.close(child)
+        os.rmdir(name, dir_fd=cases_fd)
+    os.fsync(cases_fd)
+    os.close(cases_fd)
+    os.rmdir("cases", dir_fd=generation_fd)
+    os.fsync(generation_fd)
+
+
 def cleanup_cases_tree(generation_fd: int, expected_cases: list[str]) -> None:
     """Verify and remove only the extracted, closed-world case evidence tree."""
     cases_fd = os.open(
@@ -553,8 +659,88 @@ def case_semantic_collection_sha256(records: list[dict[str, object]]) -> str:
     return value.hexdigest()
 
 
+def cleanup_partial_nf1_install(
+    generation_fd: int,
+    state: dict[str, str],
+    expected: dict[str, tuple[str, str, int, int]],
+) -> None:
+    """Remove a registered partial NF1 tree only when it is an expected subset."""
+    root_name = state["name"]
+    try:
+        root_fd = os.open(
+            root_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=generation_fd,
+        )
+    except FileNotFoundError:
+        if root_name.startswith(".nf1-install.tmp-"):
+            try:
+                root_fd = os.open(
+                    "nf1-install",
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=generation_fd,
+                )
+            except FileNotFoundError:
+                return
+            root_name = "nf1-install"
+        else:
+            return
+    root_metadata = os.fstat(root_fd)
+    actual = _closed_tree_names(root_fd)
+    if (
+        root_metadata.st_uid != 0
+        or root_metadata.st_gid != 0
+        or stat.S_IMODE(root_metadata.st_mode) not in (0o700, 0o555)
+        or not actual <= set(expected)
+    ):
+        os.close(root_fd)
+        block("partial staged NF1 cleanup closed set is unsafe")
+    for name in sorted(actual, key=lambda value: value.count("/"), reverse=True):
+        kind, _, mode, size = expected[name]
+        descriptor = _open_relative(root_fd, tuple(name.split("/")), kind == "dir")
+        metadata = os.fstat(descriptor)
+        safe = metadata.st_uid == 0 and metadata.st_gid == 0
+        if kind == "dir":
+            safe = (
+                safe
+                and stat.S_ISDIR(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) in (0o700, 0o555)
+            )
+        else:
+            safe = (
+                safe
+                and stat.S_ISREG(metadata.st_mode)
+                and metadata.st_nlink == 1
+                and metadata.st_size <= size
+                and stat.S_IMODE(metadata.st_mode) in (0o400, mode)
+            )
+        if not safe:
+            os.close(descriptor)
+            os.close(root_fd)
+            block(f"partial staged NF1 cleanup metadata mismatch: {name}")
+        os.close(descriptor)
+        parent = (
+            _open_relative(root_fd, tuple(name.split("/")[:-1]), True)
+            if "/" in name
+            else os.dup(root_fd)
+        )
+        if kind == "file":
+            os.unlink(name.rsplit("/", 1)[-1], dir_fd=parent)
+        else:
+            os.rmdir(name.rsplit("/", 1)[-1], dir_fd=parent)
+        os.fsync(parent)
+        os.close(parent)
+    os.close(root_fd)
+    os.rmdir(root_name, dir_fd=generation_fd)
+    os.fsync(generation_fd)
+
+
 def stage_nf1_install(
-    generation_fd: int, source: Path, archive: Path, harness
+    generation_fd: int,
+    source: Path,
+    archive: Path,
+    harness,
+    cleanup_registry: HandoffCleanupRegistry,
 ) -> dict[str, tuple[str, str, int, int]]:
     """Cross-check and atomically stage the closed NF1 archive/install set."""
     if digest(archive) != harness.ACCEPTED_ARCHIVE:
@@ -627,6 +813,11 @@ def stage_nf1_install(
 
     temporary = f".nf1-install.tmp-{secrets.token_hex(16)}"
     os.mkdir(temporary, 0o700, dir_fd=generation_fd)
+    cleanup_state = {"name": temporary}
+    cleanup_registry.register(
+        "nf1-install",
+        lambda: cleanup_partial_nf1_install(generation_fd, cleanup_state, expected),
+    )
     temporary_fd = os.open(
         temporary,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -722,6 +913,7 @@ def stage_nf1_install(
         os.rename(
             temporary, "nf1-install", src_dir_fd=generation_fd, dst_dir_fd=generation_fd
         )
+        cleanup_state["name"] = "nf1-install"
         os.fsync(generation_fd)
     finally:
         os.close(temporary_fd)
@@ -816,9 +1008,11 @@ def handoff_session(reviewed_commit: str):
         reviewed_commit
     )
     artifacts: dict[str, tuple[int, ...]] = {}
+    cleanup_registry = HandoffCleanupRegistry()
     try:
-        yield generation_fd, generation, mount_identity, artifacts
+        yield generation_fd, generation, mount_identity, artifacts, cleanup_registry
     finally:
+        cleanup_registry.cleanup_all()
         finalize_handoff_generation(
             parent_fd,
             generation_fd,
@@ -1473,6 +1667,7 @@ def main() -> int:
             handoff_generation,
             handoff_mount,
             handoff_generations,
+            handoff_cleanups,
         ):
             handoff_path = HANDOFF_ROOT / handoff_generation
             release_receipt = scratch / "release-receipt.v1"
@@ -1625,10 +1820,13 @@ def main() -> int:
             )
             unit = f"trustforge-nf3-b-{head[:12]}"
             staged_nf1_expected = stage_nf1_install(
-                handoff_fd, install, archive, harness
+                handoff_fd, install, archive, harness, handoff_cleanups
             )
             staged_nf1_install = handoff_path / "nf1-install"
             os.mkdir("cases", 0o700, dir_fd=handoff_fd)
+            handoff_cleanups.register(
+                "cases", lambda: cleanup_partial_cases_tree(handoff_fd)
+            )
             os.fsync(handoff_fd)
             cases_root = handoff_path / "cases"
             service_helper = Path(f"/run/{unit}-helper")
@@ -1705,7 +1903,9 @@ def main() -> int:
                 handoff_fd,
                 [case_directory.name for case_directory in case_directories],
             )
+            handoff_cleanups.discard("cases")
             cleanup_nf1_install(handoff_fd, staged_nf1_expected)
+            handoff_cleanups.discard("nf1-install")
 
             evidence = {
                 "schema": "trustforge.nf3.integrated-evidence.v1",
