@@ -32,6 +32,15 @@ def test_atomic_authority_policy_covers_transaction_subactions():
         "dynamodb:PutItem",
     }
 
+    assert "Resource" in statement and isinstance(statement["Resource"], str)
+    assert "*" not in statement["Resource"]
+    actions = statement["Action"]
+    if isinstance(actions, str):
+        actions = [actions]
+    assert "*" not in actions
+    for action in actions:
+        assert "*" not in action
+
 
 def test_atomic_authority_enables_pitr_and_uses_composite_key():
     script = SCRIPT.read_text(encoding="utf-8")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -74,12 +75,14 @@ def _validate(
     summary: dict,
     artifact_root: Path,
     registry: dict | None = None,
+    release_sha: str | None = None,
 ) -> None:
     validate_acceptance(
         registry or _registry(),
         summary,
         ROOT / "qa" / "schemas",
         artifact_root,
+        release_sha=release_sha,
     )
 
 
@@ -233,4 +236,51 @@ def test_duplicate_case_result_is_rejected(tmp_path: Path) -> None:
     summary = _valid_summary(tmp_path)
     summary["cases"].append(copy.deepcopy(summary["cases"][0]))
     with pytest.raises(AcceptanceValidationError, match="duplicate result"):
+        _validate(summary, tmp_path)
+
+
+def test_release_sha_mismatch_is_rejected(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
+    assert summary["manifest"]["git_sha"] == "b" * 40
+    with pytest.raises(
+        AcceptanceValidationError, match="manifest git_sha does not match release commit"
+    ):
+        _validate(summary, tmp_path, release_sha="a" * 40)
+
+
+def test_release_sha_match_is_accepted(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
+    _validate(summary, tmp_path, release_sha=summary["manifest"]["git_sha"])
+
+
+def test_release_sha_advisory_warning_when_not_provided(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    summary = _valid_summary(tmp_path)
+    captured: dict = {}
+
+    def fake_validate(registry, summary_arg, schemas, release_sha=None):
+        captured["release_sha"] = release_sha
+
+    monkeypatch.setattr(MODULE, "load_json", lambda p: summary)
+    monkeypatch.setattr(MODULE, "validate_acceptance", fake_validate)
+    monkeypatch.setattr(MODULE, "is_production_accepted", lambda s: True)
+    monkeypatch.setattr(sys, "argv", ["validate_qa_acceptance", "--summary", "x.json"])
+
+    rc = MODULE.main()
+    err = capsys.readouterr().err
+    assert "release-sha not provided" in err
+    assert "advisory only" in err
+    assert captured["release_sha"] is None
+    assert rc == 0
+
+
+def test_reverse_timestamps_are_rejected(tmp_path: Path) -> None:
+    summary = _valid_summary(tmp_path)
+    case = summary["cases"][0]
+    case["started_at"] = "2026-07-30T02:00:00Z"
+    case["finished_at"] = "2026-07-30T01:00:00Z"
+    with pytest.raises(
+        AcceptanceValidationError, match="case finished_at precedes started_at"
+    ):
         _validate(summary, tmp_path)

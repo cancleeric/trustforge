@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Validate TrustForge QA registry and release-bound acceptance evidence."""
+"""Validate TrustForge QA registry and release-bound acceptance evidence.
+
+誠信聲明：本 CLI 目前為 advisory（建議性）性質，未接入任何 pre-push / release-train
+自動 gate；其 fail-closed 只在手動執行時生效，不得單獨作為 release 放行證據。
+接進自動 gate 前，release 放行須另有獨立證據。
+"""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +14,7 @@ import json
 import mimetypes
 import re
 import sys
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -163,6 +169,7 @@ def validate_acceptance(
     summary: dict[str, Any],
     schemas_dir: Path,
     artifact_root: Path | None = None,
+    release_sha: str | None = None,
 ) -> None:
     repo_root = schemas_dir.resolve().parents[1]
     expected_cases = expanded_case_ids(registry, repo_root)
@@ -181,6 +188,8 @@ def validate_acceptance(
     manifest = summary["manifest"]
     if manifest["release_id"] != release_id:
         raise AcceptanceValidationError("manifest release_id does not match summary")
+    if release_sha is not None and manifest.get("git_sha") != release_sha:
+        raise AcceptanceValidationError("manifest git_sha does not match release commit")
 
     manifest_artifacts: dict[str, dict[str, Any]] = {}
     for artifact in manifest["artifacts"]:
@@ -215,6 +224,18 @@ def validate_acceptance(
                 raise AcceptanceValidationError(
                     f"case evidence metadata mismatch: {evidence['path']}"
                 )
+        started_at = case.get("started_at")
+        finished_at = case.get("finished_at")
+        if started_at and finished_at:
+            start_dt: datetime | None = None
+            finish_dt: datetime | None = None
+            try:
+                start_dt = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                finish_dt = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+            except ValueError:
+                start_dt = finish_dt = None
+            if start_dt is not None and finish_dt is not None and finish_dt < start_dt:
+                raise AcceptanceValidationError("case finished_at precedes started_at")
         observed[case_id] = case
 
     missing = sorted(set(expected_cases) - set(observed))
@@ -257,9 +278,24 @@ def main() -> int:
     parser.add_argument("--registry", type=Path, default=Path("qa/requirements.json"))
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--schemas", type=Path, default=Path("qa/schemas"))
+    parser.add_argument(
+        "--release-sha",
+        default=None,
+        help="expected 40-hex release commit; when set, manifest git_sha must equal it",
+    )
     args = parser.parse_args()
+    if args.release_sha is None:
+        print(
+            "release-sha not provided; manifest git_sha binding skipped (advisory only)",
+            file=sys.stderr,
+        )
     try:
-        validate_acceptance(load_json(args.registry), load_json(args.summary), args.schemas)
+        validate_acceptance(
+            load_json(args.registry),
+            load_json(args.summary),
+            args.schemas,
+            release_sha=args.release_sha,
+        )
     except (AcceptanceValidationError, json.JSONDecodeError) as exc:
         print(f"QA acceptance validation failed: {exc}", file=sys.stderr)
         return 1
