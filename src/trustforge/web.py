@@ -1244,9 +1244,9 @@ def _conf_gauge(
 ) -> str:
     """資訊完整度視覺化：SVG 弧形 gauge（270° 弧）+ 大字標籤。
 
-    #101 主角數字統一：`decision_state` 為 abstain/low_confidence 時主角＝
-    校準後資訊完整度（`calibrated_confidence`）；normal 時主角＝裸均值信任分
-    （`raw_confidence`，等同 `report.confidence`／後端 `trust_score` 語意）。
+    主儀表固定呈現校準後資訊完整度（`calibrated_confidence`），避免 normal
+    狀態改顯裸均值信任分時，使用者把原始證據分誤認為最終校準結果。
+    裸均值信任分只保留在旁邊的具名明細。
     `raw_confidence` 預設 `None`（＝沿用 `calibrated_confidence`），
     `decision_state` 預設 `"normal"`——向後相容既有只傳 2 個位置參數的呼叫端
     （如既有測試 `web._conf_gauge(0.91, "高信心")`），渲染結果與改動前完全一致。
@@ -1254,8 +1254,7 @@ def _conf_gauge(
     raw = calibrated_confidence if raw_confidence is None else raw_confidence
     # #1 修復：缺失/未知 decision_state 一律先正規化為 normal。
     decision_state = _normalize_decision_state(decision_state)
-    is_low_info = decision_state in ("abstain", "low_confidence")
-    hero = calibrated_confidence if is_low_info else raw
+    hero = calibrated_confidence
     pct = max(0.0, min(1.0, hero))
     # #2 修復：配色改走集中的 `_decision_color`（state-aware），不再只按
     # 數值門檻分桶，跟 React `ConfidenceGauge.bucketColor` 同一套規則。
@@ -1286,7 +1285,7 @@ def _conf_gauge(
         f'<div>'
         f'<div class="tf-conf-big" style="color:{color}">{html.escape(label)}</div>'
         f'<div style="font-size:.85rem;color:var(--tf-muted)">'
-        f'資訊完整度（校準後） {calibrated_confidence:.2f}｜裸均值信任分 {raw:.2f}</div>'
+        f'校準後資訊完整度 {calibrated_confidence:.2f}｜原始信任分 {raw:.2f}</div>'
         f'</div>'
         f'</div>'
     )
@@ -3507,9 +3506,7 @@ def _render_report(
     # （confidence_label() 已含三態），避免弱證據 abstain 時裸 confidence
     # （supporting 均值恆為 0 或 >=0.5）讓信心欄仍顯示「中/高」，跟
     # market_judgment 的「資料不足、暫不判斷」矛盾。
-    # #101 主角數字統一：多傳 raw_confidence/decision_state，讓 _conf_gauge
-    # 依 decision_state 切換主角（abstain/low_confidence→資訊完整度，
-    # normal→裸均值信任分），跟 React 端 ConfidenceGauge 同一套規則。
+    # 主儀表固定使用校準後資訊完整度；raw confidence 僅作具名明細。
     conf_html = _conf_gauge(
         report.calibrated_confidence,
         report.confidence_label(),
@@ -3713,10 +3710,8 @@ def _render_comparison(
     dir_b = report_b.direction or report_b._direction_label()
 
     def _cmp_conf(calibrated: float, raw: float, decision_state: str, label: str) -> str:
-        """#101 主角數字統一：abstain/low_confidence 態主角＝校準後資訊完整度，
-        normal 態主角＝裸均值信任分（`raw`，等同 `report.confidence`），跟
-        `_conf_gauge`／React `ConfidenceGauge`/`OverviewCard` 同一套規則。
-        副標一律雙數字並列並各自掛標籤。
+        """主數字固定呈現校準後資訊完整度，裸均值信任分只作具名明細，
+        跟 `_conf_gauge`／React `ConfidenceGauge` 同一套語意。
 
         #1／#2 修復：`decision_state` 先正規化（缺失/未知→normal），配色改走
         跟 `_conf_gauge` 共用的 `_decision_color`（state-aware：abstain=紅、
@@ -3725,8 +3720,7 @@ def _render_comparison(
         份報告 0.40 在 React 顯琥珀、SSR 卻顯紅）。
         """
         decision_state = _normalize_decision_state(decision_state)
-        is_low_info = decision_state in ("abstain", "low_confidence")
-        hero = calibrated if is_low_info else raw
+        hero = calibrated
         pct = max(0, min(100, int(hero * 100)))
         color = _decision_color(decision_state, hero)
         return (
@@ -3736,7 +3730,7 @@ def _render_comparison(
             f'<div class="tf-bar" style="width:{pct}%;background:{color}"></div>'
             f"</div>"
             f'<div style="font-size:.75rem;color:var(--tf-muted2);margin-top:2px">'
-            f'資訊完整度（校準後） {calibrated:.2f}｜裸均值信任分 {raw:.2f}</div>'
+            f'校準後資訊完整度 {calibrated:.2f}｜原始信任分 {raw:.2f}</div>'
         )
 
     src_a = len({ev.source for ev in evidence_a})

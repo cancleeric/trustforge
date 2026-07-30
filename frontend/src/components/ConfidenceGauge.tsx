@@ -25,7 +25,7 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
   const pct = Math.max(0, Math.min(1, heroValue))
   const color = bucketColor(decisionState, heroValue)
   // #171：離散分層標籤——一律吃後端對齊的 `calibrated_confidence`（資訊完整度），
-  // 不是 gauge 大字 hero（normal 態 hero=rawConfidence 信任分）。因此本分層**正名為
+  // 正是 gauge 大字 hero（所有狀態都固定使用 calibratedConfidence）。因此本分層**正名為
   // 「資訊完整度」分層**，與下方「資訊完整度（校準後）」數字同源、可對照驗證，
   // 不冠「信任等級」以免被誤讀成上方信任分的分級（codex 對抗審 H-1：normal 態
   // 大字 95%＋等級「中」同框、raw/calibrated 兩來源互打的穿幫風險）。
@@ -81,7 +81,7 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
       </p>
       <DecisionStateBadge state={decisionState} />
       <p className="tf-num text-xs text-tf-muted">
-        信任分 {rawConfidence.toFixed(2)}｜資訊完整度 {calibratedConfidence.toFixed(2)}
+        原始信任分 {rawConfidence.toFixed(2)}｜校準後資訊完整度 {calibratedConfidence.toFixed(2)}
       </p>
     </div>
   )
