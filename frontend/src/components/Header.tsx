@@ -16,7 +16,7 @@ export default function Header() {
   // 哨兵值而非版號，見下方版號徽章的註解。
   const isUnversioned = releaseVersion === 'build' || /^dev\b/.test(releaseVersion)
   const navItems = [
-    { to: '/', label: 'HERMES' }, { to: '/analyze', label: t('analyze') },
+    { to: '/', label: 'HERMES' }, { to: '/plan', label: locale === 'zh-TW' ? '規劃' : 'PLAN' }, { to: '/analyze', label: t('analyze') },
     { to: '/compare', label: t('compare') }, { to: '/history', label: t('history') },
     { to: '/status', label: t('sources') }, { to: '/costs', label: t('costs') },
   ]

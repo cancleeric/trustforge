@@ -156,6 +156,7 @@ def gate(worktree: Path) -> None:
         hook.chmod(0o500)
         command = [str(hook)]
         sandbox = Path("/usr/bin/sandbox-exec")
+        rust_toolchain = _trusted_rust_toolchain(Path.home())
         if sys.platform == "darwin":
             if not sandbox.is_file():
                 raise RuntimeError("trusted gate sandbox is unavailable")
@@ -163,6 +164,8 @@ def gate(worktree: Path) -> None:
             profile = (
                 f'(version 1)(allow default)(deny file-read* (subpath "{home}"))'
                 f'(deny file-write* (subpath "{home}"))'
+                f'(allow file-read* (subpath "{rust_toolchain}"))'
+                f'(allow process-exec (subpath "{rust_toolchain}"))'
                 '(deny process-exec (literal "/usr/bin/security"))'
             )
             command = [str(sandbox), "-p", profile, str(hook)]
@@ -172,7 +175,33 @@ def gate(worktree: Path) -> None:
                 env.pop(key)
         env["TRUSTFORGE_GATE_SANDBOX"] = "1"
         env["HOME"] = str(sandbox_root)
+        env["CARGO_HOME"] = str(sandbox_root / ".cargo")
+        env["RUSTC"] = str(rust_toolchain / "bin" / "rustc")
+        env["PATH"] = f"{rust_toolchain / 'bin'}:{env.get('PATH', '')}"
         subprocess.run(command, cwd=sandbox_root, env=env, check=True)
+
+
+def _trusted_rust_toolchain(home: Path) -> Path:
+    """Resolve only the active Rust toolchain, never Cargo credentials/caches."""
+    home = home.resolve()
+    rustup = home / ".cargo" / "bin" / "rustup"
+    if not rustup.is_file():
+        raise RuntimeError("trusted Rust toolchain is unavailable")
+    result = subprocess.run(
+        [str(rustup), "which", "cargo"],
+        text=True,
+        check=True,
+        capture_output=True,
+    )
+    cargo = Path(result.stdout.strip()).resolve(strict=True)
+    toolchains = (home / ".rustup" / "toolchains").resolve()
+    if not cargo.is_relative_to(toolchains) or cargo.name != "cargo":
+        raise RuntimeError("rustup resolved cargo outside the trusted toolchain root")
+    toolchain = cargo.parent.parent
+    rustc = toolchain / "bin" / "rustc"
+    if not rustc.is_file():
+        raise RuntimeError("trusted Rust compiler is unavailable")
+    return toolchain
 
 
 def _localize_gate_interpreter(

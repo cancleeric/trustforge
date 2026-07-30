@@ -426,7 +426,7 @@ cat > "$UD" <<EOF
 #!/bin/bash
 set -x
 dnf install -y python3.11 python3.11-pip unzip >/var/log/tf-setup.log 2>&1
-python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'cryptography>=44,<50' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
+python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'cryptography>=44,<50' 'jsonschema>=4.23,<5' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
 mkdir -p /opt/trustforge && cd /opt/trustforge
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}artifact.zip ./app.zip --region ${REGION} >>/var/log/tf-setup.log 2>&1
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}manifest.json ./manifest.json --region ${REGION} >>/var/log/tf-setup.log 2>&1

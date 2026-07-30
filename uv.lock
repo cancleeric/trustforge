@@ -1182,13 +1182,13 @@ wheels = [
 
 [[package]]
 name = "trustforge"
-version = "0.27.0"
 source = { editable = "." }
 dependencies = [
     { name = "bedrock-agentcore" },
     { name = "boto3" },
     { name = "certifi" },
     { name = "cryptography" },
+    { name = "jsonschema" },
     { name = "portalocker" },
     { name = "pypdf" },
 ]
@@ -1209,6 +1209,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.34" },
     { name = "certifi", specifier = ">=2024.2.2" },
     { name = "cryptography", specifier = ">=44,<50" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4,<5" },
     { name = "moto", extras = ["dynamodb"], marker = "extra == 'dev'", specifier = ">=5" },
     { name = "portalocker", specifier = ">=3,<4" },
