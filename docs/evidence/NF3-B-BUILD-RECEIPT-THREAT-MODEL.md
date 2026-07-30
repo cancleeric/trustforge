@@ -62,6 +62,17 @@ artifact siblings are never writable. After evidence is copied out, dirfd-based
 cleanup rejects unknown entries, symlinks, hardlinks, unsafe ownership/modes,
 and then removes the verified case tree before terminal generation cleanup.
 
+The accepted NF1 install is never bound directly into the nested unit. The
+orchestrator validates the archive as a closed set, opens install components
+without following symlinks, requires root ownership, single-link regular files,
+directory/runtime mode `0555` and data mode `0444`, and cross-checks every file
+against its archive payload. It rechecks all retained source generations,
+fsyncs a private temporary tree, and atomically publishes
+`<generation>/nf1-install`. Only that staged tree is bound read-only. After the
+matrix, exact closed-set cleanup removes it; unknown objects or source
+generation changes prevent PASS, while the external accepted install remains
+unchanged.
+
 The reviewed canonical-view receipts are:
 
 - release NF2 rlib: `1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4`;

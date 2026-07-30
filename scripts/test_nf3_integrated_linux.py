@@ -19,6 +19,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 from pathlib import Path
@@ -424,6 +425,248 @@ def cleanup_cases_tree(generation_fd: int, expected_cases: list[str]) -> None:
     os.fsync(cases_fd)
     os.close(cases_fd)
     os.rmdir("cases", dir_fd=generation_fd)
+    os.fsync(generation_fd)
+
+
+def _safe_archive_name(name: str) -> tuple[str, ...]:
+    path = Path(name)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in ("", ".", "..") for part in path.parts)
+    ):
+        block("NF1 archive contains an unsafe path")
+    return path.parts
+
+
+def _open_relative(root_fd: int, parts: tuple[str, ...], directory: bool) -> int:
+    current = os.dup(root_fd)
+    try:
+        for index, part in enumerate(parts):
+            flags = os.O_RDONLY | os.O_NOFOLLOW
+            if index < len(parts) - 1 or directory:
+                flags |= os.O_DIRECTORY
+            child = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _closed_tree_names(root_fd: int, prefix: tuple[str, ...] = ()) -> set[str]:
+    names: set[str] = set()
+    for name in os.listdir(root_fd):
+        if name in ("", ".", "..") or "/" in name:
+            block("NF1 install contains an unsafe entry name")
+        metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        relative = "/".join((*prefix, name))
+        names.add(relative)
+        if stat.S_ISDIR(metadata.st_mode):
+            child = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            names.update(_closed_tree_names(child, (*prefix, name)))
+            os.close(child)
+        elif not stat.S_ISREG(metadata.st_mode):
+            block("NF1 install contains a non-regular object")
+    return names
+
+
+def stage_nf1_install(
+    generation_fd: int, source: Path, archive: Path
+) -> dict[str, tuple[str, str, int, int]]:
+    """Cross-check and atomically stage the closed NF1 archive/install set."""
+    expected: dict[str, tuple[str, str, int, int]] = {}
+    with tarfile.open(archive, "r:") as stream:
+        for member in stream:
+            parts = _safe_archive_name(member.name)
+            name = "/".join(parts)
+            if name in expected or member.uid != 0 or member.gid != 0:
+                block("NF1 archive metadata or closed-set identity is invalid")
+            if member.isdir():
+                if member.mode != 0o555:
+                    block("NF1 archive directory mode is not 0555")
+                expected[name] = ("dir", "", 0o555, 0)
+            elif member.isfile():
+                mode = (
+                    0o555
+                    if name == "package/bin/trustforge-native-foundation"
+                    else 0o444
+                )
+                if (
+                    member.mode != mode
+                    or member.size < 0
+                    or member.size > 128 * 1024 * 1024
+                ):
+                    block("NF1 archive file metadata is invalid")
+                payload = stream.extractfile(member)
+                if payload is None:
+                    block("NF1 archive file payload is absent")
+                value = hashlib.sha256()
+                for chunk in iter(lambda: payload.read(1024 * 1024), b""):
+                    value.update(chunk)
+                expected[name] = ("file", value.hexdigest(), mode, member.size)
+            else:
+                block("NF1 archive contains a non-regular object")
+
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    source_root_generation = _file_generation(os.fstat(source_fd))
+    source_generations: dict[str, tuple[int, ...]] = {}
+    actual_names = _closed_tree_names(source_fd)
+    if actual_names != set(expected):
+        os.close(source_fd)
+        block("NF1 accepted install differs from archive closed set")
+
+    temporary = f".nf1-install.tmp-{secrets.token_hex(16)}"
+    os.mkdir(temporary, 0o700, dir_fd=generation_fd)
+    temporary_fd = os.open(
+        temporary,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=generation_fd,
+    )
+    try:
+        for name, (kind, _, _, _) in sorted(
+            expected.items(), key=lambda item: (item[0].count("/"), item[0])
+        ):
+            if kind == "dir":
+                parent = (
+                    _open_relative(temporary_fd, tuple(name.split("/")[:-1]), True)
+                    if "/" in name
+                    else os.dup(temporary_fd)
+                )
+                os.mkdir(name.rsplit("/", 1)[-1], 0o700, dir_fd=parent)
+                os.close(parent)
+        for name, (kind, expected_digest, mode, size) in sorted(expected.items()):
+            source_object = _open_relative(
+                source_fd, tuple(name.split("/")), kind == "dir"
+            )
+            metadata = os.fstat(source_object)
+            source_generations[name] = _file_generation(metadata)
+            if metadata.st_uid != 0 or metadata.st_gid != 0:
+                block("NF1 accepted install ownership is unsafe")
+            if kind == "dir":
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or stat.S_IMODE(metadata.st_mode) != 0o555
+                ):
+                    block("NF1 accepted install directory metadata is unsafe")
+                os.close(source_object)
+                continue
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != mode
+                or metadata.st_size != size
+            ):
+                block("NF1 accepted install file metadata is unsafe")
+            parent = (
+                _open_relative(temporary_fd, tuple(name.split("/")[:-1]), True)
+                if "/" in name
+                else os.dup(temporary_fd)
+            )
+            destination = os.open(
+                name.rsplit("/", 1)[-1],
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o400,
+                dir_fd=parent,
+            )
+            value = hashlib.sha256()
+            while True:
+                chunk = os.read(source_object, 1024 * 1024)
+                if not chunk:
+                    break
+                value.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(destination, view) :]
+            if value.hexdigest() != expected_digest:
+                block("NF1 accepted install content differs from archive")
+            if _file_generation(os.fstat(source_object)) != source_generations[name]:
+                block("NF1 accepted install generation changed during staging")
+            os.fchown(destination, 0, 0)
+            os.fchmod(destination, mode)
+            os.fsync(destination)
+            os.close(destination)
+            os.fsync(parent)
+            os.close(parent)
+            os.close(source_object)
+        for name, (kind, _, _, _) in sorted(
+            expected.items(), key=lambda item: item[0].count("/"), reverse=True
+        ):
+            if kind == "dir":
+                directory = _open_relative(temporary_fd, tuple(name.split("/")), True)
+                os.fchmod(directory, 0o555)
+                os.fsync(directory)
+                os.close(directory)
+        if _file_generation(os.fstat(source_fd)) != source_root_generation:
+            block("NF1 accepted install root generation changed during staging")
+        for name, generation in source_generations.items():
+            descriptor = _open_relative(
+                source_fd,
+                tuple(name.split("/")),
+                expected[name][0] == "dir",
+            )
+            if _file_generation(os.fstat(descriptor)) != generation:
+                block("NF1 accepted install changed after staging")
+            os.close(descriptor)
+        os.fchmod(temporary_fd, 0o555)
+        os.fsync(temporary_fd)
+        os.rename(
+            temporary, "nf1-install", src_dir_fd=generation_fd, dst_dir_fd=generation_fd
+        )
+        os.fsync(generation_fd)
+    finally:
+        os.close(temporary_fd)
+        os.close(source_fd)
+    return expected
+
+
+def cleanup_nf1_install(
+    generation_fd: int, expected: dict[str, tuple[str, str, int, int]]
+) -> None:
+    root_fd = os.open(
+        "nf1-install",
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=generation_fd,
+    )
+    root_metadata = os.fstat(root_fd)
+    if (
+        root_metadata.st_uid != 0
+        or root_metadata.st_gid != 0
+        or stat.S_IMODE(root_metadata.st_mode) != 0o555
+        or _closed_tree_names(root_fd) != set(expected)
+    ):
+        block("staged NF1 cleanup closed set is unsafe")
+    for name, (kind, _, mode, size) in sorted(
+        expected.items(), key=lambda item: item[0].count("/"), reverse=True
+    ):
+        descriptor = _open_relative(root_fd, tuple(name.split("/")), kind == "dir")
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or (kind == "file" and (metadata.st_nlink != 1 or metadata.st_size != size))
+        ):
+            block("staged NF1 cleanup metadata mismatch")
+        os.close(descriptor)
+        parent = (
+            _open_relative(root_fd, tuple(name.split("/")[:-1]), True)
+            if "/" in name
+            else os.dup(root_fd)
+        )
+        if kind == "file":
+            os.unlink(name.rsplit("/", 1)[-1], dir_fd=parent)
+        else:
+            os.rmdir(name.rsplit("/", 1)[-1], dir_fd=parent)
+        os.fsync(parent)
+        os.close(parent)
+    os.close(root_fd)
+    os.rmdir("nf1-install", dir_fd=generation_fd)
     os.fsync(generation_fd)
 
 
@@ -1280,6 +1523,8 @@ def main() -> int:
             os.mkdir("cases", 0o700, dir_fd=handoff_fd)
             os.fsync(handoff_fd)
             cases_root = handoff_path / "cases"
+            staged_nf1_expected = stage_nf1_install(handoff_fd, install, archive)
+            staged_nf1_install = handoff_path / "nf1-install"
             service_helper = Path(f"/run/{unit}-helper")
             service_rlib = Path(f"/run/{unit}-nf2.rlib")
             properties = [
@@ -1298,7 +1543,7 @@ def main() -> int:
                 "RuntimeDirectory=trustforge-nf3-build",
                 "RuntimeDirectoryMode=0700",
                 f"BindReadOnlyPaths={handoff_path / 'evidence-receipt.v1'}:/run/trustforge-nf3-build/receipt.v1",
-                f"BindReadOnlyPaths={install}:/opt/trustforge/native-foundation/current",
+                f"BindReadOnlyPaths={staged_nf1_install}:/opt/trustforge/native-foundation/current",
                 f"BindReadOnlyPaths={handoff_path / 'evidence-helper'}:{service_helper}",
                 f"BindReadOnlyPaths={handoff_path / 'evidence-nf2.rlib'}:{service_rlib}",
                 f"BindReadOnlyPaths={handoff_path / 'run-integrated-linux'}:/run/trustforge-nf3-run-integrated-linux",
@@ -1348,6 +1593,7 @@ def main() -> int:
                 handoff_fd,
                 [case_directory.name for case_directory in case_directories],
             )
+            cleanup_nf1_install(handoff_fd, staged_nf1_expected)
 
             evidence = {
                 "schema": "trustforge.nf3.integrated-evidence.v1",

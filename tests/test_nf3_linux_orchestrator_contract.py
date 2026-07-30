@@ -245,6 +245,24 @@ def test_nested_integrated_writes_are_scoped_to_exact_cases_root():
     assert 'os.rmdir("cases", dir_fd=generation_fd)' in cleanup
 
 
+def test_nf1_nested_bind_uses_atomic_closed_set_staging_not_raw_install():
+    value = source()
+    staging = value[value.index("def stage_nf1_install(") :]
+    staging = staging[: staging.index("def cleanup_nf1_install(")]
+    assert "actual_names != set(expected)" in staging
+    assert "member.uid != 0 or member.gid != 0" in staging
+    assert "member.mode != 0o555" in staging
+    assert "metadata.st_nlink != 1" in staging
+    assert "accepted install changed after staging" in staging
+    assert 'os.rename(\n            temporary, "nf1-install",' in staging
+    assert "os.O_NOFOLLOW" in staging
+    integrated = value[value.index('unit = f"trustforge-nf3-b-') :]
+    integrated = integrated[: integrated.index("evidence = {")]
+    assert "BindReadOnlyPaths={install}" not in integrated
+    assert "BindReadOnlyPaths={staged_nf1_install}" in integrated
+    assert "cleanup_nf1_install(handoff_fd, staged_nf1_expected)" in integrated
+
+
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
     value = source()
     normalized = "".join(value.split())
