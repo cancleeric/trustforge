@@ -58,7 +58,9 @@ The nested integrated matrix keeps `ProtectHome=read-only` and grants no broad
 write access to `/root`. Its only `ReadWritePaths` entry is one freshly created,
 root-owned mode-0700 `cases` child inside the exact handoff generation. That
 child is also passed as both the secure store parent and evidence directory;
-artifact siblings are never writable. After evidence is copied out, dirfd-based
+artifact siblings are never writable. The transient unit sets `UMask=0077`, so
+harness shell redirections atomically create mode-0600 logs. After evidence is
+copied out, dirfd-based
 cleanup rejects unknown entries, symlinks, hardlinks, unsafe ownership/modes,
 and then removes the verified case tree before terminal generation cleanup.
 The handoff session registers each owned directory immediately at creation and

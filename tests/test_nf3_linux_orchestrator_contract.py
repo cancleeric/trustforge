@@ -267,8 +267,13 @@ def test_partial_cases_cleanup_handles_real_store_witness_and_log_roots(
             witness.write_text("witness")
             witness.chmod(0o600)
             log = cases / "trustforge-nf3-integrated-Ab12Cd34.log"
-            log.write_text("log")
-            log.chmod(0o600)
+            previous_umask = os.umask(0o077)
+            try:
+                with log.open("w") as stream:
+                    stream.write("log")
+            finally:
+                os.umask(previous_umask)
+            assert log.stat().st_mode & 0o777 == 0o600
             raise RuntimeError("nested failure")
     finalizer.assert_called_once()
 
@@ -372,6 +377,7 @@ def test_nested_integrated_writes_are_scoped_to_exact_cases_root():
     assert 'cases_root = handoff_path / "cases"' in integrated
     assert 'dir="/var/tmp"' not in integrated
     assert '"ReadWritePaths=/root"' not in integrated
+    assert '"UMask=0077"' in integrated
     assert 'f"ReadWritePaths={cases_root}"' in integrated
     command = integrated[integrated.index("command.extend(") :]
     assert command.count("str(cases_root)") == 2

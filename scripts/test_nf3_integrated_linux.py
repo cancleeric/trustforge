@@ -1892,6 +1892,7 @@ def main() -> int:
                 "Type=oneshot",
                 "User=root",
                 "Group=root",
+                "UMask=0077",
                 "NoNewPrivileges=yes",
                 "PrivateTmp=yes",
                 "ProtectSystem=strict",
