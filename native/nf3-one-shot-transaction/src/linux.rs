@@ -28,6 +28,17 @@ pub struct Dir {
     fd: OwnedFd,
     uid: u32,
 }
+pub struct StoreLockGuard<'a> {
+    dir: &'a Dir,
+    name: CString,
+    _fd: OwnedFd,
+}
+pub(crate) fn kernel_boottime_ns() -> Result<u64, Error> {
+    sys::boottime_ns()
+}
+pub(crate) fn kernel_pid() -> u32 {
+    sys::getpid()
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Entry {
@@ -73,6 +84,89 @@ impl Vfs {
 }
 
 impl Dir {
+    pub(crate) fn safe_names(&self) -> Result<Vec<String>, Error> {
+        let first = self.scan_names_once()?;
+        let second = self.scan_names_once()?;
+        if first != second {
+            return Err(Error::UnsafeObject("directory mutated during scan"));
+        }
+        Ok(second.1)
+    }
+    fn scan_names_once(&self) -> Result<(DirectoryGeneration, Vec<String>), Error> {
+        let dot = CString::new(".").unwrap();
+        let scan = sys::openat2(
+            &self.fd,
+            dot.as_c_str(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+            0,
+        )?;
+        let before = generation(&sys::fstat(&scan)?);
+        let mut names = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let count = sys::getdents64(&scan, &mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let mut offset = 0;
+            while offset < count {
+                if count - offset < 19 {
+                    return Err(Error::UnsafeObject("truncated dirent"));
+                }
+                let reclen =
+                    u16::from_ne_bytes([buffer[offset + 16], buffer[offset + 17]]) as usize;
+                if reclen < 20 || offset + reclen > count {
+                    return Err(Error::UnsafeObject("invalid dirent"));
+                }
+                let raw = &buffer[offset + 19..offset + reclen];
+                let end = raw.iter().position(|b| *b == 0).ok_or(Error::InvalidName)?;
+                let name = std::str::from_utf8(&raw[..end]).map_err(|_| Error::InvalidName)?;
+                if name != "." && name != ".." {
+                    if names.len() == MAX_ENTRIES {
+                        return Err(Error::TooManyEntries);
+                    }
+                    let checked = checked_name(name)?;
+                    let stat = sys::statat(&self.fd, checked.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+                    let kind = stat.mode & 0o170000;
+                    if stat.uid != 0
+                        || stat.gid != 0
+                        || !((kind == 0o040000 && stat.mode & 0o777 == 0o700)
+                            || (kind == 0o100000 && stat.mode & 0o777 == 0o600 && stat.nlink == 1))
+                    {
+                        return Err(Error::UnsafeObject("unsafe directory entry"));
+                    }
+                    names.push(name.to_owned());
+                }
+                offset += reclen;
+            }
+        }
+        names.sort();
+        let after = generation(&sys::fstat(&scan)?);
+        if before != after {
+            return Err(Error::UnsafeObject("directory mutated during scan"));
+        }
+        Ok((after, names))
+    }
+    pub fn lock(&self, name: &str) -> Result<StoreLockGuard<'_>, Error> {
+        let name = checked_name(name)?;
+        match self.create_new(name.to_str().map_err(|_| Error::InvalidName)?, b"", 0) {
+            Ok(_) => {}
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let fd = self.open_verified(name.as_c_str(), Some(0))?;
+        sys::flock_ex(&fd)?;
+        let opened = verify_file(&fd, self.uid, Some(0o600), Some(0))?;
+        let named = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if identity(&opened) != identity(&named) {
+            return Err(Error::IdentityChanged);
+        }
+        Ok(StoreLockGuard {
+            dir: self,
+            name,
+            _fd: fd,
+        })
+    }
     pub fn mkdir(&self, name: &str) -> Result<Dir, Error> {
         let name = checked_name(name)?;
         sys::mkdirat(&self.fd, name.as_c_str(), 0o700)?;
@@ -111,16 +205,40 @@ impl Dir {
             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
             0o600,
         )?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_CREATE",
+        )?;
         sys::fchmod(&fd, 0o600)?;
         verify_file(&fd, self.uid, Some(0o600), None)?;
         write_loop(&fd, bytes)?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_WRITE",
+        )?;
         sys::fdatasync(&fd)?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_FDATASYNC",
+        )?;
         let stat = verify_file(&fd, self.uid, Some(0o600), None)?;
         let named = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
         if identity(&stat) != identity(&named) {
             return Err(Error::IdentityChanged);
         }
         sys::fsync(&self.fd)?;
+        #[cfg(feature = "adversarial-test-hooks")]
+        adversarial_create_point(
+            name.to_str().map_err(|_| Error::InvalidName)?,
+            bytes,
+            "AFTER_DIR_FSYNC",
+        )?;
         Ok(entry(name.to_str().map_err(|_| Error::InvalidName)?, &stat))
     }
 
@@ -139,7 +257,7 @@ impl Dir {
         )?;
         let validation = (|| {
             #[cfg(test)]
-            if FORCE_POST_RENAME_FAILURE.load(std::sync::atomic::Ordering::SeqCst) {
+            if FORCE_POST_RENAME_FAILURE.with(std::cell::Cell::get) {
                 return Err(Error::IdentityChanged);
             }
             let after = sys::fstat(&self.open_verified(new.as_c_str(), None)?)?;
@@ -194,7 +312,7 @@ impl Dir {
     pub fn entries(&self) -> Result<Vec<Entry>, Error> {
         let first = self.scan_once()?;
         #[cfg(test)]
-        if FORCE_SCAN_MUTATION.load(std::sync::atomic::Ordering::SeqCst) {
+        if FORCE_SCAN_MUTATION.with(std::cell::Cell::get) {
             self.create_new("forced-mutation", b"x", 1)?;
         }
         let second = self.scan_once()?;
@@ -273,6 +391,122 @@ impl Dir {
             return Err(Error::IdentityChanged);
         }
         Ok(fd)
+    }
+}
+
+#[cfg(feature = "adversarial-test-hooks")]
+fn adversarial_create_point(name: &str, bytes: &[u8], stage: &str) -> Result<(), Error> {
+    use std::io::Write;
+    let artifact = if name.ends_with(".burn") {
+        "BURN"
+    } else if bytes
+        .windows(b"state=PREPARED".len())
+        .any(|w| w == b"state=PREPARED")
+    {
+        "PREPARED"
+    } else if bytes
+        .windows(b"state=CLAIMED".len())
+        .any(|w| w == b"state=CLAIMED")
+    {
+        "CLAIMED"
+    } else if bytes
+        .windows(b"state=COMMITTED".len())
+        .any(|w| w == b"state=COMMITTED")
+    {
+        "COMMIT"
+    } else if bytes
+        .windows(b"state=TOMBSTONED".len())
+        .any(|w| w == b"state=TOMBSTONED")
+    {
+        "TOMBSTONE"
+    } else {
+        return Ok(());
+    };
+    if std::env::var("TRUSTFORGE_NF3_HOOK_ARTIFACT").as_deref() != Ok(artifact)
+        || std::env::var("TRUSTFORGE_NF3_HOOK_STAGE").as_deref() != Ok(stage)
+    {
+        return Ok(());
+    }
+    if let Ok(kind) = std::env::var("TRUSTFORGE_NF3_HOOK_ERROR") {
+        return Err(std::io::Error::from_raw_os_error(match kind.as_str() {
+            "EIO" => 5,
+            "ENOSPC" => 28,
+            _ => return Err(Error::UnsafeObject("invalid adversarial error")),
+        })
+        .into());
+    }
+    println!("PAUSED artifact={artifact} stage={stage}");
+    std::io::stdout().flush()?;
+    loop {
+        std::thread::park()
+    }
+}
+
+impl StoreLockGuard<'_> {
+    fn validate(&self) -> Result<(), Error> {
+        verify_dir_exact(&self.dir.fd, 0, 0o700)?;
+        let opened = verify_file(&self._fd, 0, Some(0o600), Some(0))?;
+        let named = sys::statat(&self.dir.fd, self.name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if identity(&opened) != identity(&named) {
+            return Err(Error::IdentityChanged);
+        }
+        Ok(())
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), Error> {
+        self.validate()
+    }
+    pub fn entries(&self) -> Result<Vec<Entry>, Error> {
+        self.validate()?;
+        let result = self.dir.entries();
+        self.validate()?;
+        result
+    }
+    pub fn read(&self, name: &str, max: usize) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let result = self.dir.read(name, max);
+        self.validate()?;
+        result
+    }
+    pub fn create_new(&self, name: &str, bytes: &[u8], max: usize) -> Result<Entry, Error> {
+        self.validate()?;
+        let result = self.dir.create_new(name, bytes, max);
+        self.validate()?;
+        result
+    }
+    pub fn rename(&self, old: &str, new: &str) -> Result<(), Error> {
+        self.validate()?;
+        let result = self.dir.rename(old, new);
+        self.validate()?;
+        result
+    }
+    pub(crate) fn entries_in(&self, dir: &Dir) -> Result<Vec<Entry>, Error> {
+        self.validate()?;
+        let result = dir.entries();
+        self.validate()?;
+        result
+    }
+    pub(crate) fn read_in(&self, dir: &Dir, name: &str, max: usize) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let result = dir.read(name, max);
+        self.validate()?;
+        result
+    }
+    pub(crate) fn create_in(
+        &self,
+        dir: &Dir,
+        name: &str,
+        bytes: &[u8],
+        max: usize,
+    ) -> Result<Entry, Error> {
+        self.validate()?;
+        let result = dir.create_new(name, bytes, max);
+        self.validate()?;
+        result
+    }
+}
+impl Drop for StoreLockGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.validate();
     }
 }
 
@@ -360,11 +594,10 @@ fn generation(s: &sys::Stat) -> DirectoryGeneration {
     }
 }
 #[cfg(test)]
-static FORCE_POST_RENAME_FAILURE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-static FORCE_SCAN_MUTATION: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    static FORCE_POST_RENAME_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_SCAN_MUTATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 fn entry(name: &str, stat: &sys::Stat) -> Entry {
     Entry {
         name: name.into(),
@@ -396,9 +629,12 @@ mod sys {
     const SYS_OPEN: c_long = 2;
     const SYS_FSTAT: c_long = 5;
     const SYS_FSYNC: c_long = 74;
+    const SYS_FLOCK: c_long = 73;
     const SYS_FDATASYNC: c_long = 75;
     const SYS_FCHMOD: c_long = 91;
     const SYS_GETEUID: c_long = 107;
+    const SYS_GETPID: c_long = 39;
+    const SYS_CLOCK_GETTIME: c_long = 228;
     const SYS_GETDENTS64: c_long = 217;
     #[cfg(test)]
     const SYS_MKNODAT: c_long = 259;
@@ -450,6 +686,23 @@ mod sys {
     pub fn geteuid() -> u32 {
         unsafe { syscall(SYS_GETEUID) as u32 }
     }
+    pub fn getpid() -> u32 {
+        unsafe { syscall(SYS_GETPID) as u32 }
+    }
+    pub fn boottime_ns() -> Result<u64, Error> {
+        #[repr(C)]
+        struct Timespec {
+            sec: i64,
+            nsec: i64,
+        }
+        let mut time = Timespec { sec: 0, nsec: 0 };
+        cvt(unsafe { syscall(SYS_CLOCK_GETTIME, 7, &mut time) })?;
+        let sec = u64::try_from(time.sec).map_err(|_| Error::UnsafeObject("kernel clock"))?;
+        let nsec = u64::try_from(time.nsec).map_err(|_| Error::UnsafeObject("kernel clock"))?;
+        sec.checked_mul(1_000_000_000)
+            .and_then(|v| v.checked_add(nsec))
+            .ok_or(Error::UnsafeObject("kernel clock overflow"))
+    }
     pub fn open(path: &CStr, flags: u64, mode: u32) -> Result<OwnedFd, Error> {
         owned(unsafe { syscall(SYS_OPEN, path.as_ptr(), flags, mode) })
     }
@@ -478,6 +731,16 @@ mod sys {
     }
     unit_fd!(fsync, SYS_FSYNC);
     unit_fd!(fdatasync, SYS_FDATASYNC);
+    pub fn flock_ex(fd: &OwnedFd) -> Result<(), Error> {
+        loop {
+            match cvt(unsafe { syscall(SYS_FLOCK, fd.as_raw_fd(), 2) }) {
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                result => return result.map(|_| ()),
+            }
+        }
+    }
     pub fn fchmod(fd: &OwnedFd, mode: u32) -> Result<(), Error> {
         cvt(unsafe { syscall(SYS_FCHMOD, fd.as_raw_fd(), mode) }).map(|_| ())
     }
@@ -557,6 +820,28 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    enum FaultHook {
+        Scan,
+        PostRename,
+    }
+    impl FaultHook {
+        fn scan() -> Self {
+            FORCE_SCAN_MUTATION.set(true);
+            Self::Scan
+        }
+        fn post_rename() -> Self {
+            FORCE_POST_RENAME_FAILURE.set(true);
+            Self::PostRename
+        }
+    }
+    impl Drop for FaultHook {
+        fn drop(&mut self) {
+            match self {
+                Self::Scan => FORCE_SCAN_MUTATION.set(false),
+                Self::PostRename => FORCE_POST_RENAME_FAILURE.set(false),
+            }
+        }
+    }
 
     struct Fixture {
         path: std::path::PathBuf,
@@ -589,7 +874,9 @@ mod tests {
 
     #[test]
     fn create_read_rename_enumerate_identity() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         let dir = f.vfs.root().mkdir("records").unwrap();
         let made = dir.create_new("a.tmp", b"payload", 32).unwrap();
@@ -608,7 +895,9 @@ mod tests {
 
     #[test]
     fn rejects_symlink_hardlink_fifo_and_permissions() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         let path = f.path.join("records");
         let dir = f.vfs.root().mkdir("records").unwrap();
@@ -626,7 +915,9 @@ mod tests {
 
     #[test]
     fn retained_fd_resists_path_substitution() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         f.vfs.root().create_new("sentinel", b"old", 8).unwrap();
         let old = f.path.with_extension("old");
@@ -644,7 +935,9 @@ mod tests {
 
     #[test]
     fn rejects_symlinked_root_unsafe_names_and_bounds() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         std::fs::set_permissions(&f.path, std::fs::Permissions::from_mode(0o750)).unwrap();
         assert!(Vfs::open(&f.path).is_err());
@@ -671,13 +964,16 @@ mod tests {
 
     #[test]
     fn mutation_blocks_scan_and_postrename_failure_still_publishes() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(f) = Fixture::new() else { return };
         let dir = f.vfs.root().mkdir("records").unwrap();
         dir.create_new("source", b"x", 8).unwrap();
-        FORCE_SCAN_MUTATION.store(true, Ordering::SeqCst);
-        assert!(dir.entries().is_err());
-        FORCE_SCAN_MUTATION.store(false, Ordering::SeqCst);
+        {
+            let _fault = FaultHook::scan();
+            assert!(dir.entries().is_err());
+        }
         assert!(
             dir.entries()
                 .unwrap()
@@ -685,13 +981,33 @@ mod tests {
                 .any(|e| e.name == "forced-mutation")
         );
 
-        FORCE_POST_RENAME_FAILURE.store(true, Ordering::SeqCst);
-        assert!(matches!(
-            dir.rename("source", "published"),
-            Err(Error::IdentityChanged)
-        ));
-        FORCE_POST_RENAME_FAILURE.store(false, Ordering::SeqCst);
+        {
+            let _fault = FaultHook::post_rename();
+            assert!(matches!(
+                dir.rename("source", "published"),
+                Err(Error::IdentityChanged)
+            ));
+        }
         assert_eq!(dir.read("published", 8).unwrap(), b"x");
         assert!(dir.read("source", 8).is_err());
+    }
+
+    #[test]
+    fn retained_lock_detects_named_inode_replacement() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(f) = Fixture::new() else { return };
+        let locks = f.vfs.root().mkdir("locks").unwrap();
+        let guard = locks.lock("global.lock").unwrap();
+        let path = f.path.join("locks");
+        std::fs::rename(path.join("global.lock"), path.join("old.lock")).unwrap();
+        std::fs::write(path.join("global.lock"), b"").unwrap();
+        std::fs::set_permissions(
+            path.join("global.lock"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(guard.revalidate().is_err());
     }
 }

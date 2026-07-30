@@ -1,6 +1,8 @@
-//! Linux retained-directory-FD filesystem primitives for NF3.
+//! Linux retained-directory-FD primitives and durable one-shot burn ledger.
 //!
-//! This crate intentionally contains no transaction protocol.
+//! This crate grants no execution, signing, capability, or release authority.
+#[cfg(all(feature = "adversarial-test-hooks", not(debug_assertions)))]
+compile_error!("adversarial test hooks are forbidden in release builds");
 
 #[derive(Debug)]
 pub enum Error {
@@ -28,7 +30,12 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod ledger;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
+mod sha256;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use ledger::{Binding, ClaimSession, LedgerStore, Request, State};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use linux::{Dir, Entry, Vfs};
 
