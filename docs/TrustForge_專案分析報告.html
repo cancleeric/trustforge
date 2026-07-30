@@ -298,39 +298,310 @@ python -m trustforge.web<br>
 <div class="divider"></div>
 
 <!-- ===== SECTION 11 ===== -->
-<h2 id="action">十一、決賽前行動建議</h2>
+<h2 id="action">十一、所有問題的具體解決方法</h2>
 
-<h3>P0 — 必須做（今晚~明天）</h3>
+<h3>問題 1：功能多但實際在跑的少</h3>
+
 <table>
-<tr><th>#</th><th>動作</th><th>原因</th></tr>
-<tr><td>1</td><td>確保一次完整真 Bedrock demo 可錄影/截圖</td><td>評審要看 live，不是 offline 的模板輸出</td></tr>
-<tr><td>2</td><td>團隊每人能講清楚信任公式 + 跑一次 demo</td><td>萬一被問到，不能只有隊長會答</td></tr>
-<tr><td>3</td><td>準備 30 秒電梯簡報</td><td>「我們不預測漲跌，我們幫你分辨哪條消息值得信——每個結論都可追溯到原始來源」</td></tr>
-<tr><td>4</td><td>凍結功能，不再加新東西</td><td>最後一天加的功能沒時間穩定，出 bug 比沒功能更慘</td></tr>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>220 模組但一半沒啟用</td>
+<td>
+1. 在簡報中畫一張「已啟用 vs 待啟用」的兩欄圖<br>
+2. 已啟用的用綠色標記：Hermes cycle、Analysis Flow、Bedrock、研究快照<br>
+3. 待啟用的用灰色標記並加「未來路線」字樣：AGOS、Three-track、Backfill<br>
+4. 被問時回答：「我們刻意分階段啟用，確保每層穩定後才開下一層」
+</td>
+<td>簡報製作者</td>
+<td>30 分鐘</td>
+</tr>
+<tr>
+<td>版本跳躍 v0.16→v0.27</td>
+<td>
+1. 在 CHANGELOG.md 的 v0.27.0 下方加一段：<br>
+<code>注：v0.17~v0.26 為內部密集開發期間的合併版本，功能包含 multi-angle、AGOS、comparison、formal-run、canary 部署等。</code><br>
+2. 不需要補完整 log，一段說明即可
+</td>
+<td>cancleeric</td>
+<td>5 分鐘</td>
+</tr>
+<tr>
+<td>部署治理模組太多讓人困惑</td>
+<td>
+1. 簡報和 demo 中不提 preview_admission、quota_key、canary_control<br>
+2. 只在被問「部署安全性」時說：「我們有金絲雀發布 + 自動回滾，確保上線不會炸」<br>
+3. 一句話帶過就好
+</td>
+<td>上台報告者</td>
+<td>0（不做事，只是不提）</td>
+</tr>
 </table>
 
-<h3>P1 — 強烈建議</h3>
+<h3>問題 2：信任分數缺乏「有用」的證據</h3>
+
 <table>
-<tr><th>#</th><th>動作</th><th>原因</th></tr>
-<tr><td>5</td><td>把「已啟用」和「就緒未啟用」明確分開呈現</td><td>誠實比誇大得分高——評審看穿會直接扣分</td></tr>
-<tr><td>6</td><td>準備「正常 vs 被操縱」的對比 demo</td><td>讓評審親眼看到信任分的差異，而不只是聽你講公式</td></tr>
-<tr><td>7</td><td>Demo 時主動點開溯源鏈展示</td><td>這是最大差異化，但藏在細節裡——要主動秀出來</td></tr>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>沒有「分高 = 事後準」的回測數據</td>
+<td>
+<strong>不要試圖證明預測力。改變敘事角度：</strong><br>
+1. 簡報中明確說：「信任分不是預測漲跌機率，是資訊品質指標」<br>
+2. 用比喻：「就像食品安全標章——有標章不代表好吃，但至少不會中毒」<br>
+3. 如果評審追問「那這有什麼用」，回答：「幫你在 100 條消息裡快速找到值得看的 10 條」
+</td>
+<td>上台報告者</td>
+<td>練習 5 分鐘</td>
+</tr>
+<tr>
+<td>離線 demo 交叉佐證都是 0</td>
+<td>
+1. 用真 Bedrock + 真資料源跑一次完整分析：<br>
+<code>python -m trustforge.cli analyze --coin BTC --type multi_source --query "分析 BTC 近兩週" --out out/btc-live</code><br>
+（不加 --offline）<br>
+2. 需要設定 AWS_REGION + BEDROCK_MODEL_ID<br>
+3. 把這次的輸出截圖/錄影，作為 demo 素材<br>
+4. 真實來源夠多時，佐證分自然會 >0
+</td>
+<td>cancleeric</td>
+<td>15 分鐘（含等 Bedrock 回應）</td>
+</tr>
+<tr>
+<td>操縱偵測沒觸發</td>
+<td>
+準備一組對比 demo 資料：<br>
+1. 在 <code>demo/sample_data/social.json</code> 複製一份 <code>social_manipulated.json</code><br>
+2. 裡面放 5 條同一帳號在 10 分鐘內發的類似喊單文<br>
+3. Demo 時先跑正常版，再跑操縱版，讓評審看到操縱偵測前後的分數差異<br>
+4. 或者用已有的 demo 輸出指著「反方/低信任證據」區說：「你看，x-panic-88 這種煽動帳號被自動壓低到 0.44」
+</td>
+<td>任何成員</td>
+<td>20 分鐘</td>
+</tr>
+<tr>
+<td>Dawid-Skene 在少量來源沒效果</td>
+<td>
+1. 不在簡報中強調 Dawid-Skene<br>
+2. 如果評審問到動態信譽，回答：「目前以初始信譽為主，Dawid-Skene EM 是累積足夠歷史後的進階機制。我們選擇誠實地先不啟用它，而不是在少量資料下硬跑得出虛假的動態調整。」<br>
+3. 這反而展示了「對不確定性的清醒判斷」——評審加分項
+</td>
+<td>上台報告者</td>
+<td>0（只是話術調整）</td>
+</tr>
 </table>
 
-<h3>P2 — 有時間再做</h3>
+<h3>問題 3：報告制式化</h3>
+
 <table>
-<tr><th>#</th><th>動作</th><th>原因</th></tr>
-<tr><td>8</td><td>修 Windows 檔名問題（asset:eth）</td><td>團隊 Windows 成員能正常 pull</td></tr>
-<tr><td>9</td><td>補 CHANGELOG v0.17~v0.26 段落</td><td>事後追溯用，比賽不緊急</td></tr>
-<tr><td>10</td><td>#847 hover tooltip 實作</td><td>新手體驗，但決賽評審可能比新手懂一些</td></tr>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>每份報告結構一樣</td>
+<td>
+1. 跑一次真 Bedrock 分析（上面說的 live run）<br>
+2. Bedrock 會根據具體內容生成不同敘事，不會每幣一樣<br>
+3. 如果時間不夠跑真 Bedrock，至少在 demo 時說明：「離線模式用模板確保結構完整；線上模式會由 AI 根據具體證據寫出客製化分析」
+</td>
+<td>cancleeric</td>
+<td>15 分鐘</td>
+</tr>
+<tr>
+<td>「聰明錢背離：無法判定」每次出現</td>
+<td>
+<strong>不需要修——反而要主動解釋這是優點：</strong><br>
+1. Demo 時說：「你看這裡寫了『無法判定』——這就是我們跟其他 AI 的差別。別人會硬給你一個結論，我們判斷不了就直接告訴你為什麼判斷不了（成交量沒上升，無法確認吸籌）」<br>
+2. 這直接對應 30% 主題切合度的「不確定性與限制說明」
+</td>
+<td>上台報告者</td>
+<td>0（話術）</td>
+</tr>
+<tr>
+<td>方向判斷過度依賴 14 天報酬率</td>
+<td>
+1. 如果有真 Bedrock 環境，跑一次 online stance 分類<br>
+2. stance 分類會讓 Layer 2（多源共識）生效，方向判斷不再只看價格<br>
+3. 如果沒環境，demo 時解釋：「離線模式只有 Layer 1（價格趨勢），線上模式會加上 Layer 2（語意立場分類），用 Bedrock 判斷每條消息是看多還是看空」
+</td>
+<td>cancleeric</td>
+<td>15 分鐘（如果要跑）/ 0（如果只解釋）</td>
+</tr>
+</table>
+
+<h3>問題 4：技術深度看不出來（冰山問題）</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>評審只看到一頁報告</td>
+<td>
+Demo 流程設計（3 分鐘內）：<br>
+1. <strong>30 秒</strong>：打開 Web UI 首頁，點一個幣種<br>
+2. <strong>30 秒</strong>：指著信任雷達圖說「這四個維度是怎麼算的」<br>
+3. <strong>30 秒</strong>：展開一筆證據，點開溯源鏈 →「你看，這筆結論追到 Blockchain.com 的這個 hash」<br>
+4. <strong>30 秒</strong>：指著反方證據說「我們故意不藏壞消息」<br>
+5. <strong>60 秒</strong>：跑一次即時分析，看五節點進度條跑完
+</td>
+<td>上台 demo 者</td>
+<td>練習 15 分鐘</td>
+</tr>
+<tr>
+<td>15 分鐘預算追蹤不可見</td>
+<td>
+1. Demo 跑分析時，打開 execution_log 頁面<br>
+2. 指著時間戳說：「整個分析花了 X 秒，五個步驟各花多久都有記錄」<br>
+3. 或者指著 UI 上的 Hermes 執行面板（已有五節點視覺化）
+</td>
+<td>上台 demo 者</td>
+<td>0（已有功能，只需展示）</td>
+</tr>
+<tr>
+<td>溯源鏈需主動挖</td>
+<td>
+1. Demo 腳本中固定安排一個「點開證據 → 展示完整溯源」的動作<br>
+2. 講解詞：「每個結論都像論文的參考文獻——你可以點開看原文，驗證我說的是不是真的」
+</td>
+<td>上台 demo 者</td>
+<td>0（已有功能，只需展示）</td>
+</tr>
+</table>
+
+<h3>問題 5：新手看不懂</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>UI 充滿專有名詞</td>
+<td>
+短期（決賽前）：<br>
+1. Demo 時口頭解釋：「交叉佐證就是有沒有別人也這樣說」<br>
+2. 指著信任分數說：「0.8 以上很可信，0.3 以下存疑」<br><br>
+長期（賽後）：<br>
+3. 實作 #847 hover tooltip（已開 issue）
+</td>
+<td>上台者（短期）/ cancleeric（長期）</td>
+<td>0（短期）/ 4h（長期）</td>
+</tr>
+<tr>
+<td>星系 UI 不知道代表什麼</td>
+<td>
+1. Demo 時第一句話就說：「這五顆星代表五個幣種，大小代表資訊完整度，顏色代表目前方向」<br>
+2. 如果評審問為什麼用星系——「加密市場像宇宙，每個幣是一個星球，我們是望遠鏡幫你看清楚」
+</td>
+<td>上台 demo 者</td>
+<td>0（話術）</td>
+</tr>
+<tr>
+<td>報告開頭直接丟數字</td>
+<td>
+如果有時間改程式碼：<br>
+1. 在 <code>agent/orchestrator.py</code> 的 <code>_format_report</code> 開頭加一行白話摘要<br>
+2. 格式：「根據 {n} 個不同來源交叉比對，目前 {coin} 市場資訊{方向描述}，我們有 {confidence}% 把握」<br><br>
+如果沒時間改：<br>
+3. Demo 時口頭加一句：「簡單說就是——7 個來源裡有 5 個都指向偏空，所以我們的結論是偏空，63% 把握」
+</td>
+<td>cancleeric（改程式）/ 上台者（口述）</td>
+<td>30 分鐘（改程式）/ 0（口述）</td>
+</tr>
+</table>
+
+<h3>問題 6：開發節奏問題</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>最後三天加 538 commits</td>
+<td>
+<strong>立即凍結功能：</strong><br>
+1. 從現在起不再加新功能<br>
+2. 只允許：修 bug、準備 demo 素材、調整文案<br>
+3. 如果 multi-angle 或 comparison 有問題，準備 fallback：退回 single-angle / 單幣分析
+</td>
+<td>cancleeric</td>
+<td>0（決定不做事）</td>
+</tr>
+<tr>
+<td>Windows 不相容（asset:eth）</td>
+<td>
+1. 已開 issue #1159<br>
+2. 改名 <code>asset:eth</code> → <code>asset_eth</code><br>
+3. 更新所有引用路徑<br>
+4. push 後 Windows 用戶重新 clone<br><br>
+暫時 workaround（如果來不及修）：<br>
+5. Windows 用戶用 sparse-checkout 排除：<br>
+<code>git sparse-checkout set --no-cone "/*" "!data/asset_intrinsic_evidence/pep/"</code>
+</td>
+<td>cancleeric</td>
+<td>15 分鐘</td>
+</tr>
+<tr>
+<td>新功能沒穩定化時間</td>
+<td>
+1. 決賽前一晚跑一次完整的 multi-angle + comparison 測試<br>
+2. 如果失敗，記住 fallback 指令：<br>
+<code>python -m trustforge.cli analyze --coin BTC --type multi_source --query "..." --offline --out out/btc</code><br>
+（single-angle multi_source 是最穩定的模式）<br>
+3. 決賽時如果新功能出問題，立刻切回穩定版，不要現場 debug
+</td>
+<td>全體</td>
+<td>20 分鐘（跑測試）</td>
+</tr>
+</table>
+
+<h3>問題 7：競賽策略面</h3>
+
+<table>
+<tr><th>情境</th><th>準備好的回答</th></tr>
+<tr>
+<td>「30 秒講完你們在做什麼」</td>
+<td>「幣圈消息真假難辨。我們不預測漲跌，我們幫你分辨哪條消息值得信——每個結論都可以追溯到原始來源，讓你自己判斷。」</td>
+</tr>
+<tr>
+<td>「跟 ChatGPT 問幣圈有什麼不同」</td>
+<td>「ChatGPT 給你一個你無法驗證的答案。我們給你每條結論的原始出處、可信度分數、還有反方證據——你可以自己查證。」</td>
+</tr>
+<tr>
+<td>「信任分準不準」</td>
+<td>「信任分不是預測準確率，是資訊品質指標。就像食品標章不代表好吃，但至少確保來源可靠、有人附議、沒被灌水。」</td>
+</tr>
+<tr>
+<td>「如果知名媒體造假呢」</td>
+<td>「老實說，如果只有一個知名來源在說，其他來源沒反應，我們的佐證分會很低。單一來源的可信度有上限——這是設計，不是 bug。」</td>
+</tr>
+<tr>
+<td>「為什麼不用 OpenAI / 其他模型」</td>
+<td>「比賽規定只能用 AWS 基礎模型。我們全程 Bedrock 直連，所有呼叫集中在一個檔案，合規可審查。」</td>
+</tr>
+<tr>
+<td>「你們的 AI 會不會幻覺」</td>
+<td>「我們的判斷不是 AI 生成的——是確定性公式算出來的。AI 只負責最後一步：把結果寫成人話。所以不存在幻覺問題。」</td>
+</tr>
+<tr>
+<td>「資料不夠怎麼辦」</td>
+<td>「我們會標『資訊完整度：低』，告訴你證據不足，而不是硬掰一個結論。不知道就說不知道。」</td>
+</tr>
 </table>
 
 <div class="divider"></div>
 
-<h2>改善核心策略</h2>
+<h2>執行優先序總表</h2>
+
+<table>
+<tr><th>優先</th><th>動作</th><th>耗時</th><th>影響評分項目</th></tr>
+<tr><td><strong>P0</strong></td><td>跑一次真 Bedrock 完整分析並錄影</td><td>15 分鐘</td><td>創意度 15% + 完成度 10%</td></tr>
+<tr><td><strong>P0</strong></td><td>設計 3 分鐘 demo 流程腳本</td><td>15 分鐘</td><td>商業應用性 25% + 主題切合度 30%</td></tr>
+<tr><td><strong>P0</strong></td><td>每個成員練習 30 秒電梯簡報 + QA 回答</td><td>15 分鐘</td><td>全部</td></tr>
+<tr><td><strong>P0</strong></td><td>凍結功能，不再加新東西</td><td>0</td><td>完成度 10%（穩定性）</td></tr>
+<tr><td><strong>P1</strong></td><td>準備操縱偵測對比 demo</td><td>20 分鐘</td><td>主題切合度 30%</td></tr>
+<tr><td><strong>P1</strong></td><td>確認 comparison 題型能穩定跑完</td><td>10 分鐘</td><td>完成度 10%</td></tr>
+<tr><td><strong>P1</strong></td><td>修 Windows 路徑問題（#1159）</td><td>15 分鐘</td><td>團隊協作</td></tr>
+<tr><td><strong>P2</strong></td><td>報告開頭加白話摘要</td><td>30 分鐘</td><td>商業應用性 25%</td></tr>
+<tr><td><strong>P2</strong></td><td>補 CHANGELOG 說明段落</td><td>5 分鐘</td><td>完成度 10%</td></tr>
+</table>
+
 <div class="highlight-box">
-<strong>不是加更多功能，而是讓已經有的東西「被看見」。</strong><br><br>
-系統深度已經夠了（220 模組、1,811 commits、86% 覆蓋率）。問題不是能力不足，是呈現方式讓人感受不到深度。決賽的勝負在於「30 秒內讓評審理解你的獨特價值」+「3 分鐘內用 live demo 證明」。
+<strong>核心策略：不是加更多功能，而是讓已經有的東西「被看見」。</strong><br><br>
+系統深度已經夠了。問題不是能力不足，是呈現方式讓人感受不到深度。決賽勝負在於：<br>
+• 30 秒內讓評審理解你的獨特價值<br>
+• 3 分鐘內用 live demo 證明<br>
+• 被追問時有準備好的誠實回答
 </div>
 
 <p style="text-align:center;color:#999;font-size:0.85em;margin-top:40px">
