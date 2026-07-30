@@ -795,6 +795,12 @@ export interface AdminConfigChanges {
   live_token?: string | null
 }
 
+export interface WhaleAlertCredentialStatus {
+  configured: boolean
+  source: 'ssm' | 'file' | 'environment' | 'unconfigured' | 'unavailable'
+  last_verified_at: string | null
+}
+
 export type BackendProviderKey =
   | 'memory'
   | 'policy'

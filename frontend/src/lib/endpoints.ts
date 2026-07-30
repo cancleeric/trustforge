@@ -14,6 +14,8 @@ import {
   isOverviewData,
   isStatusData,
 } from './validators'
+import { isWhaleAlertCredentialStatus } from './validators'
+import type { WhaleAlertCredentialStatus } from './types'
 import type {
   AdminAuditData,
   AdminBackendProvidersData,
@@ -471,6 +473,44 @@ export function getAdminAudit(
     headers: { 'X-Admin-Token': adminToken },
     cache: 'no-store',
   })
+}
+
+export function getWhaleAlertCredentialStatus(
+  adminToken: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<WhaleAlertCredentialStatus>> {
+  return apiFetch<WhaleAlertCredentialStatus>(
+    '/api/admin/whale-alert',
+    undefined,
+    isWhaleAlertCredentialStatus,
+    {
+      signal,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      headers: { 'X-Admin-Token': adminToken },
+      cache: 'no-store',
+    },
+  )
+}
+
+export function updateWhaleAlertCredential(
+  adminToken: string,
+  action: 'set' | 'clear' | 'test',
+  apiKey?: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<WhaleAlertCredentialStatus>> {
+  return apiFetch<WhaleAlertCredentialStatus>(
+    '/api/admin/whale-alert',
+    undefined,
+    isWhaleAlertCredentialStatus,
+    {
+      signal,
+      timeoutMs: action === 'test' ? 10_000 : DEFAULT_TIMEOUT_MS,
+      method: 'POST',
+      headers: { 'X-Admin-Token': adminToken },
+      jsonBody: action === 'set' ? { action, api_key: apiKey } : { action },
+      cache: 'no-store',
+    },
+  )
 }
 
 export function getAdminBackendProviders(

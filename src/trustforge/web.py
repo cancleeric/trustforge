@@ -61,6 +61,7 @@ from . import admin_config
 from . import backend_registry
 from . import rate_limit_store
 from . import ssm_params
+from . import whale_alert_secret
 from .agent.orchestrator import aggregate_trust_by_kind
 from .asset_context_repository import AssetContextRepository, load_asset_context_records
 from .asset_intrinsic import AssetIntrinsicRepository, load_asset_intrinsic_records
@@ -8344,6 +8345,76 @@ def _handle_api_admin_config_get() -> tuple[int, str]:
     return 200, _json_envelope_ok(_admin_config_view(config))
 
 
+def _handle_api_admin_whale_alert_get() -> tuple[int, str]:
+    """Return masked credential state; plaintext is never part of this contract."""
+    try:
+        state = whale_alert_secret.status().as_dict()
+    except Exception:
+        logging.error("TrustForge Whale Alert credential status unavailable")
+        return 502, _json_envelope_err(
+            "upstream_error", "Whale Alert API 設定狀態暫時無法讀取"
+        )
+    return 200, _json_envelope_ok(state)
+
+
+def _whale_alert_admin_transport_is_secure(headers) -> bool:
+    """Whale Alert 憑證管理端點整體 TLS-only gate（與 `_live_token_over_insecure_transport`
+    同立場）：`TRUST_PROXY` 開且 nginx 忠實轉發的 `X-Forwarded-Proto=https` 才放行；
+    預設（直連、0.0.0.0）不放行。必須在讀 request body（含明文 key）之前判定。"""
+    return bool(TRUST_PROXY) and (headers.get("X-Forwarded-Proto", "") or "").strip().lower() == "https"
+
+
+def _handle_api_admin_whale_alert_post(headers, rfile, client_ip: str) -> tuple[int, str]:
+    # 憑證管理端點整體 TLS-only：必須在讀 body（含明文 key）「之前」判定 transport，
+    # 否則明文已跨線才回 426 等於沒防到暴露。action 在 body 內無法先知是否為 set，
+    # 故整個端點讀 body 前即 gate（管理付費 API key 的端點 TLS-only 為正確 posture）。
+    if not _whale_alert_admin_transport_is_secure(headers):
+        return 426, _json_envelope_err(
+            "upgrade_required",
+            "Whale Alert 憑證管理端點須經 HTTPS（TLS 反代）；本服務預設不開放明文連線管理 secret。"
+            "請透過 nginx TLS 反代並設 TRUSTFORGE_TRUST_PROXY=1。",
+        )
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error
+    assert payload is not None
+    action = payload.get("action")
+    allowed = {
+        "set": {"action", "api_key"},
+        "clear": {"action"},
+        "test": {"action"},
+    }
+    if (
+        not isinstance(action, str)
+        or action not in allowed
+        or set(payload) != allowed[action]
+    ):
+        return 400, _json_envelope_err(
+            "bad_request", "action 必須是 set、clear 或 test，且不得帶額外欄位"
+        )
+    try:
+        if action == "set":
+            state = whale_alert_secret.put_api_key(payload["api_key"])
+        elif action == "clear":
+            state = whale_alert_secret.clear_api_key()
+        else:
+            state = whale_alert_secret.verify_connection()
+    except ValueError:
+        return 400, _json_envelope_err("bad_request", "Whale Alert API key 格式無效")
+    except Exception:
+        # HTTP errors may contain the request URL (and therefore the write-only
+        # key), so exception details must not be emitted to any log or response.
+        logging.error("TrustForge Whale Alert credential action failed: %s", action)
+        return 502, _json_envelope_err(
+            "upstream_error", "Whale Alert API 設定操作失敗，請稍後再試"
+        )
+    logging.info(
+        "TrustForge Whale Alert credential audit action=%s result=success client_ip=%s",
+        action, client_ip,
+    )
+    return 200, _json_envelope_ok(state.as_dict())
+
+
 def _read_admin_put_body(headers, rfile) -> tuple[dict | None, tuple[int, str] | None]:
     """讀取並解析 PUT body（計劃 §2.2：上限 4KB、Content-Type 檢查、解析
     失敗 400）。回 `(payload, None)` 或 `(None, (status, json_body))`。"""
@@ -8949,6 +9020,9 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/admin/config":
                     code, body = _handle_api_admin_config_get()
                     return self._send(code, body, "application/json; charset=utf-8")
+                if u.path == "/api/admin/whale-alert":
+                    code, body = _handle_api_admin_whale_alert_get()
+                    return self._send(code, body, "application/json; charset=utf-8")
                 if u.path == "/api/admin/backend-providers":
                     code, body = _handle_api_admin_backend_providers_get()
                     return self._send(code, body, "application/json; charset=utf-8")
@@ -9421,6 +9495,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(code, body, "application/json; charset=utf-8")
             if u.path == "/api/admin/backend-providers-all":
                 code, body = _handle_api_admin_backend_providers_all_post(getattr(self, "headers", {}), self.rfile)
+                return self._send(code, body, "application/json; charset=utf-8")
+            if u.path == "/api/admin/whale-alert":
+                code, body = _handle_api_admin_whale_alert_post(
+                    getattr(self, "headers", {}), self.rfile, client_ip
+                )
                 return self._send(code, body, "application/json; charset=utf-8")
             if u.path in actions:
                 code, body = _handle_api_admin_upgrade_action(

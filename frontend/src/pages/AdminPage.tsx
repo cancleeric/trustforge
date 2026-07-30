@@ -23,9 +23,11 @@ import {
   getAdminAudit,
   getAdminBackendProviders,
   getAdminConfig,
+  getWhaleAlertCredentialStatus,
   putAdminConfig,
   setAdminBackendProvider,
   setAllAdminBackendProviders,
+  updateWhaleAlertCredential,
 } from '../lib/endpoints'
 import type {
   AdminAuditRecord,
@@ -34,6 +36,7 @@ import type {
   AdminConfigData,
   BackendProvider,
   BackendProviderKey,
+  WhaleAlertCredentialStatus,
 } from '../lib/types'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useHermesI18n, type MessageKey } from '../hermes/hermesI18n'
@@ -149,10 +152,49 @@ export default function AdminPage() {
   const [notice, setNotice] = useState<string[]>([])
   const [saveError, setSaveError] = useState<{ code: string; message: string } | null>(null)
   const [backendSaving, setBackendSaving] = useState(false)
+  const [whaleStatus, setWhaleStatus] = useState<WhaleAlertCredentialStatus | null>(null)
+  const [whaleKey, setWhaleKey] = useState('')
+  const [whaleSaving, setWhaleSaving] = useState(false)
+  const [whaleError, setWhaleError] = useState<{ code: string; message: string } | null>(null)
   const [confirmBedrockOn, setConfirmBedrockOn] = useState(false)
   // live token 明文一次性顯示（僅本次 render 週期的 state，不落任何儲存）
   const [freshLiveToken, setFreshLiveToken] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!token) {
+      setWhaleStatus(null)
+      setWhaleKey('')
+      return
+    }
+    const controller = new AbortController()
+    getWhaleAlertCredentialStatus(token, controller.signal).then((res) => {
+      if (controller.signal.aborted) return
+      if (res.ok) {
+        setWhaleStatus(res.data)
+        setWhaleError(null)
+      } else {
+        setWhaleError(res.error)
+      }
+    })
+    return () => controller.abort()
+  }, [token])
+
+  async function runWhaleAction(action: 'set' | 'clear' | 'test') {
+    if (!token) return
+    if (action === 'set' && whaleKey.trim().length < 16) {
+      setWhaleError({ code: 'bad_request', message: t('adminWhaleAlertNotConfigured') })
+      return
+    }
+    setWhaleSaving(true)
+    setWhaleError(null)
+    const key = whaleKey
+    const res = await updateWhaleAlertCredential(token, action, key)
+    setWhaleSaving(false)
+    setWhaleKey('')
+    if (res.ok) setWhaleStatus(res.data)
+    else setWhaleError(res.error)
+  }
 
   // PUT/重載共用：任何成功拿到的最新 config 都同步 cap 輸入框
   const applyConfig = useCallback((data: AdminConfigData) => {
@@ -706,6 +748,66 @@ export default function AdminPage() {
             </div>
           </div>
         ) : null}
+      </SectionCard>
+
+      <SectionCard title={t('adminWhaleAlertSectionTitle')}>
+        <div className="mb-3 space-y-1 text-sm text-tf-text2">
+          <p>
+            <strong className="text-tf-text">
+              {whaleStatus?.configured
+                ? t('adminWhaleAlertConfigured')
+                : t('adminWhaleAlertNotConfigured')}
+            </strong>
+          </p>
+          {whaleStatus && (
+            <>
+              <p>{t('adminWhaleAlertSource')}{whaleStatus.source}</p>
+              <p>
+                {t('adminWhaleAlertLastVerified')}
+                {whaleStatus.last_verified_at ?? t('adminWhaleAlertNeverVerified')}
+              </p>
+            </>
+          )}
+        </div>
+        {whaleError && <ErrorState code={whaleError.code} message={whaleError.message} />}
+        <label className="mb-3 block text-sm text-tf-text2">
+          <span className="mb-1 block">{t('adminWhaleAlertKeyLabel')}</span>
+          <input
+            type="password"
+            value={whaleKey}
+            onChange={(event) => setWhaleKey(event.target.value)}
+            autoComplete="new-password"
+            spellCheck={false}
+            className="w-full max-w-md rounded-md border border-tf-border bg-tf-bg px-3 py-1.5 text-sm text-tf-text"
+          />
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={whaleSaving || whaleKey.trim().length < 16}
+            onClick={() => runWhaleAction('set')}
+            className={BTN_PRIMARY}
+          >
+            {t('adminWhaleAlertSave')}
+          </button>
+          <button
+            type="button"
+            disabled={whaleSaving || !whaleStatus?.configured}
+            onClick={() => runWhaleAction('test')}
+            className={BTN_PLAIN}
+          >
+            {t('adminWhaleAlertTest')}
+          </button>
+          <button
+            type="button"
+            disabled={whaleSaving || !whaleStatus?.configured}
+            onClick={() => runWhaleAction('clear')}
+            className={BTN_PLAIN}
+          >
+            {t('adminWhaleAlertClear')}
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-tf-muted">{t('adminWhaleAlertHint')}</p>
       </SectionCard>
 
       {/* §4-2 live token 管理 */}

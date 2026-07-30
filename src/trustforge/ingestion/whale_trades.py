@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from . import safe_fetch
+from ..whale_alert_secret import resolve_api_key
 from .base import Document, Source
 
 _MAX_BYTES = 512 * 1024   # 512 KB
@@ -190,7 +191,7 @@ class WhaleAlertSource(Source):
     name = "whale-alert"
 
     def fetch(self, query: str, coin: str = "") -> list[Document]:
-        api_key = os.environ.get(_WHALE_ALERT_KEY_ENV, "").strip()
+        api_key, _key_source = resolve_api_key()
         if not api_key:
             # 無 API key → 靜默回傳空（不報錯，由 collect() 的離線降級處理）
             return []
