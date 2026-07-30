@@ -79,6 +79,12 @@ else
   check_fail "[1] S3 bucket $BUCKET not reachable"
 fi
 
+# Preset pointer digests so the later `if [ -n "$VAR" ]` guards are safe under
+# `set -u` even when the JSON branch that assigns them is skipped (empty/missing
+# pointer). Mirrors deploy/activate_release.sh top-level defaults.
+CANDIDATE_DIGEST=""
+ACTIVE_DIGEST=""
+
 # ---- [2] candidate pointer ---------------------------------------------------
 CANDIDATE_JSON=$(aws s3 cp "s3://${BUCKET}/pointers/candidate.json" - --region "$REGION" 2>/dev/null || echo "")
 if [ -z "$CANDIDATE_JSON" ]; then
