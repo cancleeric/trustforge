@@ -68,6 +68,25 @@ _NARRATIVE_READ_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_NARRATIVE_READ_TIMEOUT_S
 _NARRATIVE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_NARRATIVE_CONNECT_TIMEOUT_SEC", "10"))
 
 _EXTRACT_TOOL_NAME = "emit_records"
+_CLAIM_EXTRACTION_CONTEXT_VERSION = "multi_angle_claim_context_v1"
+
+
+def claim_extraction_prompt_context(mode: str | None, question: str | None) -> str:
+    """Return the exact mode/question block sent with a multi-angle prompt.
+
+    Keeping this construction in the Bedrock module lets the durable receipt
+    commit to precisely the text that the model receives, without storing a
+    potentially sensitive full prompt or source-document body.
+    """
+    if mode is None and question is None:
+        return ""
+    return (
+        "分析上下文（此區塊指定本次 Claim Extraction 的語意焦點；不得忽略或改寫）：\n"
+        f"模式：{(mode or '').strip()}\n"
+        f"問題：{(question or '').strip()}\n\n"
+    )
+
+
 _EXTRACT_SYSTEM = (
     "你是資料整理器。只從使用者提供的原文中抄出資訊，逐字保留原文用字。"
     "禁止推論、補值、翻譯或改寫；原文沒有的欄位一律留空字串。"
@@ -155,6 +174,9 @@ class BedrockClient:
         self.stance_offline = offline if stance_offline is None else stance_offline
         self._client = None
         self._stance_client = None  # W1.5：獨立、短 timeout，不與主敘事模型共用
+        # Durable Claim Extraction provenance must distinguish an enabled model
+        # from a call that actually returned from Bedrock.
+        self.last_claim_extraction_model_invoked = False
         # 成本記錄用：classify_stance 在 scoring.py 的 O(n²) 迴圈深處被呼叫，
         # 呼叫端（cached_stance_fn/score()）無法方便地帶入 ExecutionLog，故改由
         # classify_stance 每次真呼叫（cache-miss）成功後自行把成本事件累積在此，
@@ -454,7 +476,12 @@ class BedrockClient:
     # Step 1: LLM-based Claim 抽取（Bedrock 呼叫 #1）
     # ------------------------------------------------------------------
     def extract_claims_with_llm(
-        self, docs: list[Document], log: "ExecutionLog | None" = None
+        self,
+        docs: list[Document],
+        log: "ExecutionLog | None" = None,
+        *,
+        mode: str | None = None,
+        question: str | None = None,
     ) -> list[Claim]:
         """從多源 Document 用 LLM 抽出結構化主張。
 
@@ -464,10 +491,15 @@ class BedrockClient:
 
         `log`：可選的 `ExecutionLog`，真呼叫（非 fallback）成功後把 token 用量／
         估算成本記一筆 `llm.cost`（見 `ExecutionLog.record_llm_cost`）。
+
+        `mode` / `question` 是五角度流程的實際語意分流上下文：兩者會被
+        放入送往 Bedrock 的 user prompt，而不是僅作為外部 lineage metadata。
+        未提供時保留既有單一路徑抽取行為。
         """
         # 延遲匯入：避免模組頂層循環依賴
         from .trust.scoring import Claim, extract_claims  # noqa: PLC0415
 
+        self.last_claim_extraction_model_invoked = False
         if self.offline or not self.config.model_id:
             # 離線降級：使用 regex 切句；claim_type/direction 保持預設值
             return extract_claims(docs)
@@ -485,7 +517,9 @@ class BedrockClient:
         system_prompt = (
             "你是金融資訊分析師。請嚴格依據提供的文件，不引入外部知識。"
         )
+        analysis_context = claim_extraction_prompt_context(mode, question)
         user_prompt = (
+            f"{analysis_context}"
             "從以下加密市場文件中，抽出每個獨立的「市場主張」。\n\n"
             f"文件列表：\n{doc_block}\n\n"
             "輸出 JSON array，每條格式：\n"
@@ -500,6 +534,9 @@ class BedrockClient:
 
         try:
             result = self.complete(system=system_prompt, prompt=user_prompt)
+            # A returned Bedrock result is the durable evidence that the actual
+            # prompt was accepted; JSON parse fallback does not undo that call.
+            self.last_claim_extraction_model_invoked = True
             if log is not None:
                 # 真呼叫已成功取得 usage → 記一筆成本，不管後面 JSON 解析是否成功
                 # （呼叫本身已發生、已有花費，parse 失敗只是降級 fallback，不代表沒呼叫）
