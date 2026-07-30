@@ -367,6 +367,66 @@ def cleanup_handoff_file(
     os.fsync(handoff_fd)
 
 
+def cleanup_cases_tree(generation_fd: int, expected_cases: list[str]) -> None:
+    """Verify and remove only the extracted, closed-world case evidence tree."""
+    cases_fd = os.open(
+        "cases",
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=generation_fd,
+    )
+    cases_metadata = os.fstat(cases_fd)
+    if (
+        cases_metadata.st_uid != 0
+        or cases_metadata.st_gid != 0
+        or stat.S_IMODE(cases_metadata.st_mode) != 0o700
+    ):
+        block("NF3 cases directory metadata is unsafe")
+    if sorted(os.listdir(cases_fd)) != sorted(expected_cases):
+        block("NF3 cases directory contains unknown or missing entries")
+    expected_files = {
+        "evidence.json",
+        "evidence.json.sha256",
+        "process.log",
+        "terminal.record",
+        "witness.txt",
+    }
+    for case_name in sorted(expected_cases):
+        case_fd = os.open(
+            case_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=cases_fd,
+        )
+        case_metadata = os.fstat(case_fd)
+        if (
+            case_metadata.st_uid != 0
+            or case_metadata.st_gid != 0
+            or case_metadata.st_nlink != 2
+            or stat.S_IMODE(case_metadata.st_mode) != 0o700
+            or set(os.listdir(case_fd)) != expected_files
+        ):
+            block(f"NF3 case directory is unsafe: {case_name}")
+        for filename in sorted(expected_files):
+            metadata = os.stat(filename, dir_fd=case_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != 0
+                or metadata.st_gid != 0
+                or metadata.st_nlink != 1
+                or metadata.st_size < 0
+                or metadata.st_size > 16 * 1024 * 1024
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                block(f"NF3 case evidence object is unsafe: {case_name}/{filename}")
+            os.unlink(filename, dir_fd=case_fd)
+        os.fsync(case_fd)
+        os.close(case_fd)
+        os.rmdir(case_name, dir_fd=cases_fd)
+    os.fsync(cases_fd)
+    os.close(cases_fd)
+    os.rmdir("cases", dir_fd=generation_fd)
+    os.fsync(generation_fd)
+
+
 def finalize_handoff_generation(
     parent_fd: int,
     generation_fd: int,
@@ -1217,9 +1277,9 @@ def main() -> int:
                 cwd=repo,
             )
             unit = f"trustforge-nf3-b-{head[:12]}"
-            cases_root = Path(tempfile.mkdtemp(prefix=f"{unit}-cases-", dir="/var/tmp"))
-            os.chown(cases_root, 0, 0)
-            os.chmod(cases_root, 0o700)
+            os.mkdir("cases", 0o700, dir_fd=handoff_fd)
+            os.fsync(handoff_fd)
+            cases_root = handoff_path / "cases"
             service_helper = Path(f"/run/{unit}-helper")
             service_rlib = Path(f"/run/{unit}-nf2.rlib")
             properties = [
@@ -1284,7 +1344,10 @@ def main() -> int:
             if cases_destination.exists():
                 raise RuntimeError("case evidence destination already exists")
             shutil.copytree(cases_root, cases_destination)
-            shutil.rmtree(cases_root)
+            cleanup_cases_tree(
+                handoff_fd,
+                [case_directory.name for case_directory in case_directories],
+            )
 
             evidence = {
                 "schema": "trustforge.nf3.integrated-evidence.v1",

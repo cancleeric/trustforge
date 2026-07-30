@@ -226,7 +226,9 @@ def test_nested_integrated_writes_are_scoped_to_exact_cases_root():
     value = source()
     integrated = value[value.index('unit = f"trustforge-nf3-b-') :]
     integrated = integrated[: integrated.index("evidence = {")]
-    assert 'dir="/var/tmp"' in integrated
+    assert 'os.mkdir("cases", 0o700, dir_fd=handoff_fd)' in integrated
+    assert 'cases_root = handoff_path / "cases"' in integrated
+    assert 'dir="/var/tmp"' not in integrated
     assert '"ReadWritePaths=/root"' not in integrated
     assert 'f"ReadWritePaths={cases_root}"' in integrated
     command = integrated[integrated.index("command.extend(") :]
@@ -234,7 +236,13 @@ def test_nested_integrated_writes_are_scoped_to_exact_cases_root():
     assert '"/root",\n                    str(cases_root)' not in command
     assert 'cases_root.glob("trustforge-nf3-integrated-*")' in integrated
     assert 'cases_root.glob("trustforge-nf3-witness-*")' in integrated
-    assert "shutil.rmtree(cases_root)" in integrated
+    assert "cleanup_cases_tree(" in integrated
+    cleanup = value[value.index("def cleanup_cases_tree(") :]
+    cleanup = cleanup[: cleanup.index("def finalize_handoff_generation(")]
+    assert "os.O_DIRECTORY | os.O_NOFOLLOW" in cleanup
+    assert "metadata.st_nlink != 1" in cleanup
+    assert "contains unknown or missing entries" in cleanup
+    assert 'os.rmdir("cases", dir_fd=generation_fd)' in cleanup
 
 
 def test_cargo_tests_exclude_doctests_and_all_targets_are_explicit():
