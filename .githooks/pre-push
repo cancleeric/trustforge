@@ -16,7 +16,12 @@ if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c 'import coverage, xdist' >
     exit 1
   fi
   echo "[pre-push] bootstrapping frozen dev venv from uv.lock"
-  if ! uv sync --frozen --extra dev; then
+  UV_CACHE_DIR="${TRUSTFORGE_UV_CACHE_DIR:-${TMPDIR:-/tmp}/trustforge-uv-cache-${UID:-$(id -u)}}"
+  if ! mkdir -p "$UV_CACHE_DIR"; then
+    echo "[pre-push] FAILED: cannot create sandbox-safe uv cache" >&2
+    exit 1
+  fi
+  if ! UV_CACHE_DIR="$UV_CACHE_DIR" uv sync --frozen --extra dev; then
     echo "[pre-push] FAILED: frozen dev venv bootstrap"
     exit 1
   fi
