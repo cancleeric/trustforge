@@ -1391,6 +1391,9 @@ mod tests {
         let n = write_decimal(&mut buf, 12345);
         assert_eq!(&buf[..n], b"12345");
         // No leading zeros, no trailing bytes touched beyond the digits.
+        // Reset the sentinel first: the preceding call intentionally wrote
+        // five digits into this same buffer, so byte 2 is no longer `X`.
+        buf.fill(b'X');
         let n = write_decimal(&mut buf, 42);
         assert_eq!(&buf[..n], b"42");
         assert_eq!(buf[n], b'X');
