@@ -260,7 +260,7 @@ mod tests {
     ) -> Result<Outcome, &'static str> {
         use trustforge_nf2_zero_capability_broker::CapabilitySink;
         sink.on_ready_bound()?;
-        sink.on_capability_issued()?;
+        sink.on_capability_issued(0xfd00, 0x1)?;
         sink.on_derived_pending_recheck()?;
         sink.on_committed()?;
         Ok(Outcome::Completed)

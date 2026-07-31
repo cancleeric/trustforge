@@ -455,7 +455,11 @@ pub fn run<S: crate::CapabilitySink>(sealed: &SealedNf1, sink: &S) -> Result<(),
     }
     authority.reverify(sealed)?;
     authority.verify_peer_credential(sealed, peer_credential, child.pid)?;
-    notify_sink(sink.on_capability_issued(), "capability_issued")?;
+    let (runtime_device, runtime_inode) = sealed.runtime_device_inode();
+    notify_sink(
+        sink.on_capability_issued(runtime_device, runtime_inode),
+        "capability_issued",
+    )?;
     continue_with_exit_trace(&child, &mut trace_stage)?;
     child.ensure_live()?;
     sealed.reverify()?;

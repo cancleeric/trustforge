@@ -9,7 +9,7 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "a099468430c69736bf2823cf0d91ab014e11076e38611484f5035502bd05963f";
+    "1f34dc173355da1b0c3f4cdd8e3c2cc2022b5fbec7e5b0dbd4a5bfa12f59c73c";
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
     "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1";
 const NF2_LINKED_RELEASE_RLIB_SHA256: &str =
@@ -201,7 +201,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "2ea84cc61014632d3cb76de81cdaa6df066276b392ce4cf9eb448a53f8db1308"
+            "f3a5a350e6a200f97b6601f3ebc0428270c8a483c6ccdaf96d995272a6f55cf8"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -224,11 +224,11 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "2ea84cc61014632d3cb76de81cdaa6df066276b392ce4cf9eb448a53f8db1308"
+            "f3a5a350e6a200f97b6601f3ebc0428270c8a483c6ccdaf96d995272a6f55cf8"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "464c846a5be2f64ad574c89361b9bab1a546d1f7966bf6f44eac46d25a38b7c2"
+            "c6217d3296d373bb071e17da1810997143bc91df876a2758841fbc12c5f73189"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
@@ -239,11 +239,11 @@ mod tests {
         for (name, value) in [
             (
                 "git_subtree_oid_sha1",
-                "e906cd4bad2f9eba0dbf11a765465edbe1726de1",
+                "ce3e20c5875e5fdc59e60472decbc256b9649484",
             ),
             (
                 "linked_source_sha256",
-                "8835b3194d471b040c4b8a73d6ae1d30b0ef8379e167437a4704429f0b1bfb70",
+                "bf56bb76e2f43689b9c170b7c00a2d501f1e690d773dbfd95b4d6a26917b991d",
             ),
         ] {
             frame(&mut canonical, name.as_bytes());

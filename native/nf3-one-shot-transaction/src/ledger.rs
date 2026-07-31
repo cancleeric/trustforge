@@ -499,7 +499,26 @@ impl trustforge_nf2_zero_capability_broker::CapabilitySink for ClaimSession<'_> 
         self.append_state(State::ReadyBound)
             .map_err(|_| "ledger append ready_bound failed")
     }
-    fn on_capability_issued(&self) -> Result<(), &'static str> {
+    fn on_capability_issued(
+        &self,
+        runtime_device: u64,
+        runtime_inode: u64,
+    ) -> Result<(), &'static str> {
+        use trustforge_nf2_zero_capability_broker::capability::{
+            CapabilityDescriptor, CapabilityKind, decode_hex_32,
+        };
+        let transaction_id = decode_hex_32(&self.binding.transaction_id)
+            .map_err(|_| "capability transaction_id hex decode failed")?;
+        let foundation_sha256 = decode_hex_32(&self.binding.foundation_sha256)
+            .map_err(|_| "capability foundation_sha256 hex decode failed")?;
+        let descriptor = CapabilityDescriptor::new(
+            transaction_id,
+            foundation_sha256,
+            runtime_device,
+            runtime_inode,
+            CapabilityKind::ZeroFd,
+        );
+        descriptor.assert_no_authority_fields()?;
         self.append_state(State::CapabilityIssued)
             .map_err(|_| "ledger append capability_issued failed")
     }

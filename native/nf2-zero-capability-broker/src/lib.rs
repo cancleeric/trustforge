@@ -21,20 +21,29 @@ pub enum Outcome {
 
 /// Sink notified at each capability-protocol reverify boundary.
 ///
-/// Methods take no descriptor argument: descriptor construction is deferred to
-/// the caller that holds a live capability binding (a later NF3 step, where a
-/// `ClaimSession` carries the runtime binding). This crate only emits *stage*
-/// notifications. Returning `Err` makes the broker fail closed: the live child
-/// is killed/reaped via the existing `Child` cleanup and the transaction is
-/// aborted. [`NoopSink`] never returns `Err`, so the default [`run`] path is
-/// behaviorally identical to before this hook existed.
+/// The `on_capability_issued` hook additionally carries the sealed runtime
+/// identity (device, inode) the child bound to, so an NF3 `ClaimSession` can
+/// construct the full identity-bound [`capability::CapabilityDescriptor`]
+/// (transaction id + foundation digest + runtime dev/inode + kind) at the
+/// release boundary. Full descriptor construction still lives in NF3, where the
+/// live capability binding is held; this crate only emits *stage* notifications
+/// plus the runtime identity available at that stage. Returning `Err` makes the
+/// broker fail closed: the live child is killed/reaped via the existing `Child`
+/// cleanup and the transaction is aborted. [`NoopSink`] never returns `Err`, so
+/// the default [`run`] path is behaviorally identical to before this hook
+/// existed.
 pub trait CapabilitySink {
     /// Child is ptrace-stopped at the EXEC event, bound to the sealed runtime,
     /// and the post-exec sealed reverify passed.
     fn on_ready_bound(&self) -> Result<(), &'static str>;
     /// Authority reverify passed and the capability is about to be released to
-    /// let the child produce its derived work.
-    fn on_capability_issued(&self) -> Result<(), &'static str>;
+    /// let the child produce its derived work. `runtime_device` / `runtime_inode`
+    /// are the sealed runtime identity the child is bound to at this boundary.
+    fn on_capability_issued(
+        &self,
+        runtime_device: u64,
+        runtime_inode: u64,
+    ) -> Result<(), &'static str>;
     /// Child is ptrace-stopped at the EXIT event after producing derived work;
     /// the exit-stop sealed + authority reverify passed.
     fn on_derived_pending_recheck(&self) -> Result<(), &'static str>;
@@ -51,7 +60,7 @@ impl CapabilitySink for NoopSink {
     fn on_ready_bound(&self) -> Result<(), &'static str> {
         Ok(())
     }
-    fn on_capability_issued(&self) -> Result<(), &'static str> {
+    fn on_capability_issued(&self, _runtime_device: u64, _runtime_inode: u64) -> Result<(), &'static str> {
         Ok(())
     }
     fn on_derived_pending_recheck(&self) -> Result<(), &'static str> {

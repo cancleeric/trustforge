@@ -107,9 +107,40 @@ impl CapabilityDescriptor {
             self.runtime_device,
             self.runtime_inode,
             self.capability_kind,
-            self.descriptor_sha256,
+            &self.descriptor_sha256,
         );
         Ok(())
+    }
+}
+
+/// Decodes exactly 64 lowercase-hex characters into a 32-byte digest.
+///
+/// This is the inverse of the crate's digest-then-`{:02x}` pipeline used by
+/// callers that persist digests as canonical lowercase-hex strings (for example
+/// an NF3 `Binding`'s `transaction_id` / `foundation_sha256`). It accepts only
+/// the lowercase alphabet the rest of the crate emits (`[0-9a-f]`), so a
+/// mixed-case or wrong-length string is rejected rather than silently turning
+/// an attacker-controlled identifier into a descriptor field. The result feeds
+/// [`CapabilityDescriptor::new`], whose fields are all fixed-width public
+/// identities.
+pub fn decode_hex_32(input: &str) -> Result<[u8; 32], &'static str> {
+    if input.len() != 64 {
+        return Err("hex32 length");
+    }
+    let mut output = [0u8; 32];
+    for (index, pair) in input.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_digit(pair[0])?;
+        let low = hex_digit(pair[1])?;
+        output[index] = (high << 4) | low;
+    }
+    Ok(output)
+}
+
+fn hex_digit(byte: u8) -> Result<u8, &'static str> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err("hex32 character"),
     }
 }
 
@@ -164,5 +195,25 @@ mod tests {
     #[test]
     fn authority_assertion_passes_by_default() {
         assert!(sample().assert_no_authority_fields().is_ok());
+    }
+
+    #[test]
+    fn decode_hex_32_round_trips_lowercase_encoding() {
+        let raw = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x0f, 0x1e, 0x2d, 0x3c,
+            0x4b, 0x5a, 0x69, 0x78,
+        ];
+        let encoded: String = raw.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(decode_hex_32(&encoded).unwrap(), raw);
+    }
+
+    #[test]
+    fn decode_hex_32_rejects_invalid_inputs() {
+        assert!(decode_hex_32("").is_err());
+        assert!(decode_hex_32(&"a".repeat(63)).is_err());
+        assert!(decode_hex_32(&"a".repeat(65)).is_err());
+        assert!(decode_hex_32(&"A".repeat(32)).is_err());
+        assert!(decode_hex_32(&"g".repeat(32)).is_err());
     }
 }
