@@ -1275,7 +1275,7 @@ def source_tree_receipt(tree_oid: str, source_sha256: str) -> str:
 
 def verify_evidence_profile(repo: Path) -> None:
     manifest = tomllib.loads(
-        (repo / "native/nf3-one-shot-transaction/Cargo.toml").read_text()
+        (repo / "native/Cargo.toml").read_text()
     )
     profiles = manifest.get("profile", {})
     if profiles.get("evidence") != EVIDENCE_PROFILE:
