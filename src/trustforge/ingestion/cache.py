@@ -164,6 +164,11 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     # 變動的鎖倉量，15 分鐘一輪足夠。兩者皆 keyless 無 rate limit 硬性公告。
     "defillama-price": 5 * 60,     # price_live：5 分鐘
     "defillama-tvl": 15 * 60,      # defi_tvl：15 分鐘
+    # CoinMarketCap（#1161，key-based Pro API）：作為第三條獨立現價來源，與
+    # coingecko-price/defillama-price 形成 corroboration consensus。CMC free-tier
+    # 月額度有限（10k/月量級），900 秒（15 分鐘）一輪保守使用額度——遠低於月額度，
+    # 同時現價鮮度足以參與交叉佐證。
+    "coinmarketcap-price": 15 * 60,  # price_live：15 分鐘
 }
 DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS = 15 * 60  # 未知來源名的保守預設
 
@@ -245,7 +250,7 @@ COIN_AGNOSTIC_SOURCES = frozenset(
 # 也不該讓「他幣資料」平白出現在「本幣」的 cache 快取裡）——而是把單次
 # 回應依每筆 Document 自帶的 `meta["coin"]` **分流**寫入各自對應的 cache
 # key，讓每個幣的 cache 內容天生就「只含自己」，語意與其餘逐幣來源一致。
-COIN_KEYED_BATCH_SOURCES = frozenset({"coingecko-price", "defillama-price", "defillama-tvl"})
+COIN_KEYED_BATCH_SOURCES = frozenset({"coingecko-price", "defillama-price", "defillama-tvl", "coinmarketcap-price"})
 
 # Axis C #1（task #23，PLAN docs/archive/plans/PLAN-axisC-snapshots.md）：多幣信任快照 +
 # 首頁總覽正確讀路徑——`scripts/fetch_scheduler.py --snapshot` 這個「寫入者」
