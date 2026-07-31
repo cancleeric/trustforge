@@ -441,6 +441,7 @@ def collect(query: str, coin: str | None = None,
             from .hoyabit import build_hoyabit_sources
             from .whale_trades import build_whale_sources
             from .defillama import build_defillama_sources
+            from .cmc import build_cmc_sources
             from .cache import CachedSource
             raw_sources = (
                 build_news_sources()
@@ -455,6 +456,10 @@ def collect(query: str, coin: str | None = None,
                 + build_hoyabit_sources()
                 + build_whale_sources()
                 + build_defillama_sources()
+                # #1161 CoinMarketCap（key-based，無 key→build_cmc_sources() 回 []）：
+                # 第三條獨立現價來源，與 coingecko-price/defillama-price 形成
+                # corroboration consensus。無憑證時不註冊任何來源（靜默降級）。
+                + build_cmc_sources()
             )
             # 階段2（cache + 排程 fetcher）：產品路徑一律讀快取，不直接打真連接器
             # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程

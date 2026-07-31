@@ -18,7 +18,9 @@ demo/hoyabit_data/
 *.secret
 # 生成的交付件輸出（可重跑）
 out/
-.apikey
+# 本機憑證檔：glob 覆蓋 coinmarketcap.apikey / etherscan.apikey / whale.alert.apikey
+# 及未來任何 *.apikey（字面 ".apikey" 只匹配名為 .apikey 的檔，會漏 coinmarketcap.apikey）。
+*.apikey
 .eye-cache/
 .claude/
 .cli/
