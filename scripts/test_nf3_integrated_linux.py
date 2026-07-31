@@ -32,13 +32,13 @@ ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
 )
 REVIEWED_NR1A_NF2_TREE = "b81289ffd5bb98521a79c80c18f47fc206e93ccf"
 REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256 = (
-    "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719"
+    "24967bf4449bb6dfe3f1e82fb3bd0d4ef2c804f0ab6566153e5e149290d641a6"
 )
 ACCEPTED_LINKED_SOURCE_SHA256 = (
     "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc"
 )
 REVIEWED_NR1A_LINKED_SOURCE_SHA256 = (
-    "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9"
+    "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f"
 )
 EXPECTED_RELEASE_RLIB_SHA256 = (
     "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38"
@@ -59,7 +59,7 @@ RELEASE_PROFILE_RECEIPT_SHA256 = (
     "5cc871f48193094c28b5df2691c63b2f3c6649686b3573243de5daed90e6e070"
 )
 EXPECTED_FOUNDATION_SHA256 = (
-    "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
+    "7e7fec8b03eb918102a884e55543b519ca1e44efd4829b25b1bc18a6ccbae79e"
 )
 FIXED_TOOLCHAIN_RECEIPT_SHA256 = (
     "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26"
@@ -1547,13 +1547,13 @@ def write_build_receipt(
         f"profile={profile}\n"
         f"executable_sha256={executable_sha256}\n"
         "linked_nf2_source_sha256="
-        "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9\n"
+        "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f\n"
         f"linked_nf2_rlib_sha256={rlib_sha256}\n"
         f"profile_receipt_sha256={profile_receipt}\n"
         "toolchain_receipt_sha256="
         f"{FIXED_TOOLCHAIN_RECEIPT_SHA256}\n"
         "source_tree_receipt_sha256="
-        "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719\n"
+        "6a58c8f53b4ca8e5ea43e2b0c70a53e7ffe897e94a8824dbfce88fc42f3ede90\n"
     ).encode()
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -1793,10 +1793,10 @@ def main() -> int:
             )
             expected_release_fields = {
                 "profile": "release",
-                "source": "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9",
+                "source": "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f",
                 "rlib": EXPECTED_RELEASE_RLIB_SHA256,
                 "profile_receipt": RELEASE_PROFILE_RECEIPT_SHA256,
-                "foundation": "cd3a0b280abfeef7ad5dc13295f398a07826f74a28a04bb3632278cd027ea63a",
+                "foundation": "4ae9975b5ecd55dc1d8902c0a74850a24f89dfa4c4a3ad0b59b49a95c14771c6",
             }
             tokens = release_profile_line.split()
             if len(tokens) != 6 or tokens[0] != "BOUND_PROFILE":

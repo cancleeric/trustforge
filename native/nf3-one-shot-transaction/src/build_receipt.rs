@@ -12,12 +12,14 @@ const RECEIPT_NAME: &str = "receipt.v1";
 const RECEIPT_MAX: usize = 2048;
 const EXE_MAX: usize = 64 * 1024 * 1024;
 const BLOCKED_RECEIPT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const SOURCE: &str = "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9";
+const SOURCE: &str = "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f";
 const SOURCE_TREE_RECEIPT: &str =
-    "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719";
+    "6a58c8f53b4ca8e5ea43e2b0c70a53e7ffe897e94a8824dbfce88fc42f3ede90";
 const TOOLCHAIN: &str = "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const EVIDENCE_RLIB: &str = "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
 const EVIDENCE_PROFILE: &str = "7f53b287a6944a5978b02dfcd35e50b5955be28107ac457369a70d22115f79a5";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const RELEASE_RLIB: &str = "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38";
 const RELEASE_PROFILE: &str = "5cc871f48193094c28b5df2691c63b2f3c6649686b3573243de5daed90e6e070";
 

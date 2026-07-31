@@ -9,9 +9,11 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "574440bd581c9d54d9e6c0321d4899d8f113eb7551ae637b8f3007774a48cd90";
+    "6a58c8f53b4ca8e5ea43e2b0c70a53e7ffe897e94a8824dbfce88fc42f3ede90";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
     "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_RELEASE_RLIB_SHA256: &str =
     "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38";
 const NF2_FIXED_TOOLCHAIN_RECEIPT_SHA256: &str =
@@ -201,7 +203,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
+            "7e7fec8b03eb918102a884e55543b519ca1e44efd4829b25b1bc18a6ccbae79e"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -224,11 +226,11 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
+            "7e7fec8b03eb918102a884e55543b519ca1e44efd4829b25b1bc18a6ccbae79e"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "cd3a0b280abfeef7ad5dc13295f398a07826f74a28a04bb3632278cd027ea63a"
+            "4ae9975b5ecd55dc1d8902c0a74850a24f89dfa4c4a3ad0b59b49a95c14771c6"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
@@ -243,7 +245,7 @@ mod tests {
             ),
             (
                 "linked_source_sha256",
-                "4bd3226e2338387bacab90ee03af07e8d94ada385bdd83515724c7e533324e14",
+                "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f",
             ),
         ] {
             frame(&mut canonical, name.as_bytes());

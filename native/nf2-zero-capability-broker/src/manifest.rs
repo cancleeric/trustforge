@@ -13,6 +13,67 @@ pub const ACCEPTED_ARCHIVE_SHA256: &str =
     "808487c590a183a8df2e69cfc5257969e18ae88b15c4378da95d97add6c03c1b";
 const RUSTFLAGS: &str = "--remap-path-prefix=/build-input=/workspace/native/hermetic-package -C relocation-model=static -C link-arg=--build-id=none -C link-arg=-no-pie";
 
+/// Compile-time identity pins for an accepted NF1 artifact.
+///
+/// Every field is `&'static str` (or a static slice) so the struct is
+/// const-constructible. `NF1_PINS` is the sole blessed instance; the public
+/// `validate_accepted` hard-codes it internally — callers cannot inject an
+/// alternative pin set (authority-injection defense).
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CargoPackage {
+    pub name: &'static str,
+    pub version: &'static str,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct GeneratedInput {
+    pub path: &'static str,
+    pub recipe: &'static str,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AcceptedPins {
+    pub schema: &'static str,
+    pub runtime_path: &'static str,
+    pub entry_paths: &'static [&'static str],
+    pub entry_cardinality: usize,
+    pub cargo_package: CargoPackage,
+    pub generated: GeneratedInput,
+    pub runtime_closure_method: &'static str,
+    pub commit: &'static str,
+    pub tree: &'static str,
+    pub manifest_sha256: &'static str,
+    pub runtime_sha256: &'static str,
+    pub archive_sha256: &'static str,
+}
+
+pub const NF1_PINS: AcceptedPins = AcceptedPins {
+    schema: SCHEMA,
+    runtime_path: RUNTIME_PATH,
+    entry_paths: &[
+        "bin",
+        "config",
+        RUNTIME_PATH,
+        "config/fixed-config.json",
+        "config/public-metadata-format.json",
+    ],
+    entry_cardinality: 5,
+    cargo_package: CargoPackage {
+        name: "trustforge-native-foundation",
+        version: "0.1.0",
+    },
+    generated: GeneratedInput {
+        path: "generated/source_epoch.rs",
+        recipe: "scripts/build_native_hermetic_package.py:EPOCH",
+    },
+    runtime_closure_method: "bounds-checked-elf64-parser/v1",
+    commit: ACCEPTED_COMMIT,
+    tree: ACCEPTED_TREE,
+    manifest_sha256: ACCEPTED_MANIFEST_SHA256,
+    runtime_sha256: ACCEPTED_RUNTIME_SHA256,
+    archive_sha256: ACCEPTED_ARCHIVE_SHA256,
+};
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RuntimeBinding {
     pub sha256: [u8; 32],
@@ -21,7 +82,7 @@ pub struct RuntimeBinding {
     pub source_epoch: String,
 }
 
-pub fn validate(bytes: &[u8]) -> Result<RuntimeBinding, &'static str> {
+pub fn validate(bytes: &[u8], pins: &AcceptedPins) -> Result<RuntimeBinding, &'static str> {
     let parsed = canonical_json::parse(bytes)?;
     let root = object(&parsed)?;
     let expected_top = BTreeSet::from([
@@ -40,22 +101,16 @@ pub fn validate(bytes: &[u8]) -> Result<RuntimeBinding, &'static str> {
     if root.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected_top {
         return Err("manifest top-level schema is not exact");
     }
-    if string(required(root, "schema")?)? != SCHEMA {
+    if string(required(root, "schema")?)? != pins.schema {
         return Err("manifest schema enum mismatch");
     }
-    validate_nested_schema(root)?;
+    validate_nested_schema(root, pins)?;
     reject_authority_metadata(&parsed)?;
     let entries = array(required(root, "package_entries")?)?;
-    if entries.len() != 5 {
+    if entries.len() != pins.entry_cardinality {
         return Err("package entry cardinality mismatch");
     }
-    let expected_paths = BTreeSet::from([
-        "bin",
-        "config",
-        RUNTIME_PATH,
-        "config/fixed-config.json",
-        "config/public-metadata-format.json",
-    ]);
+    let expected_paths: BTreeSet<&str> = pins.entry_paths.iter().copied().collect();
     let mut paths = BTreeSet::new();
     let mut runtime = None;
     for value in entries {
@@ -76,15 +131,15 @@ pub fn validate(bytes: &[u8]) -> Result<RuntimeBinding, &'static str> {
             return Err("package entry schema is not exact");
         }
         let mode = parse_mode(string(required(entry, "mode")?)?)?;
-        if ((kind == "directory" || path == RUNTIME_PATH) && mode != 0o555)
-            || (kind == "file" && path != RUNTIME_PATH && mode != 0o444)
+        if ((kind == "directory" || path == pins.runtime_path) && mode != 0o555)
+            || (kind == "file" && path != pins.runtime_path && mode != 0o444)
         {
             return Err("package entry mode mismatch");
         }
         if kind == "file" {
             let size = integer(required(entry, "size")?)?;
             let digest = parse_digest(string(required(entry, "sha256")?)?)?;
-            if path == RUNTIME_PATH {
+            if path == pins.runtime_path {
                 runtime = Some(RuntimeBinding {
                     sha256: digest,
                     size,
@@ -107,7 +162,7 @@ pub fn validate(bytes: &[u8]) -> Result<RuntimeBinding, &'static str> {
 }
 
 pub fn validate_accepted(bytes: &[u8]) -> Result<RuntimeBinding, &'static str> {
-    let binding = validate(bytes)?;
+    let binding = validate(bytes, &NF1_PINS)?;
     let parsed = canonical_json::parse(bytes)?;
     let root = object(&parsed)?;
     let vcs = object(required(root, "vcs")?)?;
@@ -116,6 +171,7 @@ pub fn validate_accepted(bytes: &[u8]) -> Result<RuntimeBinding, &'static str> {
         binding.sha256,
         string(required(vcs, "commit")?)?,
         string(required(vcs, "tree")?)?,
+        &NF1_PINS,
     )?;
     Ok(binding)
 }
@@ -125,18 +181,22 @@ fn verify_pin_values(
     runtime_digest: [u8; 32],
     commit: &str,
     tree: &str,
+    pins: &AcceptedPins,
 ) -> Result<(), &'static str> {
-    if manifest_digest != parse_digest(ACCEPTED_MANIFEST_SHA256)?
-        || runtime_digest != parse_digest(ACCEPTED_RUNTIME_SHA256)?
-        || commit != ACCEPTED_COMMIT
-        || tree != ACCEPTED_TREE
+    if manifest_digest != parse_digest(pins.manifest_sha256)?
+        || runtime_digest != parse_digest(pins.runtime_sha256)?
+        || commit != pins.commit
+        || tree != pins.tree
     {
         return Err("NF1 artifact differs from compile-time accepted receipt");
     }
     Ok(())
 }
 
-fn validate_nested_schema(root: &BTreeMap<String, Value>) -> Result<(), &'static str> {
+fn validate_nested_schema(
+    root: &BTreeMap<String, Value>,
+    pins: &AcceptedPins,
+) -> Result<(), &'static str> {
     exact_object(required(root, "vcs")?, &["commit", "tree"])?;
     for field in ["commit", "tree"] {
         lowercase_hex(
@@ -155,8 +215,8 @@ fn validate_nested_schema(root: &BTreeMap<String, Value>) -> Result<(), &'static
         return Err("Cargo package cardinality mismatch");
     }
     let package = exact_object(&packages[0], &["name", "version"])?;
-    if string(required(package, "name")?)? != "trustforge-native-foundation"
-        || string(required(package, "version")?)? != "0.1.0"
+    if string(required(package, "name")?)? != pins.cargo_package.name
+        || string(required(package, "version")?)? != pins.cargo_package.version
         || !array(required(cargo, "third_party_dependencies")?)?.is_empty()
         || !array(required(cargo, "vendor_entries")?)?.is_empty()
     {
@@ -167,9 +227,8 @@ fn validate_nested_schema(root: &BTreeMap<String, Value>) -> Result<(), &'static
         required(root, "generated")?,
         &["path", "recipe", "sha256", "size"],
     )?;
-    if string(required(generated, "path")?)? != "generated/source_epoch.rs"
-        || string(required(generated, "recipe")?)?
-            != "scripts/build_native_hermetic_package.py:EPOCH"
+    if string(required(generated, "path")?)? != pins.generated.path
+        || string(required(generated, "recipe")?)? != pins.generated.recipe
     {
         return Err("generated input enum mismatch");
     }
@@ -187,7 +246,7 @@ fn validate_nested_schema(root: &BTreeMap<String, Value>) -> Result<(), &'static
         required(root, "runtime_closure")?,
         &["dt_needed", "method", "pt_interp"],
     )?;
-    if string(required(closure, "method")?)? != "bounds-checked-elf64-parser/v1"
+    if string(required(closure, "method")?)? != pins.runtime_closure_method
         || required(closure, "pt_interp")? != &Value::Bool(false)
         || !array(required(closure, "dt_needed")?)?.is_empty()
     {
@@ -689,7 +748,7 @@ mod tests {
     #[test]
     fn extracts_exact_runtime_binding() {
         let digest = "01".repeat(32);
-        let binding = validate(&fixture(&digest)).unwrap();
+        let binding = validate(&fixture(&digest), &NF1_PINS).unwrap();
         assert_eq!(binding.sha256, [1; 32]);
         assert_eq!(binding.size, 42);
         assert_eq!(binding.mode, 0o555);
@@ -697,11 +756,11 @@ mod tests {
 
     #[test]
     fn rejects_malformed_digest_and_duplicate_path() {
-        assert!(validate(&fixture(&"g".repeat(64))).is_err());
+        assert!(validate(&fixture(&"g".repeat(64)), &NF1_PINS).is_err());
         let duplicate = String::from_utf8(fixture(&"0".repeat(64)))
             .unwrap()
             .replace("\"path\":\"config\"", "\"path\":\"bin\"");
-        assert!(validate(duplicate.as_bytes()).is_err());
+        assert!(validate(duplicate.as_bytes(), &NF1_PINS).is_err());
     }
 
     #[test]
@@ -711,37 +770,148 @@ mod tests {
             validate(
                 valid
                     .replace("\"offline\":true", "\"offline\":false")
-                    .as_bytes()
+                    .as_bytes(),
+                &NF1_PINS
             )
             .is_err()
         );
         for key in ["signer", "keyId", "rawKey", "trust-anchor"] {
             let mutation = valid.replace("\"build\":{", &format!("\"build\":{{\"{key}\":\"x\","));
-            assert!(validate(mutation.as_bytes()).is_err(), "{key}");
+            assert!(validate(mutation.as_bytes(), &NF1_PINS).is_err(), "{key}");
         }
         let duplicate_source = valid.replace(
             "\"sources\":[{\"mode\"",
             "\"sources\":[{\"mode\":\"0444\",\"path\":\"Cargo.toml\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":1},{\"mode\"",
         );
-        assert!(validate(duplicate_source.as_bytes()).is_err());
+        assert!(validate(duplicate_source.as_bytes(), &NF1_PINS).is_err());
     }
 
     #[test]
     fn accepted_receipt_rejects_every_identity_mutation() {
         let manifest = parse_digest(ACCEPTED_MANIFEST_SHA256).unwrap();
         let runtime = parse_digest(ACCEPTED_RUNTIME_SHA256).unwrap();
-        assert!(verify_pin_values(manifest, runtime, ACCEPTED_COMMIT, ACCEPTED_TREE).is_ok());
+        assert!(
+            verify_pin_values(manifest, runtime, ACCEPTED_COMMIT, ACCEPTED_TREE, &NF1_PINS).is_ok()
+        );
         let mut changed_manifest = manifest;
         changed_manifest[0] ^= 1;
-        assert!(
-            verify_pin_values(changed_manifest, runtime, ACCEPTED_COMMIT, ACCEPTED_TREE).is_err()
-        );
+        assert!(verify_pin_values(
+            changed_manifest,
+            runtime,
+            ACCEPTED_COMMIT,
+            ACCEPTED_TREE,
+            &NF1_PINS
+        )
+        .is_err());
         let mut changed_runtime = runtime;
         changed_runtime[0] ^= 1;
+        assert!(verify_pin_values(
+            manifest,
+            changed_runtime,
+            ACCEPTED_COMMIT,
+            ACCEPTED_TREE,
+            &NF1_PINS
+        )
+        .is_err());
         assert!(
-            verify_pin_values(manifest, changed_runtime, ACCEPTED_COMMIT, ACCEPTED_TREE).is_err()
+            verify_pin_values(manifest, runtime, &"0".repeat(40), ACCEPTED_TREE, &NF1_PINS)
+                .is_err()
         );
-        assert!(verify_pin_values(manifest, runtime, &"0".repeat(40), ACCEPTED_TREE).is_err());
-        assert!(verify_pin_values(manifest, runtime, ACCEPTED_COMMIT, &"0".repeat(40)).is_err());
+        assert!(
+            verify_pin_values(manifest, runtime, ACCEPTED_COMMIT, &"0".repeat(40), &NF1_PINS)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn nf1_accepted_manifest_validates_through_pins_and_accepted() {
+        let bytes = include_bytes!("../tests/fixtures/accepted-native-hermetic-provenance.json");
+        assert!(validate(bytes, &NF1_PINS).is_ok());
+        assert!(validate_accepted(bytes).is_ok());
+    }
+
+    #[test]
+    fn each_pin_bound_field_tampering_is_rejected_by_validate() {
+        let bytes = include_bytes!("../tests/fixtures/accepted-native-hermetic-provenance.json");
+        let original = std::str::from_utf8(bytes).unwrap();
+
+        let tampered = original.replacen(
+            "trustforge.native-hermetic-provenance/v1",
+            "trustforge.native-hermetic-provenance/v2",
+            1,
+        );
+        assert!(validate(tampered.as_bytes(), &NF1_PINS).is_err(), "schema");
+
+        let tampered = original.replace(
+            "\"path\":\"bin/trustforge-native-foundation\"",
+            "\"path\":\"bin/different-binary\"",
+        );
+        assert!(
+            validate(tampered.as_bytes(), &NF1_PINS).is_err(),
+            "runtime_path"
+        );
+
+        let tampered = original.replacen(
+            "\"name\":\"trustforge-native-foundation\"",
+            "\"name\":\"different-package\"",
+            1,
+        );
+        assert!(
+            validate(tampered.as_bytes(), &NF1_PINS).is_err(),
+            "cargo_name"
+        );
+
+        let tampered = original.replacen("\"version\":\"0.1.0\"", "\"version\":\"0.2.0\"", 1);
+        assert!(
+            validate(tampered.as_bytes(), &NF1_PINS).is_err(),
+            "cargo_version"
+        );
+
+        let tampered =
+            original.replacen("generated/source_epoch.rs", "generated/different.rs", 1);
+        assert!(
+            validate(tampered.as_bytes(), &NF1_PINS).is_err(),
+            "generated_path"
+        );
+
+        let tampered = original.replacen(
+            "scripts/build_native_hermetic_package.py:EPOCH",
+            "scripts/build_native_hermetic_package.py:DIFFERENT",
+            1,
+        );
+        assert!(
+            validate(tampered.as_bytes(), &NF1_PINS).is_err(),
+            "generated_recipe"
+        );
+
+        let tampered = original.replacen(
+            "bounds-checked-elf64-parser/v1",
+            "bounds-checked-elf64-parser/v2",
+            1,
+        );
+        assert!(
+            validate(tampered.as_bytes(), &NF1_PINS).is_err(),
+            "closure_method"
+        );
+    }
+
+    #[test]
+    fn validate_accepted_rejects_byte_change_that_passes_schema() {
+        let bytes = include_bytes!("../tests/fixtures/accepted-native-hermetic-provenance.json");
+        assert!(validate_accepted(bytes).is_ok());
+        let original = std::str::from_utf8(bytes).unwrap();
+        let structural_ok = original.replacen(
+            "3e416df1daec68de9bd56d50aee1a12dbbdcf87f7b8cfa4484dcdd37cc430058",
+            "3e416df1daec68de9bd56d50aee1a12dbbdcf87f7b8cfa4484dcdd37cc430059",
+            1,
+        );
+        assert!(
+            validate(structural_ok.as_bytes(), &NF1_PINS).is_ok(),
+            "dyld sha256 is hex-valid but not pin-bound"
+        );
+        assert!(
+            validate_accepted(structural_ok.as_bytes()).is_err(),
+            "manifest digest changed"
+        );
     }
 }
