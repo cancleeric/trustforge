@@ -24,6 +24,12 @@
 # Expected called by deploy/deploy_ec2.sh after candidate pointer is written
 # and deployment completes.
 set -euo pipefail
+
+# Sourced helpers for AWS SSM `commands` JSON construction (jq-based; avoids
+# brittle manual shell/JSON quote nesting that previously produced malformed
+# SSM parameters and false activation failures).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/ssm_commands.sh"
+
 cd "$(dirname "$0")/.."
 
 REGION="${REGION:-ap-southeast-2}"
@@ -213,8 +219,14 @@ verify_analysis_worker() {
 verify_analysis_worker_skill_log() {
   local iid="$1"
   local ecmdid
+  local skill_log_params
+  skill_log_params=$(printf '%s\n' \
+    "set -e" \
+    "systemctl show trustforge-analysis-flow.service -p Environment --value | grep -F 'TRUSTFORGE_SKILL_CHANGE_LOG=${SKILL_CHANGE_LOG_PATH}'" \
+    'echo "[activate] analysis-flow worker skill-log environment verified"' \
+    | build_ssm_commands_json)
   ecmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","systemctl show trustforge-analysis-flow.service -p Environment --value | grep -F '\''TRUSTFORGE_SKILL_CHANGE_LOG='"$SKILL_CHANGE_LOG_PATH"'\''","echo \"[activate] analysis-flow worker skill-log environment verified\""]' \
+    --document-name AWS-RunShellScript --parameters "commands=${skill_log_params}" \
     --query 'Command.CommandId' --output text)
   if [ -z "$ecmdid" ] || [ "$ecmdid" = "None" ]; then
     echo "[activate] ERROR: analysis-flow worker environment check send-command failed" >&2
