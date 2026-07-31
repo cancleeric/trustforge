@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -15,13 +16,19 @@ def _request_json(
     url: str,
     *,
     method: str = "GET",
-    payload: dict[str, str] | None = None,
+    payload: dict[str, object] | None = None,
+    idempotency_key: str | None = None,
+    cookie: str | None = None,
 ) -> dict:
     body = None
     headers: dict[str, str] = {}
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    if cookie is not None:
+        headers["Cookie"] = cookie
     request = urllib.request.Request(
         url, data=body, headers=headers, method=method
     )
@@ -38,20 +45,52 @@ def verify_report(
     timeout_seconds: int = 600,
     poll_seconds: int = 5,
 ) -> dict:
+    """Two-phase formal submit then poll for the published report.
+
+    Phase 1: POST /api/analysis-question without a scope cookie → server issues
+    a 428 with Set-Cookie (__Host-tf_formal_scope / tf_formal_scope).
+    Phase 2: replay the same Idempotency-Key + payload with the cookie → submit
+    accepted, returns job_id. Then poll /api/analysis-job until completed.
+    """
     question = (
         "Production release canary "
         f"{uuid.uuid4().hex}: 評估 BTC 整體信任狀態與操縱風險。"
     )
-    receipt = _request_json(
-        f"{base_url.rstrip('/')}/api/analysis-question",
-        method="POST",
-        payload={
-            "coin": "BTC",
-            "mode": "risk",
-            "question": question,
-            "locale": "zh-Hant",
-        },
-    )
+    payload: dict[str, object] = {
+        "coin": "BTC",
+        "mode": "risk",
+        "question": question,
+        "locale": "zh-Hant",
+        "fresh": True,
+    }
+    idempotency_key = uuid.uuid4().hex
+    submit_url = f"{base_url.rstrip('/')}/api/analysis-question"
+
+    cookie = None
+    receipt = None
+    for attempt in range(2):
+        try:
+            receipt = _request_json(
+                submit_url,
+                method="POST",
+                payload=payload,
+                idempotency_key=idempotency_key,
+                cookie=cookie,
+            )
+            break  # phase 2 succeeded (or phase 1 already had a cookie)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 428 and attempt == 0:
+                set_cookie = exc.headers.get("Set-Cookie")
+                if not set_cookie:
+                    raise RuntimeError(
+                        "formal canary: 428 without Set-Cookie (scope cookie)"
+                    ) from exc
+                cookie = set_cookie.split(";", 1)[0].strip()  # name=value
+                continue
+            raise
+    if receipt is None:
+        raise RuntimeError("formal canary: submit did not complete")
+
     job_id = receipt.get("job_id")
     if not isinstance(job_id, str) or not job_id:
         raise RuntimeError(f"analysis canary did not return a job: {receipt}")
