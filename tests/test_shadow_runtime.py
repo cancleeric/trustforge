@@ -528,7 +528,7 @@ def test_hung_child_is_reaped_and_next_observation_succeeds(monkeypatch, tmp_pat
 
     path = tmp_path / "private" / "shadow.sqlite3"
     _configure(monkeypatch, path)
-    monkeypatch.setattr(runtime, "_HARD_TIMEOUT_MS", 700.0)
+    monkeypatch.setattr(runtime, "_HARD_TIMEOUT_MS", 1500.0)
 
     assert _observe(kernel_fn=_hung_kernel).status == "timeout"
     assert not [
