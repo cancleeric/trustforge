@@ -29,6 +29,8 @@ import { useAdaptiveQuality } from '../hermes/useAdaptiveQuality'
 import FpsMeter from '../hermes/FpsMeter'
 import WorkspaceStageDrilldown from '../hermes/WorkspaceStageDrilldown'
 import { buildWorkspaceStageDetails } from '../hermes/workspaceStageDetails'
+import DiandianAvatar from '../components/DiandianAvatar'
+import DiandianOnboarding from '../components/DiandianOnboarding'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
@@ -87,6 +89,9 @@ export default function HermesDashboard() {
   const [questionContext, setQuestionContext] = useState<AnalysisQuestionContext | null>(null)
   const [shipOpen, setShipOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [diandianOnboardingOpen, setDiandianOnboardingOpen] = useState(() => {
+    try { return !localStorage.getItem('diandian_onboarding_done') } catch { return true }
+  })
   const [firstRunOpen, setFirstRunOpen] = useState(() => !qaMode && shouldShowHermesOnboarding() && searchParams.get('tour') !== '1')
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
   // #847：把新手模式掛到 <html> 上。名詞解釋的小卡是 portal 到 <body> 的
@@ -761,6 +766,17 @@ export default function HermesDashboard() {
         )}
 
         <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
+
+        {/* 點點助手 — 右下角頭像 (#1198) */}
+        <DiandianAvatar
+          isAnalyzing={phase === 'loading'}
+          onClick={() => setDiandianOnboardingOpen(true)}
+        />
+
+        {/* 點點新手引導 (#1199) */}
+        {diandianOnboardingOpen && (
+          <DiandianOnboarding onClose={() => setDiandianOnboardingOpen(false)} />
+        )}
 
         {/* FPS 與自適應品質是使用者判斷動態是否被降級的即時狀態，常駐顯示。
             定位完全交由 hermes.css：桌面在 energy deck 上方左側，≤560px
