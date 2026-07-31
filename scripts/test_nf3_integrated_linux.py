@@ -26,8 +26,12 @@ from pathlib import Path
 
 BLOCKED = 77
 ACCEPTED_NF2_MERGE = "7c26416581a8437a6d00d7941357826b2650c474"
-ACCEPTED_NF2_TREE = "b81289ffd5bb98521a79c80c18f47fc206e93ccf"
+ACCEPTED_NF2_TREE = "ce3e20c5875e5fdc59e60472decbc256b9649484"
 ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
+    "574440bd581c9d54d9e6c0321d4899d8f113eb7551ae637b8f3007774a48cd90"
+)
+REVIEWED_NR1A_NF2_TREE = "b81289ffd5bb98521a79c80c18f47fc206e93ccf"
+REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256 = (
     "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719"
 )
 ACCEPTED_LINKED_SOURCE_SHA256 = (
@@ -1313,8 +1317,8 @@ def verify_evidence_profile(repo: Path) -> None:
     if source_sha256 != ACCEPTED_LINKED_SOURCE_SHA256:
         raise RuntimeError("linked source receipt mismatch")
     if (
-        source_tree_receipt(ACCEPTED_NF2_TREE, source_sha256)
-        != ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256
+        source_tree_receipt(REVIEWED_NR1A_NF2_TREE, source_sha256)
+        != REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256
     ):
         raise RuntimeError("platform-independent source-tree receipt mismatch")
 
@@ -1628,12 +1632,19 @@ def main() -> int:
     )
     if nf2_tree != ACCEPTED_NF2_TREE:
         block("accepted NF2 tree mismatch")
+    reviewed_nf2_tree = run(
+        ["git", "rev-parse", "HEAD:native/nf2-zero-capability-broker"],
+        cwd=repo,
+        capture=True,
+    )
+    if reviewed_nf2_tree != REVIEWED_NR1A_NF2_TREE:
+        block("reviewed NR1a-A NF2 candidate tree mismatch")
     source_sha256 = linked_source_digest(repo)
     if source_sha256 != ACCEPTED_LINKED_SOURCE_SHA256:
         block("accepted NF2 canonical linked source mismatch")
     if (
-        source_tree_receipt(nf2_tree, source_sha256)
-        != ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256
+        source_tree_receipt(reviewed_nf2_tree, source_sha256)
+        != REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256
     ):
         block("accepted NF2 canonical source-tree receipt mismatch")
     changed_nf2 = set(
