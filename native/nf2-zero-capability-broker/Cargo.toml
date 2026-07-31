@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+trustforge-native-sys = { path = "../trustforge-native-sys" }
 
 [features]
 adversarial-test-hooks = []

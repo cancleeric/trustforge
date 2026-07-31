@@ -1,7 +1,7 @@
 use crate::Error;
 use crate::foundation::BuildIdentity;
 use crate::linux::Vfs;
-use crate::sha256::{digest, hex};
+use trustforge_native_sys::sha256::{digest, hex};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
@@ -12,9 +12,9 @@ const RECEIPT_NAME: &str = "receipt.v1";
 const RECEIPT_MAX: usize = 2048;
 const EXE_MAX: usize = 64 * 1024 * 1024;
 const BLOCKED_RECEIPT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const SOURCE: &str = "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f";
+const SOURCE: &str = "f32c31eec9f594d72e274faba8daac34cc0df7cc677f187cf3a963e9fc626b1b";
 const SOURCE_TREE_RECEIPT: &str =
-    "6a58c8f53b4ca8e5ea43e2b0c70a53e7ffe897e94a8824dbfce88fc42f3ede90";
+    "c0ff1fa4d9338074db2068e8fd0924ae13dbe08a166744691a40996cc6f6c019";
 const TOOLCHAIN: &str = "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26";
 // interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const EVIDENCE_RLIB: &str = "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";

@@ -1,5 +1,5 @@
 use crate::Error;
-use crate::sha256::{digest, hex};
+use trustforge_native_sys::sha256::{digest, hex};
 use trustforge_nf2_zero_capability_broker::manifest::{
     ACCEPTED_ARCHIVE_SHA256, ACCEPTED_MANIFEST_SHA256, ACCEPTED_RUNTIME_SHA256,
 };
@@ -9,7 +9,7 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "6a58c8f53b4ca8e5ea43e2b0c70a53e7ffe897e94a8824dbfce88fc42f3ede90";
+    "c0ff1fa4d9338074db2068e8fd0924ae13dbe08a166744691a40996cc6f6c019";
 // interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
     "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
@@ -115,10 +115,13 @@ fn linked_nf2_build_sha256(identity: &BuildIdentity) -> String {
 }
 
 pub(crate) fn linked_nf2_source_sha256() -> String {
-    const SOURCES: [(&str, &[u8]); 12] = [
+    const SOURCES: [(&str, &[u8]); 11] = [
+        // The workspace-root Cargo.lock is the authoritative resolution for
+        // every member build (nf2/nf3/hermetic-package share it); per-crate
+        // locks are no longer maintained once the workspace exists.
         (
             "Cargo.lock",
-            include_bytes!("../../nf2-zero-capability-broker/Cargo.lock"),
+            include_bytes!("../../Cargo.lock"),
         ),
         (
             "Cargo.toml",
@@ -160,10 +163,6 @@ pub(crate) fn linked_nf2_source_sha256() -> String {
             "src/manifest.rs",
             include_bytes!("../../nf2-zero-capability-broker/src/manifest.rs"),
         ),
-        (
-            "src/sha256.rs",
-            include_bytes!("../../nf2-zero-capability-broker/src/sha256.rs"),
-        ),
     ];
     let mut canonical = b"trustforge.nf2.linked-source.v1\0".to_vec();
     for (name, bytes) in SOURCES {
@@ -203,7 +202,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "7e7fec8b03eb918102a884e55543b519ca1e44efd4829b25b1bc18a6ccbae79e"
+            "6001aad854eec3f9c353da8330ff72eb8e37aa8affafc449f777af5392c1e325"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -226,11 +225,11 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "7e7fec8b03eb918102a884e55543b519ca1e44efd4829b25b1bc18a6ccbae79e"
+            "6001aad854eec3f9c353da8330ff72eb8e37aa8affafc449f777af5392c1e325"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "4ae9975b5ecd55dc1d8902c0a74850a24f89dfa4c4a3ad0b59b49a95c14771c6"
+            "65ee3e0e03daacc81cd209c88c7e30e116432aadf42c7fb29f884be8c260f5c0"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
@@ -245,7 +244,7 @@ mod tests {
             ),
             (
                 "linked_source_sha256",
-                "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f",
+                "f32c31eec9f594d72e274faba8daac34cc0df7cc677f187cf3a963e9fc626b1b",
             ),
         ] {
             frame(&mut canonical, name.as_bytes());

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 trustforge-nf2-zero-capability-broker = { path = "../nf2-zero-capability-broker" }
+trustforge-native-sys = { path = "../trustforge-native-sys" }
 
 [features]
 adversarial-test-hooks = []

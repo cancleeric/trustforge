@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "hermetic-package",
+    "nf2-zero-capability-broker",
+    "nf3-one-shot-transaction",
+    "trustforge-native-sys",
+]
+
+# Profile consolidation (per-package overrides so each crate keeps its exact
+# release semantics) is handled in PR-B3 alongside the byte-identical builder.
+# `cargo check` / `cargo test` use the dev profile and are unaffected by the
+# member-local [profile.*] tables, which cargo honors only at the workspace
+# root.

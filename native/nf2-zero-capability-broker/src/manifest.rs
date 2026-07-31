@@ -1,8 +1,10 @@
 use crate::canonical_json::{self, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use trustforge_native_sys::sha256;
 
 pub const RUNTIME_PATH: &str = "bin/trustforge-native-foundation";
 const SCHEMA: &str = "trustforge.native-hermetic-provenance/v1";
+const MANIFEST_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const ACCEPTED_COMMIT: &str = "e28a675f03ee517dcd69fba0d7705ec8828d24cd";
 pub const ACCEPTED_TREE: &str = "9a912277b3458c54462a8a6101db8e4766038a1f";
 pub const ACCEPTED_MANIFEST_SHA256: &str =
@@ -167,7 +169,7 @@ pub fn validate_accepted(bytes: &[u8]) -> Result<RuntimeBinding, &'static str> {
     let root = object(&parsed)?;
     let vcs = object(required(root, "vcs")?)?;
     verify_pin_values(
-        crate::sha256::digest(bytes),
+        sha256::digest(bytes, MANIFEST_MAX_BYTES)?,
         binding.sha256,
         string(required(vcs, "commit")?)?,
         string(required(vcs, "tree")?)?,
