@@ -30,20 +30,27 @@ ACCEPTED_NF2_TREE = "cb56a4bef9708da3f9f1468aff11734f2f50adcd"
 ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
     "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0"
 )
+REVIEWED_NR1A_NF2_TREE = "b81289ffd5bb98521a79c80c18f47fc206e93ccf"
+REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256 = (
+    "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719"
+)
 ACCEPTED_LINKED_SOURCE_SHA256 = (
     "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc"
 )
+REVIEWED_NR1A_LINKED_SOURCE_SHA256 = (
+    "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9"
+)
 EXPECTED_RELEASE_RLIB_SHA256 = (
-    "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4"
+    "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38"
 )
 EXPECTED_EVIDENCE_RLIB_SHA256 = (
-    "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1"
+    "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b"
 )
 EXPECTED_EVIDENCE_HELPER_SHA256 = (
-    "2cc766af9791160ded10a1bf487cc7f19e3ba8838107c6d55f90876b9ad14617"
+    "2d0df0ecded2c8e4044cb54ec2ca64b65bada958f7d9ede43cdbd285bc65a666"
 )
 EXPECTED_RELEASE_PROBE_SHA256 = (
-    "e567a05c349321f68d01aaa114d665e2e6bdf6381af211bda90dd2107eb971dc"
+    "375e4dd5d8017a79a4c8e75b3ec0280b8339351811efe9395da02281631ff209"
 )
 EVIDENCE_PROFILE_RECEIPT_SHA256 = (
     "7f53b287a6944a5978b02dfcd35e50b5955be28107ac457369a70d22115f79a5"
@@ -52,7 +59,7 @@ RELEASE_PROFILE_RECEIPT_SHA256 = (
     "5cc871f48193094c28b5df2691c63b2f3c6649686b3573243de5daed90e6e070"
 )
 EXPECTED_FOUNDATION_SHA256 = (
-    "f5c726893b278bdad9204ef201b826418eb402d07f58ec865c515ccfb94f827b"
+    "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
 )
 FIXED_TOOLCHAIN_RECEIPT_SHA256 = (
     "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26"
@@ -1232,6 +1239,7 @@ def linked_source_digest(repo: Path) -> str:
         "Cargo.lock",
         "Cargo.toml",
         "src/canonical_json.rs",
+        "src/capability.rs",
         "src/lib.rs",
         "src/linux.rs",
         "src/linux/live.rs",
@@ -1309,11 +1317,11 @@ def verify_evidence_profile(repo: Path) -> None:
     ):
         raise RuntimeError("fixed toolchain receipt constant mismatch")
     source_sha256 = linked_source_digest(repo)
-    if source_sha256 != ACCEPTED_LINKED_SOURCE_SHA256:
+    if source_sha256 != REVIEWED_NR1A_LINKED_SOURCE_SHA256:
         raise RuntimeError("linked source receipt mismatch")
     if (
-        source_tree_receipt(ACCEPTED_NF2_TREE, source_sha256)
-        != ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256
+        source_tree_receipt(REVIEWED_NR1A_NF2_TREE, source_sha256)
+        != REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256
     ):
         raise RuntimeError("platform-independent source-tree receipt mismatch")
 
@@ -1539,13 +1547,13 @@ def write_build_receipt(
         f"profile={profile}\n"
         f"executable_sha256={executable_sha256}\n"
         "linked_nf2_source_sha256="
-        "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc\n"
+        "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9\n"
         f"linked_nf2_rlib_sha256={rlib_sha256}\n"
         f"profile_receipt_sha256={profile_receipt}\n"
         "toolchain_receipt_sha256="
         f"{FIXED_TOOLCHAIN_RECEIPT_SHA256}\n"
         "source_tree_receipt_sha256="
-        "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0\n"
+        "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719\n"
     ).encode()
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -1627,31 +1635,45 @@ def main() -> int:
     )
     if nf2_tree != ACCEPTED_NF2_TREE:
         block("accepted NF2 tree mismatch")
+    reviewed_nf2_tree = run(
+        ["git", "rev-parse", "HEAD:native/nf2-zero-capability-broker"],
+        cwd=repo,
+        capture=True,
+    )
+    if reviewed_nf2_tree != REVIEWED_NR1A_NF2_TREE:
+        block("reviewed NR1a-A NF2 candidate tree mismatch")
     source_sha256 = linked_source_digest(repo)
-    if source_sha256 != ACCEPTED_LINKED_SOURCE_SHA256:
+    if source_sha256 != REVIEWED_NR1A_LINKED_SOURCE_SHA256:
         block("accepted NF2 canonical linked source mismatch")
     if (
-        source_tree_receipt(nf2_tree, source_sha256)
-        != ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256
+        source_tree_receipt(reviewed_nf2_tree, source_sha256)
+        != REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256
     ):
         block("accepted NF2 canonical source-tree receipt mismatch")
-    if (
-        subprocess.run(
+    changed_nf2 = set(
+        run(
             [
                 "git",
                 "diff",
-                "--quiet",
+                "--name-only",
                 ACCEPTED_NF2_MERGE,
                 "HEAD",
                 "--",
                 "native/nf2-zero-capability-broker",
             ],
             cwd=repo,
-            check=False,
-        ).returncode
-        != 0
-    ):
-        block("linked NF2 source differs from accepted merge")
+            capture=True,
+        ).splitlines()
+    )
+    expected_nf2_changes = {
+        "native/nf2-zero-capability-broker/src/capability.rs",
+        "native/nf2-zero-capability-broker/src/lib.rs",
+        "native/nf2-zero-capability-broker/src/linux.rs",
+        "native/nf2-zero-capability-broker/src/linux/live.rs",
+        "native/nf2-zero-capability-broker/src/linux/process.rs",
+    }
+    if changed_nf2 != expected_nf2_changes:
+        block("linked NF2 source differs from reviewed NR1a-A allowlist")
     if not arguments.probe_remapped_builds and any(
         value == BLOCKED_RECEIPT
         for value in (
@@ -1771,10 +1793,10 @@ def main() -> int:
             )
             expected_release_fields = {
                 "profile": "release",
-                "source": "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc",
+                "source": "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9",
                 "rlib": EXPECTED_RELEASE_RLIB_SHA256,
                 "profile_receipt": RELEASE_PROFILE_RECEIPT_SHA256,
-                "foundation": "e5bb12ff9bc2bd371cd2e196399838a7f7ae1b803b5481861f36fca16b09e245",
+                "foundation": "cd3a0b280abfeef7ad5dc13295f398a07826f74a28a04bb3632278cd027ea63a",
             }
             tokens = release_profile_line.split()
             if len(tokens) != 6 or tokens[0] != "BOUND_PROFILE":

@@ -119,6 +119,7 @@ from trustforge.ingestion.hoyabit import build_hoyabit_sources, log_hoyabit_star
 from trustforge.ingestion.whale_trades import build_whale_sources  # noqa: E402
 from trustforge.ingestion.defillama import build_defillama_sources  # noqa: E402
 from trustforge.ingestion.cmc import build_cmc_sources  # noqa: E402
+from trustforge.ingestion.etherscan import build_etherscan_sources  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
@@ -150,6 +151,11 @@ def build_registry() -> dict[str, Source]:
         # fetch() 時解析——unconfigured→回 []（靜默），unavailable→raise（本處
         # catch+log 並計入 failures，可觀測）。
         + build_cmc_sources()
+        # #1168 Etherscan（key-based V2 query-param key）。build_etherscan_sources()
+        # 永遠註冊（同 cmc/whale 慣例），沿用 whale_onchain kind，憑證在 fetch() 時
+        # 解析——unconfigured→回 []（靜默），unavailable→raise（本處 catch+log 並
+        # 計入 failures，可觀測）。只覆 ETH。
+        + build_etherscan_sources()
     )
     return {s.name: s for s in sources}
 

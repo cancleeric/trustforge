@@ -67,10 +67,12 @@
 
 ## Task 6：Whale Alert API key 端到端驗證
 
-- [ ] 以安全的本機／CI secret injection 設定 `WHALE_ALERT_API_KEY=<redacted>`
-- [ ] 手動或腳本呼叫 `WhaleAlertSource().fetch("", coin="BTC")`
-- [ ] 確認回應 `result=success`（或免費層限制訊息）
-- [ ] 記錄驗證結果
+- [x] 以安全的本機／CI secret injection 設定 `WHALE_ALERT_API_KEY=<redacted>`
+- [x] 手動或腳本呼叫 `WhaleAlertSource().fetch("", coin="BTC")`
+- [x] 確認回應 `result=success`（或免費層限制訊息）
+- [x] 記錄驗證結果
+
+**驗證紀錄**：`result=success, count=57` — 回傳 57 筆 BTC 鯨魚大額轉帳 Document，API 正常運作。
 
 **需求**：R3, R4
 
