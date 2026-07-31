@@ -42,7 +42,7 @@ _STEP4_SYSTEM = (
 _STEP4_LIMIT_SENTINEL = "LIMITS_OK"
 
 
-OBJECTIVE_KINDS = {"price", "price_live", "onchain", "regulatory", "hoyabit"}
+OBJECTIVE_KINDS = {"price", "price_live", "onchain", "regulatory", "hoyabit", "defi_tvl"}
 _SENTIMENT_KINDS: set[str] = {"news", "social", "sentiment"}
 # CoinGecko `dev_activity`（GitHub stars/forks/commits）刻意不歸入任一類：既非
 # 客觀「市場」事實（開發活躍度與價格走勢無直接因果），也非情緒訊號，若強行
