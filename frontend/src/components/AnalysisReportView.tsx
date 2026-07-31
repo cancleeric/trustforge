@@ -33,7 +33,7 @@ const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
  * （「幣種 A」/「幣種 B」），單幣頁不需要。`mode` 亦可選——來自請求參數
  * （`AnalyzeParams['type']`），非 `AnalyzeData` 回應本身的欄位，單純用來
  * 在標題列顯示本次分析用的模式（呼應設計稿 R2 mode: multi_source 標籤）。 */
-export default function AnalysisReportView({ data, heading, mode }: { data: AnalyzeData; heading?: string; mode?: string }) {
+export default function AnalysisReportView({ data, heading, mode, compact }: { data: AnalyzeData; heading?: string; mode?: string; compact?: boolean }) {
   const { t } = useHermesI18n()
   // N71（CEO：「手動分析的報告要在哪裡下載？執行過程的 LOG 要在哪裡看」）：
   // 三顆下載鈕本來只在最底下那個預設收合的「技術細節」裡，跑完分析根本找不到。
@@ -58,7 +58,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
               {heading}
             </span>
           )}
-          <h2 className="text-xl font-bold text-tf-text">{data.report.coin}</h2>
+          <h2 className={`${compact ? 'text-base' : 'text-xl'} font-bold text-tf-text`}>{data.report.coin}</h2>
           <DirectionBadge direction={data.report.direction} />
           <span className="font-mono text-xs text-tf-muted">run {data.execution?.run_id ?? 'legacy-run'}</span>
         </div>
@@ -88,7 +88,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
 
       <AssetIntrinsicShadowPanel value={data.report.asset_intrinsic_assessment} />
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
+      <div className={`grid grid-cols-1 gap-4 ${compact ? '' : 'xl:grid-cols-[220px_minmax(0,1fr)]'}`}>
         <ConfidenceGauge
           calibratedConfidence={data.report.calibrated_confidence}
           rawConfidence={data.report.confidence}
@@ -99,7 +99,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
           <p className="mt-2 text-base font-semibold leading-7 text-tf-text">
             <AnnotatedText text={data.report.market_judgment} />
           </p>
-          <div className="mt-4 grid grid-cols-3 gap-2 border-t border-tf-border pt-3 text-xs">
+          <div className={`mt-4 grid grid-cols-3 ${compact ? 'gap-1' : 'gap-2'} border-t border-tf-border pt-3 text-xs`}>
             <div><p className="text-tf-muted">{t('arvFacts')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.facts.length}</p></div>
             <div><p className="text-tf-muted">{t('arvInferences')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.inferences.length}</p></div>
             <div><p className="text-tf-muted">{t('arvContrarianSignals')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.contrarian.length}</p></div>

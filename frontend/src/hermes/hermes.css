@@ -4516,6 +4516,7 @@
   background: linear-gradient(145deg, rgba(12, 24, 34, .98), rgba(7, 13, 21, .98));
   padding: 20px;
   box-shadow: 0 12px 35px rgba(0, 0, 0, .22);
+  container-type: inline-size;
 }
 
 .hermes-result-summary-heading {
@@ -4715,6 +4716,60 @@
   .hermes-technical-details>summary {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+/* ── Container query: 比較頁雙欄時，各面板寬度較窄，摘要需縮排版 ── */
+@container (max-width: 520px) {
+
+  .hermes-result-summary-heading {
+    grid-template-columns: 1fr;
+  }
+
+  .hermes-result-summary-heading h2 {
+    font: 700 14px/1.5 var(--font-hermes-sans);
+  }
+
+  .hermes-readiness {
+    padding: 8px;
+  }
+
+  .hermes-readiness b {
+    font: 700 10px var(--font-hermes-sans);
+  }
+
+  .hermes-readiness small {
+    font: 9px/1.4 var(--font-hermes-sans);
+  }
+
+  .hermes-result-metrics {
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 5px;
+  }
+
+  .hermes-result-metrics>div {
+    padding: 7px 8px;
+  }
+
+  .hermes-result-metrics b {
+    font: 700 12px var(--font-hermes-mono);
+  }
+
+  .hermes-summary-reasons ol {
+    grid-template-columns: 1fr;
+  }
+
+  .hermes-summary-reasons li {
+    font: 10px/1.5 var(--font-hermes-sans);
+  }
+
+  .hermes-result-next {
+    gap: 4px;
+  }
+
+  .hermes-result-next a {
+    padding: 4px 6px;
+    font: 9px var(--font-hermes-sans);
   }
 }
 
