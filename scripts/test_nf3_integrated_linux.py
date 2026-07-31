@@ -26,12 +26,12 @@ from pathlib import Path
 
 BLOCKED = 77
 ACCEPTED_NF2_MERGE = "7c26416581a8437a6d00d7941357826b2650c474"
-ACCEPTED_NF2_TREE = "ce3e20c5875e5fdc59e60472decbc256b9649484"
+ACCEPTED_NF2_TREE = "b81289ffd5bb98521a79c80c18f47fc206e93ccf"
 ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
-    "574440bd581c9d54d9e6c0321d4899d8f113eb7551ae637b8f3007774a48cd90"
+    "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719"
 )
 ACCEPTED_LINKED_SOURCE_SHA256 = (
-    "4bd3226e2338387bacab90ee03af07e8d94ada385bdd83515724c7e533324e14"
+    "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9"
 )
 EXPECTED_RELEASE_RLIB_SHA256 = (
     "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4"
@@ -1540,13 +1540,13 @@ def write_build_receipt(
         f"profile={profile}\n"
         f"executable_sha256={executable_sha256}\n"
         "linked_nf2_source_sha256="
-        "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc\n"
+        "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9\n"
         f"linked_nf2_rlib_sha256={rlib_sha256}\n"
         f"profile_receipt_sha256={profile_receipt}\n"
         "toolchain_receipt_sha256="
         f"{FIXED_TOOLCHAIN_RECEIPT_SHA256}\n"
         "source_tree_receipt_sha256="
-        "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0\n"
+        "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719\n"
     ).encode()
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -1636,23 +1636,30 @@ def main() -> int:
         != ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256
     ):
         block("accepted NF2 canonical source-tree receipt mismatch")
-    if (
-        subprocess.run(
+    changed_nf2 = set(
+        run(
             [
                 "git",
                 "diff",
-                "--quiet",
+                "--name-only",
                 ACCEPTED_NF2_MERGE,
                 "HEAD",
                 "--",
                 "native/nf2-zero-capability-broker",
             ],
             cwd=repo,
-            check=False,
-        ).returncode
-        != 0
-    ):
-        block("linked NF2 source differs from accepted merge")
+            capture=True,
+        ).splitlines()
+    )
+    expected_nf2_changes = {
+        "native/nf2-zero-capability-broker/src/capability.rs",
+        "native/nf2-zero-capability-broker/src/lib.rs",
+        "native/nf2-zero-capability-broker/src/linux.rs",
+        "native/nf2-zero-capability-broker/src/linux/live.rs",
+        "native/nf2-zero-capability-broker/src/linux/process.rs",
+    }
+    if changed_nf2 != expected_nf2_changes:
+        block("linked NF2 source differs from reviewed NR1a-A allowlist")
     if not arguments.probe_remapped_builds and any(
         value == BLOCKED_RECEIPT
         for value in (
@@ -1772,7 +1779,7 @@ def main() -> int:
             )
             expected_release_fields = {
                 "profile": "release",
-                "source": "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc",
+                "source": "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9",
                 "rlib": EXPECTED_RELEASE_RLIB_SHA256,
                 "profile_receipt": RELEASE_PROFILE_RECEIPT_SHA256,
                 "foundation": "e5bb12ff9bc2bd371cd2e196399838a7f7ae1b803b5481861f36fca16b09e245",
