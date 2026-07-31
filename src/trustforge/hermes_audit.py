@@ -598,10 +598,22 @@ _REQUIRED_KEYS = {
     "cost-ledger": {"run_id", "ts"},
 }
 _PROJECTIONS = {
-    "connector-cache": "source_id, coin, fetched_at, ttl",
-    "scheduler-run": "run_id, ts, status, release_identity, error_class",
-    "cost-ledger": "run_id, ts, status, release_identity, cost_usd, error_class",
+    "connector-cache": ("source_id", "coin", "fetched_at", "ttl"),
+    "scheduler-run": ("run_id", "ts", "status", "release_identity", "error_class"),
+    "cost-ledger": ("run_id", "ts", "status", "release_identity", "cost_usd", "error_class"),
 }
+_ADMIN_PROJECTION = ("hermes_autonomy_enabled", "version", "updated_at")
+
+
+def _projection(names: tuple[str, ...]) -> tuple[str, dict[str, str]]:
+    """Alias every projected attribute so DynamoDB reserved words never reach the wire.
+
+    `status`, `version`, and `ttl` are all reserved; an unaliased projection is
+    rejected with ValidationException, which would silently turn every healthy
+    production table into `insufficient-evidence`. Aliasing all names, not just
+    today's reserved ones, keeps the collector correct as the reserved list grows.
+    """
+    return ", ".join(f"#{name}" for name in names), {f"#{name}": name for name in names}
 _TABLE_REQUIRED_FIELDS = {
     "admin-config": {"hermes_autonomy_enabled"},
     "connector-cache": {"source_id", "coin", "fetched_at", "ttl"},
@@ -754,18 +766,22 @@ class DynamoAuditReader:
             ttl_status = ControlState.ENABLED if ttl_raw == "ENABLED" else ControlState.DISABLED if ttl_raw == "DISABLED" else ControlState.UNKNOWN
             if binding.table_type == "admin-config":
                 requests = self._reserve_request(requests)
+                expression, attribute_names = _projection(_ADMIN_PROJECTION)
                 response = self._client.get_item(
                     TableName=binding.table_name,
                     Key={"source_id": {"S": "__admin_config__"}, "coin": {"S": "_"}},
-                    ProjectionExpression="hermes_autonomy_enabled, version, updated_at",
+                    ProjectionExpression=expression,
+                    ExpressionAttributeNames=attribute_names,
                     ConsistentRead=False,
                 )
                 raw_items = [response["Item"]] if isinstance(response, Mapping) and isinstance(response.get("Item"), Mapping) else []
             else:
                 requests = self._reserve_request(requests)
+                expression, attribute_names = _projection(_PROJECTIONS[binding.table_type])
                 response = self._client.scan(
                     TableName=binding.table_name,
-                    ProjectionExpression=_PROJECTIONS[binding.table_type],
+                    ProjectionExpression=expression,
+                    ExpressionAttributeNames=attribute_names,
                     Limit=budget.item_limit,
                     ConsistentRead=False,
                 )

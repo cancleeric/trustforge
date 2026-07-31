@@ -113,6 +113,29 @@ class ProvisionedThroughputExceededException(Exception):
     """Stand-in for the botocore throttling error raised under read pressure."""
 
 
+class ValidationException(Exception):
+    """Stand-in for the DynamoDB error raised when a projection is malformed."""
+
+
+# Subset of the DynamoDB reserved words that the audit projections actually touch.
+DYNAMO_RESERVED_WORDS = frozenset({"STATUS", "VERSION", "TTL", "TIMESTAMP", "SOURCE", "NAME", "VALUE", "SIZE"})
+
+
+def _assert_projection_is_wire_safe(kwargs: dict[str, Any]) -> None:
+    """Reject what real DynamoDB rejects: bare reserved words in a projection."""
+    expression = kwargs.get("ProjectionExpression")
+    if expression is None:
+        return
+    declared = kwargs.get("ExpressionAttributeNames") or {}
+    for token in (part.strip() for part in expression.split(",")):
+        if token.startswith("#"):
+            if token not in declared:
+                raise ValidationException(f"undefined expression attribute name: {token}")
+            continue
+        if token.upper() in DYNAMO_RESERVED_WORDS:
+            raise ValidationException(f"reserved keyword used in projection: {token}")
+
+
 class FakeDynamo:
     """Low-level Dynamo stub that records only audit reader operations."""
 
@@ -136,6 +159,7 @@ class FakeDynamo:
 
     def _record(self, operation: str, kwargs: dict[str, Any]) -> None:
         self.calls.append((operation, kwargs))
+        _assert_projection_is_wire_safe(kwargs)
         if kwargs["TableName"] == self.deny_table:
             raise PermissionError("AccessDenied")
         if kwargs["TableName"] == self.throttle_table:
@@ -299,6 +323,36 @@ def test_dynamodb_empty_denied_and_truncated_results_are_insufficient_evidence()
     _, data, _, _, _ = DynamoAuditReader(truncated, AuditLimits.defaults()).collect()
     assert all(item.status is AuditStatus.INSUFFICIENT_EVIDENCE or item.table_type == "admin-config" for item in data.table_audits)
     assert next(item for item in data.table_audits if item.table_type == "connector-cache").truncated is True
+
+
+def test_every_projected_attribute_is_aliased_against_dynamodb_reserved_words() -> None:
+    reader = FakeDynamo()
+    _, data, _, _, warnings = DynamoAuditReader(reader, AuditLimits.defaults()).collect()
+
+    # No table may degrade: a ValidationException here means the projection hit the wire bare.
+    assert not any(item.endswith("ValidationException") for item in warnings)
+    for audit_row in data.table_audits:
+        if audit_row.table_type != "durable-dead-letter":
+            assert audit_row.status is AuditStatus.COMPLETE
+
+    projected = [(name, kwargs) for name, kwargs in reader.calls if "ProjectionExpression" in kwargs]
+    assert {name for name, _ in projected} == {"get_item", "scan"}
+    for _, kwargs in projected:
+        expression = kwargs["ProjectionExpression"]
+        declared = kwargs["ExpressionAttributeNames"]
+        tokens = [part.strip() for part in expression.split(",")]
+        # Every token is an alias, every alias is declared, and no bare name survives.
+        assert tokens and all(token.startswith("#") for token in tokens)
+        assert {token: declared[token] for token in tokens} == declared
+        assert not any(value.upper() in DYNAMO_RESERVED_WORDS and value in tokens for value in declared.values())
+
+    # The contract holds for the reserved words the audit actually reads.
+    admin = next(kwargs for name, kwargs in projected if name == "get_item")
+    assert "version" in admin["ExpressionAttributeNames"].values()
+    assert "#version" in admin["ProjectionExpression"]
+    scans = [kwargs for name, kwargs in projected if name == "scan"]
+    assert any("status" in kwargs["ExpressionAttributeNames"].values() for kwargs in scans)
+    assert any("ttl" in kwargs["ExpressionAttributeNames"].values() for kwargs in scans)
 
 
 def test_dynamodb_throttling_is_insufficient_evidence_and_never_reads_as_healthy() -> None:
