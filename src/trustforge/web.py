@@ -62,6 +62,7 @@ from . import backend_registry
 from . import rate_limit_store
 from . import ssm_params
 from . import whale_alert_secret
+from .execution_event_log import to_public_events
 from .agent.orchestrator import aggregate_trust_by_kind
 from .asset_context_repository import AssetContextRepository, load_asset_context_records
 from .asset_intrinsic import AssetIntrinsicRepository, load_asset_intrinsic_records
@@ -5811,7 +5812,7 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
         "report": _public_report_dict(report),
         "evidence": [_public_evidence_dict(ev) for ev in evidence],
         "execution": log.manifest(),
-        "execution_log": log.events,
+        "execution_log": to_public_events(log.events),
     }
 
 
@@ -5832,7 +5833,7 @@ def _build_comparison_json_payload(result) -> dict:
             else None
         ),
         "execution": result.log.manifest(),
-        "execution_log": result.log.events,
+        "execution_log": to_public_events(result.log.events),
     }
 
 
@@ -6772,6 +6773,10 @@ def _handle_api_analysis_snapshot(qs: dict) -> tuple[int, str]:
             payload = flow.latest(coin, mode, question)
         if payload is None:
             return 404, _json_envelope_err("snapshot_pending", "此分析快照尚未發布")
+        # #943：儲存的快照可能來自 allowlist 套用前（仍帶 raw params），讀取時
+        # 再投影一次作 fail-closed 保險（已投影者 idempotent）。
+        if isinstance(payload.get("execution_log"), list):
+            payload["execution_log"] = to_public_events(payload["execution_log"])
         return 200, _json_envelope_ok(payload)
     except Exception:
         logging.exception("TrustForge /api/analysis-snapshot error")
@@ -7090,7 +7095,7 @@ def _handle_api_comparison_snapshot(qs: dict) -> tuple[int, str]:
             "report_b": _public_report_mapping(b["report"]), "evidence_b": b["evidence"], "trust_radar_b": b["trust_radar"],
             "trust_components_aggregate_b": b["trust_components_aggregate"], "price_provenance_b": b["price_provenance"],
             "execution": {"run_id": f"{a['execution']['run_id']}+{b['execution']['run_id']}", "nodes": a["execution"]["nodes"]},
-            "execution_log": a["execution_log"] + b["execution_log"],
+            "execution_log": to_public_events(a["execution_log"] + b["execution_log"]),
         }
         return 200, _json_envelope_ok(data)
     except Exception:
@@ -7406,7 +7411,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
                 "price_provenance": _price_provenance_data(evidence),
                 "execution": log.manifest(),
-                "execution_log": log.events,
+                "execution_log": to_public_events(log.events),
             }
         return 200, _json_envelope_ok(payload)
     except _AnalyzeDedupTimeout as exc:

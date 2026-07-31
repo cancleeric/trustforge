@@ -40,6 +40,7 @@ from .bedrock import (
     claim_extraction_prompt_context,
 )
 from .execlog import ExecutionLog
+from .execution_event_log import to_public_events
 from .feature_store import TrustFeatureStore
 from .formal_run_idempotency import (
     FormalRunIdentity,
@@ -3618,7 +3619,7 @@ class AnalysisFlow:
                    "price_provenance": _price_provenance_data(evidence),
                    "agent_os_memory_counts": memory_counts,
                    "retrieval_context": package.get("retrieval_context", []),
-                   "execution": log.manifest(), "execution_log": log.events, "snapshot_id": job["snapshot_id"],
+                    "execution": log.manifest(), "execution_log": to_public_events(log.events), "snapshot_id": job["snapshot_id"],
                    "mode": job["mode"], "question": job["question"],
                    "claim_extraction_context": package.get(
                        "claim_extraction_context",
