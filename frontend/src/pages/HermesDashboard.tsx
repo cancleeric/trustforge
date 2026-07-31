@@ -779,8 +779,8 @@ export default function HermesDashboard() {
         )}
 
         {/* FPS 與自適應品質是使用者判斷動態是否被降級的即時狀態，常駐顯示。
-            定位完全交由 hermes.css：桌面在 energy deck 上方左側，≤560px
-            收成小 badge，避免重演 inline bottom:8 壓住 deck 站點的問題。 */}
+            定位完全交由 hermes.css：桌面固定於右上角空白區域，≤560px
+            收成小 badge。 */}
         <FpsMeter
           fps={fps}
           quality={quality}
