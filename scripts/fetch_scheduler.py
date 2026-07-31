@@ -118,6 +118,7 @@ from trustforge.ingestion.social import build_social_sources  # noqa: E402
 from trustforge.ingestion.hoyabit import build_hoyabit_sources, log_hoyabit_startup_status  # noqa: E402
 from trustforge.ingestion.whale_trades import build_whale_sources  # noqa: E402
 from trustforge.ingestion.defillama import build_defillama_sources  # noqa: E402
+from trustforge.ingestion.cmc import build_cmc_sources  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
@@ -144,6 +145,11 @@ def build_registry() -> dict[str, Source]:
         + build_hoyabit_sources()
         + build_whale_sources()
         + build_defillama_sources()
+        # #1161 CoinMarketCap（key-based）。build_cmc_sources() 永遠註冊來源
+        # （同 build_whale_sources 慣例，不在 build-time resolve 憑證）；憑證在
+        # fetch() 時解析——unconfigured→回 []（靜默），unavailable→raise（本處
+        # catch+log 並計入 failures，可觀測）。
+        + build_cmc_sources()
     )
     return {s.name: s for s in sources}
 
