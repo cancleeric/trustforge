@@ -6854,6 +6854,11 @@ def _formal_scope_keys() -> tuple[str, dict[str, bytes]]:
 
     active = os.getenv("TRUSTFORGE_FORMAL_SCOPE_ACTIVE_KEY_ID", "scope-v1").strip()
     raw = os.getenv("TRUSTFORGE_FORMAL_SCOPE_SECRETS", "").strip()
+    if not raw:
+        from .ssm_params import get_runtime_token
+        ssm_raw = get_runtime_token("TRUSTFORGE_FORMAL_SCOPE_SECRETS")
+        if ssm_raw:
+            raw = ssm_raw.strip()
     try:
         configured = json.loads(raw) if raw else {}
     except json.JSONDecodeError as exc:
