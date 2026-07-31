@@ -117,6 +117,7 @@ from trustforge.ingestion.taiwan_regulatory import build_taiwan_regulatory_sourc
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
 from trustforge.ingestion.hoyabit import build_hoyabit_sources, log_hoyabit_startup_status  # noqa: E402
 from trustforge.ingestion.whale_trades import build_whale_sources  # noqa: E402
+from trustforge.ingestion.defillama import build_defillama_sources  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
@@ -142,6 +143,7 @@ def build_registry() -> dict[str, Source]:
         + build_coingecko_sources()
         + build_hoyabit_sources()
         + build_whale_sources()
+        + build_defillama_sources()
     )
     return {s.name: s for s in sources}
 
