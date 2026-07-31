@@ -27,6 +27,7 @@ function dashboardFormalReceipt() {
   }
 }
 
+vi.mock('../lib/analysisWip', () => ({ ANALYSIS_FORMAL_WIP: false }))
 vi.mock('../lib/endpoints', () => ({
   getOverview: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getCosts: vi.fn().mockResolvedValue({ ok: true, data: { total_cost_usd: 0 } }),
