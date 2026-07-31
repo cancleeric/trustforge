@@ -16,9 +16,9 @@ const SOURCE: &str = "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426
 const SOURCE_TREE_RECEIPT: &str =
     "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719";
 const TOOLCHAIN: &str = "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26";
-const EVIDENCE_RLIB: &str = "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1";
+const EVIDENCE_RLIB: &str = "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
 const EVIDENCE_PROFILE: &str = "7f53b287a6944a5978b02dfcd35e50b5955be28107ac457369a70d22115f79a5";
-const RELEASE_RLIB: &str = "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4";
+const RELEASE_RLIB: &str = "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38";
 const RELEASE_PROFILE: &str = "5cc871f48193094c28b5df2691c63b2f3c6649686b3573243de5daed90e6e070";
 
 // Covered: missing/mismatched receipts and non-root mutation/forgery.

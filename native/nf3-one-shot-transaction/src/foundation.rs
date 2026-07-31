@@ -11,9 +11,9 @@ const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9d
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
     "574440bd581c9d54d9e6c0321d4899d8f113eb7551ae637b8f3007774a48cd90";
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
-    "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1";
+    "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
 const NF2_LINKED_RELEASE_RLIB_SHA256: &str =
-    "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4";
+    "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38";
 const NF2_FIXED_TOOLCHAIN_RECEIPT_SHA256: &str =
     "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26";
 #[cfg(test)]
@@ -201,7 +201,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "7e253b616809e91f1fba465abe4a58a0515b4f6b8400e636503729c3c4638d2b"
+            "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -224,11 +224,11 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "7e253b616809e91f1fba465abe4a58a0515b4f6b8400e636503729c3c4638d2b"
+            "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "e8fb50da86b76aa137df1f6650eed72bd51b8d0c42ffe15ec862af4e98f92d6a"
+            "cd3a0b280abfeef7ad5dc13295f398a07826f74a28a04bb3632278cd027ea63a"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }

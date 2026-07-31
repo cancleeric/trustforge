@@ -6,10 +6,10 @@ rlib="${2:?missing linked NF2 rlib}"
 expected_helper="${3:?missing commit-bound helper SHA-256}"
 parent="${4:-/root}"
 evidence_dir="${5:?missing root-owned evidence directory}"
-expected_rlib=84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1
+expected_rlib=bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b
 expected_source=bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9
 expected_profile_receipt=7f53b287a6944a5978b02dfcd35e50b5955be28107ac457369a70d22115f79a5
-expected_foundation=f5c726893b278bdad9204ef201b826418eb402d07f58ec865c515ccfb94f827b
+expected_foundation=63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548
 blocked=77
 
 block() { echo "BLOCKED_EXTERNAL_LINUX: $*" >&2; exit "$blocked"; }
