@@ -1098,7 +1098,7 @@
     "type": "object"
   },
   "Evidence": {
-    "$id": "https://trustforge.local/contracts/evidence/1.0.0",
+    "$id": "https://trustforge.local/contracts/evidence/1.1.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
@@ -1107,6 +1107,9 @@
           "string",
           "null"
         ]
+      },
+      "claim_id": {
+        "type": "string"
       },
       "content_reference": {
         "type": "string"
@@ -1145,7 +1148,7 @@
         ]
       },
       "schema_version": {
-        "const": "1.0.0"
+        "const": "1.1.0"
       },
       "source": {
         "type": "string"
@@ -2045,7 +2048,7 @@
         "type": "object"
       }
     },
-    "$id": "https://trustforge.local/contracts/report/1.0.0",
+    "$id": "https://trustforge.local/contracts/report/1.1.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
@@ -2193,6 +2196,26 @@
       },
       "key_basis": {
         "items": {
+          "properties": {
+            "claim": {
+              "type": "string"
+            },
+            "claim_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "evidence_idx": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "explanation": {
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "type": "array"
@@ -2238,7 +2261,7 @@
         "type": "array"
       },
       "schema_version": {
-        "const": "1.0.0"
+        "const": "1.1.0"
       },
       "term_annotations": {
         "items": {

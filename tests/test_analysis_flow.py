@@ -91,7 +91,7 @@ def test_matrix_is_snapshot_isolated_and_atomically_published(tmp_path, monkeypa
     assert [event["stage"] for event in events if event["event_type"] == "stage_completed"] == list(STAGES)
     published = next(event for event in events if event["event_type"] == "result_published")
     assert published["parent_id"] == jobs[0]
-    assert published["metadata"]["report_schema_version"] == "1.0.0"
+    assert published["metadata"]["report_schema_version"] == "1.1.0"
     features = flow._conn().execute(
         "SELECT feature_name FROM trust_feature_values WHERE run_id=? ORDER BY feature_name", (jobs[0],),
     ).fetchall()
