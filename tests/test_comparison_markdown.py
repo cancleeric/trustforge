@@ -196,7 +196,7 @@ class TestCLIComparisonMarkdown:
     """CA-08: CLI 的 report.md / comparison_report.md 輸出驗證。"""
 
     def test_cli_writes_report_md_and_comparison_report_md(self, monkeypatch):
-        """CLI comparison 產生 report.md 與 comparison_report.md。"""
+        """#1224: CLI comparison 產生單一整合 report.md（三段式格式）。"""
         def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
             return _make_fixture_docs(coin)
 
@@ -222,17 +222,12 @@ class TestCLIComparisonMarkdown:
             report_content = report_path.read_text(encoding="utf-8")
             assert "BTC" in report_content
             assert "ETH" in report_content
-            assert "相對強弱比較" in report_content
-
-            # CA-08: comparison_report.md 也應存在
-            cmp_path = pathlib.Path(tmpdir) / "comparison_report.md"
-            assert cmp_path.exists(), "comparison_report.md 應存在（CA-08 unified format）"
-
-            cmp_content = cmp_path.read_text(encoding="utf-8")
-            assert "比較分析報告" in cmp_content
-            assert "綜合結論" in cmp_content
-            assert "比較面向分析" in cmp_content
-            assert "各幣詳細分析" in cmp_content
+            # #1224: 新格式三段式結構
+            assert "各幣詳細分析" in report_content
+            assert "整合比較總結" in report_content
+            assert "合併證據清單" in report_content
+            assert "綜合結論" in report_content
+            assert "比較面向分析" in report_content
 
 
 # ---------------------------------------------------------------------------
