@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trustforge.local/schemas/acceptance-artifact-manifest.schema.json",
+  "title": "TrustForge acceptance artifact manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "git_sha", "frontend_version", "backend_version", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "release_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "git_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "frontend_version": {"type": "string", "minLength": 1},
+    "backend_version": {"type": "string", "minLength": 1},
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "media_type", "size_bytes"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "media_type": {"type": "string", "minLength": 1},
+          "size_bytes": {"type": "integer", "minimum": 1},
+          "magic": {"type": "string", "maxLength": 64}
+        }
+      }
+    }
+  }
+}

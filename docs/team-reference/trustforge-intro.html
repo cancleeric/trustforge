@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrustForge Hermes — 專案介紹與名詞解釋</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --orange: #d29922;
+  --red: #f85149;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, 'Microsoft JhengHei', 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  padding: 2rem;
+  max-width: 900px;
+  margin: 0 auto;
+}
+h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent); }
+h2 { font-size: 1.5rem; margin: 2.5rem 0 1rem; color: var(--green); border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+h3 { font-size: 1.2rem; margin: 1.5rem 0 0.5rem; color: var(--orange); }
+p { margin: 0.8rem 0; }
+ul, ol { margin: 0.8rem 0 0.8rem 1.5rem; }
+li { margin: 0.4rem 0; }
+.subtitle { color: var(--text-muted); font-size: 1rem; margin-bottom: 2rem; }
+.highlight-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.2rem 1.5rem;
+  margin: 1.2rem 0;
+}
+.highlight-box.important {
+  border-left: 4px solid var(--accent);
+}
+.highlight-box.warning {
+  border-left: 4px solid var(--orange);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.6rem 0.8rem;
+  text-align: left;
+}
+th { background: var(--surface); color: var(--accent); }
+code {
+  background: var(--surface);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+.formula {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.5rem;
+  margin: 1rem 0;
+  font-family: 'Consolas', monospace;
+  font-size: 0.95rem;
+  line-height: 2;
+}
+.tag {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: bold;
+}
+.tag-high { background: #f8514922; color: var(--red); border: 1px solid var(--red); }
+.tag-mid { background: #d2992222; color: var(--orange); border: 1px solid var(--orange); }
+.tag-low { background: #3fb95022; color: var(--green); border: 1px solid var(--green); }
+.flow-diagram {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin: 1rem 0;
+  font-family: 'Consolas', monospace;
+  font-size: 0.85rem;
+  white-space: pre;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+</style>
+</head>
+<body>
+
+<h1>🔥 TrustForge Hermes（信源熔爐）</h1>
+<p class="subtitle">專案介紹與名詞解釋 — 給團隊成員的入門文件</p>
+
+<!-- ===== 比賽背景 ===== -->
+<h2>一、比賽是什麼？</h2>
+
+<div class="highlight-box important">
+<strong>比賽名稱：</strong>2026 雲湧智生：臺灣生成式 AI 應用黑客松<br>
+<strong>組別：</strong>黑客組<br>
+<strong>命題單位：</strong>HOYA BIT（禾亞數位科技）<br>
+<strong>命題：</strong>加密市場分析 AI Agent：多源資訊的信任提煉<br>
+<strong>決賽：</strong>8/1–8/2（30 小時內交付）<br>
+<strong>團隊：</strong>HurricaneSoft（颶風軟體）— 隊名「中再參與」
+</div>
+
+<h3>比賽要我們做什麼？</h3>
+<p>做一個 <strong>AI Agent（智能助手）</strong>，它能：</p>
+<ol>
+  <li>從<strong>多個來源</strong>（新聞、社群、鏈上數據、官方公告、價格數據）蒐集加密貨幣資訊</li>
+  <li>判斷這些資訊的<strong>可信度</strong>（哪些可信、哪些可能是假消息或帶風向）</li>
+  <li>整合後產出一份<strong>帶有證據溯源</strong>的分析報告（不是隨便給答案，每個結論都要能追到原始來源）</li>
+</ol>
+
+<h3>為什麼不是直接問 ChatGPT？</h3>
+<div class="highlight-box">
+<p>一般做法：把一堆資料丟給 AI → AI 給你一個摘要 → 你不知道它根據什麼講的</p>
+<p><strong>TrustForge 的做法：</strong>先把每條資訊打分數（可信嗎？有其他來源佐證嗎？是不是有人在帶風向？）→ 用分數加權後才讓 AI 產出分析 → 每個結論都附上原始證據連結</p>
+<p>👉 我們交付的不是「一個答案」，而是「一個你能查證的答案」。</p>
+</div>
+
+<!-- ===== 題目規則 ===== -->
+<h2>二、比賽規則重點</h2>
+
+<h3>幣種池（現場抽）</h3>
+<p><code>BTC</code> / <code>ETH</code> / <code>SOL</code> / <code>BNB</code> / <code>XRP</code>（五選一）</p>
+
+<h3>題型池（現場抽）</h3>
+<table>
+<tr><th>題型</th><th>白話意思</th></tr>
+<tr><td>多源整合</td><td>把所有來源的資料整合在一起，看一致不一致，給整體判斷</td></tr>
+<tr><td>假設驗證</td><td>給你一個假設（如「BTC 短期會盤整」），你找正反證據來驗證</td></tr>
+<tr><td>比較分析</td><td>比較兩個幣的表現、風險、市場位置</td></tr>
+</table>
+
+<h3>硬約束（違反 = 失格）</h3>
+<ul>
+  <li>🚫 只能用 <strong>AWS Bedrock</strong> 當 AI 模型（不能用 OpenAI、不能用其他 API）</li>
+  <li>🚫 不能抄別人的分析當答案（AI 只負責「寫」，判斷邏輯是我們的 pipeline 產出的）</li>
+  <li>🚫 執行時間 ≤ 15 分鐘（超時不採計）</li>
+  <li>🚫 必須使用 HOYA BIT 提供的企業數據（5 幣 × 5 年 Daily OHLCV）</li>
+</ul>
+
+<h3>交付物（4 件）</h3>
+<table>
+<tr><th>交付物</th><th>是什麼</th></tr>
+<tr><td>分析報告 Final Report</td><td>結論 + 關鍵依據 + 信心說明（主要評分對象）</td></tr>
+<tr><td>證據清單 Evidence List</td><td>每筆證據的來源、取得時間、引用片段、對應結論</td></tr>
+<tr><td>執行紀錄 Execution Log</td><td>系統跑了什麼、花了多久、呼叫了哪些工具</td></tr>
+<tr><td>程式碼 Source Code</td><td>本 repo</td></tr>
+</table>
+
+<!-- ===== 系統架構 ===== -->
+<h2>三、系統怎麼運作？（三層架構）</h2>
+
+<div class="flow-diagram">
+        多源輸入                信任提煉 (核心)              Agent 編排 / 輸出
+ ┌─────────────────┐     ┌──────────────────────┐     ┌────────────────────┐
+ │ 新聞 / RSS       │     │ 1. 主張抽取            │     │ Bedrock Agent       │
+ │ 社群 / X         │     │    (claim extraction) │     │  - 信任加權融合       │
+ │ 鏈上 on-chain    │ ──▶ │ 2. 來源信譽評分        │ ──▶ │  - 帶溯源生成分析     │
+ │ HOYA BIT 行情    │     │ 3. 交叉佐證 corroborate│     │  - 反方證據 / 資訊完整度 │
+ │ 監管 / 公告      │     │ 4. 時效衰減 recency    │     │                      │
+ └─────────────────┘     │ ⇒ TrustScore per claim│     └──────────┬─────────┘
+                          └──────────────────────┘                │
+                                                        ┌──────────▼─────────┐
+                                                        │ Live Demo (Web UI)  │
+                                                        │ 信任分數 + 溯源面板   │
+                                                        └────────────────────┘
+</div>
+
+<h3>Layer 1 — Ingestion（資料蒐集層）</h3>
+<p>從各種來源抓資料，統一格式化成 <code>Document</code>：</p>
+<table>
+<tr><th>來源</th><th>連接器</th><th>提供什麼</th></tr>
+<tr><td>價格數據</td><td><code>prices</code></td><td>每日 OHLCV（開高低收量）</td></tr>
+<tr><td>新聞</td><td><code>news</code></td><td>媒體報導、事件</td></tr>
+<tr><td>社群</td><td><code>social</code></td><td>X/Reddit 討論、情緒、喊單</td></tr>
+<tr><td>鏈上數據</td><td><code>onchain</code></td><td>大額轉帳、交易所流入流出</td></tr>
+<tr><td>HOYA BIT</td><td><code>hoyabit</code></td><td>交易所行情（企業數據）</td></tr>
+<tr><td>監管公告</td><td><code>regulatory</code></td><td>政策、合規事件</td></tr>
+</table>
+
+<h3>Layer 2 — Trust（信任提煉層 ★ 核心競爭力）</h3>
+<p>這是我們跟別人不一樣的地方。把每條資訊的「主張」抽出來，打信任分數：</p>
+<div class="formula">
+TrustScore = 來源信譽 × 0.50
+           + 交叉佐證 × 0.25
+           + 時效衰減 × 0.15
+           − 操縱懲罰 × 0.40
+</div>
+
+<h3>Layer 3 — Agent（AI 編排層）</h3>
+<p>把打完分數的資訊送給 AWS Bedrock（AI 模型），讓它產出帶溯源的分析報告。</p>
+
+<!-- ===== 名詞解釋 ===== -->
+<h2>四、專業名詞解釋</h2>
+
+<h3>🎯 核心概念</h3>
+
+<table>
+<tr><th>名詞</th><th>英文</th><th>白話解釋</th></tr>
+<tr>
+  <td><strong>信任分數</strong></td>
+  <td>TrustScore</td>
+  <td>一條資訊「可以相信到什麼程度」的分數（0~1）。越高越可信。不是「幣會漲多少」，是「這條消息本身可不可靠」。</td>
+</tr>
+<tr>
+  <td><strong>來源信譽</strong></td>
+  <td>Source Reputation</td>
+  <td>這個來源過去表現如何？官方公告 > 主流新聞 > 匿名社群。鏈上數據（客觀事實）信譽最高 0.95，匿名社群最低 0.35。</td>
+</tr>
+<tr>
+  <td><strong>交叉佐證</strong></td>
+  <td>Cross-Source Corroboration</td>
+  <td>同一件事有幾個「獨立」來源在講？如果只有一個人喊，可信度低；如果三個不同來源都說同一件事，可信度高。</td>
+</tr>
+<tr>
+  <td><strong>時效衰減</strong></td>
+  <td>Recency Decay</td>
+  <td>幣圈資訊過期很快。一週前的消息對今天的判斷影響比較小，會隨時間打折扣。</td>
+</tr>
+<tr>
+  <td><strong>操縱懲罰</strong></td>
+  <td>Manipulation Penalty</td>
+  <td>如果偵測到「帶風向」的跡象（拉盤喊單、機器人大量轉發、情緒極端煽動），直接扣分。</td>
+</tr>
+<tr>
+  <td><strong>主張</strong></td>
+  <td>Claim</td>
+  <td>從一篇文章/消息中抽出的「具體說法」。例如一篇新聞可能包含：「BTC 突破 10 萬」「機構大量買入」兩個主張。</td>
+</tr>
+<tr>
+  <td><strong>溯源鏈</strong></td>
+  <td>Provenance</td>
+  <td>每個結論都能追回到「原始來源 URL + 取得時間 + 引用片段」。讓使用者可以自己去驗證。</td>
+</tr>
+<tr>
+  <td><strong>資訊完整度</strong></td>
+  <td>Information Completeness</td>
+  <td>我們蒐集到的資料「夠不夠完整」來做判斷？如果只有價格數據沒有新聞，完整度就低，結論的信心也應該降低。</td>
+</tr>
+</table>
+
+<h3>🔧 技術名詞</h3>
+
+<table>
+<tr><th>名詞</th><th>白話解釋</th></tr>
+<tr>
+  <td><strong>AWS Bedrock</strong></td>
+  <td>Amazon 提供的 AI 模型服務。我們用它來「寫」分析報告。比賽規定只能用這個。</td>
+</tr>
+<tr>
+  <td><strong>OHLCV</strong></td>
+  <td>Open/High/Low/Close/Volume — 開盤價/最高價/最低價/收盤價/成交量。股票和幣圈的基本價格資料格式。</td>
+</tr>
+<tr>
+  <td><strong>Agent</strong></td>
+  <td>AI 助手。不是單純問答，而是能「自己去找資料、判斷、產出報告」的自動化流程。</td>
+</tr>
+<tr>
+  <td><strong>Pipeline</strong></td>
+  <td>管線。資料從頭到尾經過的完整流程：蒐集 → 信任評分 → AI 分析 → 輸出報告。</td>
+</tr>
+<tr>
+  <td><strong>Ingestion</strong></td>
+  <td>資料攝取。把外部來源的資料「吃」進系統裡。</td>
+</tr>
+<tr>
+  <td><strong>Connector（連接器）</strong></td>
+  <td>接到外部資料來源的「接頭」。每個來源有自己的連接器。</td>
+</tr>
+<tr>
+  <td><strong>Dawid-Skene</strong></td>
+  <td>一個統計方法，用來動態學習「哪些來源比較可靠」。如果某來源經常跟其他可靠來源矛盾，它的信譽會自動降低。</td>
+</tr>
+<tr>
+  <td><strong>Conformal Prediction</strong></td>
+  <td>統計校準方法。確保我們說「80% 可信」的時候，真的大概有 80% 的機率是對的，而不是隨便給個數字。</td>
+</tr>
+<tr>
+  <td><strong>Offline 模式</strong></td>
+  <td>不連 AWS、不花錢，用本機樣本資料跑完整流程。開發和展示用。</td>
+</tr>
+<tr>
+  <td><strong>Live Demo</strong></td>
+  <td>部署在雲端的展示版本，評審可以直接操作。我們的在 EC2 上跑。</td>
+</tr>
+</table>
+
+<h3>📊 來源信譽等級表</h3>
+
+<table>
+<tr><th>來源類型</th><th>基礎信譽</th><th>為什麼</th></tr>
+<tr><td>價格數據 / 鏈上數據</td><td><span class="tag tag-low">0.95</span></td><td>客觀事實，無法造假</td></tr>
+<tr><td>監管公告</td><td><span class="tag tag-low">0.90</span></td><td>官方發布，可信度高</td></tr>
+<tr><td>HOYA BIT 行情</td><td><span class="tag tag-low">0.85</span></td><td>交易所一手數據</td></tr>
+<tr><td>主流新聞</td><td><span class="tag tag-mid">0.65</span></td><td>有編輯把關，但可能有偏向</td></tr>
+<tr><td>情緒指數 / 開發活動</td><td><span class="tag tag-mid">0.50</span></td><td>輔助訊號，參考用</td></tr>
+<tr><td>匿名社群（X/Reddit）</td><td><span class="tag tag-high">0.35</span></td><td>最容易造假、帶風向、機器人灌水</td></tr>
+</table>
+
+<!-- ===== 團隊分工 ===== -->
+<h2>五、團隊分工</h2>
+
+<table>
+<tr><th>負責區塊</th><th>主責</th><th>內容</th></tr>
+<tr><td>核心引擎</td><td>王英豪（隊長）</td><td>trust/ + agent/ 信任提煉引擎</td></tr>
+<tr><td>外框模組</td><td><strong>Nicholas（副隊）</strong></td><td>ingestion/ 連接器 + Bedrock 直連 + AWS 佈署 + HOYA BIT 對接</td></tr>
+<tr><td>前端 WebUI</td><td>林子彤</td><td>dashboard、信任橫條、證據卡、溯源面板</td></tr>
+<tr><td>創意（主撰）</td><td>嵋婕</td><td>敘事、Demo 劇本、評審簡報、4 交付件統籌</td></tr>
+</table>
+
+<!-- ===== 快速上手 ===== -->
+<h2>六、快速上手</h2>
+
+<h3>本機跑一次 Demo</h3>
+<div class="highlight-box">
+<pre><code># 1. 建立虛擬環境
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[dev]"
+
+# 2. 跑 offline demo（不需要 AWS，不花錢）
+python -m trustforge.cli analyze \
+    --coin BTC --type multi_source \
+    --query "分析 BTC 過去兩週市場狀況" \
+    --offline --out out/btc
+
+# 產出：
+#   out/btc/report.md        ← 分析報告
+#   out/btc/evidence.json    ← 證據清單
+#   out/btc/execution_log.jsonl ← 執行紀錄</code></pre>
+</div>
+
+<h3>線上 Live Demo</h3>
+<ul>
+  <li>EC2：<a href="http://3.106.220.68/" style="color:var(--accent)">http://3.106.220.68/</a></li>
+  <li>域名：<a href="https://trustforge.hurricanesoft.com.tw/" style="color:var(--accent)">https://trustforge.hurricanesoft.com.tw/</a></li>
+</ul>
+
+<!-- ===== 一句話總結 ===== -->
+<h2>七、一句話總結</h2>
+
+<div class="highlight-box important">
+<p style="font-size:1.1rem"><strong>幣圈消息真假難辨，TrustForge 不是「問 AI 幣價會漲嗎」，而是「把各來源的說法先打分數、交叉比對、標記可疑的」，最後給你一份帶信任分數和原始出處的分析報告，讓你自己判斷。</strong></p>
+</div>
+
+<footer>
+TrustForge Hermes · HurricaneSoft（颶風軟體）· 2026-07-30 · 內部參考文件
+</footer>
+
+</body>
+</html>

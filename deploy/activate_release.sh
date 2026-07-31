@@ -48,8 +48,13 @@ fi
 
 MODEL_RECONCILE_COMMAND="true"
 TRAINING_DATA_DIR="${TRUSTFORGE_TRAINING_DATA_DIR:-/opt/trustforge/data/training}"
+SKILL_CHANGE_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_changes.jsonl}"
 if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
   echo "[activate] ERROR: TRUSTFORGE_TRAINING_DATA_DIR must be an absolute safe path" >&2
+  exit 2
+fi
+if ! [[ "$SKILL_CHANGE_LOG_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$SKILL_CHANGE_LOG_PATH" == *"/../"* ]] || [[ "$SKILL_CHANGE_LOG_PATH" == */.. ]]; then
+  echo "[activate] ERROR: TRUSTFORGE_SKILL_CHANGE_LOG must be an absolute safe path" >&2
   exit 2
 fi
 TRAINING_RECONCILE_COMMAND="if grep -q '^Environment=TRUSTFORGE_TRAINING_DATA_DIR=' /etc/systemd/system/trustforge.service; then sed -i 's|^Environment=TRUSTFORGE_TRAINING_DATA_DIR=.*|Environment=TRUSTFORGE_TRAINING_DATA_DIR=${TRAINING_DATA_DIR}|' /etc/systemd/system/trustforge.service; else sed -i '/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_TRAINING_DATA_DIR=${TRAINING_DATA_DIR}' /etc/systemd/system/trustforge.service; fi"
@@ -205,6 +210,25 @@ verify_analysis_worker() {
   echo "[activate] analysis-flow worker stable on $iid"
 }
 
+verify_analysis_worker_skill_log() {
+  local iid="$1"
+  local ecmdid
+  ecmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","systemctl show trustforge-analysis-flow.service -p Environment --value | grep -F '\''TRUSTFORGE_SKILL_CHANGE_LOG='"$SKILL_CHANGE_LOG_PATH"'\''","echo \"[activate] analysis-flow worker skill-log environment verified\""]' \
+    --query 'Command.CommandId' --output text)
+  if [ -z "$ecmdid" ] || [ "$ecmdid" = "None" ]; then
+    echo "[activate] ERROR: analysis-flow worker environment check send-command failed" >&2
+    return 1
+  fi
+  local estatus
+  estatus=$(poll_ssm_terminal_status "$ecmdid" "$iid" 90 5) || true
+  if [ "$estatus" != "Success" ]; then
+    echo "[activate] ERROR: analysis-flow worker skill-log environment mismatch (Status=${estatus})" >&2
+    return 1
+  fi
+  echo "[activate] analysis-flow worker skill-log environment verified on $iid"
+}
+
 # ---- real manual report E2E ---------------------------------------------------
 verify_analysis_report() {
   local iid="$1"
@@ -270,7 +294,7 @@ ROLLBACK() {
   # history. First activations may not have an active digest yet.
   if [ "$UNIT_BACKUP_CAPTURED" -eq 1 ]; then
     URCMD=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-      --document-name AWS-RunShellScript --parameters commands='["set -e","cp -p /opt/trustforge/.activation-trustforge.service.bak /etc/systemd/system/trustforge.service","systemctl daemon-reload","systemctl restart trustforge"]' \
+      --document-name AWS-RunShellScript --parameters commands='["set -e","cp -p /opt/trustforge/.activation-trustforge.service.bak /etc/systemd/system/trustforge.service","for unit in trustforge.service hermes-cycle.service trustforge-analysis-flow.service; do target=/etc/systemd/system/$unit.d/20-skill-change-log.conf; backup=/opt/trustforge/.activation-skill-log-dropins.bak/$unit; if [ -f \"$backup\" ]; then install -d -m 0755 \"$(dirname \"$target\")\"; cp -p \"$backup\" \"$target\"; else rm -f \"$target\"; rmdir \"$(dirname \"$target\")\" 2>/dev/null || true; fi; done","systemctl daemon-reload","systemctl restart trustforge","systemctl try-restart trustforge-analysis-flow.service"]' \
       --query 'Command.CommandId' --output text 2>/dev/null || echo "")
     if [ -n "$URCMD" ] && [ "$URCMD" != "None" ]; then
       urstatus=$(poll_ssm_terminal_status "$URCMD" "$TARGET" 120 5) || true
@@ -290,7 +314,7 @@ ROLLBACK() {
   if [ -n "$ACTIVE_DIGEST" ] && [ "$ACTIVE_DIGEST" != "unknown" ]; then
     echo "[activate] rollback: restoring previous active ($ACTIVE_DIGEST)"
     RBCMD=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-      --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","rm -f /opt/trustforge/.activation-trustforge.service.bak","echo \"[activate] rollback restore completed\""]' \
+      --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","rm -f /opt/trustforge/.activation-trustforge.service.bak; rm -rf /opt/trustforge/.activation-skill-log-dropins.bak","echo \"[activate] rollback restore completed\""]' \
       --query 'Command.CommandId' --output text 2>/dev/null || echo "")
     if [ -n "$RBCMD" ] && [ "$RBCMD" != "None" ]; then
       rbstatus=$(poll_ssm_terminal_status "$RBCMD" "$TARGET" 120 5) || true
@@ -324,6 +348,19 @@ ROLLBACK() {
     rb_ok=0
   else
     echo "[activate] rollback healthz verification passed"
+  fi
+  if ! verify_analysis_worker "$TARGET" 2>/dev/null; then
+    echo "[activate] rollback analysis-flow worker verification FAILED" >&2
+    rb_ok=0
+  else
+    echo "[activate] rollback analysis-flow worker verification passed"
+  fi
+
+  if ! verify_analysis_worker_skill_log "$TARGET" 2>/dev/null; then
+    echo "[activate] rollback analysis-flow skill-log environment verification FAILED" >&2
+    rb_ok=0
+  else
+    echo "[activate] rollback analysis-flow skill-log environment verification passed"
   fi
 
   if [ "$rb_ok" = 1 ]; then
@@ -445,7 +482,7 @@ trap 'ROLLBACK $?' ERR
 # Step 3: Download candidate to target
 echo "[activate] Step 3: downloading candidate artifact to target..."
 CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","cp -p /etc/systemd/system/trustforge.service /opt/trustforge/.activation-trustforge.service.bak","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'manifest.json ./manifest.json --region '"$REGION"'","echo \"[activate] candidate artifact downloaded\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","cp -p /etc/systemd/system/trustforge.service /opt/trustforge/.activation-trustforge.service.bak","rm -rf /opt/trustforge/.activation-skill-log-dropins.bak","mkdir -p /opt/trustforge/.activation-skill-log-dropins.bak","for unit in trustforge.service hermes-cycle.service trustforge-analysis-flow.service; do source=/etc/systemd/system/$unit.d/20-skill-change-log.conf; backup=/opt/trustforge/.activation-skill-log-dropins.bak/$unit; if [ -f \"$source\" ]; then cp -p \"$source\" \"$backup\"; else : > \"$backup.absent\"; fi; done","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'manifest.json ./manifest.json --region '"$REGION"'","echo \"[activate] candidate artifact downloaded\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
   echo "[activate] ERROR: download send-command failed" >&2
@@ -482,7 +519,7 @@ echo "[activate] artifact verified"
 # Step 5: Restart service (zero-downtime)
 echo "[activate] Step 5: restarting service..."
 RCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","'"$TRAINING_RECONCILE_COMMAND"'","'"$PREVIEW_RECONCILE_COMMAND"'","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","'"$TRAINING_RECONCILE_COMMAND"'","'"$PREVIEW_RECONCILE_COMMAND"'","TRUSTFORGE_SKILL_CHANGE_LOG='"$SKILL_CHANGE_LOG_PATH"' bash deploy/reconcile_skill_change_log.sh","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$RCMDID" ] || [ "$RCMDID" = "None" ]; then
   echo "[activate] ERROR: restart send-command failed" >&2
@@ -511,6 +548,7 @@ echo "[activate] Step 7: post-verify..."
 verify_web_healthz "$TARGET"
 verify_fetch_scheduler "$TARGET"
 verify_analysis_worker "$TARGET"
+verify_analysis_worker_skill_log "$TARGET"
 verify_analysis_report "$TARGET"
 echo "[activate] post-verify passed"
 
@@ -525,7 +563,7 @@ trap - ERR
 # Remove the transaction-only unit backup after commit. Cleanup is best-effort:
 # activation and its receipt are already complete.
 CCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","rm -f /opt/trustforge/.activation-trustforge.service.bak"]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","rm -f /opt/trustforge/.activation-trustforge.service.bak; rm -rf /opt/trustforge/.activation-skill-log-dropins.bak"]' \
   --query 'Command.CommandId' --output text 2>/dev/null || echo "")
 if [ -z "$CCMDID" ] || [ "$CCMDID" = "None" ]; then
   echo "[activate] WARNING: unit backup cleanup send-command failed" >&2

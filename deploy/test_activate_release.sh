@@ -133,6 +133,19 @@ else
   fail "activation requires completed manual report"
 fi
 
+echo "--- Test 11: rollback restores and verifies skill-log worker configuration ---"
+ROLLBACK_SECTION=$(sed -n '/^ROLLBACK() {/,/^# ---- lock helpers/p' deploy/activate_release.sh)
+if grep -q 'activation-skill-log-dropins.bak' deploy/activate_release.sh \
+  && grep -q 'refusing to follow a systemd drop-in symlink' deploy/reconcile_skill_change_log.sh \
+  && grep -q 'systemctl try-restart trustforge-analysis-flow.service' <<<"$ROLLBACK_SECTION" \
+  && grep -q 'verify_analysis_worker "$TARGET"' <<<"$ROLLBACK_SECTION" \
+  && grep -q 'verify_analysis_worker_skill_log "$TARGET"' <<<"$ROLLBACK_SECTION" \
+  && grep -q 'systemctl show trustforge-analysis-flow.service -p Environment' deploy/activate_release.sh; then
+  pass "rollback restores skill-log drop-ins and reconciles analysis-flow worker"
+else
+  fail "rollback restores skill-log drop-ins and reconciles analysis-flow worker"
+fi
+
 echo ""
 echo "========================================"
 echo "Results: PASS=$PASS FAIL=$FAIL"

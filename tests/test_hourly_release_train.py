@@ -799,3 +799,145 @@ def test_execute_does_not_noop_when_public_frontend_is_stale(monkeypatch, tmp_pa
         "verified_main_sha": "a" * 40,
         "frontend_asset": "assets/index-release.js",
     }
+
+
+def test_formal_run_blocked_when_handler_present_without_ready_flag(tmp_path, monkeypatch):
+    main_tree = tmp_path / "main"
+    web_py = main_tree / "src" / "trustforge" / "web.py"
+    web_py.parent.mkdir(parents=True)
+    web_py.write_text(
+        "def _handle_api_formal_analysis_question():\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent-flag")
+
+    assert train.formal_run_blocked(main_tree, "a" * 40) is True
+
+
+def test_formal_run_unblocked_when_ready_flag_exists(tmp_path, monkeypatch):
+    main_tree = tmp_path / "main"
+    web_py = main_tree / "src" / "trustforge" / "web.py"
+    web_py.parent.mkdir(parents=True)
+    web_py.write_text(
+        "def _handle_api_formal_analysis_question():\n    pass\n",
+        encoding="utf-8",
+    )
+    flag = tmp_path / "formal-run-prod-ready"
+    flag.write_text("dynamodb=trustforge-formal-run, ssm=3secrets, env=drop-in", encoding="utf-8")
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", flag)
+
+    assert train.formal_run_blocked(main_tree, "any-main-sha") is False
+
+
+def test_formal_run_unblocked_when_flag_exists_regardless_of_main_sha(tmp_path, monkeypatch):
+    main_tree = tmp_path / "main"
+    web_py = main_tree / "src" / "trustforge" / "web.py"
+    web_py.parent.mkdir(parents=True)
+    web_py.write_text(
+        "def _handle_api_formal_analysis_question():\n    pass\n",
+        encoding="utf-8",
+    )
+    flag = tmp_path / "formal-run-prod-ready"
+    flag.write_text("ready", encoding="utf-8")
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", flag)
+
+    assert train.formal_run_blocked(main_tree, "different-sha-xyz") is False
+
+
+def test_formal_run_unblocked_when_handler_absent(tmp_path, monkeypatch):
+    main_tree = tmp_path / "main"
+    web_py = main_tree / "src" / "trustforge" / "web.py"
+    web_py.parent.mkdir(parents=True)
+    web_py.write_text("def legacy():\n    pass\n", encoding="utf-8")
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent-flag")
+
+    assert train.formal_run_blocked(main_tree, "a" * 40) is False
+
+
+def test_formal_run_unblocked_when_web_py_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent-flag")
+    assert train.formal_run_blocked(tmp_path / "no-main", "a" * 40) is False
+
+
+def test_formal_run_pending_origin_blocks_when_marker_without_flag(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        train, "run",
+        lambda command, *, cwd=train.ROOT, capture=False: "def _handle_api_formal_analysis_question():\n    pass\n",
+    )
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent")
+    assert train.formal_run_pending_origin() is True
+
+
+def test_formal_run_pending_origin_unblocks_when_flag_exists(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        train, "run",
+        lambda command, *, cwd=train.ROOT, capture=False: "def _handle_api_formal_analysis_question():\n    pass\n",
+    )
+    flag = tmp_path / "formal-run-prod-ready"
+    flag.write_text("sha", encoding="utf-8")
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", flag)
+    assert train.formal_run_pending_origin() is False
+
+
+def test_formal_run_pending_origin_unblocks_when_marker_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        train, "run",
+        lambda command, *, cwd=train.ROOT, capture=False: "def legacy():\n    pass\n",
+    )
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent")
+    assert train.formal_run_pending_origin() is False
+
+
+def test_formal_run_pending_origin_fails_closed_when_git_show_errors(monkeypatch, tmp_path):
+    def boom(command, *, cwd=train.ROOT, capture=False):
+        raise train.subprocess.CalledProcessError(1, command)
+    monkeypatch.setattr(train, "run", boom)
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent")
+    with pytest.raises(train.subprocess.CalledProcessError):
+        train.formal_run_pending_origin()
+
+
+def test_execute_blocks_when_formal_handler_pending(monkeypatch, tmp_path):
+    monkeypatch.setattr(train, "OUT", tmp_path / "out")
+    monkeypatch.setattr(train, "require_clean_root", lambda: None)
+    monkeypatch.setattr(train, "gate", lambda worktree: None)
+    monkeypatch.setattr(train, "bump_patch_version", lambda worktree: "0.27.40")
+    monkeypatch.setattr(train, "formal_run_blocked", lambda main_tree, main_sha: True)
+    monkeypatch.setattr(train, "production_identity", lambda: ("c" * 40, "d" * 64))
+    deploy_calls = []
+    monkeypatch.setattr(
+        train,
+        "deploy_production",
+        lambda *args: deploy_calls.append(args) or pytest.fail("must not deploy when formal blocked"),
+    )
+
+    def fake_run(command, *, cwd=train.ROOT, capture=False):
+        if command[:3] == ["git", "rev-list", "--left-right"]:
+            return "0 1"
+        if command[:3] == ["git", "rev-parse", "origin/main"]:
+            return "a" * 40
+        if command[:3] == ["git", "worktree", "add"]:
+            Path(command[4]).mkdir(parents=True)
+            return ""
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return "b" * 40
+        return ""
+
+    monkeypatch.setattr(train, "run", fake_run)
+    monkeypatch.setattr(
+        train.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+    recorded = []
+    monkeypatch.setattr(
+        train,
+        "record",
+        lambda receipt: recorded.append(receipt) or tmp_path / "receipt.json",
+    )
+
+    train.execute(SimpleNamespace(dry_run=False))
+
+    assert deploy_calls == []
+    assert recorded[-1]["status"] == "blocked-formal-pending"
+    assert "formal-run" in recorded[-1]["blocked_reason"]

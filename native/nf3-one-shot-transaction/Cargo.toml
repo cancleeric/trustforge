@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+trustforge-nf2-zero-capability-broker = { path = "../nf2-zero-capability-broker" }
 
 [features]
 adversarial-test-hooks = []
@@ -13,3 +14,25 @@ adversarial-test-hooks = []
 name = "nf3-test-helper"
 path = "src/bin/nf3_test_helper.rs"
 required-features = ["adversarial-test-hooks"]
+
+# Deterministic native-host evidence graph. This is deliberately not release:
+# debug assertions keep adversarial hooks test-only while fixed code generation
+# makes the helper and the exact NF2 rlib it consumes reproducible.
+[profile.evidence]
+inherits = "dev"
+opt-level = 2
+debug-assertions = true
+incremental = false
+codegen-units = 1
+lto = false
+panic = "unwind"
+strip = "none"
+
+[profile.release]
+opt-level = 3
+debug-assertions = false
+incremental = false
+codegen-units = 1
+lto = false
+panic = "abort"
+strip = "symbols"

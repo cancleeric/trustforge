@@ -49,6 +49,11 @@ vi.mock('../lib/endpoints', () => ({
       restart_required: false,
     },
   }),
+  getWhaleAlertCredentialStatus: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { configured: false, source: 'unconfigured', last_verified_at: null },
+  }),
+  updateWhaleAlertCredential: vi.fn(),
   putAdminConfig: vi.fn(),
   setAdminBackendProvider: vi.fn(),
   setAllAdminBackendProviders: vi.fn(),

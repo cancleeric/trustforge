@@ -15,6 +15,8 @@ const O_CLOEXEC: u64 = 0o2000000;
 const O_DIRECTORY: u64 = 0o200000;
 const O_NOFOLLOW: u64 = 0o400000;
 const O_NONBLOCK: u64 = 0o4000;
+#[allow(dead_code)] // 附屬於 append_witness（NF3 #1089）；musl target 下尚未接線，保留供後續交易見證使用
+const O_APPEND: u64 = 0o2000;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
@@ -84,6 +86,34 @@ impl Vfs {
 }
 
 impl Dir {
+    #[allow(dead_code)] // NF3 #1089：交易見證追加；musl target 下尚未接線，保留供後續 durable claim 使用
+    pub(crate) fn append_witness(&self, name: &str, frame: &[u8]) -> Result<(), Error> {
+        if frame.len() > MAX_PAYLOAD {
+            return Err(Error::UnsafeObject("witness frame bound"));
+        }
+        let name = checked_name(name)?;
+        let fd = sys::openat2(
+            &self.fd,
+            name.as_c_str(),
+            O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW,
+            0,
+        )?;
+        let opened = verify_file(&fd, self.uid, Some(0o600), None)?;
+        let named = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if identity(&opened) != identity(&named) {
+            return Err(Error::IdentityChanged);
+        }
+        sys::flock_ex(&fd)?;
+        write_loop(&fd, frame)?;
+        sys::fdatasync(&fd)?;
+        let after = sys::fstat(&fd)?;
+        let renamed = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if identity(&after) != identity(&renamed) {
+            return Err(Error::IdentityChanged);
+        }
+        Ok(())
+    }
+
     pub(crate) fn safe_names(&self) -> Result<Vec<String>, Error> {
         let first = self.scan_names_once()?;
         let second = self.scan_names_once()?;
@@ -271,12 +301,23 @@ impl Dir {
     }
 
     pub fn read(&self, name: &str, max: usize) -> Result<Vec<u8>, Error> {
+        self.read_checked(name, max, false)
+    }
+    pub(crate) fn read_readonly(&self, name: &str, max: usize) -> Result<Vec<u8>, Error> {
+        self.read_checked(name, max, true)
+    }
+    fn read_checked(&self, name: &str, max: usize, readonly: bool) -> Result<Vec<u8>, Error> {
         if max > MAX_PAYLOAD {
             return Err(Error::UnsafeObject("payload bound exceeds cap"));
         }
         let name = checked_name(name)?;
-        let fd = self.open_verified(name.as_c_str(), Some(max))?;
+        let accepted_modes: &[u32] = if readonly { &[0o400, 0o444] } else { &[0o600] };
+        let fd = self.open_verified_mode(name.as_c_str(), Some(max), accepted_modes)?;
         let before = sys::fstat(&fd)?;
+        let named_before = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if generation(&before) != generation(&named_before) {
+            return Err(Error::IdentityChanged);
+        }
         let capacity = max
             .checked_add(1)
             .ok_or(Error::UnsafeObject("payload bound overflow"))?;
@@ -303,7 +344,10 @@ impl Dir {
             return Err(Error::UnsafeObject("file exceeds bound"));
         }
         let after = sys::fstat(&fd)?;
-        if identity(&before) != identity(&after) {
+        let named_after = sys::statat(&self.fd, name.as_c_str(), AT_SYMLINK_NOFOLLOW)?;
+        if generation(&before) != generation(&after)
+            || generation(&after) != generation(&named_after)
+        {
             return Err(Error::IdentityChanged);
         }
         Ok(bytes)
@@ -379,13 +423,25 @@ impl Dir {
     }
 
     fn open_verified(&self, name: &CStr, max: Option<usize>) -> Result<OwnedFd, Error> {
+        self.open_verified_mode(name, max, &[0o600])
+    }
+
+    fn open_verified_mode(
+        &self,
+        name: &CStr,
+        max: Option<usize>,
+        accepted_modes: &[u32],
+    ) -> Result<OwnedFd, Error> {
         let fd = sys::openat2(
             &self.fd,
             name,
             O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
             0,
         )?;
-        let opened = verify_file(&fd, self.uid, Some(0o600), max)?;
+        let opened = verify_file(&fd, self.uid, None, max)?;
+        if !accepted_modes.contains(&(opened.mode & 0o777)) {
+            return Err(Error::UnsafeObject("regular file mode mismatch"));
+        }
         let named = sys::statat(&self.fd, name, AT_SYMLINK_NOFOLLOW)?;
         if identity(&opened) != identity(&named) {
             return Err(Error::IdentityChanged);
@@ -891,6 +947,31 @@ mod tests {
         assert_eq!(dir.read("occupied", 32).unwrap(), b"existing");
         assert_eq!(dir.read("candidate", 32).unwrap(), b"new");
         assert_eq!(dir.entries().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn readonly_receipts_accept_only_readonly_modes_without_weakening_mutable_reads() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(f) = Fixture::new() else { return };
+        let dir = f.vfs.root().mkdir("receipts").unwrap();
+        let path = f.path.join("receipts");
+
+        std::fs::write(path.join("private"), b"private").unwrap();
+        std::fs::set_permissions(path.join("private"), std::fs::Permissions::from_mode(0o400))
+            .unwrap();
+        assert_eq!(dir.read_readonly("private", 16).unwrap(), b"private");
+        assert!(dir.read("private", 16).is_err());
+
+        std::fs::write(path.join("public"), b"public").unwrap();
+        std::fs::set_permissions(path.join("public"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        assert_eq!(dir.read_readonly("public", 16).unwrap(), b"public");
+
+        dir.create_new("mutable", b"mutable", 16).unwrap();
+        assert_eq!(dir.read("mutable", 16).unwrap(), b"mutable");
+        assert!(dir.read_readonly("mutable", 16).is_err());
     }
 
     #[test]

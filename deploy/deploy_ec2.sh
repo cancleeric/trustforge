@@ -8,6 +8,7 @@ REGION="${REGION:-ap-southeast-2}"
 NAME=trustforge
 MODEL="${BEDROCK_MODEL_ID-}"
 TOKEN_SSM_PREFIX="${TRUSTFORGE_TOKEN_SSM_PREFIX-}"
+WHALE_ALERT_SSM_PARAMETER="${TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER:-/trustforge/production/whale-alert-api-key}"
 DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
 BUDGET_BACKEND="${TRUSTFORGE_BUDGET_GUARD_BACKEND:-dynamodb}"
 CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
@@ -15,6 +16,7 @@ COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
 LEASE_BACKEND="${TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND:-dynamodb}"
 LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
 TRAINING_DATA_DIR="${TRUSTFORGE_TRAINING_DATA_DIR:-/opt/trustforge/data/training}"
+SKILL_CHANGE_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_changes.jsonl}"
 PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
 PREVIEW_ENV_KEYS=(
   TRUSTFORGE_PREVIEW_ADMISSION_TABLE TRUSTFORGE_PREVIEW_TABLE_ARN
@@ -39,6 +41,10 @@ if [ -n "$TOKEN_SSM_PREFIX" ] && ! [[ "$TOKEN_SSM_PREFIX" =~ ^[A-Za-z0-9._/~-]+$
   echo "[ec2] ERROR: TRUSTFORGE_TOKEN_SSM_PREFIX contains invalid characters" >&2
   exit 1
 fi
+if ! [[ "$WHALE_ALERT_SSM_PARAMETER" =~ ^/[A-Za-z0-9_./-]{1,255}$ ]]; then
+  echo "[ec2] ERROR: TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER is invalid" >&2
+  exit 1
+fi
 if [ -n "$DAILY_CAP" ] && ! [[ "$DAILY_CAP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   echo "[ec2] ERROR: TRUSTFORGE_BEDROCK_DAILY_USD_CAP must be a decimal number" >&2
   exit 1
@@ -49,6 +55,10 @@ if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
 fi
 if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
   echo "[ec2] ERROR: TRUSTFORGE_TRAINING_DATA_DIR must be an absolute safe path" >&2
+  exit 1
+fi
+if ! [[ "$SKILL_CHANGE_LOG_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$SKILL_CHANGE_LOG_PATH" == *"/../"* ]] || [[ "$SKILL_CHANGE_LOG_PATH" == */.. ]]; then
+  echo "[ec2] ERROR: TRUSTFORGE_SKILL_CHANGE_LOG must be an absolute safe path" >&2
   exit 1
 fi
 if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
@@ -74,6 +84,7 @@ done
 
 EXTRA_UNIT_ENV=""
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_TRAINING_DATA_DIR=${TRAINING_DATA_DIR}\n"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER=${WHALE_ALERT_SSM_PARAMETER}\n"
 [ -n "$DAILY_CAP" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=${DAILY_CAP}\n"
 [ -n "$TOKEN_SSM_PREFIX" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX}\n"
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_GUARD_BACKEND=${BUDGET_BACKEND}\n"
@@ -238,6 +249,10 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
     {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}},
     {\"Effect\":\"Deny\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"ArnLike\":{\"kms:EncryptionContext:PARAMETER_ARN\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/preview-admission/*\"},\"ArnNotEquals\":{\"kms:EncryptionContext:PARAMETER_ARN\":[\"$PREVIEW_CURRENT_PARAMETER_ARN\",\"$PREVIEW_PREVIOUS_PARAMETER_ARN\"]}}}
   ]}" >/dev/null
+
+REGION="$REGION" TRUSTFORGE_EC2_ROLE="$ROLE" \
+  TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER="$WHALE_ALERT_SSM_PARAMETER" \
+  ./deploy/setup_whale_alert_ssm.sh
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-cloudwatch \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[\"Effect\":\"Allow\",\"Action\":\"cloudwatch:PutMetricData\",\"Resource\":\"*\"]}" >/dev/null
@@ -424,7 +439,7 @@ echo "[ec2] SG=$SGID VPC=$VPC"
 UD=$(mktemp)
 cat > "$UD" <<EOF
 #!/bin/bash
-set -x
+set -euxo pipefail
 dnf install -y python3.11 python3.11-pip unzip >/var/log/tf-setup.log 2>&1
 python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'cryptography>=44,<50' 'jsonschema>=4.23,<5' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
 mkdir -p /opt/trustforge && cd /opt/trustforge
@@ -453,6 +468,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 UNIT
+TRUSTFORGE_SKILL_CHANGE_LOG=${SKILL_CHANGE_LOG_PATH} bash /opt/trustforge/deploy/reconcile_skill_change_log.sh
 chmod 600 /etc/systemd/system/trustforge.service
 cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2
 [Unit]

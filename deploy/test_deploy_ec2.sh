@@ -335,6 +335,7 @@ with open('$work/ssm.json') as f:
 script = chr(10).join(cmds)
 script = script.replace('/etc/systemd/system/fetch-scheduler.service', '$fake_unit')
 script = script.replace('/opt/trustforge', '$fake_opt')
+script = script.replace('/usr/bin/python3.11', '$fake_py')
 script = script.replace('/usr/bin/python3', '$fake_py')
 with open('$work/verify.sh', 'w') as f:
     f.write(script)
@@ -570,8 +571,26 @@ case "$ALL" in
     echo "123456789012" ;;
   "s3api head-bucket"*)
     exit 0 ;;
-  "s3 cp"*)
+  "s3api head-object"*)
     exit 0 ;;
+  "s3 cp"*)
+    # Writes (stdin→S3) need no stdout. Reads (S3→stdout "-") must emit JSON
+    # for activate_release.sh preflight checks.
+    if printf '%s' "$ALL" | grep -q 'pointers/candidate.json -'; then
+      printf '{"digest":"mockdigest123","uploaded_at":"2026-01-01T00:00:00Z","version":"v0.0.1"}'
+    elif printf '%s' "$ALL" | grep -q 'pointers/active.json -'; then
+      printf '{"digest":"prevdigest456","uploaded_at":"2025-12-01T00:00:00Z","version":"v0.0.0"}'
+    elif printf '%s' "$ALL" | grep -q 'pointers/previous.json -'; then
+      printf '{"digest":"olddigest789","uploaded_at":"2025-11-01T00:00:00Z","version":"v0.0.0"}'
+    elif printf '%s' "$ALL" | grep -q 'manifest.json -'; then
+      # Compute real config_snapshot_identity so preflight [6] passes.
+      if [ -x .venv/bin/python ]; then _PY=.venv/bin/python; else _PY=python3; fi
+      _CSID=$($_PY -c "import sys; sys.path.insert(0,'src'); from trustforge.config_snapshot import ConfigSnapshot; print(ConfigSnapshot.capture().identity)" 2>/dev/null || echo "sha256:mock")
+      printf '{"artifact_digest":"mockdigest123","config_snapshot_identity":"%s","git_sha":"abcdef0123456789abcdef0123456789abcdef01"}' "$_CSID"
+    fi
+    exit 0 ;;
+  "ec2 describe-instances --region"*"Reservations[0].Instances[0].State.Name"*)
+    echo "running" ;;
   "ec2 describe-instances --region"*"Reservations[].Instances[].[InstanceId,State.Name]"*)
     case "$SCENARIO" in
       update-in-place|scheduler-fail|update-in-place-token-prefix|update-in-place-cap)
@@ -725,7 +744,7 @@ else
   assert_contains "$UD_CONTENT" "fetch-scheduler.service" "user-data: 有寫 fetch-scheduler.service"
   assert_contains "$UD_CONTENT" "fetch-scheduler.timer" "user-data: 有寫 fetch-scheduler.timer"
   assert_contains "$UD_CONTENT" "ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py" "user-data: fetch-scheduler ExecStart 正確"
-  assert_contains "$UD_CONTENT" "OnUnitActiveSec=15min" "user-data: timer 週期 15min"
+  assert_contains "$UD_CONTENT" "OnUnitActiveSec=10min" "user-data: timer 週期 10min"
   assert_contains "$UD_CONTENT" "systemctl enable --now fetch-scheduler.timer" "user-data: 有 enable --now timer"
   # BEDROCK_MODEL_ID 仍走 \${VAR-} fail-safe，離線測試環境未設 → 應為空
   assert_contains "$UD_CONTENT" "Environment=BEDROCK_MODEL_ID=" "user-data: BEDROCK_MODEL_ID 行仍存在（fail-safe 未動）"
@@ -800,7 +819,7 @@ if [ -z "$VERIFY_FT_HEALTHZ" ]; then
 else
   assert_contains "$VERIFY_FT_HEALTHZ" "systemctl is-active --quiet trustforge" "首次建置：web healthz gate 有檢查 trustforge.service is-active"
   assert_contains "$VERIFY_FT_HEALTHZ" "curl -fsS http://localhost/healthz" "首次建置：web healthz gate 有 curl /healthz"
-  assert_contains "$VERIFY_FT_HEALTHZ" "healthz 檢查失敗" "首次建置：web healthz gate 失敗時有印訊息"
+  assert_contains "$VERIFY_FT_HEALTHZ" "[ec2] healthz check failed" "首次建置：web healthz gate 失敗時有印訊息"
   assert_contains "$VERIFY_FT_HEALTHZ" "journalctl -u trustforge" "首次建置：web healthz gate 失敗時有印 trustforge journal"
   assert_healthz_gate_behavior \
     "首次建置：web healthz 失敗（模擬 systemctl is-active/curl 失敗）→ gate 判定失敗（exit1），獨立於 probe 是否會過" \
@@ -971,7 +990,10 @@ with open('$CAPTURE/remote_script.sh', 'w') as f:
   REMOTE=$(cat "$CAPTURE/remote_script.sh" 2>/dev/null || echo "")
   assert_contains "$REMOTE" 'Environment=BEDROCK_MODEL_ID=' "update-in-place: 仍保留 BEDROCK_MODEL_ID sed（既有邏輯不動）"
   assert_contains "$REMOTE" 'Environment=CACHE_BACKEND=dynamodb' "update-in-place: 補 CACHE_BACKEND"
-  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache' "update-in-place: 補 TRUSTFORGE_CACHE_TABLE"
+assert_contains "$REMOTE" 'Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache' "update-in-place: 補 TRUSTFORGE_CACHE_TABLE"
+assert_contains "$REMOTE" 'policy-name trustforge-analysis-write-rate-limit' "所有發布：reconcile analysis-write rate-limit IAM policy"
+assert_contains "$REMOTE" '"Action":"dynamodb:UpdateItem"' "所有發布：rate-limit 僅取得 DynamoDB UpdateItem"
+assert_contains "$REMOTE" 'table/trustforge-connector-cache' "所有發布：rate-limit 權限限縮 connector-cache table"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger' "update-in-place: 補 TRUSTFORGE_COST_LEDGER_TABLE"
   assert_contains "$REMOTE" 'Environment=COST_LEDGER_BACKEND=dynamodb' "update-in-place: 補 COST_LEDGER_BACKEND"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb' "update-in-place: 補 shared lease backend"
@@ -1323,7 +1345,7 @@ if run_deploy "scheduler-fail"; then
 else
   echo "  [PASS] fetch-scheduler 驗證失敗時，deploy_ec2.sh 正確地非零結束"
   PASS=$((PASS + 1))
-  if grep -qF "fetch-scheduler probe 同步驗證失敗" "$CAPTURE/stdout_scheduler-fail.log"; then
+  if grep -qF "fetch-scheduler probe failed" "$CAPTURE/stdout_scheduler-fail.log"; then
     echo "  [PASS] 失敗訊息明確（含 fetch-scheduler 同步驗證失敗 字樣）"
     PASS=$((PASS + 1))
   else
@@ -1352,7 +1374,7 @@ if run_deploy "healthz-fail"; then
 else
   echo "  [PASS] web healthz 驗證失敗時，deploy_ec2.sh 正確地非零結束"
   PASS=$((PASS + 1))
-  if grep -qF "web healthz 同步驗證失敗" "$CAPTURE/stdout_healthz-fail.log"; then
+  if grep -qF "web healthz failed" "$CAPTURE/stdout_healthz-fail.log"; then
     echo "  [PASS] 失敗訊息明確（含 web healthz 同步驗證失敗 字樣）"
     PASS=$((PASS + 1))
   else
@@ -1411,7 +1433,7 @@ if run_deploy "bad-prefix" TRUSTFORGE_TOKEN_SSM_PREFIX='evil"pre;fix'; then
 else
   echo "  [PASS] token SSM 前綴含不安全字元時，deploy_ec2.sh 正確地非零結束"
   PASS=$((PASS + 1))
-  assert_file_contains "$CAPTURE/stdout_bad-prefix.log" "不允許字元" "錯誤訊息明確指出字元集限制"
+  assert_file_contains "$CAPTURE/stdout_bad-prefix.log" "invalid characters" "錯誤訊息明確指出字元集限制"
 fi
 # vp-eng M-2：字元集驗證是全腳本第一段檢查，在任何 aws 呼叫之前，中止時
 # 應該連一次 aws 呼叫都還沒打過——零 aws 呼叫。
@@ -1428,7 +1450,7 @@ if run_deploy "bad-cap" TRUSTFORGE_BEDROCK_DAILY_USD_CAP='1;rm -rf /'; then
 else
   echo "  [PASS] cap 含非數字字元時，deploy_ec2.sh 正確地非零結束"
   PASS=$((PASS + 1))
-  assert_file_contains "$CAPTURE/stdout_bad-cap.log" "必須是十進位數字" "錯誤訊息明確指出 cap 格式限制"
+  assert_file_contains "$CAPTURE/stdout_bad-cap.log" "decimal number" "錯誤訊息明確指出 cap 格式限制"
 fi
 if [ -f "$CAPTURE/aws_calls_bad-cap.log" ]; then
   echo "  [FAIL] cap 字元集檢查中止前，不該有任何 aws 呼叫，但抓到：$(cat "$CAPTURE/aws_calls_bad-cap.log")"

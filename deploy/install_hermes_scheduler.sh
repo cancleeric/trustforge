@@ -5,6 +5,23 @@ set -euo pipefail
 APP_DIR="${TRUSTFORGE_APP_DIR:-/opt/trustforge}"
 REGION="${REGION:-ap-southeast-2}"
 UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+PRIMARY_UNIT="$UNIT_DIR/trustforge.service"
+SKILL_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_changes.jsonl}"
+
+MODEL="${BEDROCK_MODEL_ID:-}"
+if [[ -z "$MODEL" && -f "$PRIMARY_UNIT" ]]; then
+  MODEL="$(sed -n 's/^Environment=BEDROCK_MODEL_ID=//p' \
+    "$PRIMARY_UNIT" | tail -n 1)"
+fi
+if [[ -n "$MODEL" && ! "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  echo "invalid BEDROCK_MODEL_ID in primary service contract" >&2
+  exit 2
+fi
+
+if ! [[ "$SKILL_LOG_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$SKILL_LOG_PATH" == *"/../"* ]] || [[ "$SKILL_LOG_PATH" == */.. ]]; then
+  echo "TRUSTFORGE_SKILL_CHANGE_LOG must be an absolute safe path" >&2
+  exit 2
+fi
 
 install -m 0644 /dev/stdin "$UNIT_DIR/hermes-cycle.service" <<UNIT
 [Unit]
@@ -17,6 +34,7 @@ Type=oneshot
 WorkingDirectory=$APP_DIR
 Environment=TRUSTFORGE_HOME=$APP_DIR
 Environment=AWS_REGION=$REGION
+Environment=BEDROCK_MODEL_ID=$MODEL
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
@@ -58,6 +76,7 @@ Type=simple
 WorkingDirectory=$APP_DIR
 Environment=TRUSTFORGE_HOME=$APP_DIR
 Environment=AWS_REGION=$REGION
+Environment=BEDROCK_MODEL_ID=$MODEL
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
@@ -74,6 +93,7 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
+TRUSTFORGE_SKILL_CHANGE_LOG="$SKILL_LOG_PATH" bash "$APP_DIR/deploy/reconcile_skill_change_log.sh"
 systemctl daemon-reload
 systemctl enable --now hermes-cycle.timer
 systemctl enable --now trustforge-analysis-flow.service

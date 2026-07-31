@@ -26,6 +26,12 @@ PRODUCTION_ACCOUNT = "795930814369"
 PRODUCTION_REGION = "ap-southeast-2"
 PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
 VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)\Z")
+# main 引入 formal-run analysis-question handler 後，必須先完成生產配套
+# (DynamoDB table + caller/idempotency/retention secret + EC2 env) 並建立此 flag，
+# release train 才會嘗試部署該版本；否則 fail-closed 不部署，避免 fe-nginx 把對外層
+# 寫壞、或 activate 一個生產環境跑不起來的 formal-run 版本。
+FORMAL_RUN_READY_FLAG = OUT / "formal-run-prod-ready"
+FORMAL_HANDLER_MARKER = "_handle_api_formal_analysis_question"
 
 
 def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -727,6 +733,43 @@ def require_backup_receipt(command: str, run_id: str) -> Path:
     return receipt
 
 
+def formal_run_blocked(main_tree: Path, main_sha: str) -> bool:  # noqa: ARG001
+    """main 含 formal-run handler 但生產配套未就緒時回傳 True。
+
+    release train 應在此為真時 fail-closed 不部署，直到生產配套（DynamoDB
+    table + caller/idempotency/retention secret + EC2 env）完成並建立
+    FORMAL_RUN_READY_FLAG。避免部署一個生產環境跑不起來的 formal-run 版本，
+    也避免 fe-nginx 在無配套下把對外層改壞。
+
+    flag 存在即視為配套就緒（配套做好後新 main commit 不破壞既有 table/secret/env，
+    flag 內容建議寫人類可讀的配套清單供審計）。main_sha 保留為簽名參數穩定呼叫端。
+    """
+    web_py = main_tree / "src" / "trustforge" / "web.py"
+    if not web_py.exists():
+        return False
+    if FORMAL_HANDLER_MARKER not in web_py.read_text(encoding="utf-8"):
+        return False
+    return not FORMAL_RUN_READY_FLAG.exists()
+
+
+def formal_run_pending_origin() -> bool:
+    """gate 前止損：origin/main 含 formal handler 但配套 flag 不存在 → True。
+
+    在 worktree/gate 建立前檢查，讓 release train 不受 flaky test 影響可靠止損。
+    flag 內容的 SHA 驗證仍由 gate 後的 formal_run_blocked() 把關（雙層防護）。
+
+    git show 失敗時讓 CalledProcessError 傳播（fail-closed：無法確認 origin/main
+    狀態時 execute 走 failed 路徑，不部署），不靜默放行。
+    """
+    origin_main_web = run(
+        ["git", "show", "origin/main:src/trustforge/web.py"],
+        capture=True,
+    )
+    if FORMAL_HANDLER_MARKER not in origin_main_web:
+        return False
+    return not FORMAL_RUN_READY_FLAG.exists()
+
+
 def execute(args: argparse.Namespace) -> Path:
     started = datetime.now(UTC)
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
@@ -769,6 +812,17 @@ def execute(args: argparse.Namespace) -> Path:
                 receipt["status"] = "no-op"
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
+            # gate 前止損：formal handler 在 origin/main 但配套 flag 不存在 → 不跑 gate/不部署，
+            # 避免 finale 衝刺留下的 flaky test 卡住止損、避免部署無配套版本
+            if formal_run_pending_origin():
+                receipt["status"] = "blocked-formal-pending"
+                receipt["blocked_reason"] = (
+                    "origin/main 引入 formal-run analysis-question handler，但生產 formal-run "
+                    "配套（DynamoDB table + caller/idempotency/retention secret + EC2 env）"
+                    f"尚未就緒。完成配套後，將部署目標 main SHA 寫入 {FORMAL_RUN_READY_FLAG} 才會部署。"
+                )
+                receipt["finished_at"] = datetime.now(UTC).isoformat()
+                return record(receipt)
             backup_command = "bash deploy/backup_production_release.sh"
             with tempfile.TemporaryDirectory(prefix="trustforge-release-train-") as temporary:
                 base = Path(temporary)
@@ -801,6 +855,16 @@ def execute(args: argparse.Namespace) -> Path:
                         receipt["steps"].append({"release_version": release_version})
                     gate(main_tree)
                     main_sha = run(["git", "rev-parse", "HEAD"], cwd=main_tree, capture=True).strip()
+                    if formal_run_blocked(main_tree, main_sha):
+                        receipt["status"] = "blocked-formal-pending"
+                        receipt["main_sha"] = main_sha
+                        receipt["blocked_reason"] = (
+                            "main 引入 formal-run analysis-question handler，但生產 formal-run "
+                            "配套（DynamoDB table + caller/idempotency/retention secret + EC2 env）"
+                            f"尚未就緒。完成配套後，將此 main SHA 寫入 {FORMAL_RUN_READY_FLAG} 才會部署。"
+                        )
+                        receipt["finished_at"] = datetime.now(UTC).isoformat()
+                        return record(receipt)
                     release_branch = f"release/auto-{run_id[:8]}"
                     backup = require_backup_receipt(backup_command, run_id)
                     receipt["steps"].append({"backup_receipt": str(backup)})
