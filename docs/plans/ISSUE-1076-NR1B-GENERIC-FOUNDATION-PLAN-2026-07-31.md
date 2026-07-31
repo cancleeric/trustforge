@@ -46,11 +46,12 @@ pub fn validate_accepted(bytes) -> Result<RuntimeBinding, &str> { validate(bytes
 - NF1 instance compat: existing accepted manifest still validates (golden-unchanged test + behavior-equivalence fuzz).
 
 ## PR-B2 design (workspace + dedup)
-- native/Cargo.toml [workspace] resolver=2 members=[hermetic-package,nf2,nf3,trustforge-native-sys].
-- evidence profile stays in nf3/Cargo.toml (workspace root can't define custom profile).
+- native/Cargo.toml [workspace] resolver=2 members=[nf2,nf3,trustforge-native-sys]; hermetic-package is `exclude`d so its own [profile.release] (lto=true, opt-level="z") is NOT overridden by the root profile (it is an NF1 leaf, standalone-built).
+- evidence profile lives at the workspace root as [profile.evidence] in native/Cargo.toml — a member's [profile.*] is IGNORED under a workspace, so it must be at the root (moved out of nf3/Cargo.toml in B2).
 - trustforge-native-sys: sha256 (nf3 baseline) + OpenHow/RESOLVE_*/SYS_OPENAT2 (shared consts) + getdents64_raw skeleton. Upper-level semantics (open_beneath/scan_once) stay local.
 - nf2/nf3 Cargo.toml: trustforge-native-sys = { path = "../trustforge-native-sys" }.
-- NR1a-A compat: capability.rs/ledger.rs use statements change path; descriptor_sha256 bytes unchanged (same algo, +bound). foundation.rs SOURCES[12] removes src/sha256.rs (moved to native-sys).
+- NR1a-A compat: capability.rs/ledger.rs use statements change path; descriptor_sha256 bytes unchanged (same algo, +bound). foundation.rs SOURCES[12] removes src/sha256.rs and adds src/native_sys.rs (the shared crate's lib.rs is part of the linked source binding — pinned at the source layer).
+- nf2 release LTO true→false: accepted. Consolidating release at the workspace root set lto=false (opt-level=3) for nf2, diverging from nf2's former per-crate lto=true. Byte-identical nf2 rlib is NOT claimed in B2; the linked NF2 rlib is pinned (EVIDENCE_RLIB/RELEASE_RLIB interim) so the foundation binding stays exact. Full .83 musl rebuild + rlib repin is tracked in PR-B3.
 
 ## PR-B3 design (builder)
 - mirror hermetic-package/.cargo/config.toml + rust-toolchain.toml + toolchain-lock.json to nf2/nf3 (same Darwin builder → same dyld values).

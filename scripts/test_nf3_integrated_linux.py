@@ -32,13 +32,21 @@ ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
 )
 REVIEWED_NR1A_NF2_TREE = "c43e08d8ce5cded900282ca4ddda681fe148594a"
 REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256 = (
-    "adcadfc4c9112896a4f51b7c61d348417794305cd450fe1bbb0054a56c934750"
+    "636361176b16b3d85ccce2db3789d69a193a984619df3a76617f34a1dac7700a"
 )
 ACCEPTED_LINKED_SOURCE_SHA256 = (
     "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc"
 )
 REVIEWED_NR1A_LINKED_SOURCE_SHA256 = (
-    "8671760ee0571a33cfb5373be7991757a0eb55f99810e8f1d44561175f819e20"
+    "2c948fcca2c9194fce13e212e449739e5ecaa2b35256e7709b929b7822c85983"
+)
+# Foundation goldens (evidence/release) are the single source of truth for the
+# derived foundation digest; inline literals elsewhere must reference these.
+REVIEWED_NR1A_FOUNDATION_EVIDENCE_SHA256 = (
+    "d4d080f116e5967e2dd7c8cca02e471f754484ca529b48f22c2106ed8c819568"
+)
+REVIEWED_NR1A_FOUNDATION_RELEASE_SHA256 = (
+    "07a3a28ceb2ecfaed3f2ca334f60228bfbc8c500d67223aa9b4c0220e15e5005"
 )
 EXPECTED_RELEASE_RLIB_SHA256 = (
     "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38"
@@ -58,9 +66,7 @@ EVIDENCE_PROFILE_RECEIPT_SHA256 = (
 RELEASE_PROFILE_RECEIPT_SHA256 = (
     "5cc871f48193094c28b5df2691c63b2f3c6649686b3573243de5daed90e6e070"
 )
-EXPECTED_FOUNDATION_SHA256 = (
-    "7e7fec8b03eb918102a884e55543b519ca1e44efd4829b25b1bc18a6ccbae79e"
-)
+EXPECTED_FOUNDATION_SHA256 = REVIEWED_NR1A_FOUNDATION_EVIDENCE_SHA256
 FIXED_TOOLCHAIN_RECEIPT_SHA256 = (
     "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26"
 )
@@ -1239,7 +1245,7 @@ def linked_source_digest(repo: Path) -> str:
     workspace = repo / "native"
     # Cargo.lock is the workspace-root authoritative resolution (PR-B2 dedup);
     # src/sha256.rs moved to trustforge-native-sys. Keep in sync with
-    # foundation.rs linked_nf2_source_sha256() SOURCES (11 entries).
+    # foundation.rs linked_nf2_source_sha256() SOURCES (12 entries).
     sources = [
         ("Cargo.lock", workspace / "Cargo.lock"),
         ("Cargo.toml", root / "Cargo.toml"),
@@ -1252,6 +1258,7 @@ def linked_source_digest(repo: Path) -> str:
         ("src/linux/sealed.rs", root / "src/linux/sealed.rs"),
         ("src/main.rs", root / "src/main.rs"),
         ("src/manifest.rs", root / "src/manifest.rs"),
+        ("src/native_sys.rs", workspace / "trustforge-native-sys/src/lib.rs"),
     ]
     value = hashlib.sha256(b"trustforge.nf2.linked-source.v1\0")
     for name, path in sources:
@@ -1375,6 +1382,15 @@ def copy_reviewed_build_inputs(repo: Path, destination: Path) -> Path:
     native.mkdir(mode=0o700)
     for crate in ("nf2-zero-capability-broker", "nf3-one-shot-transaction"):
         shutil.copytree(repo / "native" / crate, native / crate)
+    # nf2/nf3 path-depend on trustforge-native-sys, and nf3 foundation.rs
+    # include_bytes!("../../Cargo.lock") resolves to the workspace-root lock;
+    # the workspace-root manifest is needed for cargo to discover the workspace.
+    # Copy these so the canonical view is a complete, self-resolving workspace.
+    shutil.copytree(
+        repo / "native" / "trustforge-native-sys", native / "trustforge-native-sys"
+    )
+    shutil.copy2(repo / "native" / "Cargo.toml", native / "Cargo.toml")
+    shutil.copy2(repo / "native" / "Cargo.lock", native / "Cargo.lock")
     for root, directories, files in os.walk(destination):
         paths = [Path(root), *(Path(root) / name for name in directories + files)]
         for path in paths:
@@ -1549,14 +1565,12 @@ def write_build_receipt(
         "v1\n"
         f"profile={profile}\n"
         f"executable_sha256={executable_sha256}\n"
-        "linked_nf2_source_sha256="
-        "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f\n"
+        f"linked_nf2_source_sha256={REVIEWED_NR1A_LINKED_SOURCE_SHA256}\n"
         f"linked_nf2_rlib_sha256={rlib_sha256}\n"
         f"profile_receipt_sha256={profile_receipt}\n"
         "toolchain_receipt_sha256="
         f"{FIXED_TOOLCHAIN_RECEIPT_SHA256}\n"
-        "source_tree_receipt_sha256="
-        "6a58c8f53b4ca8e5ea43e2b0c70a53e7ffe897e94a8824dbfce88fc42f3ede90\n"
+        f"source_tree_receipt_sha256={REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256}\n"
     ).encode()
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -1796,10 +1810,10 @@ def main() -> int:
             )
             expected_release_fields = {
                 "profile": "release",
-                "source": "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f",
+                "source": REVIEWED_NR1A_LINKED_SOURCE_SHA256,
                 "rlib": EXPECTED_RELEASE_RLIB_SHA256,
                 "profile_receipt": RELEASE_PROFILE_RECEIPT_SHA256,
-                "foundation": "4ae9975b5ecd55dc1d8902c0a74850a24f89dfa4c4a3ad0b59b49a95c14771c6",
+                "foundation": REVIEWED_NR1A_FOUNDATION_RELEASE_SHA256,
             }
             tokens = release_profile_line.split()
             if len(tokens) != 6 or tokens[0] != "BOUND_PROFILE":

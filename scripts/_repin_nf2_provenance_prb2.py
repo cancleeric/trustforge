@@ -2,7 +2,7 @@
 """Recompute NF2 provenance framing for PR-B2 (workspace + native-sys dedup).
 
 Replicates the exact byte framing of foundation.rs:
-  - linked_source  = linked-source.v1 framing over 11 SOURCES
+  - linked_source  = linked-source.v1 framing over 12 SOURCES
   - source_tree    = source-tree-receipt.v1 framing over (git_oid, linked_source)
 """
 import hashlib
@@ -26,9 +26,10 @@ SOURCES = [
     ("src/linux/sealed.rs", NF2 / "src/linux/sealed.rs"),
     ("src/main.rs", NF2 / "src/main.rs"),
     ("src/manifest.rs", NF2 / "src/manifest.rs"),
+    ("src/native_sys.rs", NATIVE / "trustforge-native-sys/src/lib.rs"),
 ]
 
-GIT_SUBTREE_OID = "ce3e20c5875e5fdc59e60472decbc256b9649484"
+GIT_SUBTREE_OID = "c43e08d8ce5cded900282ca4ddda681fe148594a"
 
 # Fixed foundation anchors (not changed by PR-B2 dedup).
 DOMAIN = b"trustforge.native-foundation-binding.v1\0"

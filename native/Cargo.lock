@@ -3,10 +3,6 @@
 version = 4
 
 [[package]]
-name = "trustforge-native-foundation"
-version = "0.1.0"
-
-[[package]]
 name = "trustforge-native-sys"
 version = "0.1.0"
 

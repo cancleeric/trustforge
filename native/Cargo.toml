@@ -1,11 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "hermetic-package",
     "nf2-zero-capability-broker",
     "nf3-one-shot-transaction",
     "trustforge-native-sys",
 ]
+# hermetic-package is excluded: it is an NF1 leaf node with no workspace
+# dependents and must build STANDALONE so its own [profile.release]
+# (lto=true, opt-level="z") takes effect. As a workspace member its per-crate
+# profile was silently overridden by the root [profile.release]
+# (lto=false, opt-level=3).
+exclude = ["hermetic-package"]
 
 # evidence profile (nf3 adversarial clippy/check via --profile evidence) must
 # be at workspace root — member [profile.*] is ignored under a workspace.
