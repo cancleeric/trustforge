@@ -70,7 +70,7 @@ def test_matrix_single_offline(coin, qtype, monkeypatch):
     """
     monkeypatch.setattr("trustforge.pipeline.collect", _fake_collect(coin))
 
-    report, evidence, log = run(coin, f"分析 {coin}", qtype, offline=True)
+    report, evidence, log = run(coin, f"分析 {coin}", qtype, offline=True, run_scope_id=f"test-stress-matrix-{coin}")
 
     # 交付件 1：report 有內容
     assert report.market_judgment, f"[{coin}/{qtype}] market_judgment 不可空"
@@ -109,7 +109,7 @@ def test_matrix_comparison_offline(coin_a, coin_b, monkeypatch):
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
     report_a, ev_a, report_b, ev_b, log = run_comparison(
-        coin_a, coin_b, f"比較 {coin_a} 與 {coin_b}", offline=True
+        coin_a, coin_b, f"比較 {coin_a} 與 {coin_b}", offline=True, run_scope_id=f"test-stress-cmp-{coin_a}-{coin_b}"
     )
 
     # 各幣 report
@@ -181,7 +181,7 @@ def test_source_failure_reflected_in_limits(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect_with_fail)
 
-    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-stress-btc")
 
     # report.limits 應含失敗來源的品牌顯示名，而非原始裸 slug
     limits_text = " ".join(report.limits)
@@ -213,7 +213,7 @@ def test_pipeline_does_not_crash_with_failing_source(monkeypatch):
     monkeypatch.setattr("trustforge.pipeline.collect", patched_collect)
 
     # 不應拋任何未捕獲例外
-    report, evidence, log = run("BTC", "分析 BTC 降級測試", QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run("BTC", "分析 BTC 降級測試", QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-stress-degrade")
 
     assert report is not None, "report 不可為 None"
     assert report.market_judgment, "market_judgment 不可空"
@@ -238,7 +238,8 @@ def test_bedrock_offline_fallback_does_not_crash(monkeypatch):
     monkeypatch.setattr("trustforge.pipeline.collect", _fake_collect("ETH"))
 
     report, evidence, log = run(
-        "ETH", "假設 ETH 短期將突破歷史高點", QuestionType.HYPOTHESIS, offline=True
+        "ETH", "假設 ETH 短期將突破歷史高點", QuestionType.HYPOTHESIS, offline=True,
+        run_scope_id="test-stress-eth-hyp",
     )
 
     assert report is not None, "Bedrock offline 時 report 不可為 None"
@@ -258,7 +259,8 @@ def test_bedrock_offline_narrative_has_content(monkeypatch):
     monkeypatch.setattr("trustforge.pipeline.collect", _fake_collect("XRP"))
 
     report, evidence, log = run(
-        "XRP", "分析 XRP 近兩週市場狀況", QuestionType.MULTI_SOURCE, offline=True
+        "XRP", "分析 XRP 近兩週市場狀況", QuestionType.MULTI_SOURCE, offline=True,
+        run_scope_id="test-stress-xrp",
     )
 
     # market_judgment 非空且非僅空白
@@ -272,7 +274,7 @@ def test_bedrock_offline_narrative_has_content(monkeypatch):
 def test_existing_multi_source_unaffected(monkeypatch):
     """確保新改動不破壞既有 multi_source 題型行為。"""
     monkeypatch.setattr("trustforge.pipeline.collect", _fake_collect("BTC"))
-    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-stress-btc")
     assert report.coin == "BTC"
     assert evidence
 
@@ -280,7 +282,7 @@ def test_existing_multi_source_unaffected(monkeypatch):
 def test_existing_hypothesis_unaffected(monkeypatch):
     """確保新改動不破壞既有 hypothesis 題型行為。"""
     monkeypatch.setattr("trustforge.pipeline.collect", _fake_collect("SOL"))
-    report, evidence, log = run("SOL", "SOL 將上漲", QuestionType.HYPOTHESIS, offline=True)
+    report, evidence, log = run("SOL", "SOL 將上漲", QuestionType.HYPOTHESIS, offline=True, run_scope_id="test-stress-sol")
     assert report.coin == "SOL"
     assert "假設" in report.market_judgment
 
@@ -290,7 +292,7 @@ def test_existing_comparison_unaffected(monkeypatch):
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin or "BTC")
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
-    ra, ea, rb, eb, log = run_comparison("BTC", "ETH", "比較 BTC ETH", offline=True)
+    ra, ea, rb, eb, log = run_comparison("BTC", "ETH", "比較 BTC ETH", offline=True, run_scope_id="test-stress-btceth")
     assert ra.coin == "BTC"
     assert rb.coin == "ETH"
     assert ea and eb
@@ -315,7 +317,7 @@ def test_pipeline_limits_dedup_on_repeated_failure(monkeypatch):
         return _make_docs(coin or "BTC")
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect_with_dup_fail)
-    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-stress-btc")
 
     dup_display = source_display_name("dup-src")
     other_display = source_display_name("other-src")

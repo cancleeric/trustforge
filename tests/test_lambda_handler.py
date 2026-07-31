@@ -205,7 +205,7 @@ def test_lambda_analyze_json_success_unaffected():
 def _authored_single(coin="BTC", query="lambda author leak test"):
     """真的跑一次 `web.run()`，尾端多附一筆帶 `author` 的 `Evidence`，
     模擬「連接器真的抓到來源平台公開 username」的情境。"""
-    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-lambda-authored")
     authored_ev = Evidence(
         source="reddit-bitcoin",
         fetched_at="2026-07-06T00:00:00Z",

@@ -558,7 +558,7 @@ def test_stance_pairs_mechanism_triggers_divergence_with_injected_synthetic_clai
     report, evidence = run_agent_pipeline(
         query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=ExecutionLog(now_fn=lambda: 1000.0),
-        now_fn=lambda: 1000.0,
+        now_fn=lambda: 1000.0, run_scope_id="test-tier2-pipeline",
     )
 
     sig = report.cross_source_signal
@@ -621,6 +621,7 @@ def test_build_report_stance_pairs_survive_aggregate_truncation_overflow():
         now_fn=lambda: 1000.0,
         stance_fn=_contradiction_stance_fn,
         scored=scored,  # 修法核心：傳完整未截斷全集，不是 brief 截斷後的結果
+        run_scope_id="test-tier2-overflow",
     )
 
     sig = report.cross_source_signal
@@ -652,6 +653,7 @@ def test_build_report_without_scored_falls_back_to_brief_supporting_contrarian()
         now_fn=lambda: 1000.0,
         stance_fn=_contradiction_stance_fn,
         # 不傳 scored → 應退回 brief.supporting + brief.contrarian
+        run_scope_id="test-tier2-fallback",
     )
 
     sig = report.cross_source_signal
@@ -673,6 +675,7 @@ def test_eth_multi_source_evidence_facts_count_pinned():
         QuestionType.MULTI_SOURCE,
         offline=True,
         data_dir=OFFICIAL_OHLCV_DIR,
+        run_scope_id="test-tier2-eth-facts",
     )
 
     assert len(report.facts) == 8
@@ -721,6 +724,7 @@ def test_eth_analysis_stable_across_query_wording(query: str):
         QuestionType.MULTI_SOURCE,
         offline=True,
         data_dir=OFFICIAL_OHLCV_DIR,
+        run_scope_id=f"test-tier2-stable-{query}",
     )
     assert len(report.facts) == 8, f"query={query!r} facts 數應穩定為 8，實得 {len(report.facts)}"
     assert _has_official_full_history_fact(report.facts)
@@ -755,7 +759,8 @@ def test_other_coins_no_false_divergence_after_coin_filter_fix(coin: str, query:
     真實分歧樣本／stance_cache 矛盾配對，修正後仍應維持 cross_source_signal
     為 None（或至少不含 stance_pairs），不可因排序調整而意外浮現假訊號。
     """
-    report, evidence, log = run(coin, query, QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run(coin, query, QuestionType.MULTI_SOURCE, offline=True,
+                                run_scope_id=f"test-tier2-nofalse-{coin}-{query}")
     sig = report.cross_source_signal
     if sig is not None:
         assert "stance_pairs" not in sig or not sig["stance_pairs"], (

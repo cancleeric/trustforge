@@ -215,6 +215,7 @@ def test_run_default_no_new_env_behaves_byte_identical(monkeypatch):
 
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, data_mode="live", llm_mode="off",
+        run_scope_id="test-budget-guard-run",
     )
     assert len(captured) == 1
     assert captured[0] == {"offline": True, "stance_offline": True}
@@ -242,6 +243,7 @@ def test_run_daily_cap_hit_forces_bedrock_mode_to_full_offline_abstain(monkeypat
 
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, data_mode="live", llm_mode="bedrock",
+        run_scope_id="test-budget-guard-bedrock",
     )
     assert captured[0] == {"offline": True, "stance_offline": True}
     assert any("今日 Bedrock 預算已達上限" in s for s in report.limits)
@@ -267,6 +269,7 @@ def test_run_daily_cap_hit_forces_online_stance_abstain_in_real_off_mode(monkeyp
 
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, data_mode="live", llm_mode="off",
+        run_scope_id="test-budget-guard-run",
     )
     assert captured[0] == {"offline": True, "stance_offline": True}
     assert any("今日 Bedrock 預算已達上限" in s for s in report.limits)
@@ -292,6 +295,7 @@ def test_run_daily_cap_not_hit_but_switch_off_stays_fully_offline_no_note(monkey
 
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, data_mode="live", llm_mode="off",
+        run_scope_id="test-budget-guard-run",
     )
     assert captured[0] == {"offline": True, "stance_offline": True}
     assert not any("線上深度分析" in s for s in report.limits)
@@ -320,6 +324,7 @@ def test_run_online_stance_activates_when_switch_on_and_cap_not_exceeded(monkeyp
 
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, data_mode="live", llm_mode="off",
+        run_scope_id="test-budget-guard-run",
     )
     # 敘事仍離線（$0），但 stance 判斷改成非離線（可能打真 Bedrock）——
     # 本測試資料無候選配對，不會真的觸發呼叫，只驗證「旗標決策」正確。
@@ -347,7 +352,7 @@ def test_run_force_stance_offline_degrades_even_when_switch_on_and_cap_not_excee
 
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, data_mode="live", llm_mode="off",
-        force_stance_offline=True,
+        force_stance_offline=True, run_scope_id="test-budget-guard-force-offline",
     )
     assert captured[0] == {"offline": True, "stance_offline": True}
     assert any("本 IP 線上分析請求過於頻繁" in s for s in report.limits)
@@ -375,7 +380,7 @@ def test_run_comparison_propagates_force_stance_offline_to_both_coins(monkeypatc
 
     pl.run_comparison(
         "BTC", "ETH", "比較 BTC 與 ETH", data_mode="live", llm_mode="off",
-        force_stance_offline=True,
+        force_stance_offline=True, run_scope_id="test-budget-guard-cmp",
     )
     assert len(captured) == 2
     assert all(c == {"offline": True, "stance_offline": True} for c in captured)

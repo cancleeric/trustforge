@@ -26,6 +26,7 @@ def _hypothesis_report(supporting, contrarian, qtype=QuestionType.HYPOTHESIS):
     scored = supporting + contrarian
     return build_report(
         query="BTC 短期會盤整嗎", coin="BTC", qtype=qtype, brief=brief, scored=scored,
+        run_scope_id="test-insights-d15",
     )[0]
 
 
@@ -62,7 +63,7 @@ def test_d15_ledger_indices_bind_evidence():
     report, evidence = build_report(
         query="BTC 短期會盤整嗎", coin="BTC", qtype=QuestionType.HYPOTHESIS,
         brief=TrustedBrief(query="q", supporting=sup, contrarian=con, confidence=0.7),
-        scored=sup + con,
+        scored=sup + con, run_scope_id="test-insights-d15-idx",
     )
     pro_i = report.hypothesis_ledger["pro"][0]
     con_i = report.hypothesis_ledger["con"][0]

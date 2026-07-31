@@ -63,7 +63,7 @@ def test_pipeline_consumes_runtime_policies(monkeypatch):
             )
         ]
 
-    def fake_run_agent_pipeline(query, coin, qtype, docs, client=None, log=None):
+    def fake_run_agent_pipeline(query, coin, qtype, docs, client=None, log=None, run_scope_id=""):
         assert log is not None
         report = Report(
             coin=coin,
@@ -152,7 +152,7 @@ def test_baseline_report_policy_does_not_truncate_existing_output(monkeypatch):
             )
         ]
 
-    def fake_run_agent_pipeline(query, coin, qtype, docs, client=None, log=None):
+    def fake_run_agent_pipeline(query, coin, qtype, docs, client=None, log=None, run_scope_id=""):
         report = Report(
             coin=coin,
             question_type=qtype.value,

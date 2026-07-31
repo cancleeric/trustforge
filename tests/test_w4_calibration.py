@@ -312,6 +312,7 @@ def _run_report(brief, qtype=QuestionType.MULTI_SOURCE, query="分析 BTC", now:
         client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: now),
         now_fn=lambda: now,
+        run_scope_id="test-w4-calibration",
     )
 
 
@@ -721,6 +722,7 @@ def test_e2e_abstain_with_real_cross_source_signal_is_neutralized():
         client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1_000_000.0),
         now_fn=lambda: 1_000_000.0,
+        run_scope_id="test-w4-cross-abstain",
     )
     assert report.decision_state == "abstain"
     # 修後：abstain 態的 Report 必須把跨源訊號中和成 None，即使底層演算法
@@ -952,6 +954,7 @@ def test_e2e_high_trust_other_coin_sentiment_source_does_not_flip_cross_source_s
         log=ExecutionLog(now_fn=lambda: 1_000_000.0),
         now_fn=lambda: 1_000_000.0,
         scored=scored,
+        run_scope_id="test-w4-btc-consensus",
     )
     assert report.decision_state == "normal"
     assert report.cross_source_signal is not None, "BTC-only 跨源訊號應仍正常運作，不應被誤中和成 None"
@@ -1038,6 +1041,7 @@ def test_e2e_root_fix_all_report_fields_immune_to_mixed_trust_other_coin_claims(
             log=ExecutionLog(now_fn=lambda: 1_000_000.0),
             now_fn=lambda: 1_000_000.0,
             scored=scored,
+            run_scope_id="test-w4-root-immune",
         )
         return scored, brief, report
 

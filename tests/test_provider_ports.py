@@ -623,6 +623,7 @@ class TestPipelineProviderRuntimePath:
             QuestionType.MULTI_SOURCE,
             data_mode="sample",
             llm_mode="bedrock",
+            run_scope_id="test-provider-ports-pipeline",
         )
 
         assert seen["offline"] is False
@@ -664,7 +665,7 @@ class TestPipelineProviderRuntimePath:
                 )
             ]
 
-        def fake_run_agent_pipeline(query, coin, qtype, docs, *, client, log):
+        def fake_run_agent_pipeline(query, coin, qtype, docs, *, client, log, run_scope_id=""):
             seen["client"] = client
             return (
                 Report(

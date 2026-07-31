@@ -235,6 +235,7 @@ def test_aggregate_trust_by_kind_adds_zero_bedrock_calls():
     report, evidence = run_agent_pipeline(
         "分析 BTC", "BTC", QuestionType.MULTI_SOURCE, docs,
         client=BedrockClient(offline=True), log=log_without,
+        run_scope_id="test-multidim-nocalls",
     )
     calls_without = len([e for e in log_without.events if e.get("tool") == "bedrock.complete"])
 
@@ -253,6 +254,7 @@ def test_aggregate_trust_by_kind_does_not_change_total_trust_score():
     report, evidence = run_agent_pipeline(
         "分析 BTC", "BTC", QuestionType.MULTI_SOURCE, docs,
         client=BedrockClient(offline=True), log=ExecutionLog(now_fn=lambda: 1.0),
+        run_scope_id="test-multidim-trust",
     )
     confidence_before = report.confidence
     calibrated_before = report.calibrated_confidence
