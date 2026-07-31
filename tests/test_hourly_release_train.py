@@ -814,7 +814,7 @@ def test_formal_run_blocked_when_handler_present_without_ready_flag(tmp_path, mo
     assert train.formal_run_blocked(main_tree, "a" * 40) is True
 
 
-def test_formal_run_unblocked_when_ready_flag_authorizes_exact_sha(tmp_path, monkeypatch):
+def test_formal_run_unblocked_when_ready_flag_exists(tmp_path, monkeypatch):
     main_tree = tmp_path / "main"
     web_py = main_tree / "src" / "trustforge" / "web.py"
     web_py.parent.mkdir(parents=True)
@@ -823,13 +823,13 @@ def test_formal_run_unblocked_when_ready_flag_authorizes_exact_sha(tmp_path, mon
         encoding="utf-8",
     )
     flag = tmp_path / "formal-run-prod-ready"
-    flag.write_text("b" * 40, encoding="utf-8")
+    flag.write_text("dynamodb=trustforge-formal-run, ssm=3secrets, env=drop-in", encoding="utf-8")
     monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", flag)
 
-    assert train.formal_run_blocked(main_tree, "b" * 40) is False
+    assert train.formal_run_blocked(main_tree, "any-main-sha") is False
 
 
-def test_formal_run_blocked_when_flag_sha_mismatches(tmp_path, monkeypatch):
+def test_formal_run_unblocked_when_flag_exists_regardless_of_main_sha(tmp_path, monkeypatch):
     main_tree = tmp_path / "main"
     web_py = main_tree / "src" / "trustforge" / "web.py"
     web_py.parent.mkdir(parents=True)
@@ -838,10 +838,10 @@ def test_formal_run_blocked_when_flag_sha_mismatches(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     flag = tmp_path / "formal-run-prod-ready"
-    flag.write_text("stale-old-sha", encoding="utf-8")
+    flag.write_text("ready", encoding="utf-8")
     monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", flag)
 
-    assert train.formal_run_blocked(main_tree, "c" * 40) is True
+    assert train.formal_run_blocked(main_tree, "different-sha-xyz") is False
 
 
 def test_formal_run_unblocked_when_handler_absent(tmp_path, monkeypatch):
