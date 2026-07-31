@@ -396,13 +396,15 @@ class ComparisonReport:
             L.append(f"- 信心：{dim.confidence:.0%}")
             a_refs_display = [
                 f"[{self.supporting_evidence_a[idx].source}:#{idx}]"
-                for idx in dim.a_evidence_refs
                 if idx < len(self.supporting_evidence_a)
+                else f"[?:#{idx}]"
+                for idx in dim.a_evidence_refs
             ]
             b_refs_display = [
                 f"[{self.supporting_evidence_b[idx].source}:#{idx}]"
-                for idx in dim.b_evidence_refs
                 if idx < len(self.supporting_evidence_b)
+                else f"[?:#{idx}]"
+                for idx in dim.b_evidence_refs
             ]
             L.append(f"- A 幣證據索引：{', '.join(a_refs_display) if a_refs_display else '無'}")
             L.append(f"- B 幣證據索引：{', '.join(b_refs_display) if b_refs_display else '無'}")
@@ -410,13 +412,13 @@ class ComparisonReport:
             L.append("")
 
         if self.limits:
-            L.append("## 已知限制")
+            L.append("### 已知限制")
             for item in self.limits:
                 L.append(f"- {item}")
             L.append("")
 
         if self.could_flip:
-            L.append("## 可能推翻條件")
+            L.append("### 可能推翻條件")
             for item in self.could_flip:
                 L.append(f"- {item}")
             L.append("")
@@ -426,18 +428,23 @@ class ComparisonReport:
         L.append("## 合併證據清單\n")
         L.append("| # | 幣種 | source | fetched_at | trust | content_reference |")
         L.append("|---|------|--------|-----------|-------|-------------------|")
+
+        def _esc(text: str) -> str:
+            """Escape pipe characters for markdown table cells."""
+            return text.replace("|", "\\|")
+
         for i, ev in enumerate(self.supporting_evidence_a):
-            ref = (ev.content_reference or "")[:60]
+            ref = _esc((ev.content_reference or "")[:60])
             L.append(
-                f"| E{i} | {self.coin_a} | {ev.source} "
-                f"| {ev.fetched_at or ''} | {ev.trust:.2f} | {ref} |"
+                f"| E{i} | {self.coin_a} | {_esc(ev.source)} "
+                f"| {_esc(ev.fetched_at or '')} | {ev.trust:.2f} | {ref} |"
             )
         offset = len(self.supporting_evidence_a)
         for i, ev in enumerate(self.supporting_evidence_b):
-            ref = (ev.content_reference or "")[:60]
+            ref = _esc((ev.content_reference or "")[:60])
             L.append(
-                f"| E{offset + i} | {self.coin_b} | {ev.source} "
-                f"| {ev.fetched_at or ''} | {ev.trust:.2f} | {ref} |"
+                f"| E{offset + i} | {self.coin_b} | {_esc(ev.source)} "
+                f"| {_esc(ev.fetched_at or '')} | {ev.trust:.2f} | {ref} |"
             )
         L.append("")
 

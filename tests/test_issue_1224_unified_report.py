@@ -156,25 +156,25 @@ class TestAC2_IntegratedSynthesis:
     def test_limits_shown_when_present(self, comparison_report):
         comparison_report.comparison.limits = ["測試限制一", "測試限制二"]
         md = comparison_report.comparison.to_markdown()
-        assert "## 已知限制" in md
+        assert "### 已知限制" in md
         assert "測試限制一" in md
         assert "測試限制二" in md
 
     def test_limits_hidden_when_empty(self, comparison_report):
         comparison_report.comparison.limits = []
         md = comparison_report.comparison.to_markdown()
-        assert "## 已知限制" not in md
+        assert "### 已知限制" not in md
 
     def test_could_flip_shown_when_present(self, comparison_report):
         comparison_report.comparison.could_flip = ["若 ETH ETF 資金反轉"]
         md = comparison_report.comparison.to_markdown()
-        assert "## 可能推翻條件" in md
+        assert "### 可能推翻條件" in md
         assert "若 ETH ETF 資金反轉" in md
 
     def test_could_flip_hidden_when_empty(self, comparison_report):
         comparison_report.comparison.could_flip = []
         md = comparison_report.comparison.to_markdown()
-        assert "## 可能推翻條件" not in md
+        assert "### 可能推翻條件" not in md
 
 
 # ---------------------------------------------------------------------------

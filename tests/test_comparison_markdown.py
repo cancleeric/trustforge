@@ -159,26 +159,26 @@ class TestComparisonToMarkdown:
 
         注意：內嵌的 supporting Report.to_markdown() 可能自帶「已知限制」文字，
         那是各幣報告的資訊完整度說明，非 ComparisonReport 層級的限制章節。
-        本測試驗證的是 ComparisonReport-level 的 `## 已知限制` 不存在。
+        本測試驗證的是 ComparisonReport-level 的 `### 已知限制` 不存在。
         """
         btc_eth_comparison.limits = []
         btc_eth_comparison.could_flip = []
         md = btc_eth_comparison.to_markdown()
-        # ComparisonReport 層級的已知限制章節開頭是 `## 已知限制`
-        assert "## 已知限制" not in md
-        assert "## 可能推翻條件" not in md
+        # ComparisonReport 層級的已知限制章節開頭是 `### 已知限制`（#1224: h3）
+        assert "### 已知限制" not in md
+        assert "### 可能推翻條件" not in md
 
     def test_to_markdown_empty_limits_no_section(self, btc_eth_comparison):
         """空 limits 清單不會產生 ComparisonReport-level 的章節。"""
         btc_eth_comparison.limits = []
         md = btc_eth_comparison.to_markdown()
-        assert "## 已知限制" not in md
+        assert "### 已知限制" not in md
 
     def test_to_markdown_empty_could_flip_no_section(self, btc_eth_comparison):
         """空 could_flip 清單不會產生 ComparisonReport-level 的章節。"""
         btc_eth_comparison.could_flip = []
         md = btc_eth_comparison.to_markdown()
-        assert "## 可能推翻條件" not in md
+        assert "### 可能推翻條件" not in md
 
     def test_to_markdown_has_confidence_section(self, btc_eth_comparison):
         """整體比較信心出現在綜合結論區。"""
