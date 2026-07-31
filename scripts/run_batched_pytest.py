@@ -12,13 +12,56 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
+_GRACE_SECONDS = 10
+
 
 def _test_files(root: Path) -> list[Path]:
     return sorted((root / "tests").glob("test_*.py"))
+
+
+def _run_isolated(command: list[str], *, cwd: Path, env: dict[str, str]) -> int:
+    """Run one child in its own session, but still die when the hook is cancelled.
+
+    The child needs its own session so a test that signals its own process group
+    cannot take down this runner or the git hook driving it. That isolation
+    otherwise makes Ctrl-C orphan a running pytest, so forward the interrupt to
+    the child's group by hand and escalate if it does not leave.
+    """
+    child = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
+    received: int | None = None
+
+    def _forward(signum: int, _frame: object) -> None:
+        nonlocal received
+        received = signum
+
+    previous_int = signal.signal(signal.SIGINT, _forward)
+    previous_term = signal.signal(signal.SIGTERM, _forward)
+    try:
+        while True:
+            try:
+                return child.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                if received is None:
+                    continue
+                try:
+                    group = os.getpgid(child.pid)
+                    os.killpg(group, signal.SIGTERM)
+                    try:
+                        child.wait(timeout=_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(group, signal.SIGKILL)
+                        child.wait()
+                except ProcessLookupError:
+                    child.wait()
+                return 128 + received
+    finally:
+        signal.signal(signal.SIGINT, previous_int)
+        signal.signal(signal.SIGTERM, previous_term)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,32 +126,31 @@ def main(argv: list[str] | None = None) -> int:
             "--disable-warnings",
         ]
         command.extend(str(path) for path in batch)
-        result = subprocess.run(command, cwd=root, env=environment, start_new_session=True)
-        if result.returncode == 5:
+        returncode = _run_isolated(command, cwd=root, env=environment)
+        if returncode == 5:
             print(
                 f"[batched-pytest] batch {batch_number} collected no runnable tests; continuing",
                 flush=True,
             )
-        elif result.returncode != 0:
+        elif returncode != 0:
             print(
                 f"[batched-pytest] FAILED batch {batch_number} "
-                f"(exit {result.returncode})",
+                f"(exit {returncode})",
                 file=sys.stderr,
             )
-            return result.returncode
+            return returncode
 
-    combine = subprocess.run(
+    combined = _run_isolated(
         [sys.executable, "-m", "coverage", "combine"],
         cwd=root,
         env=environment,
-        start_new_session=True,
     )
-    if combine.returncode != 0:
+    if combined != 0:
         print(
-            f"[batched-pytest] FAILED coverage combine (exit {combine.returncode})",
+            f"[batched-pytest] FAILED coverage combine (exit {combined})",
             file=sys.stderr,
         )
-        return combine.returncode
+        return combined
     return 0
 
 
