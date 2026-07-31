@@ -169,6 +169,10 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     # 月額度有限（10k/月量級），900 秒（15 分鐘）一輪保守使用額度——遠低於月額度，
     # 同時現價鮮度足以參與交叉佐證。
     "coinmarketcap-price": 15 * 60,  # price_live：15 分鐘
+    # Etherscan（#1168，key-based V2 query-param key）：追蹤已知鯨魚地址的鏈上大額
+    # ETH 轉帳，沿用 whale_onchain kind。同 whale-alert 的 5 分鐘一輪（鯨魚信號時效
+    # 性強；Etherscan 5/s 限速下 5 分鐘一輪綽綽有餘）。只覆 ETH。
+    "etherscan-whale": 5 * 60,  # whale_onchain：5 分鐘
 }
 DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS = 15 * 60  # 未知來源名的保守預設
 
