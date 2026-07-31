@@ -26,15 +26,18 @@ from pathlib import Path
 
 BLOCKED = 77
 ACCEPTED_NF2_MERGE = "7c26416581a8437a6d00d7941357826b2650c474"
-ACCEPTED_NF2_TREE = "ce3e20c5875e5fdc59e60472decbc256b9649484"
+ACCEPTED_NF2_TREE = "cb56a4bef9708da3f9f1468aff11734f2f50adcd"
 ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
-    "574440bd581c9d54d9e6c0321d4899d8f113eb7551ae637b8f3007774a48cd90"
+    "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0"
 )
 REVIEWED_NR1A_NF2_TREE = "b81289ffd5bb98521a79c80c18f47fc206e93ccf"
 REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256 = (
     "02fe8e1b780cb7f844b37adf4167f41c3a1b06bbd50c8ab8f78e22bfcd828719"
 )
 ACCEPTED_LINKED_SOURCE_SHA256 = (
+    "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc"
+)
+REVIEWED_NR1A_LINKED_SOURCE_SHA256 = (
     "bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9"
 )
 EXPECTED_RELEASE_RLIB_SHA256 = (
@@ -1314,7 +1317,7 @@ def verify_evidence_profile(repo: Path) -> None:
     ):
         raise RuntimeError("fixed toolchain receipt constant mismatch")
     source_sha256 = linked_source_digest(repo)
-    if source_sha256 != ACCEPTED_LINKED_SOURCE_SHA256:
+    if source_sha256 != REVIEWED_NR1A_LINKED_SOURCE_SHA256:
         raise RuntimeError("linked source receipt mismatch")
     if (
         source_tree_receipt(REVIEWED_NR1A_NF2_TREE, source_sha256)
@@ -1640,7 +1643,7 @@ def main() -> int:
     if reviewed_nf2_tree != REVIEWED_NR1A_NF2_TREE:
         block("reviewed NR1a-A NF2 candidate tree mismatch")
     source_sha256 = linked_source_digest(repo)
-    if source_sha256 != ACCEPTED_LINKED_SOURCE_SHA256:
+    if source_sha256 != REVIEWED_NR1A_LINKED_SOURCE_SHA256:
         block("accepted NF2 canonical linked source mismatch")
     if (
         source_tree_receipt(reviewed_nf2_tree, source_sha256)
