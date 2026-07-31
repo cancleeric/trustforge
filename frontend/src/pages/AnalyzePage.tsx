@@ -13,6 +13,7 @@ import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
 import { useHermesI18n } from '../hermes/hermesI18n'
 import MultiAngleOverview from '../hermes/MultiAngleOverview'
+import { ANALYSIS_FORMAL_WIP } from '../lib/analysisWip'
 
 function defaultQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
@@ -333,6 +334,14 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
         writeStoredJobId(storageKey, res.data.job_id)
         poll(res.data.job_id, false, idempotencyKey)
       })
+    }
+    if (ANALYSIS_FORMAL_WIP) {
+      setLoading(false)
+      setError({ code: 'analysis_wip', message: '分析功能預覽建置中，敬請期待。' })
+      return () => {
+        controller.abort()
+        timers.forEach(window.clearTimeout)
+      }
     }
     submit(0)
     return () => {
