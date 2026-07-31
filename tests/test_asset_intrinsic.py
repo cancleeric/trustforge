@@ -526,7 +526,7 @@ def test_load_rejects_non_array_or_non_object(tmp_path: Path) -> None:
 
 # ---- PEP & Builder tests (issue #873) ----
 
-PEP_ETH_DIR = Path(__file__).parents[1] / "data" / "asset_intrinsic_evidence" / "pep" / "asset:eth"
+PEP_ETH_DIR = Path(__file__).parents[1] / "data" / "asset_intrinsic_evidence" / "pep" / "asset_eth"
 BUILDER_SCRIPT = Path(__file__).parents[1] / "scripts" / "build_issuance_supply_records.py"
 
 
@@ -567,7 +567,7 @@ def test_pep_manifest_schema_is_versioned_and_reject_unknown_protocol_family(tmp
 
 def test_builder_rejects_tampered_evidence_and_wrong_hash(tmp_path: Path) -> None:
     manifest = json.loads((PEP_ETH_DIR / "manifest.json").read_text())
-    pep_dir = tmp_path / "asset:eth"
+    pep_dir = tmp_path / "asset_eth"
     pep_dir.mkdir()
     (pep_dir / "evidence").mkdir()
     (pep_dir / "evidence" / "eth-issuance-pos.txt").write_text("tampered content")
