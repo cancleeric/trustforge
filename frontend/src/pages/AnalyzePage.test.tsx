@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, useNavigate } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useState } from 'react'
+import { MemoryRouter, useNavigate, useSearchParams } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BridgeHologramProvider } from '../components/BridgeHologramContext'
 import { getAnalysisJob, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeData } from '../lib/types'
@@ -147,6 +148,9 @@ describe('AnalyzePage manual execution', () => {
     expect(registerAnalysisQuestion).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+    // #940：正式送出現在先經確認對話框，確認後才真正註冊。
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
   })
 
@@ -154,7 +158,10 @@ describe('AnalyzePage manual execution', () => {
     renderAnalyze('/analyze')
     const submit = screen.getByRole('button', { name: /立即重新分析/ })
     fireEvent.click(submit)
+    // #940：確認對話框現在是送出的閘門；連點第二下 composer 只會重設同一個
+    // pending intent，不會送出第二次。
     fireEvent.click(submit)
+    fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
 
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
     expect(submit).toBeDisabled()
@@ -256,6 +263,7 @@ describe('AnalyzePage manual execution', () => {
     await waitFor(() => expect(submit).not.toBeDisabled())
 
     fireEvent.click(submit)
+    fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
     const first = vi.mocked(registerAnalysisQuestion).mock.calls[0]
     const second = vi.mocked(registerAnalysisQuestion).mock.calls[1]
@@ -298,6 +306,7 @@ describe('AnalyzePage manual execution', () => {
       const firstView = renderAnalyze(path)
       await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
       fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+      fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
       await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
       const freshCall = vi.mocked(registerAnalysisQuestion).mock.calls[1]
       expect(freshCall[4]).toBe(true)
@@ -604,6 +613,12 @@ describe('AnalyzePage manual execution', () => {
       </HermesI18nProvider>,
     )
 
+    // #940: the forced resubmit is now gated behind the same confirm dialog as
+    // every formal run. The signal still forces a real new POST, but only after
+    // the user confirms — a byte-identical URL no longer silently fires.
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: /確認執行|Confirm run/ }))
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
   })
 
@@ -649,5 +664,261 @@ describe('AnalyzePage manual execution', () => {
     )
     await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
     expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+  })
+
+  describe('#940 formal-run confirmation + reconnect/partial UI', () => {
+    beforeEach(() => {
+      // N7 switches the locale cookie to 'en' and never restores it; isolate
+      // these tests back to the default zh-TW so localized button/banner copy
+      // is deterministic regardless of where this block runs in the suite.
+      document.cookie = 'trustforge_hermes_locale=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'
+    })
+
+    afterEach(() => {
+      // `vi.clearAllMocks()` (outer beforeEach) resets call history but NOT a
+      // mock implementation set via mockImplementation — so a test that overrides
+      // getAnalysisJob to return a *completed* job (the partial-result test)
+      // would leak that shape into a later test and trigger an unrelated render
+      // crash. Restore the factory defaults after every test in this block.
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null },
+      })
+      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: formalReceipt() })
+    })
+
+    it('cancel on the pre-submit confirmation dialog does not submit', async () => {
+      renderAnalyze('/analyze')
+      fireEvent.change(screen.getByLabelText('問題'), { target: { value: '取消不送' } })
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+      // dialog opens; the formal run is held pending, no registration yet.
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('button', { name: '取消' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+    })
+
+    it('confirm on the pre-submit dialog submits the formal run exactly once', async () => {
+      renderAnalyze('/analyze')
+      fireEvent.change(screen.getByLabelText('問題'), { target: { value: '確認送出' } })
+      fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+      fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
+
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+      // a confirmed run must reflect the committed question, not a stale one.
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[0][2]).toBe('確認送出')
+    })
+
+    it('Esc dismisses the confirmation dialog without submitting', async () => {
+      renderAnalyze('/analyze')
+      fireEvent.change(screen.getByLabelText('問題'), { target: { value: 'Esc 取消' } })
+      fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+    })
+
+    it('renders a reconnecting banner when reattaching to an in-progress URL job', async () => {
+      vi.useFakeTimers()
+      try {
+        vi.mocked(getAnalysisJob).mockResolvedValue({
+          ok: true,
+          data: {
+            job_id: 'job-run', state: 'running', current_stage: 'trust_reasoning',
+            coin: 'BTC', mode: 'risk', question: '接回測試', error: null, origin: 'manual',
+            priority: 0, queue_position: null, result: null,
+          },
+        })
+        const view = renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=接回測試&job=job-run')
+        await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+        // a URL job that is still running must surface a distinct reconnecting
+        // banner (not a fresh-submit loading label) and must not re-register.
+        expect(screen.getByText('接回既有分析工作')).toBeInTheDocument()
+        expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+        expect(screen.queryByLabelText('analysis report')).not.toBeInTheDocument()
+        view.unmount()
+      } finally {
+        vi.useRealTimers()
+        vi.mocked(getAnalysisJob).mockResolvedValue({
+          ok: true,
+          data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null },
+        })
+      }
+    })
+
+    it('renders a partial-result banner for a degraded completed report and not for a normal one', async () => {
+      const normal = analysisResult('BTC', 'run-normal')
+      const partial = analysisResult('BTC', 'run-partial')
+      ;(partial.report as { decision_state: string }).decision_state = 'abstain'
+
+      vi.mocked(getAnalysisJob).mockImplementation(async (job) => ({
+        ok: true,
+        data: {
+          job_id: job, state: 'completed', current_stage: 'report_delivery',
+          coin: 'BTC', mode: 'risk', question: job === 'run-partial' ? '部分完成' : '正常完成',
+          error: null, origin: 'manual', priority: 0, queue_position: null,
+          result: job === 'run-partial' ? partial : normal,
+        },
+      }))
+
+      const partialView = renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=部分完成&job=run-partial')
+      await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
+      expect(screen.getByText(/best-effort/)).toBeInTheDocument()
+      partialView.unmount()
+
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=正常完成&job=run-normal')
+      await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
+      expect(screen.queryByText(/best-effort/)).not.toBeInTheDocument()
+    })
+
+    it('#940: the beginner focus-start button gates behind the confirm dialog before committing', async () => {
+      // focusMode shows the first-run card; clicking 開始第一次分析 is a non-sample
+      // formal run, so it must open the confirm dialog instead of committing the
+      // run directly (it previously called setSearchParams + bumped the nonce).
+      renderAnalyze('/analyze?focus=1')
+      const startButton = screen.getByRole('button', { name: /開始第一次分析/ })
+
+      fireEvent.click(startButton)
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+
+      // cancel: no submit, dialog closes.
+      fireEvent.click(screen.getByRole('button', { name: '取消' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+
+      // confirm: the focus run commits (focus=1 preserved) and registers once.
+      fireEvent.click(startButton)
+      fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+    })
+
+    it('#940: an embedded resubmit that also changes the URL params is held until confirm', async () => {
+      // The host (HermesDashboard.onSubmit) writes new params to the URL AND bumps
+      // resubmitSignal in the same tick. The URL change alone would make the
+      // polling effect submit immediately, bypassing a signal-only gate — so the
+      // gate must hold the run until the user confirms.
+      function HostShell() {
+        const [signal, setSignal] = useState(0)
+        const navigate = useNavigate()
+        return (
+          <>
+            <AnalyzePage embedded resubmitSignal={signal} />
+            <button onClick={() => {
+              navigate('/analyze?coin=ETH&type=multi_source&mode=risk&q=changed-question&workspace=analyze')
+              setSignal((value) => value + 1)
+            }}>host-resubmit</button>
+          </>
+        )
+      }
+      const view = render(
+        <HermesI18nProvider>
+          <MemoryRouter initialEntries={['/analyze?coin=BTC&type=multi_source&mode=risk&q=first-question&workspace=analyze']}>
+            <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+              <HostShell />
+            </BridgeHologramProvider>
+          </MemoryRouter>
+        </HermesI18nProvider>,
+      )
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[0][0]).toBe('BTC')
+
+      fireEvent.click(screen.getByRole('button', { name: 'host-resubmit' }))
+      // dialog opens; the URL already moved to ETH/changed-question but NO submit.
+      expect(await screen.findByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+
+      fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[1][0]).toBe('ETH')
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[1][2]).toBe('changed-question')
+      view.unmount()
+    })
+
+    it('#940 修1: cancelling an embedded resubmit restores the URL so reload cannot auto-run the cancelled request', async () => {
+      // The host writes the new (unconfirmed) request to the URL in the same tick
+      // it bumps resubmitSignal. Cancelling the confirm dialog used to leave that
+      // unconfirmed q in the URL, so a reload/remount would read it and fire an
+      // irreversible formal run with NO confirmation. Cancel must restore the URL
+      // to the pre-resubmit state so the cancelled request cannot auto-run.
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: {
+          job_id: 'flow-1', state: 'completed', current_stage: 'report_delivery',
+          coin: 'BTC', mode: 'risk', question: 'first-question', error: null, origin: 'manual',
+          priority: 0, queue_position: null, result: analysisResult('BTC', 'flow-1'),
+        },
+      })
+      function HostShell() {
+        const [signal, setSignal] = useState(0)
+        const navigate = useNavigate()
+        const [search] = useSearchParams()
+        return (
+          <>
+            <AnalyzePage embedded resubmitSignal={signal} />
+            <button onClick={() => {
+              navigate('/analyze?coin=ETH&type=multi_source&mode=risk&q=changed-question&workspace=analyze')
+              setSignal((value) => value + 1)
+            }}>host-resubmit</button>
+            <div data-testid="url-probe">{search.toString()}</div>
+          </>
+        )
+      }
+      const view = render(
+        <HermesI18nProvider>
+          <MemoryRouter initialEntries={['/analyze?coin=BTC&type=multi_source&mode=risk&q=first-question&workspace=analyze']}>
+            <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+              <HostShell />
+            </BridgeHologramProvider>
+          </MemoryRouter>
+        </HermesI18nProvider>,
+      )
+      // first-question runs exactly once and lands.
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
+
+      // host resubmit -> URL already moved to the unconfirmed changed-question, dialog holds it.
+      fireEvent.click(screen.getByRole('button', { name: 'host-resubmit' }))
+      expect(await screen.findByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+
+      // cancel -> the unconfirmed request must NOT linger in the URL.
+      fireEvent.click(screen.getByRole('button', { name: '取消' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+      await waitFor(() => {
+        const probe = screen.getByTestId('url-probe').textContent ?? ''
+        expect(probe).not.toContain('changed-question')
+      })
+      const probeAfterCancel = screen.getByTestId('url-probe').textContent ?? ''
+      // restored to the previously-confirmed request, pinned to its existing job so the
+      // restored URL reconnects (poll-only) rather than firing a fresh formal run.
+      expect(probeAfterCancel).toContain('first-question')
+      expect(probeAfterCancel).toContain('job=flow-1')
+
+      // simulate a real page reload: brand-new mount with the restored URL. The
+      // cancelled request must NOT auto-run; it must only reconnect to flow-1.
+      const restoredPath = '/analyze?' + probeAfterCancel
+      view.unmount()
+      renderAnalyze(restoredPath, true)
+      await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+      expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal))
+    })
+
+    it('#940: a sample demo run commits immediately without raising the confirm dialog', async () => {
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&q=demo&sample=1')
+      // sample is the local demo path — it must NOT raise the formal-run dialog.
+      await waitFor(() => expect(getAnalyze).toHaveBeenCalled())
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+    })
   })
 })
