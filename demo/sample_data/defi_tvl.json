@@ -1,0 +1,34 @@
+[
+  {
+    "id": "defi_tvl-eth-sample",
+    "source": "defillama-tvl",
+    "text": "ETH（Ethereum 鏈）DeFi TVL 約 58,000,000,000 USD（現值，端點未提供 24h 變化）",
+    "url": "https://api.llama.fi/v2/chains",
+    "ts": 1779969600,
+    "meta": {"coin": "ETH", "tvl": 58000000000.0, "reputation": 0.85}
+  },
+  {
+    "id": "defi_tvl-sol-sample",
+    "source": "defillama-tvl",
+    "text": "SOL（Solana 鏈）DeFi TVL 約 12,500,000,000 USD（現值，端點未提供 24h 變化）",
+    "url": "https://api.llama.fi/v2/chains",
+    "ts": 1779969600,
+    "meta": {"coin": "SOL", "tvl": 12500000000.0, "reputation": 0.85}
+  },
+  {
+    "id": "defi_tvl-bnb-sample",
+    "source": "defillama-tvl",
+    "text": "BNB（BSC 鏈）DeFi TVL 約 6,200,000,000 USD（現值，端點未提供 24h 變化）",
+    "url": "https://api.llama.fi/v2/chains",
+    "ts": 1779969600,
+    "meta": {"coin": "BNB", "tvl": 6200000000.0, "reputation": 0.85}
+  },
+  {
+    "id": "defi_tvl-arb-sample",
+    "source": "defillama-tvl",
+    "text": "ARB（Arbitrum 鏈）DeFi TVL 約 4,100,000,000 USD（現值，端點未提供 24h 變化）",
+    "url": "https://api.llama.fi/v2/chains",
+    "ts": 1779969600,
+    "meta": {"coin": "ARB", "tvl": 4100000000.0, "reputation": 0.85}
+  }
+]
