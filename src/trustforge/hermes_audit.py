@@ -14,7 +14,7 @@ import re
 import shutil
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -29,11 +29,14 @@ from .hermes_audit_contracts import (
     ControlPlane,
     ControlState,
     DataPlane,
+    DEFAULT_READ_BUDGETS,
     DeadLetterSummary,
     EffectiveControl,
     EvidenceRef,
+    ReadBudget,
     ReleaseComparison,
     ReleaseComparisonStatus,
+    SAFE_RELEASE_RE,
     SYSTEMD_UNIT_ALLOWLIST,
     TABLE_TYPE_ALLOWLIST,
     TableAudit,
@@ -43,12 +46,12 @@ from .hermes_audit_contracts import (
     redact_or_reject_remote_payload,
     sha256_digest,
 )
+from .hermes_audit_signing import EvidenceAttestationV1
 
 REMOTE_SCHEMA_VERSION = "hermes-audit-ssm.v1"
 MAX_SSM_OUTPUT_BYTES = 256 * 1024
 SSM_POLL_SECONDS = 1.0
 TABLE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{3,255}\Z")
-SAFE_RELEASE_RE = re.compile(r"[A-Za-z0-9._@+-]{1,256}\Z")
 _CONFIG_ALLOWLIST = (
     "CACHE_BACKEND",
     "TRUSTFORGE_CACHE_TABLE",
@@ -64,16 +67,104 @@ _CONFIG_ALLOWLIST = (
     "TRUSTFORGE_ENV",
     "TRUSTFORGE_RUNTIME_STATE_PATH",
     "TRUSTFORGE_HOME",
+    "TRUSTFORGE_SHARED_ANALYSIS_DB_PATH",
 )
+_TABLE_NAME_FLAGS = (
+    "TRUSTFORGE_CACHE_TABLE",
+    "TRUSTFORGE_SCHEDULER_RUN_TABLE",
+    "TRUSTFORGE_COST_LEDGER_TABLE",
+)
+# Distinct from a genuinely-unset table-name flag ("absent"): the remote flag
+# was set but to a value that fails TABLE_NAME_RE (e.g. too short/long, illegal
+# characters, or -- to make the sentinel itself impossible to spoof as a real
+# table name -- it also contains ":" which TABLE_NAME_RE's charset excludes).
+# Emitted by `config_value()` inside STATIC_SSM_COMMAND (kept in sync with the
+# literal there) and consumed by `_validate_ssm_snapshot`/`TableBinding.configured`
+# so "present but invalid" fails closed like "present but not approved", never
+# collapsing into "absent" and silently adopting the static approved table.
+_TABLE_NAME_INVALID_SENTINEL = "table-name:invalid"
 
 # Immutable program text: no input interpolation, no systemctl cat/full unit
 # output, no remote mutation, and no stdout containing an Environment value or
 # journal text. `Environment` is inspected in-process solely to reduce the
 # named allowlisted flags to a tri-state/presence value before JSON emission.
 STATIC_SSM_COMMAND = r'''python3 - <<'PY'
-import hashlib, json, os, platform, re, select, subprocess, time
+import hashlib, json, os, platform, re, select, sqlite3, subprocess, time
 UNITS = ("hermes-cycle.timer", "hermes-cycle.service", "trustforge-analysis-flow.service", "fetch-scheduler.timer", "fetch-scheduler.service")
-FLAGS = ("CACHE_BACKEND", "TRUSTFORGE_CACHE_TABLE", "TRUSTFORGE_SCHEDULER_RUN_TABLE", "TRUSTFORGE_COST_LEDGER_TABLE", "TRUSTFORGE_HERMES_AUTONOMY_ENABLED", "TRUSTFORGE_THREE_TRACK_LEARNING_ENABLED", "TRUSTFORGE_AGOS_ENABLED", "TRUSTFORGE_COIN_POOL", "TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "TRUSTFORGE_RUNTIME_SWITCH", "TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS", "TRUSTFORGE_ENV", "TRUSTFORGE_RUNTIME_STATE_PATH", "TRUSTFORGE_HOME")
+FLAGS = ("CACHE_BACKEND", "TRUSTFORGE_CACHE_TABLE", "TRUSTFORGE_SCHEDULER_RUN_TABLE", "TRUSTFORGE_COST_LEDGER_TABLE", "TRUSTFORGE_HERMES_AUTONOMY_ENABLED", "TRUSTFORGE_THREE_TRACK_LEARNING_ENABLED", "TRUSTFORGE_AGOS_ENABLED", "TRUSTFORGE_COIN_POOL", "TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "TRUSTFORGE_RUNTIME_SWITCH", "TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS", "TRUSTFORGE_ENV", "TRUSTFORGE_RUNTIME_STATE_PATH", "TRUSTFORGE_HOME", "TRUSTFORGE_SHARED_ANALYSIS_DB_PATH")
+TABLE_NAME_FLAGS = ("TRUSTFORGE_CACHE_TABLE", "TRUSTFORGE_SCHEDULER_RUN_TABLE", "TRUSTFORGE_COST_LEDGER_TABLE")
+TABLE_NAME_INVALID_SENTINEL = "table-name:invalid"
+DEAD_LETTER_ROW_LIMIT = 32
+# Human-curated, deliberately static allowlist of exception class names that
+# may legitimately prefix `analysis_dead_letters.error` (see
+# docs/plans/PLAN-HERMES-PR1197-REMEDIATION-2026-07-31.md 5.1(3)): anything
+# else, including any secret-like text, is reduced to a fixed sentinel and
+# the raw error text never leaves this process.
+ERROR_CLASS_ALLOWLIST = frozenset((
+    "TimeoutError", "ConnectionError", "ConnectionResetError", "ConnectionRefusedError",
+    "OSError", "ValueError", "RuntimeError", "KeyError", "PermissionError",
+    "MultiAngleCapacityError", "MultiAngleBudgetError", "MultiAngleAuthorityError",
+    "MultiAngleIdempotencyConflictError", "MultiAngleRequestInProgressError",
+    "BedrockThrottlingException", "ClientError",
+))
+def classify_error(text):
+    # `text` never leaves this function as-is: only an allowlisted class
+    # name or the fixed sentinel below is ever returned.
+    token = re.split(r"[:\s]", text or "", maxsplit=1)[0]
+    return token if token in ERROR_CLASS_ALLOWLIST else "unclassified-error"
+def dead_letters(path, limit):
+    # Fail-closed: any missing file/table, lock, or malformed row collapses
+    # to None (caller substitutes the "unavailable" sentinel), never raises.
+    try:
+        if not path or not os.path.isfile(path):
+            return None
+        connection = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=1)
+        try:
+            # Belt-and-suspenders on top of the read-only URI connection
+            # (see analysis_flow.py's own mode=ro convention); busy_timeout
+            # here is shorter than analysis_flow's own writer busy_timeout
+            # so a concurrent WAL writer cannot exhaust this SSM command's
+            # own read budget.
+            connection.execute("PRAGMA busy_timeout=1000")
+            connection.execute("PRAGMA query_only=1")
+            cursor = connection.execute(
+                "SELECT job_id, stage, coin, attempts, error, failed_at FROM analysis_dead_letters "
+                "ORDER BY failed_at DESC LIMIT ?", (limit + 1,),
+            )
+            rows = cursor.fetchall()
+        finally:
+            connection.close()
+        truncated = len(rows) > limit
+        output = []
+        for job_id, stage, coin, attempts, error, failed_at in rows[:limit]:
+            output.append({
+                "job_id": job_id if isinstance(job_id, str) else "",
+                "coin": coin if isinstance(coin, str) else "",
+                "stage": stage if isinstance(stage, str) else "",
+                "attempt": attempts,
+                "error_class": classify_error(error if isinstance(error, str) else None),
+                "retry_state": "dead-lettered",
+                "release_identity": None,
+            })
+        return {"available": True, "truncated": truncated, "rows": output}
+    except Exception:
+        return None
+def config_value(name, service_env):
+    if name in TABLE_NAME_FLAGS:
+        # A key genuinely missing from service_env (never set by the unit)
+        # is "absent". A key that IS present -- even mapped to "" by a
+        # misconfigured `Environment=NAME=` with no value -- is present but
+        # malformed, and must stay distinguishable from genuinely absent:
+        # collapsing either case into "absent" would let a syntactically
+        # invalid (or empty) remote override be silently miscategorized as
+        # "not configured" and fall back to the static approved table
+        # upstream.
+        if name not in service_env:
+            return "absent"
+        raw = service_env[name]
+        return raw if re.fullmatch(r"[A-Za-z0-9_.-]{3,255}", raw) else TABLE_NAME_INVALID_SENTINEL
+    raw = service_env.get(name, "")
+    return "configured" if raw else "absent"
 def call(*args, limit=8192, timeout=3):
     process = None
     try:
@@ -170,9 +261,12 @@ def bounded_text(path):
         return text if len(raw) <= 4096 and text and len(text) <= 256 and re.fullmatch(r"[A-Za-z0-9._+@-]+", text) else None
     except Exception:
         return None
+# ---- driver: executes once per SSM RunCommand invocation ----
 service_env = environment_values("hermes-cycle.service")
 units = [unit(name, service_env) for name in UNITS]
-payload = {"schema_version":"hermes-audit-ssm.v1","units":units,"control":{"runtime_guard":runtime_guard_state(service_env),"unit_env":flag_state(service_env.get("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", "")),"production_default":"disabled"},"config":{name:"configured" if service_env.get(name, "") else "absent" for name in FLAGS},"release":{"version":bounded_text("/opt/trustforge/VERSION"),"python":platform.python_version(),"manifest_sha256":digest("/opt/trustforge/manifest.json")}}
+home = service_env.get("TRUSTFORGE_HOME", "/opt/trustforge")
+db_path = service_env.get("TRUSTFORGE_SHARED_ANALYSIS_DB_PATH") or os.path.join(home, "out", "trustforge.sqlite3")
+payload = {"schema_version":"hermes-audit-ssm.v1","units":units,"control":{"runtime_guard":runtime_guard_state(service_env),"unit_env":flag_state(service_env.get("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", "")),"production_default":"disabled"},"config":{name:config_value(name, service_env) for name in FLAGS},"release":{"version":bounded_text("/opt/trustforge/VERSION"),"python":platform.python_version(),"manifest_sha256":digest("/opt/trustforge/manifest.json")},"dead_letters":dead_letters(db_path, DEAD_LETTER_ROW_LIMIT) or {"available": False, "truncated": False, "rows": []}}
 print(json.dumps(payload, sort_keys=True, separators=(",",":")))
 PY'''
 STATIC_SSM_COMMAND_DIGEST = "sha256:" + hashlib.sha256(
@@ -415,8 +509,13 @@ def _is_optional_nonnegative(value: Any) -> bool:
     return value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
 
 
+_DEAD_LETTER_ROW_KEYS = frozenset(
+    {"job_id", "coin", "stage", "attempt", "error_class", "retry_state", "release_identity"}
+)
+
+
 def _validate_ssm_snapshot(value: Any) -> Mapping[str, Any]:
-    expected = {"schema_version", "units", "control", "config", "release"}
+    expected = {"schema_version", "units", "control", "config", "release", "dead_letters"}
     if (
         not isinstance(value, Mapping)
         or set(value) != expected
@@ -460,12 +559,17 @@ def _validate_ssm_snapshot(value: Any) -> Mapping[str, Any]:
     ):
         raise AuditContractError("SSM snapshot control schema is invalid")
     config = value.get("config")
-    if (
-        not isinstance(config, Mapping)
-        or set(config) != set(_CONFIG_ALLOWLIST)
-        or any(item not in {"configured", "absent"} for item in config.values())
-    ):
+    if not isinstance(config, Mapping) or set(config) != set(_CONFIG_ALLOWLIST):
         raise AuditContractError("SSM snapshot config schema is invalid")
+    for name, item in config.items():
+        if name in _TABLE_NAME_FLAGS:
+            if (
+                item not in ("absent", _TABLE_NAME_INVALID_SENTINEL)
+                and (not isinstance(item, str) or TABLE_NAME_RE.fullmatch(item) is None)
+            ):
+                raise AuditContractError("SSM snapshot config schema is invalid")
+        elif item not in {"configured", "absent"}:
+            raise AuditContractError("SSM snapshot config schema is invalid")
     release = value.get("release")
     if (
         not isinstance(release, Mapping)
@@ -475,6 +579,30 @@ def _validate_ssm_snapshot(value: Any) -> Mapping[str, Any]:
         or release.get("manifest_sha256") is not None and (not isinstance(release.get("manifest_sha256"), str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", release["manifest_sha256"]))
     ):
         raise AuditContractError("SSM snapshot release schema is invalid")
+    dead_letters = value.get("dead_letters")
+    if (
+        not isinstance(dead_letters, Mapping)
+        or set(dead_letters) != {"available", "truncated", "rows"}
+        or not isinstance(dead_letters.get("available"), bool)
+        or not isinstance(dead_letters.get("truncated"), bool)
+        or not isinstance(dead_letters.get("rows"), list)
+        or len(dead_letters["rows"]) > DEFAULT_READ_BUDGETS["local-io"].item_limit
+        or (not dead_letters["available"] and (dead_letters["rows"] or dead_letters["truncated"]))
+    ):
+        raise AuditContractError("SSM snapshot dead-letter schema is invalid")
+    for row in dead_letters["rows"]:
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != _DEAD_LETTER_ROW_KEYS
+            or any(
+                not isinstance(row.get(key), str)
+                for key in ("job_id", "coin", "stage", "error_class", "retry_state")
+            )
+            or isinstance(row.get("attempt"), bool)
+            or not isinstance(row.get("attempt"), (int, str))
+            or (row.get("release_identity") is not None and not isinstance(row.get("release_identity"), str))
+        ):
+            raise AuditContractError("SSM snapshot dead-letter row schema is invalid")
     return value
 
 
@@ -526,7 +654,14 @@ def control_from_snapshot(
     expected_release: str | None,
 ) -> ControlPlane:
     remote, release = snapshot["control"], snapshot["release"]
-    config = {name.replace("_", "-").lower(): str(value) for name, value in snapshot["config"].items()}
+    # Table-name flags may now carry the real remote table name (validated
+    # against TABLE_NAME_RE) instead of a bare "configured"/"absent" tri-state
+    # -- but `redacted_config` must never surface that raw name, so every
+    # entry is normalized back to tri-state before it can reach the bundle.
+    config = {
+        name.replace("_", "-").lower(): ("absent" if value == "absent" else "configured")
+        for name, value in snapshot["config"].items()
+    }
     config["python"] = str(release["python"])
     runtime_guard = _state(remote["runtime_guard"])
     unit_env = _state(remote["unit_env"])
@@ -590,6 +725,14 @@ _APPROVED_TABLE_NAMES = {
     "connector-cache": "trustforge-connector-cache",
     "scheduler-run": "trustforge-scheduler-runs",
     "cost-ledger": "trustforge-cost-ledger",
+}
+# Which remote `config` flag (see _TABLE_NAME_FLAGS) names each table type's
+# binding. admin-config shares connector-cache's physical table/flag.
+_TABLE_TYPE_NAME_FLAGS = {
+    "admin-config": "TRUSTFORGE_CACHE_TABLE",
+    "connector-cache": "TRUSTFORGE_CACHE_TABLE",
+    "scheduler-run": "TRUSTFORGE_SCHEDULER_RUN_TABLE",
+    "cost-ledger": "TRUSTFORGE_COST_LEDGER_TABLE",
 }
 _REQUIRED_KEYS = {
     "admin-config": {"source_id", "coin"},
@@ -670,13 +813,40 @@ class TableBinding:
             raise AuditContractError("table binding is not approved")
 
     @classmethod
-    def configured(cls) -> tuple["TableBinding", ...]:
-        """Return the immutable approved production table map, never local env input."""
-        return tuple(
-            cls(table_type, _APPROVED_TABLE_NAMES[table_type])
-            for table_type in TABLE_TYPE_ALLOWLIST
-            if table_type in _APPROVED_TABLE_NAMES
-        )
+    def configured(cls, remote_config: Mapping[str, str] | None = None) -> tuple["TableBinding", ...]:
+        """Return the approved production table bindings.
+
+        `remote_config` (if given) is the already schema-validated SSM
+        snapshot ``config`` mapping -- never `os.environ` (that stays
+        permanently unable to redirect a binding). A table-name flag's
+        remote value is only ever adopted when it matches *this* table
+        type's own approved name; any other value that isn't literally
+        "absent" -- a syntactically valid but non-approved name, *or* the
+        `_TABLE_NAME_INVALID_SENTINEL` produced upstream for a present-but-
+        malformed value -- is fail-closed: the binding for that type is
+        dropped entirely (never silently falls back to the static table),
+        so the caller ends up treating that table as unavailable rather
+        than reading whatever table the remote value actually pointed at
+        (or guessing at one for a malformed value).
+        """
+        bindings = []
+        for table_type in TABLE_TYPE_ALLOWLIST:
+            approved = _APPROVED_TABLE_NAMES.get(table_type)
+            if approved is None:
+                continue
+            table_name = approved
+            if remote_config is not None:
+                flag_name = _TABLE_TYPE_NAME_FLAGS.get(table_type)
+                remote_value = remote_config.get(flag_name) if flag_name else None
+                if remote_value is not None and remote_value != "absent":
+                    # Covers both "syntactically valid but not this type's
+                    # approved name" and the invalid-value sentinel: neither
+                    # is ever adopted, and neither falls back silently.
+                    if remote_value != approved:
+                        continue
+                    table_name = remote_value
+            bindings.append(cls(table_type, table_name))
+        return tuple(bindings)
 
 
 class DynamoAuditReader:
@@ -693,12 +863,18 @@ class DynamoAuditReader:
     ):
         self._client = client
         self._limits = limits
-        self._bindings = bindings or TableBinding.configured()
+        self._bindings = bindings if bindings is not None else TableBinding.configured()
         self._deadline = deadline
         self._now = now
         expected_types = tuple(item for item in TABLE_TYPE_ALLOWLIST if item != "durable-dead-letter")
-        if tuple(item.table_type for item in self._bindings) != expected_types:
-            raise AuditContractError("Dynamo bindings must exactly match the approved type allowlist")
+        types = tuple(item.table_type for item in self._bindings)
+        # A fail-closed table-name resolution (see TableBinding.configured) may
+        # legitimately drop a binding, so bindings are no longer required to
+        # cover every expected type -- but must still be a duplicate-free,
+        # order-preserving subset of it (never an unknown type, never
+        # reordered, never repeated).
+        if len(set(types)) != len(types) or tuple(item for item in expected_types if item in types) != types:
+            raise AuditContractError("Dynamo bindings must be an ordered subset of the approved type allowlist")
 
     def collect(
         self,
@@ -720,8 +896,20 @@ class DynamoAuditReader:
             else:
                 if self._deadline is not None and self._now() >= self._deadline:
                     raise AuditPartial("audit-deadline-exhausted")
-                binding = next(item for item in self._bindings if item.table_type == table_type)
-                audit, table_rows, ref, warning = self._collect_table(binding, requests)
+                binding = next((item for item in self._bindings if item.table_type == table_type), None)
+                if binding is None:
+                    # Fail-closed table-name resolution dropped this type's
+                    # binding (see TableBinding.configured): never attempt a
+                    # Dynamo call, just report it as unavailable.
+                    audit = TableAudit(table_type, AuditStatus.INSUFFICIENT_EVIDENCE, 0, 0, 0, False)
+                    table_rows = []
+                    ref = EvidenceRef(
+                        "dynamodb-read-v1", _utc_now(), f"{table_type}-table-name-not-approved",
+                        False, sha256_digest({"table_type": table_type, "status": "not-approved"}),
+                    )
+                    warning = f"dynamodb-{table_type}-table-name-not-approved"
+                else:
+                    audit, table_rows, ref, warning = self._collect_table(binding, requests)
             requests += audit.requests_used
             audits.append(audit)
             rows[table_type] = table_rows
@@ -886,6 +1074,53 @@ def _dead_letters(rows: list[Mapping[str, Any]]) -> tuple[DeadLetterSummary, ...
     return tuple(output)
 
 
+def _dead_letter_evidence(
+    remote: Mapping[str, Any], budget: ReadBudget
+) -> tuple[TableAudit, tuple[DeadLetterSummary, ...], EvidenceRef, str | None]:
+    """Turn an already schema-validated `dead_letters` SSM snapshot section
+    into durable-dead-letter evidence, overlaying the DynamoDB collector's
+    placeholder for that table type.
+
+    Fail-closed: an unavailable source (missing file/table, lock, or any
+    other read failure inside the SSM script) or an over-budget payload
+    degrades this one table to INSUFFICIENT_EVIDENCE without raising --
+    mirroring `_collect_table`'s own local error handling -- rather than
+    failing the whole audit. An *available* table with zero rows is
+    reported COMPLETE: absence of dead letters is not itself evidence of
+    missing evidence (see plan R4 / test #2).
+    """
+    table_type = "durable-dead-letter"
+    if not remote.get("available"):
+        ref = EvidenceRef(
+            "local-io-read-v1", _utc_now(), "durable-dead-letter-unavailable",
+            False, sha256_digest({"table_type": table_type, "status": "unavailable"}),
+        )
+        return (
+            TableAudit(table_type, AuditStatus.INSUFFICIENT_EVIDENCE, 0, 0, 0, False),
+            (), ref, "dynamodb-durable-dead-letter-insufficient-evidence",
+        )
+    letters = _dead_letters(remote.get("rows", []))
+    encoded = canonical_json([asdict(item) for item in letters])
+    if len(encoded) > budget.byte_limit:
+        ref = EvidenceRef(
+            "local-io-read-v1", _utc_now(), "durable-dead-letter-unavailable",
+            False, sha256_digest({"table_type": table_type, "status": "byte-budget-exceeded"}),
+        )
+        return (
+            TableAudit(table_type, AuditStatus.INSUFFICIENT_EVIDENCE, 0, 0, 0, False),
+            (), ref, "local-io-byte-budget-exceeded",
+        )
+    truncated = bool(remote.get("truncated"))
+    status = AuditStatus.INSUFFICIENT_EVIDENCE if truncated else AuditStatus.COMPLETE
+    ref = EvidenceRef(
+        "local-io-read-v1", _utc_now(), "durable-dead-letter-summary",
+        truncated, sha256_digest([asdict(item) for item in letters]),
+    )
+    audit_row = TableAudit(table_type, status, 0, len(letters), len(encoded), truncated)
+    warning = "dynamodb-durable-dead-letter-insufficient-evidence" if status is not AuditStatus.COMPLETE else None
+    return audit_row, letters, ref, warning
+
+
 def _new_audit_id() -> str:
     return "audit-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + uuid.uuid4().hex[:8]
 
@@ -936,9 +1171,37 @@ def run_audit(
         snapshot = _bounded_ssm_snapshot(clients, target, active, now, sleep, deadline)
         if now() >= deadline:
             raise AuditPartial("audit-deadline-exhausted")
-        dynamodb_state, data, letters, refs, warnings = DynamoAuditReader(
-            clients.dynamodb, active, deadline=deadline, now=now
+        dynamodb_state, data, _, refs, warnings = DynamoAuditReader(
+            clients.dynamodb, active,
+            bindings=TableBinding.configured(remote_config=snapshot["config"]),
+            deadline=deadline, now=now,
         ).collect()
+        # Overlay the DynamoDB collector's durable-dead-letter placeholder with
+        # the real read-only SQLite evidence gathered by the same SSM command
+        # (see _dead_letter_evidence); matched by the placeholder's fixed
+        # reduction_rule/warning constants, never by list position.
+        dead_letter_audit, letters, dead_letter_ref, dead_letter_warning = _dead_letter_evidence(
+            snapshot["dead_letters"], active.read_budgets["local-io"],
+        )
+        data = replace(
+            data,
+            table_audits=tuple(
+                dead_letter_audit if item.table_type == "durable-dead-letter" else item
+                for item in data.table_audits
+            ),
+        )
+        refs = tuple(
+            dead_letter_ref if ref.reduction_rule == "durable-dead-letter-sqlite-only" else ref
+            for ref in refs
+        )
+        cleaned_warnings = []
+        for warning in warnings:
+            if warning == "dynamodb-durable-dead-letter-insufficient-evidence":
+                if dead_letter_warning:
+                    cleaned_warnings.append(dead_letter_warning)
+                continue
+            cleaned_warnings.append(warning)
+        warnings = tuple(cleaned_warnings)
         control = control_from_snapshot(snapshot, dynamodb_state, expected_release)
         mismatch = any(item.status is ReleaseComparisonStatus.MISMATCH for item in control.release_comparison)
         release_unknown = any(item.status is ReleaseComparisonStatus.UNKNOWN for item in control.release_comparison)
@@ -965,8 +1228,20 @@ def run_audit(
         return AuditBundle.build(audit_id=_new_audit_id(), captured_at=_utc_now(), target=target, invoker_identity_hash=invoker, limits=active, overall_status=AuditStatus.PARTIAL, blockers=(str(exc),), control_plane=_placeholder_control(AuditStatus.PARTIAL), data_plane=_placeholder_data(AuditStatus.INSUFFICIENT_EVIDENCE))
 
 
-def write_evidence_bundle(bundle: AuditBundle, output_dir: Path) -> Path:
-    """Write a local bundle atomically; never uploads, commits, or uses a network API."""
+def write_evidence_bundle(
+    bundle: AuditBundle,
+    output_dir: Path,
+    *,
+    signer: Callable[[AuditBundle], EvidenceAttestationV1],
+) -> Path:
+    """Write a local bundle atomically; never uploads, commits, or uses a network API.
+
+    Every call signs the bundle via ``signer`` and writes the resulting
+    attestation as ``ATTESTATION.json`` -- unconditionally, for every
+    ``overall_status`` (including blocked/partial/integrity-failure), so
+    evidence is never left with only a self-consistent SHA-256 that its own
+    author could recompute.
+    """
     root = _validated_output_dir(output_dir)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     destination = root / bundle.audit_id
@@ -979,7 +1254,16 @@ def write_evidence_bundle(bundle: AuditBundle, output_dir: Path) -> Path:
         evidence_path.write_bytes(canonical_json(bundle.to_dict()) + b"\n")
         summary_path = staging / "summary.md"
         summary_path.write_text("\n".join(("# Hermes Production Audit", "", f"- Status: `{bundle.overall_status.value}`", f"- Audit ID: `{bundle.audit_id}`", f"- Evidence digest: `{bundle.canonical_payload_sha256}`", f"- Blockers: `{', '.join(bundle.blockers) if bundle.blockers else 'none'}`", "- Disposition: this evidence is read-only and does not authorize feature flags or rollout.")) + "\n", encoding="utf-8")
-        checksums = "\n".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in (evidence_path, summary_path)) + "\n"
+        attestation = signer(bundle)
+        if (
+            not isinstance(attestation, EvidenceAttestationV1)
+            or attestation.audit_id != bundle.audit_id
+            or attestation.canonical_payload_sha256 != bundle.canonical_payload_sha256
+        ):
+            raise AuditContractError("evidence attestation does not match this audit bundle")
+        attestation_path = staging / "ATTESTATION.json"
+        attestation_path.write_bytes(canonical_json(attestation.to_dict()) + b"\n")
+        checksums = "\n".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in (evidence_path, summary_path, attestation_path)) + "\n"
         (staging / "SHA256SUMS").write_text(checksums, encoding="utf-8")
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(f"audit evidence destination already exists: {bundle.audit_id}")

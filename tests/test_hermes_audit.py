@@ -7,14 +7,26 @@ import inspect
 import json
 import os
 import shutil
+import sqlite3
+import threading
+import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 
 from scripts import hermes_production_audit as cli
 from trustforge import hermes_audit as audit
+from trustforge.authenticated_ledger import AuthenticatedLedger
 from trustforge.hermes_audit import (
     AwsAuditClients,
     DynamoAuditReader,
@@ -24,6 +36,7 @@ from trustforge.hermes_audit import (
     write_evidence_bundle,
 )
 from trustforge.hermes_audit_contracts import (
+    AuditBundle,
     AuditContractError,
     AuditLimits,
     AuditStatus,
@@ -34,13 +47,54 @@ from trustforge.hermes_audit_contracts import (
     ReadBudget,
     sha256_digest,
 )
+from trustforge.hermes_audit_signing import (
+    APPROVAL_NONCE_LEDGER_KEY_ID,
+    derive_approval_nonce_ledger_keyring,
+    derive_nonce_ledger_keyring,
+    sign_approval_attestation,
+    sign_evidence_bundle,
+)
+from trustforge.secure_keyring import SecureKeyringError
 
 REGION = "ap-southeast-2"
 INSTANCE = "i-0152b70368358a81c"
 TARGET = AuditTarget(REGION, INSTANCE)
 
 
-def _snapshot(*, runtime_guard: str = "disabled", version: str = "v0.27.37") -> dict[str, Any]:
+def _signer(tmp_path: Path, *, key_id: str = "test-signer"):
+    """Build a real signer (fresh Ed25519 key + nonce ledger) for tests that
+    only need write_evidence_bundle to succeed, not to inspect the signature.
+    """
+    private = Ed25519PrivateKey.generate()
+    private_bytes = private.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    ledger = AuthenticatedLedger(
+        keyring=derive_nonce_ledger_keyring(key_id, private_bytes),
+        active_key_id=key_id,
+        test_directory_override=tmp_path / "nonce-ledger",
+    )
+
+    def sign(bundle: AuditBundle):
+        return sign_evidence_bundle(
+            bundle, private_key=private_bytes, key_id=key_id, actor="test-actor",
+            nonce_store=ledger,
+        )
+
+    return sign
+
+
+def _dead_letters_section(
+    *, available: bool = True, truncated: bool = False, rows: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    return {"available": available, "truncated": truncated, "rows": rows or []}
+
+
+def _snapshot(
+    *,
+    runtime_guard: str = "disabled",
+    version: str = "v0.27.37",
+    table_names: dict[str, str] | None = None,
+    dead_letters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     units = []
     for name in SYSTEMD_UNIT_ALLOWLIST:
         units.append(
@@ -65,12 +119,22 @@ def _snapshot(*, runtime_guard: str = "disabled", version: str = "v0.27.37") -> 
             "unit_env": "disabled",
             "production_default": "disabled",
         },
-        "config": {name: "configured" for name in audit._CONFIG_ALLOWLIST},
+        "config": {
+            name: (
+                (table_names or {}).get(name, audit._APPROVED_TABLE_NAMES[
+                    next(t for t, flag in audit._TABLE_TYPE_NAME_FLAGS.items() if flag == name)
+                ])
+                if name in audit._TABLE_NAME_FLAGS
+                else "configured"
+            )
+            for name in audit._CONFIG_ALLOWLIST
+        },
         "release": {
             "version": version,
             "python": "3.11.9",
             "manifest_sha256": sha256_digest({"manifest": "fixture"}),
         },
+        "dead_letters": dead_letters or _dead_letters_section(),
     }
 
 
@@ -268,15 +332,33 @@ def test_unknown_control_is_fail_closed_and_static_command_is_exact() -> None:
 
 
 def test_complete_fixture_collects_ttl_timer_and_redacted_dead_letter_summary() -> None:
-    clients, _, _ = _clients(snapshot=_snapshot(runtime_guard="disabled"))
+    row = {
+        "job_id": "job-42", "coin": "btc", "stage": "fetch", "attempt": 2,
+        "error_class": "TimeoutError", "retry_state": "dead-lettered", "release_identity": None,
+    }
+    snapshot = _snapshot(runtime_guard="disabled", dead_letters=_dead_letters_section(rows=[row]))
+    clients, _, _ = _clients(snapshot=snapshot)
     bundle = run_audit(TARGET, clients, expected_release="v0.27.37")
-    assert bundle.overall_status is AuditStatus.PARTIAL
+    # Whatever this fixture's status turns out to be for unrelated release-comparison
+    # reasons, the durable-dead-letter table itself must read as healthy: an
+    # available, non-truncated SQLite read is COMPLETE, not insufficient evidence.
+    dead_letter_audit = next(item for item in bundle.data_plane.table_audits if item.table_type == "durable-dead-letter")
+    assert dead_letter_audit.status is AuditStatus.COMPLETE
     assert bundle.control_plane.effective_control.effective is ControlState.DISABLED
     assert bundle.control_plane.units[0].timer_next_monotonic_usec == 100
     assert bundle.control_plane.units[0].journal_error_count == 0
     assert all(item.ttl_status is ControlState.ENABLED for item in bundle.data_plane.table_audits if item.table_type != "durable-dead-letter")
-    assert bundle.dead_letters == ()
-    assert "dynamodb-durable-dead-letter-insufficient-evidence" in bundle.warnings
+    assert len(bundle.dead_letters) == 1
+    summary = bundle.dead_letters[0]
+    assert summary.coin == "BTC"
+    assert summary.stage == "fetch"
+    assert summary.attempt == 2
+    assert summary.error_class == "TimeoutError"
+    assert summary.retry_state == "dead-lettered"
+    assert summary.release_identity is None
+    assert "dynamodb-durable-dead-letter-insufficient-evidence" not in bundle.warnings
+    serialized = json.dumps(bundle.to_dict(), sort_keys=True)
+    assert "job-42" not in serialized
 
 
 def test_secret_like_ssm_output_is_integrity_failure_without_payload_leakage() -> None:
@@ -394,29 +476,33 @@ def test_dynamodb_throttling_is_insufficient_evidence_and_never_reads_as_healthy
     assert "trustforge-connector-cache" not in json.dumps(bundle.to_dict(), sort_keys=True)
 
 
-def test_writer_creates_verified_local_bundle_and_rejects_outside_output() -> None:
+def test_writer_creates_verified_local_bundle_and_rejects_outside_output(tmp_path: Path) -> None:
     clients, _, _ = _clients(snapshot=_snapshot(runtime_guard="disabled"))
     bundle = run_audit(TARGET, clients, expected_release="v0.27.37")
     root = Path(__file__).resolve().parents[1] / "out" / "audits" / "hermes"
-    destination = write_evidence_bundle(bundle, root)
+    signer = _signer(tmp_path)
+    destination = write_evidence_bundle(bundle, root, signer=signer)
     try:
         evidence = destination / "evidence.json"
         summary = destination / "summary.md"
+        attestation = destination / "ATTESTATION.json"
         checksums = (destination / "SHA256SUMS").read_text(encoding="utf-8")
         assert json.loads(evidence.read_text(encoding="utf-8"))["canonical_payload_sha256"] == bundle.canonical_payload_sha256
         assert hashlib.sha256(evidence.read_bytes()).hexdigest() in checksums
         assert hashlib.sha256(summary.read_bytes()).hexdigest() in checksums
+        assert hashlib.sha256(attestation.read_bytes()).hexdigest() in checksums
+        assert json.loads(attestation.read_text(encoding="utf-8"))["audit_id"] == bundle.audit_id
         assert "does not authorize feature flags" in summary.read_text(encoding="utf-8")
         with pytest.raises(FileExistsError):
-            write_evidence_bundle(bundle, root)
+            write_evidence_bundle(bundle, root, signer=signer)
         assert not list(root.glob(f".{bundle.audit_id}.*.incomplete"))
     finally:
         shutil.rmtree(destination)
     with pytest.raises(AuditContractError):
-        write_evidence_bundle(bundle, Path("/tmp/outside-audit"))
+        write_evidence_bundle(bundle, Path("/tmp/outside-audit"), signer=signer)
 
 
-def test_writer_does_not_delete_preexisting_staging_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_writer_does_not_delete_preexisting_staging_collision(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     clients, _, _ = _clients(snapshot=_snapshot(runtime_guard="disabled"))
     bundle = run_audit(TARGET, clients, expected_release="v0.27.37")
     root = Path(__file__).resolve().parents[1] / "out" / "audits" / "hermes"
@@ -429,7 +515,7 @@ def test_writer_does_not_delete_preexisting_staging_collision(monkeypatch: pytes
     monkeypatch.setattr(audit.uuid, "uuid4", lambda: fixed_uuid)
     try:
         with pytest.raises(FileExistsError):
-            write_evidence_bundle(bundle, root)
+            write_evidence_bundle(bundle, root, signer=_signer(tmp_path))
         assert marker.read_text(encoding="utf-8") == "must-survive"
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -569,6 +655,151 @@ def test_non_dry_cli_requires_human_approval_before_client_creation(monkeypatch:
     assert json.loads(capsys.readouterr().err) == {"status": "internal-failure", "error_class": "AuditContractError"}
 
 
+def _valid_approval_bundle(
+    tmp_path: Path, *, output_dir: Path, expected_release: str | None = None
+) -> dict[str, Path]:
+    """Build four independently Ed25519-signed approval attestations (one per
+    role) plus their shared public verification keyring, all bound to
+    ``TARGET``/``output_dir``/the current ``STATIC_SSM_COMMAND_DIGEST`` --
+    this is the CLI-integration counterpart of
+    tests/test_hermes_audit_approval.py's direct unit coverage of
+    ``validate_approval_bundle``.
+    """
+    now = datetime.now(timezone.utc)
+    issued_at = (now - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    verification_keys: dict[str, bytes] = {}
+    paths: dict[str, Path] = {}
+    for role in ("ceo", "cpo", "ciso", "operator"):
+        private = Ed25519PrivateKey.generate()
+        private_bytes = private.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+        public_bytes = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        key_id = f"{role}-test-key"
+        verification_keys[key_id] = public_bytes
+        attestation = sign_approval_attestation(
+            role=role,
+            region=TARGET.region,
+            instance_id=TARGET.instance_id,
+            expected_release=expected_release,
+            output_dir=str(output_dir),
+            static_ssm_command_sha256=audit.STATIC_SSM_COMMAND_DIGEST,
+            actor=f"{role}-actor",
+            issued_at=issued_at,
+            expires_at=expires_at,
+            nonce=f"{role}-nonce-{uuid.uuid4()}",
+            key_id=key_id,
+            private_key=private_bytes,
+        )
+        path = tmp_path / f"{role}-approval.json"
+        path.write_text(json.dumps(attestation.to_dict()), encoding="utf-8")
+        paths[role] = path
+    keyring_path = tmp_path / "approval-verification-keyring.json"
+    keyring_path.write_text(json.dumps({
+        "verification_keys": {key_id: key.hex() for key_id, key in verification_keys.items()}
+    }), encoding="utf-8")
+    paths["verification_keyring"] = keyring_path
+    return paths
+
+
+def _approval_flags(bundle: dict[str, Path]) -> list[str]:
+    return [
+        "--ceo-approval", str(bundle["ceo"]),
+        "--cpo-approval", str(bundle["cpo"]),
+        "--ciso-approval", str(bundle["ciso"]),
+        "--operator-approval", str(bundle["operator"]),
+        "--approval-verification-keyring", str(bundle["verification_keyring"]),
+    ]
+
+
+def test_non_dry_cli_requires_signing_keyring_before_client_creation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def fail_if_called(*_: Any, **__: Any) -> Any:
+        raise AssertionError("AWS clients must not be created without a signing keyring")
+
+    monkeypatch.setattr(cli, "create_aws_clients", fail_if_called)
+    output_dir = Path(__file__).resolve().parents[1] / "out" / "audits" / "hermes" / "signing-keyring-required"
+    bundle = _valid_approval_bundle(tmp_path, output_dir=output_dir)
+    result = cli.main([
+        "--region", REGION, "--instance-id", INSTANCE, "--output-dir", str(output_dir),
+        *_approval_flags(bundle),
+        "--approval-nonce-ledger-dir", str(tmp_path / "approval-nonce-ledger"),
+    ])
+    assert result == 5
+    assert json.loads(capsys.readouterr().err) == {"status": "internal-failure", "error_class": "AuditContractError"}
+
+
+@pytest.mark.parametrize("missing_flag", ["--ceo-approval", "--cpo-approval", "--ciso-approval", "--operator-approval", "--approval-verification-keyring"])
+def test_non_dry_cli_requires_all_four_approvals_before_client_creation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], missing_flag: str
+) -> None:
+    """Plan 3.3 case #14: omitting any single one of the four
+    ``--xxx-approval`` flags (or the verification keyring) must prevent
+    ``create_aws_clients`` from ever being called -- a partially-supplied
+    approval bundle is exactly as unauthorized as none at all.
+    """
+    def fail_if_called(*_: Any, **__: Any) -> Any:
+        raise AssertionError(f"AWS clients must not be created without {missing_flag}")
+
+    monkeypatch.setattr(cli, "create_aws_clients", fail_if_called)
+    output_dir = Path(__file__).resolve().parents[1] / "out" / "audits" / "hermes" / "partial-approval-rejected"
+    bundle = _valid_approval_bundle(tmp_path, output_dir=output_dir)
+    args = [
+        "--region", REGION, "--instance-id", INSTANCE, "--output-dir", str(output_dir),
+        *_approval_flags(bundle),
+        "--approval-nonce-ledger-dir", str(tmp_path / "approval-nonce-ledger"),
+    ]
+    # drop the flag under test and its value from the argument list.
+    index = args.index(missing_flag)
+    del args[index:index + 2]
+    result = cli.main(args)
+    assert result == 5
+    assert json.loads(capsys.readouterr().err) == {"status": "internal-failure", "error_class": "AuditContractError"}
+
+
+def test_dry_run_cli_never_creates_the_signing_nonce_ledger(tmp_path: Path) -> None:
+    output_dir = Path(__file__).resolve().parents[1] / "out" / "audits" / "hermes" / "dry-run-no-ledger"
+    nonce_dir = tmp_path / "nonce-ledger"
+    result = cli.main([
+        "--region", REGION, "--instance-id", INSTANCE, "--output-dir", str(output_dir),
+        "--nonce-ledger-dir", str(nonce_dir), "--dry-run",
+    ])
+    assert result == 0
+    assert not nonce_dir.exists()
+
+
+def _write_private_keyring(path: Path, *, mode: int = 0o600) -> str:
+    """Write a valid private keyring JSON (per secure_keyring's contract) and
+    return its key_id, so _load_signer tests only need to vary the file's own
+    symlink/permission properties, not the key material inside it.
+    """
+    private = Ed25519PrivateKey.generate()
+    private_bytes = private.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    public_bytes = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    key_id = "test-signing-key"
+    path.write_text(json.dumps({
+        "key_id": key_id,
+        "private_key": private_bytes.hex(),
+        "verification_keys": {key_id: public_bytes.hex()},
+    }), encoding="utf-8")
+    os.chmod(path, mode)
+    return key_id
+
+
+def test_load_signer_rejects_a_symlinked_keyring_file(tmp_path: Path) -> None:
+    real = tmp_path / "real-keyring.json"
+    _write_private_keyring(real)
+    link = tmp_path / "signing-keyring.json"
+    os.symlink(real, link)
+    with pytest.raises(SecureKeyringError):
+        cli._load_signer(link, tmp_path / "nonce-ledger")
+
+
+def test_load_signer_rejects_a_loosely_permissioned_keyring_file(tmp_path: Path) -> None:
+    keyring_path = tmp_path / "signing-keyring.json"
+    _write_private_keyring(keyring_path, mode=0o644)
+    with pytest.raises(SecureKeyringError):
+        cli._load_signer(keyring_path, tmp_path / "nonce-ledger")
+
+
 def test_output_validation_rejects_symlinked_ancestors() -> None:
     root = Path(__file__).resolve().parents[1] / "out" / "audits" / "hermes"
     root.mkdir(parents=True, exist_ok=True)
@@ -580,3 +811,485 @@ def test_output_validation_rejects_symlinked_ancestors() -> None:
     finally:
         if link.is_symlink():
             link.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: STATIC_SSM_COMMAND dead-letter SQLite + table-name resolution
+# (docs/plans/PLAN-HERMES-PR1197-REMEDIATION-2026-07-31.md section 2).
+# ---------------------------------------------------------------------------
+
+def _load_ssm_functions() -> dict[str, Any]:
+    """Extract and exec() the pure function/constant definitions embedded in
+    STATIC_SSM_COMMAND (everything before the driver marker), so the
+    heredoc's own classify_error/dead_letters/config_value can be
+    behaviourally unit tested without actually invoking SSM RunCommand.
+    """
+    body = audit.STATIC_SSM_COMMAND.split("python3 - <<'PY'\n", 1)[1]
+    body = body.split("# ---- driver:", 1)[0]
+    namespace: dict[str, Any] = {}
+    exec(compile(body, "<static-ssm-command>", "exec"), namespace)
+    return namespace
+
+
+def _write_dead_letter_db(path: Path, rows: list[tuple[Any, ...]], *, wal: bool = True) -> None:
+    connection = sqlite3.connect(str(path))
+    try:
+        if wal:
+            connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            "CREATE TABLE analysis_dead_letters ("
+            "job_id TEXT, stage TEXT, coin TEXT, mode TEXT, question TEXT, "
+            "snapshot_id TEXT, attempts INTEGER, error TEXT, failed_at TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO analysis_dead_letters "
+            "(job_id, stage, coin, mode, question, snapshot_id, attempts, error, failed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_classify_error_recognizes_allowlisted_exception_prefix_and_reduces_everything_else() -> None:
+    classify_error = _load_ssm_functions()["classify_error"]
+    assert classify_error("TimeoutError: connection reset") == "TimeoutError"
+    assert classify_error("BedrockThrottlingException: throttled") == "BedrockThrottlingException"
+    # Free-form text -- including anything secret-like -- never survives as-is.
+    assert classify_error("sk-0123456789abcdef leaked in traceback") == "unclassified-error"
+    assert classify_error(None) == "unclassified-error"
+    assert classify_error("") == "unclassified-error"
+
+
+def test_config_value_distinguishes_genuinely_absent_from_present_but_invalid_table_name() -> None:
+    """Bug 1 (2026-07-31 adversarial codex review, CEO-confirmed): a remote
+    table-name flag that was genuinely never set and one that WAS set but to
+    a syntactically-invalid value must not collapse into the identical
+    "absent" sentinel -- doing so lets a present-but-malformed override be
+    miscategorized upstream as "not configured" and silently fall back to
+    the static approved table (see the TableBinding.configured() tests
+    below for the end-to-end consequence).
+    """
+    config_value = _load_ssm_functions()["config_value"]
+    # Genuinely absent: the key never appears in service_env at all.
+    assert config_value("TRUSTFORGE_CACHE_TABLE", {}) == "absent"
+    # Present-but-empty is NOT the same as genuinely absent -- a systemd unit
+    # misconfigured with e.g. `Environment=TRUSTFORGE_CACHE_TABLE=` (empty
+    # value) still populates the dict key, distinct from the key being
+    # missing entirely, and must fail closed exactly like any other
+    # syntactically-invalid present value.
+    assert (
+        config_value("TRUSTFORGE_CACHE_TABLE", {"TRUSTFORGE_CACHE_TABLE": ""})
+        == audit._TABLE_NAME_INVALID_SENTINEL
+    )
+    for malformed in ("evil/table", " HermesCache", "ab", "a" * 256, "trustforge`; rm -rf /`"):
+        sentinel = config_value("TRUSTFORGE_CACHE_TABLE", {"TRUSTFORGE_CACHE_TABLE": malformed})
+        assert sentinel not in ("absent", malformed)
+        assert sentinel == audit._TABLE_NAME_INVALID_SENTINEL
+    # Non-table-name flags are unaffected: still the plain configured/absent
+    # tri-state, no new sentinel leaks into unrelated flags.
+    assert config_value("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", {"TRUSTFORGE_HERMES_AUTONOMY_ENABLED": "1"}) == "configured"
+    assert config_value("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", {}) == "absent"
+
+
+def test_dead_letter_sqlite_positive_reads_existing_rows_with_safe_field_mapping(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    db_path = tmp_path / "trustforge.sqlite3"
+    _write_dead_letter_db(db_path, [
+        ("job-1", "fetch", "BTC", "m", "q", "s", 2, "TimeoutError: connection reset", "2026-07-30T00:00:00Z"),
+    ])
+    result = dead_letters(str(db_path), 32)
+    assert result == {
+        "available": True, "truncated": False,
+        "rows": [{
+            "job_id": "job-1", "coin": "BTC", "stage": "fetch", "attempt": 2,
+            "error_class": "TimeoutError", "retry_state": "dead-lettered", "release_identity": None,
+        }],
+    }
+
+
+def test_dead_letter_sqlite_empty_table_is_available_and_complete_not_insufficient(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    db_path = tmp_path / "trustforge.sqlite3"
+    _write_dead_letter_db(db_path, [])
+    remote = dead_letters(str(db_path), 32)
+    assert remote == {"available": True, "truncated": False, "rows": []}
+    audit_row, letters, _, warning = audit._dead_letter_evidence(remote, ReadBudget(12, 32, 1_048_576, 5, 1))
+    assert audit_row.status is AuditStatus.COMPLETE
+    assert letters == ()
+    assert warning is None
+
+
+def test_dead_letter_sqlite_missing_file_is_insufficient_evidence_without_crash(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    assert dead_letters(str(tmp_path / "does-not-exist.sqlite3"), 32) is None
+    audit_row, letters, _, warning = audit._dead_letter_evidence(
+        {"available": False, "truncated": False, "rows": []}, ReadBudget(12, 32, 1_048_576, 5, 1),
+    )
+    assert audit_row.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert letters == ()
+    assert warning == "dynamodb-durable-dead-letter-insufficient-evidence"
+
+
+def test_dead_letter_sqlite_schema_drift_missing_table_is_insufficient_evidence(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    db_path = tmp_path / "trustforge.sqlite3"
+    connection = sqlite3.connect(str(db_path))
+    connection.execute("CREATE TABLE unrelated_table (x TEXT)")
+    connection.commit()
+    connection.close()
+    assert dead_letters(str(db_path), 32) is None
+
+
+def test_dead_letter_error_text_never_leaves_the_ssm_script_process(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    db_path = tmp_path / "trustforge.sqlite3"
+    secret = "sk-0123456789abcdef"
+    _write_dead_letter_db(db_path, [
+        ("job-1", "fetch", "BTC", "m", "q", "s", 1, f"ValueError: password={secret}", "2026-07-30T00:00:00Z"),
+    ])
+    result = dead_letters(str(db_path), 32)
+    assert result["rows"][0]["error_class"] == "ValueError"
+    assert secret not in json.dumps(result)
+
+    # Even if a compromised remote somehow reported the secret directly as
+    # error_class (bypassing classify_error), Python-side contract validation
+    # drops that one row rather than persisting it anywhere.
+    letters = audit._dead_letters([{
+        "job_id": "job-1", "coin": "BTC", "stage": "fetch", "attempt": 1,
+        "error_class": secret, "retry_state": "dead-lettered", "release_identity": None,
+    }])
+    assert letters == ()
+
+
+def test_dead_letter_row_limit_truncates_and_orders_by_failed_at_desc(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    db_path = tmp_path / "trustforge.sqlite3"
+    rows = [
+        (f"job-{i}", "fetch", "BTC", "m", "q", "s", 1, "TimeoutError: x", f"2026-07-{i:02d}T00:00:00Z")
+        for i in range(1, 35)
+    ]
+    _write_dead_letter_db(db_path, rows)
+    result = dead_letters(str(db_path), 32)
+    assert result["truncated"] is True
+    assert len(result["rows"]) == 32
+    assert result["rows"][0]["job_id"] == "job-34"
+
+    # A snapshot claiming more rows than the local-io item_limit is a fatal
+    # structural violation, not a soft warning: this script always caps its
+    # own output at `limit`, so seeing more means the snapshot was tampered
+    # with or the schema drifted.
+    row = {
+        "job_id": "job", "coin": "BTC", "stage": "fetch", "attempt": 1,
+        "error_class": "TimeoutError", "retry_state": "dead-lettered", "release_identity": None,
+    }
+    oversized = _snapshot(dead_letters=_dead_letters_section(rows=[row] * 33))
+    with pytest.raises(AuditContractError):
+        audit._validate_ssm_snapshot(oversized)
+
+
+def test_dead_letter_malformed_attempt_is_dropped_row_by_row_not_fatal() -> None:
+    rows = [
+        {
+            "job_id": "job-good", "coin": "BTC", "stage": "fetch", "attempt": 2,
+            "error_class": "TimeoutError", "retry_state": "dead-lettered", "release_identity": None,
+        },
+        {
+            "job_id": "job-bad", "coin": "BTC", "stage": "fetch", "attempt": -1,
+            "error_class": "TimeoutError", "retry_state": "dead-lettered", "release_identity": None,
+        },
+    ]
+    letters = audit._dead_letters(rows)
+    assert len(letters) == 1
+    assert letters[0].coin == "BTC"
+    audit_row, letters, _, warning = audit._dead_letter_evidence(
+        {"available": True, "truncated": False, "rows": rows}, ReadBudget(12, 32, 1_048_576, 5, 1),
+    )
+    assert audit_row.status is AuditStatus.COMPLETE
+    assert len(letters) == 1
+    assert warning is None
+
+
+def test_dead_letter_over_byte_budget_degrades_to_insufficient_evidence_not_crash() -> None:
+    rows = [
+        {
+            "job_id": f"job-{i}", "coin": "BTC", "stage": "fetch", "attempt": 1,
+            "error_class": "TimeoutError", "retry_state": "dead-lettered", "release_identity": None,
+        }
+        for i in range(20)
+    ]
+    tiny_budget = ReadBudget(12, 32, 64, 5, 1)
+    audit_row, letters, ref, warning = audit._dead_letter_evidence(
+        {"available": True, "truncated": False, "rows": rows}, tiny_budget,
+    )
+    assert audit_row.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert letters == ()
+    assert warning == "local-io-byte-budget-exceeded"
+    assert ref.content_sha256.startswith("sha256:")
+
+
+def test_dead_letter_sqlite_read_respects_busy_timeout_under_a_concurrent_writer_lock(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    db_path = tmp_path / "trustforge.sqlite3"
+    _write_dead_letter_db(db_path, [
+        ("job-1", "fetch", "BTC", "m", "q", "s", 1, "TimeoutError: x", "2026-07-30T00:00:00Z"),
+    ])
+    released = threading.Event()
+
+    def hold_exclusive_lock(hold_seconds: float) -> None:
+        writer = sqlite3.connect(str(db_path), timeout=5)
+        writer.execute("PRAGMA locking_mode=EXCLUSIVE")
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE analysis_dead_letters SET attempts = attempts")
+        writer.execute("UPDATE analysis_dead_letters SET attempts = attempts")
+        time.sleep(hold_seconds)
+        writer.commit()
+        writer.close()
+        released.set()
+
+    thread = threading.Thread(target=hold_exclusive_lock, args=(0.3,))
+    thread.start()
+    time.sleep(0.05)  # let the writer actually acquire the exclusive lock first
+    started = time.monotonic()
+    try:
+        result = dead_letters(str(db_path), 32)
+    finally:
+        thread.join(timeout=5)
+    elapsed = time.monotonic() - started
+    # The read-only connection's own busy_timeout (1000ms, shorter than the
+    # audit's overall SSM read budget) must be honoured: it waits for the
+    # writer to release rather than failing immediately, but the wait stays
+    # bounded well under the SSM command's own timeout.
+    assert released.is_set()
+    assert elapsed < 2.0
+    assert result == {"available": True, "truncated": False, "rows": [{
+        "job_id": "job-1", "coin": "BTC", "stage": "fetch", "attempt": 1,
+        "error_class": "TimeoutError", "retry_state": "dead-lettered", "release_identity": None,
+    }]}
+
+
+def test_dead_letter_sqlite_lock_held_longer_than_busy_timeout_is_fail_closed(tmp_path: Path) -> None:
+    dead_letters = _load_ssm_functions()["dead_letters"]
+    db_path = tmp_path / "trustforge.sqlite3"
+    _write_dead_letter_db(db_path, [
+        ("job-1", "fetch", "BTC", "m", "q", "s", 1, "TimeoutError: x", "2026-07-30T00:00:00Z"),
+    ])
+    released = threading.Event()
+
+    def hold_exclusive_lock() -> None:
+        writer = sqlite3.connect(str(db_path), timeout=5)
+        writer.execute("PRAGMA locking_mode=EXCLUSIVE")
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE analysis_dead_letters SET attempts = attempts")
+        writer.execute("UPDATE analysis_dead_letters SET attempts = attempts")
+        released.wait(5)
+        writer.commit()
+        writer.close()
+
+    thread = threading.Thread(target=hold_exclusive_lock)
+    thread.start()
+    time.sleep(0.05)
+    try:
+        started = time.monotonic()
+        result = dead_letters(str(db_path), 32)
+        elapsed = time.monotonic() - started
+        # busy_timeout is 1000ms: a lock held well beyond that must fail
+        # closed (None), never hang or raise, and must not block much longer
+        # than the configured timeout.
+        assert result is None
+        assert elapsed < 3.0
+    finally:
+        released.set()
+        thread.join(timeout=5)
+
+
+def test_table_binding_configured_adopts_a_remote_value_that_matches_its_own_approved_name() -> None:
+    remote_config = {name: "absent" for name in audit._TABLE_NAME_FLAGS}
+    remote_config["TRUSTFORGE_CACHE_TABLE"] = audit._APPROVED_TABLE_NAMES["connector-cache"]
+    bindings = {item.table_type: item.table_name for item in audit.TableBinding.configured(remote_config=remote_config)}
+    assert bindings["connector-cache"] == audit._APPROVED_TABLE_NAMES["connector-cache"]
+    assert bindings["admin-config"] == audit._APPROVED_TABLE_NAMES["admin-config"]
+    # Untouched flags fall back to the static approved table, unchanged.
+    assert bindings["scheduler-run"] == audit._APPROVED_TABLE_NAMES["scheduler-run"]
+    assert bindings["cost-ledger"] == audit._APPROVED_TABLE_NAMES["cost-ledger"]
+
+
+def test_table_binding_configured_fails_closed_when_remote_value_is_valid_but_not_approved() -> None:
+    """CEO ruling 2026-07-31: a syntactically valid remote table name that is
+    not in `_APPROVED_TABLE_NAMES.values()` must never be adopted, and must
+    never fall back to silently continuing to read the old static table --
+    the binding for that type is dropped entirely (fail-closed).
+    """
+    remote_config = {name: "absent" for name in audit._TABLE_NAME_FLAGS}
+    # Syntactically valid (passes TABLE_NAME_RE) but not connector-cache's
+    # approved name -- a plausible "production accidentally repointed the env
+    # var at a different, still legitimately-named table" scenario.
+    remote_config["TRUSTFORGE_CACHE_TABLE"] = "trustforge-some-other-table"
+    bindings = audit.TableBinding.configured(remote_config=remote_config)
+    types = {item.table_type for item in bindings}
+    assert "connector-cache" not in types
+    assert "admin-config" not in types
+    assert {"scheduler-run", "cost-ledger"}.issubset(types)
+
+    # End-to-end: the dropped binding must degrade only that table to
+    # insufficient evidence with a distinct warning, never silently keep
+    # reading the static table, and never crash.
+    reader = DynamoAuditReader(FakeDynamo(), AuditLimits.defaults(), bindings=bindings)
+    _, data, _, refs, warnings = reader.collect()
+    cache = next(item for item in data.table_audits if item.table_type == "connector-cache")
+    admin = next(item for item in data.table_audits if item.table_type == "admin-config")
+    assert cache.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert admin.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert "dynamodb-connector-cache-table-name-not-approved" in warnings
+    assert "dynamodb-admin-config-table-name-not-approved" in warnings
+    assert "trustforge-some-other-table" not in json.dumps(
+        {"warnings": list(warnings), "refs": [dataclasses.asdict(ref) for ref in refs]}, sort_keys=True,
+    )
+
+
+def test_table_binding_configured_fails_closed_when_remote_value_is_present_but_syntactically_invalid() -> None:
+    """Bug 1 end-to-end (2026-07-31 adversarial codex review, CEO-confirmed):
+    a remote table-name flag that IS set but to a value that fails
+    TABLE_NAME_RE must fail closed exactly like a syntactically valid but
+    non-approved value -- it must NEVER be miscategorized as "genuinely
+    absent" and silently fall back to reading the static approved table.
+    """
+    config_value = _load_ssm_functions()["config_value"]
+    sentinel = config_value("TRUSTFORGE_CACHE_TABLE", {"TRUSTFORGE_CACHE_TABLE": "evil/table"})
+
+    snapshot = _snapshot(table_names={"TRUSTFORGE_CACHE_TABLE": sentinel})
+    validated = audit._validate_ssm_snapshot(snapshot)  # must not raise: sentinel is schema-valid
+
+    bindings = audit.TableBinding.configured(remote_config=validated["config"])
+    types = {item.table_type for item in bindings}
+    assert "connector-cache" not in types
+    assert "admin-config" not in types
+    assert {"scheduler-run", "cost-ledger"}.issubset(types)
+
+    # End-to-end: the dropped binding degrades only that table to
+    # insufficient evidence, never silently keeps reading the static table.
+    reader = DynamoAuditReader(FakeDynamo(), AuditLimits.defaults(), bindings=bindings)
+    _, data, _, _, warnings = reader.collect()
+    cache = next(item for item in data.table_audits if item.table_type == "connector-cache")
+    admin = next(item for item in data.table_audits if item.table_type == "admin-config")
+    assert cache.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert admin.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert "dynamodb-connector-cache-table-name-not-approved" in warnings
+    assert "dynamodb-admin-config-table-name-not-approved" in warnings
+
+
+def test_table_binding_configured_fails_closed_when_remote_value_is_present_but_empty() -> None:
+    """Bug 1 sibling end-to-end (2026-07-31 adversarial codex re-review): a
+    remote table-name flag that IS a key in service_env but whose value is
+    the empty string (e.g. a systemd unit misconfigured with
+    `Environment=TRUSTFORGE_CACHE_TABLE=`) must fail closed exactly like any
+    other present-but-invalid value -- it must NEVER be miscategorized as
+    "genuinely absent" and silently fall back to reading the static
+    approved table. This drives the value through config_value() itself
+    (not a manually constructed sentinel) to prove the whole pipeline --
+    config_value -> _validate_ssm_snapshot -> TableBinding.configured --
+    closes the gap end to end.
+    """
+    config_value = _load_ssm_functions()["config_value"]
+    sentinel = config_value("TRUSTFORGE_CACHE_TABLE", {"TRUSTFORGE_CACHE_TABLE": ""})
+    assert sentinel == audit._TABLE_NAME_INVALID_SENTINEL
+
+    snapshot = _snapshot(table_names={"TRUSTFORGE_CACHE_TABLE": sentinel})
+    validated = audit._validate_ssm_snapshot(snapshot)  # must not raise: sentinel is schema-valid
+
+    bindings = audit.TableBinding.configured(remote_config=validated["config"])
+    types = {item.table_type for item in bindings}
+    assert "connector-cache" not in types
+    assert "admin-config" not in types
+    assert {"scheduler-run", "cost-ledger"}.issubset(types)
+
+    # End-to-end: the dropped binding degrades only that table to
+    # insufficient evidence, never silently keeps reading the static table.
+    reader = DynamoAuditReader(FakeDynamo(), AuditLimits.defaults(), bindings=bindings)
+    _, data, _, _, warnings = reader.collect()
+    cache = next(item for item in data.table_audits if item.table_type == "connector-cache")
+    admin = next(item for item in data.table_audits if item.table_type == "admin-config")
+    assert cache.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert admin.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert "dynamodb-connector-cache-table-name-not-approved" in warnings
+    assert "dynamodb-admin-config-table-name-not-approved" in warnings
+
+
+def test_dynamo_audit_reader_empty_bindings_tuple_is_not_replaced_by_static_defaults() -> None:
+    """Bug 4 (2026-07-31 adversarial codex third-pass review, CEO-confirmed):
+    `TableBinding.configured(remote_config=...)` legitimately returns an empty
+    tuple when every `_TABLE_NAME_FLAGS` entry fails closed. `bindings=()` is
+    falsy, so `self._bindings = bindings or TableBinding.configured()` used to
+    treat "caller explicitly supplied an empty tuple" the same as "caller
+    passed nothing" and silently re-populated it with the full set of static
+    approved bindings -- inverting fail-closed into "the more broken the
+    remote config, the healthier the tool looks." Only the true default
+    (`bindings=None`, not supplied at all) may fall back to the static set.
+    """
+    reader = DynamoAuditReader(FakeDynamo(), AuditLimits.defaults(), bindings=())
+    assert reader._bindings == ()
+    _, data, _, _, warnings = reader.collect()
+    for item in data.table_audits:
+        if item.table_type == "durable-dead-letter":
+            continue
+        assert item.status is AuditStatus.INSUFFICIENT_EVIDENCE
+    assert len(data.table_audits) == len(TABLE_TYPE_ALLOWLIST)
+
+
+def test_run_audit_end_to_end_when_all_table_name_flags_fail_closed_never_falls_back_to_static_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug 4 end-to-end: drive the same scenario through `run_audit()` with a
+    remote SSM snapshot where all three `_TABLE_NAME_FLAGS` are present but
+    syntactically invalid, so `TableBinding.configured(remote_config=...)`
+    returns `()`. `run_audit()` must report INSUFFICIENT_EVIDENCE for every
+    non-dead-letter table type, never silently recover by reading the old
+    static tables.
+    """
+    config_value = _load_ssm_functions()["config_value"]
+    table_names = {
+        flag: config_value(flag, {flag: "evil/table"}) for flag in audit._TABLE_NAME_FLAGS
+    }
+    for sentinel in table_names.values():
+        assert sentinel == audit._TABLE_NAME_INVALID_SENTINEL
+    snapshot = _snapshot(table_names=table_names)
+    validated = audit._validate_ssm_snapshot(snapshot)
+    assert audit.TableBinding.configured(remote_config=validated["config"]) == ()
+
+    clients, _, _ = _clients(snapshot=snapshot)
+    bundle = run_audit(TARGET, clients, expected_release="v0.27.37")
+    for item in bundle.data_plane.table_audits:
+        if item.table_type == "durable-dead-letter":
+            continue
+        assert item.status is AuditStatus.INSUFFICIENT_EVIDENCE
+
+
+def test_local_environment_still_cannot_override_when_ssm_snapshot_also_supplies_an_approved_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRUSTFORGE_CACHE_TABLE", "attacker-controlled-table")
+    remote_config = {name: "absent" for name in audit._TABLE_NAME_FLAGS}
+    remote_config["TRUSTFORGE_CACHE_TABLE"] = audit._APPROVED_TABLE_NAMES["connector-cache"]
+    bindings = {item.table_type: item.table_name for item in audit.TableBinding.configured(remote_config=remote_config)}
+    assert bindings["connector-cache"] == audit._APPROVED_TABLE_NAMES["connector-cache"]
+    assert "attacker-controlled-table" not in bindings.values()
+
+
+def test_table_name_with_shell_characters_or_overlong_value_is_rejected_by_snapshot_validation() -> None:
+    for bad_value in ("trustforge`; rm -rf /`", "a" * 256, "ab"):
+        snapshot = _snapshot(table_names={"TRUSTFORGE_CACHE_TABLE": bad_value})
+        with pytest.raises(AuditContractError):
+            audit._validate_ssm_snapshot(snapshot)
+
+
+def test_config_schema_drift_is_integrity_failure() -> None:
+    snapshot = _snapshot()
+    snapshot["config"] = dict(snapshot["config"])
+    snapshot["config"]["UNEXPECTED_FLAG"] = "configured"
+    with pytest.raises(AuditContractError):
+        audit._validate_ssm_snapshot(snapshot)
+
+    clients, _, _ = _clients(snapshot=snapshot)
+    bundle = run_audit(TARGET, clients)
+    assert bundle.overall_status is AuditStatus.INTEGRITY_FAILURE

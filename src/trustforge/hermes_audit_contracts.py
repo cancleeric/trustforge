@@ -55,6 +55,10 @@ _REGION_RE = re.compile(r"[a-z]{2}-[a-z]+-\d\Z")
 _INSTANCE_ID_RE = re.compile(r"i-[0-9a-f]{8,17}\Z")
 _SAFE_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,255}\Z")
 _COIN_RE = re.compile(r"[A-Z]{2,16}\Z")
+# Shared by hermes_audit.py (expected_release CLI grammar) and
+# hermes_audit_signing.py (ApprovalAttestationV1.expected_release binding) so
+# both modules enforce the exact same release-identity grammar.
+SAFE_RELEASE_RE = re.compile(r"[A-Za-z0-9._@+-]{1,256}\Z")
 _SECRET_KEY_RE = re.compile(
     r"(?:^|[_\-])(api[_\-]?key|access[_\-]?key|secret|token|password|"
     r"credential|authorization|private[_\-]?key|ssm[_\-]?prefix|parameter[_\-]?prefix)(?:$|[_\-])",

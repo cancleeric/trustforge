@@ -40,10 +40,31 @@ commits, uploads, comments on an issue, or deletes evidence.
 The static SSM reducer evaluates the allowlisted environment of
 `hermes-cycle.service` (not the SSM process environment), and reads the actual
 release manifest at `/opt/trustforge/manifest.json`. The durable analysis
-failure table is SQLite `analysis_dead_letters`; this audit intentionally does
-not guess or read a DynamoDB table for it, so the durable-dead-letter row is
-reported as insufficient evidence until a separately approved read-only SQLite
-adapter exists.
+failure table is SQLite `analysis_dead_letters`, not a DynamoDB table: the same
+SSM command opens it with a read-only, belt-and-suspenders connection
+(`file:...?mode=ro` plus `PRAGMA query_only=1`, with a `busy_timeout` shorter
+than this audit's own read budget so a concurrent WAL writer can never exhaust
+it) and reads at most `local-io` budget's `item_limit` (32) most-recent rows,
+ordered by `failed_at DESC`. An available, non-truncated table (including an
+empty one) is `complete`; a missing file/table, a lock, or an over-budget
+payload is fail-closed to `insufficient-evidence`, never a crash. The raw
+`error` column text never leaves the SSM script process: it is reduced in
+place to an allowlisted exception class name or the fixed sentinel
+`unclassified-error` before being returned. `retry_state` is always the fixed
+string `dead-lettered` (every row in this table has already exhausted its
+retries by construction) and `release_identity` is always `null`, a known
+limitation — the source table does not record it.
+
+The three table-name environment flags (`TRUSTFORGE_CACHE_TABLE`,
+`TRUSTFORGE_SCHEDULER_RUN_TABLE`, `TRUSTFORGE_COST_LEDGER_TABLE`) now carry
+their real remote value (validated against a safe character-set pattern)
+instead of a bare `configured`/`absent` tri-state. A remote value is only ever
+adopted when it exactly matches that table's own pre-approved name; any other
+syntactically valid but unapproved value is fail-closed (that table's binding
+is dropped for this audit, reported as insufficient evidence) rather than
+silently falling back to reading the previously-approved table. A local shell
+environment variable on the operator's machine can never influence this
+decision either way; only the SSM snapshot's own validated value can.
 
 ## Mandatory dry-run review
 
@@ -67,20 +88,50 @@ or the output path is outside `out/`.
 
 ## Production-read authorization gate (Task 6)
 
-Do **not** remove `--dry-run` or make a real production read until all of the
-following are recorded in the review ticket/window:
+Do **not** remove `--dry-run` or make a real production read until four
+independent Ed25519-signed approval attestations exist, one each from CEO,
+CPO, CISO, and the operator. Each attestation is a small signed JSON file
+binding: the exact region/instance target, the expected release (if any),
+the exact `--output-dir`, and the static SSM command's SHA-256 digest, plus
+an `issued_at`/`expires_at` validity window and a one-time nonce. A single
+signer can never stand in for another role, and a signature is invalid for
+every purpose other than the one role it names — the command refuses to run
+if any file is missing, unsigned, forged, expired, not-yet-valid, bound to a
+different target/release/output path/command digest than the one actually
+being invoked, or if any two of the four attestations share the same actor
+or the same signing key (self-approval).
 
-1. An explicit CEO change window and exact region/instance target.
-2. CPO approval for the evidence scope and CISO approval for the privilege,
-   secret-handling, and retention boundary.
-3. A new short-lived AWS credential scoped to the permissions above.
-4. A second-person signed dry-run review of target, release, command digest,
-   limits, and output path.
+Each signer independently runs (offline, ahead of the actual audit
+invocation) the project's approval-signing helper
+(`trustforge.hermes_audit_signing.sign_approval_attestation`) with their own
+private Ed25519 key, producing one `<role>-approval.json` file. Operators
+must also hold a public `--approval-verification-keyring` file (the
+`secure_keyring` public-keyring JSON contract) listing all four signers'
+verification keys. Invoke the real audit as:
 
-The approved operator may then run the same command without `--dry-run`. No
-unit, table, configuration, flag, deployment, or database may be changed in
-the same window. The operator records the command's JSON status and bundle
-digest, not its raw remote output.
+```sh
+.venv/bin/python scripts/hermes_production_audit.py \
+  --region ap-southeast-2 \
+  --instance-id i-0152b70368358a81c \
+  --output-dir out/audits/hermes \
+  --expected-release v0.27.37 \
+  --ceo-approval ceo-approval.json \
+  --cpo-approval cpo-approval.json \
+  --ciso-approval ciso-approval.json \
+  --operator-approval operator-approval.json \
+  --approval-verification-keyring approval-verification-keyring.json \
+  --signing-keyring signing-keyring.json
+```
+
+Each of the four nonces is consumed exactly once, ledger-wide, at the moment
+this command runs (`--approval-nonce-ledger-dir`, default
+`out/audit-approval-nonce-ledger`): replaying any single already-used
+attestation — even mixed with three otherwise-fresh ones — rejects the
+whole bundle and consumes nothing. A new short-lived AWS credential scoped to
+the permissions above must also be in place before running without
+`--dry-run`. No unit, table, configuration, flag, deployment, or database may
+be changed in the same window. The operator records the command's JSON status
+and bundle digest, not its raw remote output.
 
 ## Interpreting results
 

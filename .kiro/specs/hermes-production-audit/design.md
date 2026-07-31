@@ -14,6 +14,7 @@ scripts/hermes_production_audit.py
    └─ Local evidence writer ─────────────> out/audits/hermes/<audit-id>/
        ├─ evidence.json
        ├─ summary.md
+       ├─ ATTESTATION.json
        └─ SHA256SUMS
 ```
 
@@ -65,7 +66,7 @@ SSM stdout 與 DynamoDB items 只在記憶體解析為 allowlisted 聚合欄位�
 
 ## Output and failure safety
 
-`out/audits/` 必須在實作時確認為 ignored runtime output。canonical JSON 使用排序 key 與 UTC；SHA-256 可驗證 bundle。summary 只列狀態、hash、摘要與人工下一步。不得 upload、commit、issue comment、CloudWatch write 或 DynamoDB write。
+`out/audits/` 必須在實作時確認為 ignored runtime output。canonical JSON 使用排序 key 與 UTC；canonical JSON + SHA-256 提供內容自洽性摘要（操作者自己就能重算，不足以防第三方竄改）——`ATTESTATION.json` 內的 Ed25519 簽章才是防竄改依據，驗證需要對應的 verification key。`complete`/`blocked`/`partial`/`insufficient-evidence`/`integrity-failure` 全狀態一律簽署，不只對「好消息」簽章。summary 只列狀態、hash、摘要與人工下一步。不得 upload、commit、issue comment、CloudWatch write 或 DynamoDB write。
 
 AWS session/SSM timeout 產生 blocked/partial，不嘗試 SSH。redaction/schema 違反是 integrity failure，未遮罩 payload 不落盤。工具沒有 production mutation；停止工具或回到前一 script release 即可回退。本機 evidence 若疑似含敏感資料，走 security incident/retention，不得逕自刪除已被引用的證據。
 
