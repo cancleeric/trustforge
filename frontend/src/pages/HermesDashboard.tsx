@@ -90,7 +90,7 @@ export default function HermesDashboard() {
   const [shipOpen, setShipOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [diandianOnboardingOpen, setDiandianOnboardingOpen] = useState(() => {
-    try { return !localStorage.getItem('diandian_onboarding_done') } catch { return true }
+    try { return !document.cookie.split('; ').some(c => c.startsWith('diandian_onboarding_done=1')) } catch { return true }
   })
   const [firstRunOpen, setFirstRunOpen] = useState(() => !qaMode && shouldShowHermesOnboarding() && searchParams.get('tour') !== '1')
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
