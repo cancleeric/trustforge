@@ -30,15 +30,15 @@ ACCEPTED_NF2_TREE = "cb56a4bef9708da3f9f1468aff11734f2f50adcd"
 ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
     "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0"
 )
-REVIEWED_NR1A_NF2_TREE = "7a80381fb557db83609e3724ea7cf65834e86f18"
+REVIEWED_NR1A_NF2_TREE = "0be111ae0a67fa6f525fd533e932e63df30be642"
 REVIEWED_NR1A_SOURCE_TREE_RECEIPT_SHA256 = (
-    "4f513859900b407fd9a82a195def37ce50c89cbf13fe50b8cfdeda75dc92cea2"
+    "59248aae1d8167cc84c3cc44e22cd8879ff8c51d802d2af26a3246080325dc3f"
 )
 ACCEPTED_LINKED_SOURCE_SHA256 = (
     "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc"
 )
 REVIEWED_NR1A_LINKED_SOURCE_SHA256 = (
-    "3ea09c0374235f8d87dc01f8b9dd7deaa432d70400a92cb855529649c3d5708f"
+    "f32c31eec9f594d72e274faba8daac34cc0df7cc677f187cf3a963e9fc626b1b"
 )
 EXPECTED_RELEASE_RLIB_SHA256 = (
     "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38"
@@ -1235,24 +1235,27 @@ def frame(value: bytes) -> bytes:
 
 
 def linked_source_digest(repo: Path) -> str:
-    names = (
-        "Cargo.lock",
-        "Cargo.toml",
-        "src/canonical_json.rs",
-        "src/capability.rs",
-        "src/lib.rs",
-        "src/linux.rs",
-        "src/linux/live.rs",
-        "src/linux/process.rs",
-        "src/linux/sealed.rs",
-        "src/main.rs",
-        "src/manifest.rs",
-        "src/sha256.rs",
-    )
     root = repo / "native/nf2-zero-capability-broker"
+    workspace = repo / "native"
+    # Cargo.lock is the workspace-root authoritative resolution (PR-B2 dedup);
+    # src/sha256.rs moved to trustforge-native-sys. Keep in sync with
+    # foundation.rs linked_nf2_source_sha256() SOURCES (11 entries).
+    sources = [
+        ("Cargo.lock", workspace / "Cargo.lock"),
+        ("Cargo.toml", root / "Cargo.toml"),
+        ("src/canonical_json.rs", root / "src/canonical_json.rs"),
+        ("src/capability.rs", root / "src/capability.rs"),
+        ("src/lib.rs", root / "src/lib.rs"),
+        ("src/linux.rs", root / "src/linux.rs"),
+        ("src/linux/live.rs", root / "src/linux/live.rs"),
+        ("src/linux/process.rs", root / "src/linux/process.rs"),
+        ("src/linux/sealed.rs", root / "src/linux/sealed.rs"),
+        ("src/main.rs", root / "src/main.rs"),
+        ("src/manifest.rs", root / "src/manifest.rs"),
+    ]
     value = hashlib.sha256(b"trustforge.nf2.linked-source.v1\0")
-    for name in names:
-        payload = (root / name).read_bytes()
+    for name, path in sources:
+        payload = path.read_bytes()
         value.update(frame(name.encode()))
         value.update(len(payload).to_bytes(8, "big"))
         value.update(payload)
