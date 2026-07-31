@@ -754,6 +754,24 @@ def formal_run_blocked(main_tree: Path, main_sha: str) -> bool:
     return FORMAL_RUN_READY_FLAG.read_text(encoding="utf-8").strip() != main_sha
 
 
+def formal_run_pending_origin() -> bool:
+    """gate 前止損：origin/main 含 formal handler 但配套 flag 不存在 → True。
+
+    在 worktree/gate 建立前檢查，讓 release train 不受 flaky test 影響可靠止損。
+    flag 內容的 SHA 驗證仍由 gate 後的 formal_run_blocked() 把關（雙層防護）。
+
+    git show 失敗時讓 CalledProcessError 傳播（fail-closed：無法確認 origin/main
+    狀態時 execute 走 failed 路徑，不部署），不靜默放行。
+    """
+    origin_main_web = run(
+        ["git", "show", "origin/main:src/trustforge/web.py"],
+        capture=True,
+    )
+    if FORMAL_HANDLER_MARKER not in origin_main_web:
+        return False
+    return not FORMAL_RUN_READY_FLAG.exists()
+
+
 def execute(args: argparse.Namespace) -> Path:
     started = datetime.now(UTC)
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
@@ -794,6 +812,17 @@ def execute(args: argparse.Namespace) -> Path:
                 and frontend_in_sync
             ):
                 receipt["status"] = "no-op"
+                receipt["finished_at"] = datetime.now(UTC).isoformat()
+                return record(receipt)
+            # gate 前止損：formal handler 在 origin/main 但配套 flag 不存在 → 不跑 gate/不部署，
+            # 避免 finale 衝刺留下的 flaky test 卡住止損、避免部署無配套版本
+            if formal_run_pending_origin():
+                receipt["status"] = "blocked-formal-pending"
+                receipt["blocked_reason"] = (
+                    "origin/main 引入 formal-run analysis-question handler，但生產 formal-run "
+                    "配套（DynamoDB table + caller/idempotency/retention secret + EC2 env）"
+                    f"尚未就緒。完成配套後，將部署目標 main SHA 寫入 {FORMAL_RUN_READY_FLAG} 才會部署。"
+                )
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
             backup_command = "bash deploy/backup_production_release.sh"

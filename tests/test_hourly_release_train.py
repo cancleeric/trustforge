@@ -859,6 +859,44 @@ def test_formal_run_unblocked_when_web_py_absent(tmp_path, monkeypatch):
     assert train.formal_run_blocked(tmp_path / "no-main", "a" * 40) is False
 
 
+def test_formal_run_pending_origin_blocks_when_marker_without_flag(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        train, "run",
+        lambda command, *, cwd=train.ROOT, capture=False: "def _handle_api_formal_analysis_question():\n    pass\n",
+    )
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent")
+    assert train.formal_run_pending_origin() is True
+
+
+def test_formal_run_pending_origin_unblocks_when_flag_exists(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        train, "run",
+        lambda command, *, cwd=train.ROOT, capture=False: "def _handle_api_formal_analysis_question():\n    pass\n",
+    )
+    flag = tmp_path / "formal-run-prod-ready"
+    flag.write_text("sha", encoding="utf-8")
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", flag)
+    assert train.formal_run_pending_origin() is False
+
+
+def test_formal_run_pending_origin_unblocks_when_marker_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        train, "run",
+        lambda command, *, cwd=train.ROOT, capture=False: "def legacy():\n    pass\n",
+    )
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent")
+    assert train.formal_run_pending_origin() is False
+
+
+def test_formal_run_pending_origin_fails_closed_when_git_show_errors(monkeypatch, tmp_path):
+    def boom(command, *, cwd=train.ROOT, capture=False):
+        raise train.subprocess.CalledProcessError(1, command)
+    monkeypatch.setattr(train, "run", boom)
+    monkeypatch.setattr(train, "FORMAL_RUN_READY_FLAG", tmp_path / "absent")
+    with pytest.raises(train.subprocess.CalledProcessError):
+        train.formal_run_pending_origin()
+
+
 def test_execute_blocks_when_formal_handler_pending(monkeypatch, tmp_path):
     monkeypatch.setattr(train, "OUT", tmp_path / "out")
     monkeypatch.setattr(train, "require_clean_root", lambda: None)
