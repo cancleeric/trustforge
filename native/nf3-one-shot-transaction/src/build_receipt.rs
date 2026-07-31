@@ -12,9 +12,9 @@ const RECEIPT_NAME: &str = "receipt.v1";
 const RECEIPT_MAX: usize = 2048;
 const EXE_MAX: usize = 64 * 1024 * 1024;
 const BLOCKED_RECEIPT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const SOURCE: &str = "f32c31eec9f594d72e274faba8daac34cc0df7cc677f187cf3a963e9fc626b1b";
+const SOURCE: &str = "8671760ee0571a33cfb5373be7991757a0eb55f99810e8f1d44561175f819e20";
 const SOURCE_TREE_RECEIPT: &str =
-    "c0ff1fa4d9338074db2068e8fd0924ae13dbe08a166744691a40996cc6f6c019";
+    "adcadfc4c9112896a4f51b7c61d348417794305cd450fe1bbb0054a56c934750";
 const TOOLCHAIN: &str = "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26";
 // interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const EVIDENCE_RLIB: &str = "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";

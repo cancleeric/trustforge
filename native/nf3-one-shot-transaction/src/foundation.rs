@@ -9,7 +9,7 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "c0ff1fa4d9338074db2068e8fd0924ae13dbe08a166744691a40996cc6f6c019";
+    "adcadfc4c9112896a4f51b7c61d348417794305cd450fe1bbb0054a56c934750";
 // interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
     "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
@@ -202,7 +202,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "6001aad854eec3f9c353da8330ff72eb8e37aa8affafc449f777af5392c1e325"
+            "b75ff48d83fffe3bcceb20cfbefdfb25172270d1c2dde2fafe7da7dd792d28ee"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -225,11 +225,11 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "6001aad854eec3f9c353da8330ff72eb8e37aa8affafc449f777af5392c1e325"
+            "b75ff48d83fffe3bcceb20cfbefdfb25172270d1c2dde2fafe7da7dd792d28ee"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "65ee3e0e03daacc81cd209c88c7e30e116432aadf42c7fb29f884be8c260f5c0"
+            "1e222c14e2397be637fb774bf839197045f8b623b0528c64f3bddce17bd5cdd1"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
@@ -240,11 +240,11 @@ mod tests {
         for (name, value) in [
             (
                 "git_subtree_oid_sha1",
-                "ce3e20c5875e5fdc59e60472decbc256b9649484",
+                "c43e08d8ce5cded900282ca4ddda681fe148594a",
             ),
             (
                 "linked_source_sha256",
-                "f32c31eec9f594d72e274faba8daac34cc0df7cc677f187cf3a963e9fc626b1b",
+                "8671760ee0571a33cfb5373be7991757a0eb55f99810e8f1d44561175f819e20",
             ),
         ] {
             frame(&mut canonical, name.as_bytes());
