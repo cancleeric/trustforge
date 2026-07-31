@@ -348,37 +348,64 @@ class ComparisonReport:
         )
 
     def to_markdown(self) -> str:
-        """Unified ComparisonReport 格式的 Markdown 輸出（CA-08）。
+        """Unified ComparisonReport 格式的 Markdown 輸出（CA-08 / #1224）。
 
-        取代舊版 `comparison_to_markdown()` 的雙幣並排格式，
-        以結構化的四個比較面向為主體，含綜合結論、已知限制、
-        可能推翻條件，並以摺疊區保留各幣詳細分析。
+        三段式結構：
+          Part I ：各幣詳細分析（fully expanded，評審可追溯推理鏈）
+          Part II：整合比較總結（綜合結論 + 四面向 + 限制 + 推翻條件）
+          Part III：合併證據清單（標明幣種歸屬，可被抽查）
+
+        設計決策見 docs/plans/PLAN-COMPARISON-UNIFIED-REPORT-FORMAT-2026-08-01.md
         """
         L: list[str] = []
         L.append(f"# {self.coin_a} vs {self.coin_b} 比較分析報告")
         L.append(f"> 比較問題：{self.query}")
         L.append(f"> 生成時間：{self.generated_at}\n")
 
-        L.append("## 綜合結論")
+        # ── Part I：各幣詳細分析（完整展開）─────────────────────
+        L.append("---")
+        L.append("## 各幣詳細分析\n")
+
+        if self.supporting_report_a:
+            L.append(f"### {self.coin_a} 分析")
+            L.append(
+                self.supporting_report_a.to_markdown(self.supporting_evidence_a)
+            )
+            L.append("")
+
+        if self.supporting_report_b:
+            L.append(f"### {self.coin_b} 分析")
+            L.append(
+                self.supporting_report_b.to_markdown(self.supporting_evidence_b)
+            )
+            L.append("")
+
+        # ── Part II：整合比較總結 ─────────────────────────────────
+        L.append("---")
+        L.append("## 整合比較總結\n")
+
+        L.append("### 綜合結論")
         L.append(self.conclusion or "（待產生）")
         if self.confidence:
             L.append(f"\n**整體比較信心：{self.confidence:.0%}**\n")
 
-        L.append("## 比較面向分析")
+        L.append("### 比較面向分析")
         for i, dim in enumerate(self.dimensions, start=1):
-            L.append(f"### {i}. {dim.label}")
+            L.append(f"#### {i}. {dim.label}")
             L.append(f"- 結論：{dim.finding}")
             L.append(f"- 信心：{dim.confidence:.0%}")
             a_refs_display = [
-                f"[{self.supporting_evidence_a[i].source}:#{i}]"
-                for i in dim.a_evidence_refs
+                f"[{self.supporting_evidence_a[idx].source}:#{idx}]"
+                for idx in dim.a_evidence_refs
+                if idx < len(self.supporting_evidence_a)
             ]
             b_refs_display = [
-                f"[{self.supporting_evidence_b[i].source}:#{i}]"
-                for i in dim.b_evidence_refs
+                f"[{self.supporting_evidence_b[idx].source}:#{idx}]"
+                for idx in dim.b_evidence_refs
+                if idx < len(self.supporting_evidence_b)
             ]
-            L.append(f"- A 幣證據索引：{a_refs_display if a_refs_display else '無'}")
-            L.append(f"- B 幣證據索引：{b_refs_display if b_refs_display else '無'}")
+            L.append(f"- A 幣證據索引：{', '.join(a_refs_display) if a_refs_display else '無'}")
+            L.append(f"- B 幣證據索引：{', '.join(b_refs_display) if b_refs_display else '無'}")
             L.append(f"- 判定：{dim.decision}")
             L.append("")
 
@@ -394,19 +421,25 @@ class ComparisonReport:
                 L.append(f"- {item}")
             L.append("")
 
-        L.append("## 各幣詳細分析")
-        if self.supporting_report_a:
-            L.append(f"\n<details><summary>{self.coin_a} 詳細分析</summary>\n")
+        # ── Part III：合併證據清單 ────────────────────────────────
+        L.append("---")
+        L.append("## 合併證據清單\n")
+        L.append("| # | 幣種 | source | fetched_at | trust | content_reference |")
+        L.append("|---|------|--------|-----------|-------|-------------------|")
+        for i, ev in enumerate(self.supporting_evidence_a):
+            ref = (ev.content_reference or "")[:60]
             L.append(
-                self.supporting_report_a.to_markdown(self.supporting_evidence_a)
+                f"| E{i} | {self.coin_a} | {ev.source} "
+                f"| {ev.fetched_at or ''} | {ev.trust:.2f} | {ref} |"
             )
-            L.append("\n</details>")
-        if self.supporting_report_b:
-            L.append(f"\n<details><summary>{self.coin_b} 詳細分析</summary>\n")
+        offset = len(self.supporting_evidence_a)
+        for i, ev in enumerate(self.supporting_evidence_b):
+            ref = (ev.content_reference or "")[:60]
             L.append(
-                self.supporting_report_b.to_markdown(self.supporting_evidence_b)
+                f"| E{offset + i} | {self.coin_b} | {ev.source} "
+                f"| {ev.fetched_at or ''} | {ev.trust:.2f} | {ref} |"
             )
-            L.append("\n</details>")
+        L.append("")
 
         return "\n".join(L)
 
