@@ -79,7 +79,15 @@ def formal_run_store(
 def _secret(name: str) -> bytes:
     value = os.getenv(name, "").encode("utf-8")
     if len(value) < 32:
-        raise IdempotencyUnavailable(f"{name} must contain at least 32 bytes")
+        # 常駐 HMAC secret 走 SSM SecureString fallback（TRUSTFORGE_TOKEN_SSM_PREFIX），
+        # 不需明文寫入 systemd Environment；env 優先（本機/測試），SSM 次之（生產）。
+        from .ssm_params import get_runtime_token
+        ssm_value = get_runtime_token(name)
+        if ssm_value and len(ssm_value) >= 32:
+            return ssm_value.encode("utf-8")
+        raise IdempotencyUnavailable(
+            f"{name} must contain at least 32 bytes (env or SSM under TRUSTFORGE_TOKEN_SSM_PREFIX)"
+        )
     return value
 
 
