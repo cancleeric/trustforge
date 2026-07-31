@@ -167,20 +167,23 @@ snapshots.
 
 ### 2.3 Uniqueness guarantee (within a run)
 
-Within one run, canonical claim_ids MUST be unique. Because `extract_claims`
-(`scoring.py:325`) and the LLM extractor (`bedrock.py:585`) already produce
-unique source fingerprints per document, the `(doc_id, source_claim_suffix)`
-pair is unique pre-dedup. The report builder therefore:
+Within one run, canonical claim_ids MUST be unique across the **complete
+canonical registry** (admitted Evidence claims + truncated-but-registered
+claims). Because `extract_claims` (`scoring.py:325`) and the LLM extractor
+(`bedrock.py:585`) already produce unique source fingerprints per document, the
+`(doc_id, source_claim_suffix)` pair is unique pre-dedup. The report builder
+therefore:
 
-1. computes the canonical claim_id for each **admitted** Evidence (i.e. after the
-   `(source, content_reference, related, direction)` dedup at
-   `orchestrator.py:1064-1078` `_add_evidence`, which keeps the highest-trust
-   survivor);
-2. asserts uniqueness of the resulting set; and
+1. computes the canonical claim_id for each claim in the `scored` list (both
+   admitted Evidence and truncated-but-referenced);
+2. asserts uniqueness of the resulting complete set; and
 3. on the theoretical collision (two distinct claims hashing identically), MUST
    deterministically disambiguate by appending a monotonic counter derived from
-   admission order (`.d2`, `.d3`, …) — the collision resolver is the ONLY place
-   admission order influences identity, and it never promotes a bare array index.
+   **scored-list order** (`.d2`, `.d3`, …) — scored-list order is the stable
+   position in the original `scored` list passed to `build_report`, and it covers
+   both admitted and truncated claims uniformly. The collision resolver is the
+   ONLY place scored-list order influences identity, and it never promotes a bare
+   array index.
 
 Every Evidence row carries exactly one canonical `claim_id` (1:1). **Every
 deduplicated (discarded) source fingerprint MUST alias the admitted survivor's
@@ -281,31 +284,45 @@ stability while giving the report/export layer a joinable typed key.
    reruns ordering is irrelevant because ids are disjoint (§1.1).
 2. **No dangling references**: every canonical id appearing in `BasisItem`,
    `Insight`, `cross_source_signal`, or narrative citations MUST be present in
-   the run's `Evidence[*].claim_id` set. The report builder MUST validate this
-   **as the final statement immediately before the return** of `build_report`
-   (fail-closed ValueError on any dangling id — mirrors the existing strictness
-   in `contracts.py:205`); no code may run between this check and the return.
-3. **Bidirectional reachability (the #942 requirement)**: from any Evidence one
-   can reach every `BasisItem` / `Insight` / `cross_source_signal` that cites it
-   (via `claim_id` equality), and from any such consumer one can reach the
-   Evidence (via the same key). `evidence_idx` remains as a legacy positional
-   convenience but is NOT authoritative.
+   the run's **canonical claim_id registry** — the complete set of ids minted by
+   `build_report` for this run, which includes both Evidence-admitted claims AND
+   truncated (detected-but-not-admitted) claims that `cross_source_signal`/
+   insights reference. This resolves the tension between §4.2.5 (`cross_source`
+   receives the untruncated `scored` list) and the no-dangling invariant:
+   truncated claims are minted and registered, but not exposed as Evidence rows.
+   The report builder MUST validate this **as the final statement immediately
+   before the return** of `build_report` (fail-closed ValueError on any dangling
+   id — mirrors the existing strictness in `contracts.py:205`); no code may run
+   between this check and the return.
+3. **Bidirectional reachability (the #942 requirement)**: from any **admitted**
+   Evidence one can reach every `BasisItem` / `Insight` / `cross_source_signal`
+   that cites it (via `claim_id` equality), and from any such consumer one can
+   reach the Evidence (via the same key). **This invariant applies to admitted
+   Evidence claims only.** Truncated claims' canonical ids are registered in the
+   canonical registry (§4.2.2) and MAY be referenced by cross_source_signal /
+   insights, but they are **NOT bidirectionally navigable** — they have no
+   Evidence row. References to truncated claims are **informational** (the signal
+   was detected involving a claim not included in the final report). `evidence_idx`
+   remains as a legacy positional convenience but is NOT authoritative.
 4. **Direction role preservation**: the existing supporting/contrarian split
    encoded in `related_claim` (`"{coin} 市場判斷"` vs `"反方／低信任訊號"`,
    `orchestrator.py:1062,1090`; mirrored in `evidence_grouper.py:29,95`) is
    preserved. `claim_id` carries no direction; direction stays on `Evidence`/
    `claim.direction` to avoid encoding semantics into the identity.
-5. **Truncation consistency (no references to non-admitted claims)**:
+5. **Truncation consistency (truncated-but-referenced claims stay registered)**:
    `aggregate()`'s supporting/contrarian truncation determines the **admitted
-   Evidence set** — only admitted claims receive a canonical id and appear in
-   `Evidence[*].claim_id`. Consumers that receive a broader list — insights,
-   `cross_source_signal` (which intentionally receives the untruncated `scored`
-   list), and narrative citations — MUST reference **only admitted Evidence
-   claims**. Any reference to a claim that was truncated (present in `scored` but
-   not admitted) MUST be filtered/dropped by the consumer before reference
-   emission; equivalently, `build_report` resolves canonical ids only for the
-   admitted set and MUST drop consumer references that don't resolve. This
-   guarantees the §4.2.2 no-dangling check cannot fail on valid truncated input.
+   Evidence set** — only admitted claims are exposed as `Evidence[*]` rows.
+   Consumers that receive a broader list — insights, `cross_source_signal` (which
+   intentionally receives the untruncated `scored` list), and narrative citations
+   — MUST reference **only registered canonical ids**: an admitted Evidence row,
+   or a truncated claim minted into the registry below. Any reference to a claim
+   that was truncated (present in `scored` but not admitted) MUST be **minted and
+   registered** in the canonical claim_id registry (§4.2.2) by `build_report` —
+   the truncated claim gets a canonical id even though it is not exposed as an
+   Evidence row. Consumers (`cross_source_signal`, insights) MAY reference these
+   registered-but-not-admitted ids. This preserves the #32 cross-source
+   reliability fix (which depends on `cross_source` seeing the full untruncated
+   list) while maintaining no-dangling integrity.
 
 ## 5. Backward compatibility (old snapshots)
 
@@ -399,7 +416,7 @@ Join rules:
 2. Wire `build_report` to mint via the single helper, populate the
    `source_fingerprint -> canonical_claim_id` map, and remap
    insights/cross_source_signal/narrative citations.
-3. Add the §5.1 dual-read adapter; switch all readers to `resolve_claim_id`.
+3. Add the §5.1 dual-read adapter; switch the initial reference read-paths (`web._public_evidence_dict`, `historical_replay`) to `resolve_claim_id` (#960 scope). Remaining read-paths (snapshot modal, comparison, other web handlers) migrated by #941.
 4. Synchronize OpenAPI + frontend typed client; add the `^clm1:` validation.
 5. Enforce: no canonical id minted outside `build_report` (grep/lint guard in
    #960).
@@ -414,7 +431,7 @@ Join rules:
 | `run-scope-same-job-replay` | replay of the same `run_scope_id` (e.g. #957 `reused`) → identical claim_ids (same run) |
 | `empty-run-scope-id-rejected` | `build_report(run_scope_id="")` raises before any Evidence emitted |
 | `back-link-parity` | `set(BasisItem.claim_ids) == {evidence[i].claim_id for i in evidence_idx}` for every basis item |
-| `no-dangling-claim-ref` | every id in basis/insight/cross_source/narrative ∈ `Evidence[*].claim_id` set, else ValueError |
+| `no-dangling-claim-ref` | every id in basis/insight/cross_source/narrative ∈ canonical claim_id registry (Evidence-admitted + truncated-but-registered), else ValueError |
 | `kernel-boundary-unchanged` | `KernelClaim.id`/tuple-order contract tests pass unmodified; canonical ids do not enter the kernel |
 | `legacy-snapshot-readable` | pre-#960 payload deserializes; reader returns `legacy:` synthetic keys; render succeeds |
 | `legacy-key-not-persisted` | synthetic `legacy:` key from a read is never written to any store/export/log |
@@ -422,7 +439,42 @@ Join rules:
 | `public-api-claim-id-present` | `/api/analyze` body Evidence rows carry non-empty `clm1:` ids |
 | `csv-join-parity` | CSV evidence-grain `claim_id` joins basis/insight export on equality |
 | `collision-disambiguation` | forced hash collision → deterministic `.dN` suffix; still unique; no bare index |
-| `truncated-claim-ref-filtered` | a claim present in `scored` but truncated from Evidence, referenced by cross-source/insight → reference dropped; no dangling id; no-dangling check passes |
+| `truncated-claim-ref-registered` | a claim present in `scored` but truncated from Evidence, referenced by cross-source/insight → claim is minted + registered in canonical registry (not Evidence); reference resolves; no-dangling check passes |
+
+## Amendment A — Contract clarifications (post-PR1 review)
+
+1. **Canonical registry (§4.2.2)**: the no-dangling validation target is the
+   canonical claim_id registry (all ids minted by `build_report` for a run,
+   including truncated-but-referenced claims), not just the `Evidence[*].claim_id`
+   set. This preserves `cross_source_signal`'s #32 reliability behavior.
+
+2. **provenance().claim_id (`scoring.py:304`)**: `TrustedBrief.provenance()`
+   returns the raw source fingerprint (`sc.claim.id`), NOT a canonical `clm1:`
+   id. It is a trust-layer identity, not an app-layer join key. It MUST NOT be
+   used for Report↔Evidence↔Basis joining. If any `build_report` consumer
+   serializes `provenance().claim_id` into a public field, `build_report` MUST
+   remap it via the `source_fingerprint→canonical` map at the consumption point.
+
+3. **JSON-schema required**: the data-contracts JSON schema MUST NOT add
+   `claim_id`/`claim_ids` to `required` (preserves backward compat for old snapshot
+   readers). "New-write-required" is enforced by the mint helper (`build_report`
+   always stamps) + no-dangling check + tests, NOT by JSON-schema validation.
+   OpenAPI MAY mark them required (describes new-write contract, not old-reader
+   validation).
+
+4. **Adapter ownership**: #960 ships the initial `resolve_claim_id` dual-read
+   adapter + migrates `web._public_evidence_dict` and `historical_replay`. #941
+   owns hardening + migrating all remaining read-paths (snapshot modal,
+   comparison, remaining web handlers).
+5. **Serialized resolvability of truncated references**: truncated claims'
+   canonical ids are registered in-memory by build_report but have no Evidence
+   row. #960 MUST ensure that serialized references to truncated claims (in
+   stance_pairs/supporting_claim_ids/narrative) are either (a) resolvable via a
+   serialized minimal registry/lookup exposed in the Report/export shape, or
+   (b) explicitly marked as truncated so consumers (#942 UI / #949 export) do
+   not attempt to join to a non-existent Evidence row. The approach is an #960
+   implementation decision; the contract constrains the outcome (no silent
+   unresolvable references in serialized output).
 
 ## 8. Owner boundaries
 
@@ -431,8 +483,8 @@ Join rules:
   insights/cross_source/narrative, the §4.2 invariants, the dual-read adapter,
   OpenAPI/types sync, schema-version bump, and the unit + contract tests above.
 - **#941 (adapter)** owns: hardening the `resolve_claim_id` dual-read adapter and
-  migrating all read paths (web handlers, replay, snapshot modal, comparison) to
-  it; the legacy-snapshot read tests.
+  migrating the remaining read paths (snapshot modal, comparison, other web
+  handlers) to it; the legacy-snapshot read tests.
 - **#942 (back-link UI)** owns: frontend Evidence↔Claim bidirectional navigation
   using `claim_id`/`claim_ids`; deprecating `evidence_idx`-as-identity in
   `KeyBasisList.tsx` / `EvidenceTable.tsx` / `InsightExplainabilityPanel.tsx` /
@@ -492,7 +544,7 @@ of `Evidence.claim_id` values produced by one `build_report` invocation.
     {"id":"dedup-survivor-single-id","expect":{"evidence_claim_ids_after_dedup":"exactly_one_per_admitted_row"}},
     {"id":"hash-collision-disambiguation","expect":{"disambiguator":[".d2"],"still_unique":true,"bare_index_used":false}},
     {"id":"basis-claim-ids-parity","expect":{"parity_with_evidence_idx":true}},
-    {"id":"no-dangling-claim-ref","expect":{"all_refs_in_evidence_set":true,"else":"ValueError"}},
+    {"id":"no-dangling-claim-ref","expect":{"all_refs_in_canonical_registry":true,"else":"ValueError"}},
     {"id":"insight-claim-ids-canonicalized","expect":{"insight_claim_ids_match_clm1":true,"raw_source_fingerprint_leaked":false}},
     {"id":"cross-source-claim-ids-canonicalized","expect":{"supporting_claim_ids_and_stance_pairs_match_clm1":true}},
     {"id":"narrative-citations-canonical","expect":{"prompt_claim_table_uses_clm1":true}},
