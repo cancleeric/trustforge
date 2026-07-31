@@ -442,6 +442,7 @@ def collect(query: str, coin: str | None = None,
             from .whale_trades import build_whale_sources
             from .defillama import build_defillama_sources
             from .cmc import build_cmc_sources
+            from .etherscan import build_etherscan_sources
             from .cache import CachedSource
             raw_sources = (
                 build_news_sources()
@@ -460,6 +461,11 @@ def collect(query: str, coin: str | None = None,
                 # 第三條獨立現價來源，與 coingecko-price/defillama-price 形成
                 # corroboration consensus。無憑證時不註冊任何來源（靜默降級）。
                 + build_cmc_sources()
+                # #1168 Etherscan（key-based V2 query-param key）。沿用 whale_onchain
+                # kind，與 whale-alert 同 kind 不同 source，互為獨立佐證。build 永
+                # 遠註冊（同 cmc/whale 慣例），憑證在 fetch() 時解析——unconfigured→回 []
+                # （靜默），unavailable→raise（可觀測）。只覆 ETH。
+                + build_etherscan_sources()
             )
             # 階段2（cache + 排程 fetcher）：產品路徑一律讀快取，不直接打真連接器
             # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程
