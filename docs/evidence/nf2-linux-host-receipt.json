@@ -24,7 +24,7 @@
   },
   "host": {
     "architecture": "x86_64",
-    "boot_id": "656c474c-c33e-4197-b138-e730699f18a1",
+    "boot_id": "37eb69b5-05b3-4ae9-a547-b1d61d9d07d8",
     "container_evidence": {
       "dockerenv_absent": true,
       "namespace_inodes": {
@@ -47,6 +47,13 @@
     "operating_system": "Linux",
     "pid1": "systemd",
     "virtualization": "physical"
+  },
+  "reacceptance": {
+    "finished_at_utc": "2026-07-31T05:40:47Z",
+    "reason": "host reboot; all reviewed host, namespace, kernel, and toolchain identities reverified",
+    "systemd_command": "systemd-run --wait --pipe --collect --unit=trustforge-nf2-acceptance.service /opt/trustforge/native-foundation/provisioning/receipts/nf2-host-probe.sh",
+    "tool_sha256_status": "all twelve APPROVED_TOOL_SHA256 entries match",
+    "started_at_utc": "2026-07-31T05:40:47Z"
   },
   "receipt_schema": "trustforge.nf2-linux-host-receipt/v1",
   "rust": {
