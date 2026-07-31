@@ -62,7 +62,27 @@
 
 **需求**：R1–R6
 
-**相依**：Task 5 + 明確 production approval
+**相依**：Task 5 + 明確 production approval + 下方阻斷項結清
+
+### ⛔ Task 6 前置阻斷項：table 名稱未依有效設定解析
+
+`DynamoAuditReader` 目前固定讀 `_APPROVED_TABLE_NAMES` 的靜態名稱，但
+R4／design 要求讀「**有效設定所指向的**」table（static map **或已驗證有效設定**）。
+靜態 SSM 收集器把 `TRUSTFORGE_CACHE_TABLE`、`TRUSTFORGE_SCHEDULER_RUN_TABLE`、
+`TRUSTFORGE_COST_LEDGER_TABLE` 壓成 `configured`／`absent`，實際值沒被帶回來，
+所以「已驗證有效設定」這條路徑實作不出來。
+
+production 一旦覆寫其中任一變數，稽核就會讀到非作用中的 table，
+產出的證據無效。失敗方向是 fail-closed（回 `insufficient-evidence`，不會假綠），
+因此不是安全洞，但**足以讓 Task 6 的 bundle 不可採信**。
+
+結清方式：SSM snapshot 帶回實際 table 名稱 → 對 allowlist 嚴格驗證 →
+用於 read；bundle 仍只落 table type 與 digest，不得落 raw 名稱
+（維持 `test_contract_coverage_is_exact_and_no_raw_table_name_is_persisted`
+與 `test_local_table_environment_cannot_redirect_approved_bindings` 兩條不變式）。
+此改動會變更 static SSM command digest，需 harper（CISO）專審。
+
+來源：codex 對抗審 2026-07-31。
 
 ## 依賴圖
 
