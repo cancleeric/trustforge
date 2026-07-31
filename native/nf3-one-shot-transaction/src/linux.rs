@@ -15,6 +15,7 @@ const O_CLOEXEC: u64 = 0o2000000;
 const O_DIRECTORY: u64 = 0o200000;
 const O_NOFOLLOW: u64 = 0o400000;
 const O_NONBLOCK: u64 = 0o4000;
+#[allow(dead_code)] // 附屬於 append_witness（NF3 #1089）；musl target 下尚未接線，保留供後續交易見證使用
 const O_APPEND: u64 = 0o2000;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
@@ -85,6 +86,7 @@ impl Vfs {
 }
 
 impl Dir {
+    #[allow(dead_code)] // NF3 #1089：交易見證追加；musl target 下尚未接線，保留供後續 durable claim 使用
     pub(crate) fn append_witness(&self, name: &str, frame: &[u8]) -> Result<(), Error> {
         if frame.len() > MAX_PAYLOAD {
             return Err(Error::UnsafeObject("witness frame bound"));
