@@ -41,7 +41,7 @@ export default function DiandianOnboarding({ onClose }: Props) {
   const handleNext = () => {
     if (isLast) {
       // Mark as done
-      try { localStorage.setItem('diandian_onboarding_done', '1') } catch {}
+      try { document.cookie = 'diandian_onboarding_done=1; path=/; max-age=31536000; SameSite=Lax' } catch {}
       onClose()
       return
     }
@@ -54,7 +54,7 @@ export default function DiandianOnboarding({ onClose }: Props) {
   }
 
   const handleSkip = () => {
-    try { localStorage.setItem('diandian_onboarding_done', '1') } catch {}
+    try { document.cookie = 'diandian_onboarding_done=1; path=/; max-age=31536000; SameSite=Lax' } catch {}
     onClose()
   }
 
