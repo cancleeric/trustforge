@@ -521,6 +521,25 @@ impl trustforge_nf2_zero_capability_broker::CapabilitySink for ClaimSession<'_> 
         // descriptor itself never crosses back into ambient state: only its
         // fixed-width public digest is persisted.
         desc.assert_no_authority_fields()?;
+        // Integrity: the public descriptor_sha256 field must equal the digest
+        // recomputed over the identity fields (reject a tampered/forged digest).
+        if desc.descriptor_sha256 != desc.compute_sha256() {
+            return Err("capability descriptor digest mismatch");
+        }
+        // Binding: the descriptor must bind THIS transaction + foundation.
+        // A foreign descriptor (even if well-formed) is rejected so the durable
+        // audit record can never claim an arbitrary identity under this tx.
+        let bound_tx = trustforge_nf2_zero_capability_broker::capability::decode_hex_32(
+            &self.binding.transaction_id,
+        )
+        .map_err(|_| "capability transaction_id hex decode failed")?;
+        let bound_foundation = trustforge_nf2_zero_capability_broker::capability::decode_hex_32(
+            &self.binding.foundation_sha256,
+        )
+        .map_err(|_| "capability foundation_sha256 hex decode failed")?;
+        if desc.transaction_id != bound_tx || desc.foundation_sha256 != bound_foundation {
+            return Err("capability descriptor binding mismatch");
+        }
         let descriptor_sha256 = hex(&desc.descriptor_sha256);
         self.append_state(State::CapabilityIssued, Some(&descriptor_sha256))
             .map_err(|_| "ledger append capability_issued failed")
