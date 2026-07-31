@@ -16,4 +16,4 @@ frontend 的 npm metadata 則由 release_version.py 產生並驗證。
 換湯不換藥。所以這裡保留可由 build backend 靜態解析的單一字面值。
 """
 
-VERSION = "0.27.44"
+VERSION = "0.27.45"
