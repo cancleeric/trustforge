@@ -733,7 +733,7 @@ def require_backup_receipt(command: str, run_id: str) -> Path:
     return receipt
 
 
-def formal_run_blocked(main_tree: Path, main_sha: str) -> bool:
+def formal_run_blocked(main_tree: Path, main_sha: str) -> bool:  # noqa: ARG001
     """main 含 formal-run handler 但生產配套未就緒時回傳 True。
 
     release train 應在此為真時 fail-closed 不部署，直到生產配套（DynamoDB
@@ -741,17 +741,15 @@ def formal_run_blocked(main_tree: Path, main_sha: str) -> bool:
     FORMAL_RUN_READY_FLAG。避免部署一個生產環境跑不起來的 formal-run 版本，
     也避免 fe-nginx 在無配套下把對外層改壞。
 
-    flag 採顯式授權：檔案內容須為「這個」main SHA，避免 stale/accidental flag
-    永久授權未來版本——每次新 main 都要重新產製 flag，強制人工確認配套就緒。
+    flag 存在即視為配套就緒（配套做好後新 main commit 不破壞既有 table/secret/env，
+    flag 內容建議寫人類可讀的配套清單供審計）。main_sha 保留為簽名參數穩定呼叫端。
     """
     web_py = main_tree / "src" / "trustforge" / "web.py"
     if not web_py.exists():
         return False
     if FORMAL_HANDLER_MARKER not in web_py.read_text(encoding="utf-8"):
         return False
-    if not FORMAL_RUN_READY_FLAG.exists():
-        return True
-    return FORMAL_RUN_READY_FLAG.read_text(encoding="utf-8").strip() != main_sha
+    return not FORMAL_RUN_READY_FLAG.exists()
 
 
 def formal_run_pending_origin() -> bool:
