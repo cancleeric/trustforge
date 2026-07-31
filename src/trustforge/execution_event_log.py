@@ -151,3 +151,127 @@ def _is_secret_key(key: str) -> bool:
         return True
     parts = set(filter(None, re.split(r"[_\W]+", lowered)))
     return any(marker in parts for marker in _SECRET_KEY_MARKERS)
+
+
+# ── Public execution-log allowlist (deny-by-default) ───────────────────────
+# #943：對外公開的 payload 一律只投影下列欄位。``params`` 整包預設不公開——只
+# 透過 :func:`_public_params` 投影**列舉的公開子鍵**（hermes workflow context +
+# ingestion.source 來源摘要）；其餘 params 子鍵（含 url ``?token=``、api_key、
+# wallet、未列舉欄位、free-text summary 內誤帶的 secret）一律丟棄。**allowlist
+# 才是主防線**；下方 :func:`_scrub_summary` 與既有 :func:`redact_secrets` 僅作
+# 第二層 defense-in-depth，絕不能用來取代 allowlist。
+PUBLIC_EVENT_FIELDS = frozenset(
+    {"ts", "elapsed_sec", "tool", "summary", "step", "node_id", "cost"}
+)
+
+# #943 curated params sub-allowlist（deny-by-default 投影）。前端 HermesExecutionPanel /
+# AnalyzePage 讀取的公開欄位才列舉；其餘 params 子鍵一律不公開。
+_PUBLIC_HERMES_KEYS = frozenset(
+    {"node_id", "node_label", "node_order", "status", "run_id", "agent"}
+)
+_PUBLIC_INGESTION_SOURCE_KEYS = frozenset(
+    {"source", "kind", "coin", "duration_ms", "document_count", "outcome", "data_mode"}
+)
+
+
+def _public_params(event: dict) -> dict:
+    """把 event 的 ``params`` 投影成**只含列舉公開子鍵**的 dict（deny-by-default）。
+
+    - ``params.hermes``：**每個 event 都投影**——前端 HermesExecutionPanel 無條件讀
+      ``event.params.hermes``，缺鍵會 throw（legacy 快照 reproject 路徑特別易踩），
+      故 hermes 缺/非 dict 時投影成 ``{}`` 而非省略。只保留 :data:`_PUBLIC_HERMES_KEYS`
+      中的鍵。
+    - ``tool == "ingestion.source"``：額外投影 :data:`_PUBLIC_INGESTION_SOURCE_KEYS`
+      中存在於 params 的鍵（前端來源摘要表讀取）。
+    - 其餘 params 子鍵（api_key/url/wallet/未列舉鍵…）一律不公開。
+    恆回傳含 ``hermes`` 的 dict（呼叫端不再判空），確保公開 payload 的
+    ``event.params.hermes`` 永遠安全可讀。
+    """
+    params = event.get("params")
+    hermes = params.get("hermes") if isinstance(params, dict) else None
+    out: dict[str, Any] = {
+        "hermes": {
+            k: hermes[k]
+            for k in _PUBLIC_HERMES_KEYS
+            if isinstance(hermes, dict) and k in hermes
+        }
+    }
+    if event.get("tool") == "ingestion.source" and isinstance(params, dict):
+        for k in _PUBLIC_INGESTION_SOURCE_KEYS:
+            if k in params:
+                out[k] = params[k]
+    return out
+
+# Defense-in-depth：對投影後的 ``summary`` 字串做 value scrub，把 token-like 明顯
+# secret 形樣換成 [REDACTED]。**主防線是上方 allowlist（直接丟棄 params）；這組
+# pattern 只堵 ``summary`` 本身誤帶 secret 的邊角。**
+# colon-form ``key: value`` scrub 的 key 名集合：對齊 :data:`_SECRET_KEY_MARKERS`
+# （api_key/apikey/auth/authorization/credential/password/secret/token 全數納入），
+# 並補 passwd/access_token/key 等常見短別名以與上方 URL query-param scrub 覆蓋面
+# 一致——避免 ``token: SECRET`` / ``auth: SECRET`` 等 colon 形樣原樣外露。
+_COLON_SECRET_KEY_ALT = "|".join(_SECRET_KEY_MARKERS + ("passwd", "access_token", "key"))
+_TOKEN_LIKE_PATTERNS = (
+    # URL query param：?token=... / &api_key=... / ?access_token=... —— 保留前綴只遮值。
+    re.compile(
+        r"([?&](?:token|apikey|api_key|access_token|secret|password|passwd|code|auth|credential)=)[^&#\s]+",
+        re.IGNORECASE,
+    ),
+    # ``bearer <token>``
+    re.compile(r"(bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE),
+    # header / ``key: value``：authorization: ... / password: ... / token: ... ——
+    # key 名集合對齊 _SECRET_KEY_MARKERS（經 _COLON_SECRET_KEY_ALT 展開）。
+    re.compile(
+        rf"((?:{_COLON_SECRET_KEY_ALT}):\s*)[^\s,;]+",
+        re.IGNORECASE,
+    ),
+    # 長 hex（≥32）：JWT segment / SHA256 / API key hex。
+    re.compile(r"\b[0-9a-fA-F]{32,}\b"),
+)
+
+
+def _scrub_summary(summary: Any) -> Any:
+    """Defense-in-depth：把 ``summary`` 字串中的 token-like 值換成 [REDACTED]。
+
+    **主防線是 :data:`PUBLIC_EVENT_FIELDS` allowlist**（透過 :func:`_public_params`
+    直接丟棄未列舉的 ``params`` 子鍵，包含 api_key/url/wallet 等敏感值）；本函式僅是
+    第二層 defense-in-depth，處理 ``summary`` 本身誤帶 secret 的邊角，**絕不能取代
+    allowlist**。
+
+    今日**不覆蓋**的形樣（已知殘餘，追蹤於 summary-hardening follow-up issue）：
+      * ``=``-form —— ``key=value`` / ``pw=value`` 等無結構化 marker 前綴的賦值式；
+      * base64-like blob —— 非認得的 token-like pattern；
+      * <32 字元 hex —— 低於 long-hex（≥32）門檻（如 8 字元 ``abc1def2``）。
+    （覆蓋的形樣見 :data:`_TOKEN_LIKE_PATTERNS`：URL ``?token=``、``bearer``、
+    ``key: value`` colon-form、≥32 long-hex。）
+
+    非 str 輸入原樣回傳（投影層不對型別做強轉）。
+    """
+    if not isinstance(summary, str):
+        return summary
+    for pattern in _TOKEN_LIKE_PATTERNS:
+        summary = pattern.sub(
+            lambda m: (m.group(1) if m.lastindex else "") + REDACTED, summary
+        )
+    return summary
+
+
+def to_public_event_dict(event: dict) -> dict:
+    """把單一原始 event 投影成**只含公開欄位**的 dict（deny-by-default）。
+
+    只投影 :data:`PUBLIC_EVENT_FIELDS` 中**存在**的鍵（缺的不補）；``params``
+    只透過 :func:`_public_params` 投影列舉的公開子鍵（hermes + ingestion.source
+    摘要），其餘 params 子鍵與任何未列舉欄位一律丟棄。``params`` 恆存在（至少含
+    ``hermes`` 子鍵，確保前端 ``event.params.hermes`` 永不 throw）。投影後對
+    ``summary`` 跑 :func:`_scrub_summary`，再對整份 dict 跑一次 :func:`redact_secrets`
+    作雙保險。
+    """
+    public = {key: event[key] for key in PUBLIC_EVENT_FIELDS if key in event}
+    if "summary" in public:
+        public["summary"] = _scrub_summary(public["summary"])
+    public["params"] = _public_params(event)
+    return redact_secrets(public)
+
+
+def to_public_events(events: list[dict]) -> list[dict]:
+    """批量 :func:`to_public_event_dict`，供公開 payload 統一套用。"""
+    return [to_public_event_dict(event) for event in events]

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from ..execution_event_log import to_public_events
 from ..pipeline import run
 from ..schema import COIN_POOL, QuestionType
 
@@ -55,7 +56,7 @@ def analyze_market(
     return {
         "report": asdict(report),
         "evidence": [asdict(item) for item in evidence],
-        "execution_log": asdict(execution_log),
+        "execution_log": to_public_events(execution_log.events),
     }
 
 
