@@ -5333,6 +5333,8 @@ _EVIDENCE_PUBLIC_FIELDS = frozenset({
     "schema_version", "source", "fetched_at", "content_reference", "related_claim",
     "source_url", "kind", "trust", "trust_components", "flags", "info_flags",
     "data_lineage",
+    # #960 canonical claim identity (public join key, not sensitive).
+    "claim_id",
     # W2 動態信譽模式標註（非敏感字串標註，可對外；等同 trust_components 層級
     # 的透明化資訊，只是放在 trust_components 之外的兄弟欄位）。
     "reputation_mode",

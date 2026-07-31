@@ -29,8 +29,8 @@ from trustforge.intrinsic_official_contract import intrinsic_official_state_sche
 from trustforge.peer_metrics import PEER_METRICS_SCHEMA_VERSION
 
 DOCUMENT_SCHEMA_VERSION = "1.0.0"
-EVIDENCE_SCHEMA_VERSION = "1.0.0"
-REPORT_SCHEMA_VERSION = "1.0.0"
+EVIDENCE_SCHEMA_VERSION = "1.1.0"
+REPORT_SCHEMA_VERSION = "1.1.0"
 KERNEL_SCHEMA_VERSION = "1.0.0"
 
 
@@ -442,7 +442,7 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
         },
         "Evidence": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": "https://trustforge.local/contracts/evidence/1.0.0",
+            "$id": "https://trustforge.local/contracts/evidence/1.1.0",
             "title": "TrustForge Evidence", "type": "object",
             "required": [
                 "schema_version", "source", "fetched_at", "content_reference",
@@ -459,12 +459,14 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                 "author": {"type": ["string", "null"]},
                 "reputation_mode": {"type": ["string", "null"]},
                 "data_lineage": {"type": ["object", "null"]},
+                # #960 PR1 dark field (optional; never required — additive)。
+                "claim_id": {"type": "string"},
             },
             "additionalProperties": False,
         },
         "Report": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": "https://trustforge.local/contracts/report/1.0.0",
+            "$id": "https://trustforge.local/contracts/report/1.1.0",
             "title": "TrustForge Report", "type": "object",
             "required": [
                 "schema_version", "coin", "question_type", "question", "market_judgment",
@@ -477,7 +479,22 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                 "question": {"type": "string"}, "market_judgment": {"type": "string"},
                 "facts": {"type": "array", "items": {"type": "string"}},
                 "inferences": {"type": "array", "items": {"type": "string"}},
-                "key_basis": {"type": "array", "items": {"type": "object"}},
+                "key_basis": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        # #960 PR1：BasisItem dark field claim_ids 於此記述
+                        # （BasisItem 無獨立 schema，嵌於 Report.key_basis）。
+                        # 純 additive——不加 required、additionalProperties 留空
+                        # （open），舊 payload 一律仍驗證通過。
+                        "properties": {
+                            "claim": {"type": "string"},
+                            "explanation": {"type": "string"},
+                            "evidence_idx": {"type": "array", "items": {"type": "integer"}},
+                            "claim_ids": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                },
                 "confidence": {"type": "number"}, "limits": {"type": "array"},
                 "could_flip": {"type": "array"}, "contrarian": {"type": "array"},
                 "generated_at": {"type": "string"}, "direction": {"type": "string"},
