@@ -27,8 +27,17 @@ set -euo pipefail
 
 # Sourced helpers for AWS SSM `commands` JSON construction (jq-based; avoids
 # brittle manual shell/JSON quote nesting that previously produced malformed
-# SSM parameters and false activation failures).
+# SSM parameters and false activation failures). jq is an explicit activation
+# prerequisite, validated below before any production mutation.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ssm_commands.sh"
+
+# jq is required by build_ssm_commands_json (lib/ssm_commands.sh). Fail fast
+# at startup — never let a missing jq break post-verify/rollback mid-flow and
+# mask a successful deployment as a failed one.
+command -v jq >/dev/null 2>&1 || {
+  echo "[activate] ERROR: jq is required by deploy/lib/ssm_commands.sh but is not on PATH. Install jq on the activation host before deploying." >&2
+  exit 1
+}
 
 cd "$(dirname "$0")/.."
 

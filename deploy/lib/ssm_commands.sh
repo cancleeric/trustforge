@@ -9,6 +9,10 @@
 # had succeeded.
 #
 # This file is intended to be sourced, not executed.
+#
+# Requires: jq on PATH. activate_release.sh validates this at startup (before
+# any production mutation) so a missing jq fails fast rather than breaking
+# post-verify/rollback mid-activation.
 
 # build_ssm_commands_json
 # Read shell commands from stdin (one command per line) and emit a compact

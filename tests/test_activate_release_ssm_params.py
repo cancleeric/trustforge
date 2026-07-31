@@ -95,3 +95,40 @@ def test_escapes_embedded_double_quotes():
     out = _build_commands(["set -e", cmd])
     data = json.loads(out)
     assert data[1] == cmd
+
+
+def test_activate_release_fails_fast_when_jq_missing(tmp_path):
+    """codex P1 regression: if jq is missing on the activation host,
+    ``activate_release.sh`` must exit non-zero at startup (before any
+    production mutation) with a clear message, never reaching
+    post-verify/rollback where a missing jq would mask a successful
+    deployment as failed."""
+    import shutil
+
+    bin_dir = tmp_path / "nojq-bin"
+    bin_dir.mkdir()
+    # Provide only what the script needs to reach the jq check: bash + dirname
+    # (used by `source "$(dirname "${BASH_SOURCE[0]}")/..."`). jq is absent.
+    for tool in ("bash", "dirname"):
+        src = shutil.which(tool)
+        if src:
+            (bin_dir / tool).symlink_to(src)
+    result = subprocess.run(
+        [
+            str(bin_dir / "bash"),
+            str(REPO_ROOT / "deploy" / "activate_release.sh"),
+            "--target",
+            "i-failfast-test",
+        ],
+        env={"PATH": str(bin_dir)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        f"expected non-zero exit when jq is missing; "
+        f"got {result.returncode}\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert "jq is required" in result.stderr, (
+        f"expected clear 'jq is required' error; stderr was:\n{result.stderr}"
+    )
