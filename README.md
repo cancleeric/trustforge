@@ -262,25 +262,31 @@ CACHE_BACKEND=sqlite ./scripts/trustforge_control.sh start   # → http://127.0.
 > **反作弊鐵則**：市場判斷、證據整合、信任評分由本 pipeline 產生；Bedrock 只負責
 > 把推理「行文」，不得把第三方現成結論當主要結果。詳見 `docs/competition/COMPETITION.md`。
 
-## ModelHub 校準器候選流程（#351）
+## ModelHub／AWS SageMaker 校準器候選流程（#351）
 
-TrustForge 已提供 loopback-only 的 ModelHub REST client 與五幣校準器候選編排。輸入真相是
+TrustForge 的校準器候選流程支援 **ModelHub** 與 **AWS SageMaker**，可依部署環境選擇模型訓練與核准後端。輸入真相是
 `data/training/{BTC,ETH,SOL,BNB,XRP}.jsonl`；流程會先做資料 gate 與 chronological split，
 再以 weighted ECE 比較 baseline/candidate。改善至少 `0.02` 才建立 immutable proposal。
 候選永遠是 `automatic_apply: false`、`requires_human_approval: true`，不會自動啟用模型。
 
 ```bash
-# 安全 dry-run：不呼叫 ModelHub；macOS 請使用 /private/tmp，避免 /tmp symlink 被拒絕
+# 安全 dry-run：不呼叫 ModelHub 或 AWS SageMaker；macOS 請使用 /private/tmp，避免 /tmp symlink 被拒絕
 python -m trustforge.cli modelhub-train --all --dry-run \
   --out-dir /private/tmp/trustforge-modelhub-proposals
+python -m trustforge.cli sagemaker-train --all --dry-run \
+  --out-dir /private/tmp/trustforge-sagemaker-proposals
 
-# live 編排是 state-changing 操作：須先取得 Eric 或具名 ModelHub owner 的明確授權，
-# 再為五幣各提供一個不同、真實存在的 ModelHub req_no。
-# 取得 req_no、API key 或通過 reviewer/CISO 審查，本身都不構成執行授權。
+# live 編排兩者皆可使用，都是 state-changing 操作：須先取得 Eric 或具名後端操作負責人的明確授權。
+# ModelHub：為五幣各提供一個不同、真實存在的 ModelHub req_no。
+# 取得 API key、AWS credential 或通過 reviewer/CISO 審查，本身都不構成執行授權。
 python -m trustforge.cli modelhub-train --all \
   --req-no-map "BTC=$MODELHUB_BTC_REQ" --req-no-map "ETH=$MODELHUB_ETH_REQ" \
   --req-no-map "SOL=$MODELHUB_SOL_REQ" --req-no-map "BNB=$MODELHUB_BNB_REQ" \
   --req-no-map "XRP=$MODELHUB_XRP_REQ"
+
+# AWS SageMaker：使用已設定的 SageMaker backend 執行五幣訓練編排。
+python -m trustforge.cli sagemaker-train --all \
+  --out-dir out/sagemaker-proposals
 ```
 
 輸出目錄包含 immutable `execution-<run_id>.jsonl`、候選 proposal，以及每幣可覆寫的

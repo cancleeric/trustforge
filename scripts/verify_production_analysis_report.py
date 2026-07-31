@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import secrets
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
+from datetime import datetime, timezone
 
 
 def _request_json(
@@ -54,7 +56,7 @@ def verify_report(
     """
     question = (
         "Production release canary "
-        f"{uuid.uuid4().hex}: 評估 BTC 整體信任狀態與操縱風險。"
+        f"{secrets.token_hex(16)}: 評估 BTC 整體信任狀態與操縱風險。"
     )
     payload: dict[str, object] = {
         "coin": "BTC",
@@ -63,7 +65,9 @@ def verify_report(
         "locale": "zh-Hant",
         "fresh": True,
     }
-    idempotency_key = uuid.uuid4().hex
+    epoch = datetime.now(timezone.utc).strftime("%Y%m")
+    random_part = base64.urlsafe_b64encode(secrets.token_bytes(16)).decode("ascii").rstrip("=")
+    idempotency_key = f"tf1.{epoch}.{random_part}"
     submit_url = f"{base_url.rstrip('/')}/api/analysis-question"
 
     cookie = None
