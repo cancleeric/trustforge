@@ -84,27 +84,15 @@ fi
 PYTEST_WORKERS="${TRUSTFORGE_PYTEST_WORKERS:-4}"
 run_gate "backend coverage reset" "$PYTHON" -m coverage erase
 case "$PYTEST_WORKERS" in
-  0)
-    echo "[pre-push] pytest workers: 0 (serial fallback)"
-    run_gate \
-      "backend tests (serial fallback)" \
-      env PYTHONPATH=src "$PYTHON" -m pytest --cov-fail-under=75 -q
-    ;;
   ''|*[!0-9]*)
     echo "[pre-push] FAILED: TRUSTFORGE_PYTEST_WORKERS must be a non-negative integer (got '$PYTEST_WORKERS')." >&2
     exit 1
     ;;
   *)
-    echo "[pre-push] pytest workers: ${PYTEST_WORKERS} (fixed, worksteal)"
+    echo "[pre-push] pytest workers: ${PYTEST_WORKERS} (isolated per-file batches)"
     run_gate \
-      "backend tests (parallel lane)" \
-      env PYTHONPATH=src "$PYTHON" -m pytest -q \
-        -m "not serial" -n "$PYTEST_WORKERS" --dist worksteal \
-        --cov-report= --cov-fail-under=0
-    run_gate \
-      "backend tests (serial lane)" \
-      env PYTHONPATH=src "$PYTHON" -m pytest -q \
-        -m "serial" -n 0 --cov-append --cov-report= --cov-fail-under=0
+      "backend tests (isolated batches)" \
+      env PYTHONPATH=src "$PYTHON" scripts/run_batched_pytest.py --chunk-size 1
     run_gate \
       "backend coverage" \
       "$PYTHON" -m coverage report --show-missing --fail-under=75

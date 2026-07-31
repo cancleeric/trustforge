@@ -1,5 +1,5 @@
 use super::sealed::SealedNf1;
-use core::ffi::{c_char, c_int, c_long};
+use core::ffi::{c_char, c_int, c_long, c_void};
 use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -14,6 +14,9 @@ const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
 const SYS_OPENAT2: c_long = 437;
 const SYS_GETDENTS64: c_long = 217;
+const SYS_GETSOCKOPT: c_long = 55;
+const SOL_SOCKET: c_int = 1;
+const SO_PEERCRED: c_int = 17;
 const PROC_TEXT_MAX: usize = 64 * 1024;
 
 #[repr(C)]
@@ -37,6 +40,31 @@ struct ProcIdentity {
     inode: u64,
     owner: u32,
     group: u32,
+}
+
+/// Kernel-mediated peer identity captured over an AF_UNIX socket via
+/// `SO_PEERCRED`. This is the fourth independent child-identity signal,
+/// alongside pidfd (PID-reuse guard), /proc starttime, and the exe
+/// device/inode. It is structurally distinct from the /proc-based checks
+/// because it never touches the procfs at all.
+///
+/// Per unix(7), `SO_PEERCRED` returns "the credentials ... in effect at the
+/// time of the call to connect(2), listen(2), or socketpair(2)". A socketpair
+/// created in this broker would therefore carry the *broker's* credentials and
+/// could never attest the child; the child must be the connector. `capture_*`
+/// callers arrange exactly that.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct PeerCredential {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[repr(C)]
+struct Ucred {
+    pid: i32,
+    uid: u32,
+    gid: u32,
 }
 
 pub struct LiveAuthority {
@@ -185,6 +213,69 @@ impl LiveAuthority {
                 return Err("mapped file outside retained runtime closure");
             }
         }
+        Ok(())
+    }
+
+    /// Reads the kernel peer credential of a connected AF_UNIX socket via the
+    /// `SO_PEERCRED` option. The returned credentials reflect the process that
+    /// *connected* the socket (see the `PeerCredential` docs), so the caller
+    /// must ensure the child is the connector. `sock_fd` must be the broker's
+    /// accepted end of such a connection.
+    pub fn capture_peer_credential(sock_fd: c_int) -> Result<PeerCredential, &'static str> {
+        let mut ucred = Ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut optlen: u32 = std::mem::size_of::<Ucred>() as u32;
+        // SAFETY: getsockopt writes a fixed 12-byte ucred into the sized buffer.
+        let result = unsafe {
+            syscall(
+                SYS_GETSOCKOPT,
+                sock_fd as c_long,
+                SOL_SOCKET as c_long,
+                SO_PEERCRED as c_long,
+                &mut ucred as *mut Ucred as *mut c_void,
+                &mut optlen as *mut u32,
+            )
+        };
+        if result != 0 || optlen as usize != std::mem::size_of::<Ucred>() {
+            return Err("peer credential capture failed");
+        }
+        Ok(PeerCredential {
+            pid: ucred.pid,
+            uid: ucred.uid,
+            gid: ucred.gid,
+        })
+    }
+
+    /// Cross-checks the kernel peer credential against the directly-forked
+    /// child pid and the broker's own euid/egid (which the child inherits and
+    /// which /proc also independently reports). `expected_pid` is the exact
+    /// child pid already guarded against reuse by the retained pidfd, so a
+    /// matching `cred.pid` is an independent confirmation rather than a
+    /// tautology.
+    pub fn verify_peer_credential(
+        &self,
+        sealed: &SealedNf1,
+        cred: PeerCredential,
+        expected_pid: c_int,
+    ) -> Result<(), &'static str> {
+        if cred.pid != expected_pid {
+            return Err("peer credential pid mismatch");
+        }
+        // SAFETY: identity queries have no preconditions.
+        let euid = unsafe { geteuid() };
+        let egid = unsafe { getegid() };
+        if cred.uid != euid || cred.gid != egid {
+            return Err("peer credential identity mismatch");
+        }
+        // Cross-check the socket channel against the procfs-derived child
+        // identity retained at capture time: the two paths must agree.
+        if cred.uid != self.proc_identity.owner || cred.gid != self.proc_identity.group {
+            return Err("peer credential diverges from proc identity");
+        }
+        let _ = sealed;
         Ok(())
     }
 
