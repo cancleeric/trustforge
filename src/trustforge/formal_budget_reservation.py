@@ -256,17 +256,20 @@ class DynamoDbFormalBudgetAuthority:
                 baseline = spent + settled
                 if baseline + reserved + cost > cap:
                     return None
-                condition = (
-                    "reserved_total=:old_reserved AND spent_total=:old_spent"
-                    if counter
-                    else "attribute_not_exists(pk)"
-                )
-                values = {
-                    ":new_reserved": reserved + cost,
-                    ":new_spent": settled,
-                    ":old_reserved": reserved,
-                    ":old_spent": settled,
-                }
+                if counter:
+                    condition = "reserved_total=:old_reserved AND spent_total=:old_spent"
+                    values = {
+                        ":new_reserved": reserved + cost,
+                        ":new_spent": settled,
+                        ":old_reserved": reserved,
+                        ":old_spent": settled,
+                    }
+                else:
+                    condition = "attribute_not_exists(pk)"
+                    values = {
+                        ":new_reserved": reserved + cost,
+                        ":new_spent": settled,
+                    }
                 try:
                     self._client.transact_write_items(
                         TransactItems=[
