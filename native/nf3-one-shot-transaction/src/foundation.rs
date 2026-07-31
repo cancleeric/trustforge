@@ -9,7 +9,7 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "1f34dc173355da1b0c3f4cdd8e3c2cc2022b5fbec7e5b0dbd4a5bfa12f59c73c";
+    "574440bd581c9d54d9e6c0321d4899d8f113eb7551ae637b8f3007774a48cd90";
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
     "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1";
 const NF2_LINKED_RELEASE_RLIB_SHA256: &str =
@@ -201,7 +201,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "f3a5a350e6a200f97b6601f3ebc0428270c8a483c6ccdaf96d995272a6f55cf8"
+            "7bd399254c2ab4bd7dda4e12f2ed58b36456b80f57fa94f597731ac24dd0f921"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -224,11 +224,11 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "f3a5a350e6a200f97b6601f3ebc0428270c8a483c6ccdaf96d995272a6f55cf8"
+            "7bd399254c2ab4bd7dda4e12f2ed58b36456b80f57fa94f597731ac24dd0f921"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "c6217d3296d373bb071e17da1810997143bc91df876a2758841fbc12c5f73189"
+            "b69567581a2d54e45f5512d8005a0b829a571601113afb63d3088f27d2d87807"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
@@ -243,7 +243,7 @@ mod tests {
             ),
             (
                 "linked_source_sha256",
-                "bf56bb76e2f43689b9c170b7c00a2d501f1e690d773dbfd95b4d6a26917b991d",
+                "4bd3226e2338387bacab90ee03af07e8d94ada385bdd83515724c7e533324e14",
             ),
         ] {
             frame(&mut canonical, name.as_bytes());

@@ -21,13 +21,16 @@ pub enum Outcome {
 
 /// Sink notified at each capability-protocol reverify boundary.
 ///
-/// The `on_capability_issued` hook additionally carries the sealed runtime
-/// identity (device, inode) the child bound to, so an NF3 `ClaimSession` can
-/// construct the full identity-bound [`capability::CapabilityDescriptor`]
-/// (transaction id + foundation digest + runtime dev/inode + kind) at the
-/// release boundary. Full descriptor construction still lives in NF3, where the
-/// live capability binding is held; this crate only emits *stage* notifications
-/// plus the runtime identity available at that stage. Returning `Err` makes the
+/// The `on_capability_issued` hook receives the fully identity-bound
+/// [`capability::CapabilityDescriptor`] (transaction id + foundation digest +
+/// sealed runtime dev/inode + kind, with its domain-separated
+/// `descriptor_sha256` already computed). The broker constructs this descriptor
+/// in-process at the release boundary from the [`capability::CapabilityContext`]
+/// it was handed (decoded by NF3 from the durable `Binding`) plus the sealed
+/// runtime device/inode the child is bound to, then passes a reference to the
+/// sink. This keeps the descriptor live-bound rather than reconstructed from
+/// ambient state, and lets an NF3 `ClaimSession` durably record the descriptor
+/// digest without owning the live runtime binding. Returning `Err` makes the
 /// broker fail closed: the live child is killed/reaped via the existing `Child`
 /// cleanup and the transaction is aborted. [`NoopSink`] never returns `Err`, so
 /// the default [`run`] path is behaviorally identical to before this hook
@@ -37,12 +40,11 @@ pub trait CapabilitySink {
     /// and the post-exec sealed reverify passed.
     fn on_ready_bound(&self) -> Result<(), &'static str>;
     /// Authority reverify passed and the capability is about to be released to
-    /// let the child produce its derived work. `runtime_device` / `runtime_inode`
-    /// are the sealed runtime identity the child is bound to at this boundary.
+    /// let the child produce its derived work. `desc` is the full
+    /// identity-bound descriptor the broker built for this transaction.
     fn on_capability_issued(
         &self,
-        runtime_device: u64,
-        runtime_inode: u64,
+        desc: &capability::CapabilityDescriptor,
     ) -> Result<(), &'static str>;
     /// Child is ptrace-stopped at the EXIT event after producing derived work;
     /// the exit-stop sealed + authority reverify passed.
@@ -60,7 +62,10 @@ impl CapabilitySink for NoopSink {
     fn on_ready_bound(&self) -> Result<(), &'static str> {
         Ok(())
     }
-    fn on_capability_issued(&self, _runtime_device: u64, _runtime_inode: u64) -> Result<(), &'static str> {
+    fn on_capability_issued(
+        &self,
+        _desc: &capability::CapabilityDescriptor,
+    ) -> Result<(), &'static str> {
         Ok(())
     }
     fn on_derived_pending_recheck(&self) -> Result<(), &'static str> {
@@ -72,22 +77,29 @@ impl CapabilitySink for NoopSink {
 }
 
 /// Default entry point. Behaviorally identical to the pre-hook `run()`: it
-/// delegates to [`run_transactional`] with [`NoopSink`], so no sink can ever
-/// abort the default path.
+/// delegates to [`run_transactional`] with [`NoopSink`] and an all-zero
+/// [`capability::CapabilityContext`], so no sink can ever abort the default
+/// path and no descriptor is ever constructed.
 pub fn run() -> Result<Outcome, &'static str> {
-    run_transactional(&NoopSink)
+    run_transactional(&NoopSink, &capability::CapabilityContext::zero())
 }
 
 /// Transactional entry point that emits a stage notification at each capability
-/// reverify boundary. Non-Linux-x86_64 hosts are still explicitly blocked.
-pub fn run_transactional<S: CapabilitySink>(sink: &S) -> Result<Outcome, &'static str> {
+/// reverify boundary. `ctx` supplies the transaction id and foundation digest
+/// the broker combines with the sealed runtime identity to build the
+/// [`capability::CapabilityDescriptor`] at the `on_capability_issued` boundary.
+/// Non-Linux-x86_64 hosts are still explicitly blocked.
+pub fn run_transactional<S: CapabilitySink>(
+    sink: &S,
+    ctx: &capability::CapabilityContext,
+) -> Result<Outcome, &'static str> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        linux::run_transactional(sink).map(|()| Outcome::Completed)
+        linux::run_transactional(sink, ctx).map(|()| Outcome::Completed)
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
-        let _ = sink;
+        let _ = (sink, ctx);
         Ok(Outcome::BlockedExternalLinux)
     }
 }
@@ -107,7 +119,7 @@ mod tests {
     #[test]
     fn noop_sink_path_matches_default_run() {
         assert_eq!(
-            super::run_transactional(&super::NoopSink),
+            super::run_transactional(&super::NoopSink, &super::capability::CapabilityContext::zero()),
             Ok(super::Outcome::BlockedExternalLinux)
         );
     }

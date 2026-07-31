@@ -321,7 +321,11 @@ impl Drop for Child {
 
 use std::os::fd::AsRawFd;
 
-pub fn run<S: crate::CapabilitySink>(sealed: &SealedNf1, sink: &S) -> Result<(), &'static str> {
+pub fn run<S: crate::CapabilitySink>(
+    sealed: &SealedNf1,
+    sink: &S,
+    ctx: &crate::capability::CapabilityContext,
+) -> Result<(), &'static str> {
     sealed.reverify()?;
     let test_mode = test_mode();
     #[cfg(feature = "adversarial-test-hooks")]
@@ -456,10 +460,21 @@ pub fn run<S: crate::CapabilitySink>(sealed: &SealedNf1, sink: &S) -> Result<(),
     authority.reverify(sealed)?;
     authority.verify_peer_credential(sealed, peer_credential, child.pid)?;
     let (runtime_device, runtime_inode) = sealed.runtime_device_inode();
-    notify_sink(
-        sink.on_capability_issued(runtime_device, runtime_inode),
-        "capability_issued",
-    )?;
+    // The broker is the single constructor of the live-bound descriptor: it
+    // combines the transaction-scoped identity carried in `ctx` (decoded by NF3
+    // from the durable Binding) with the sealed runtime device/inode the child
+    // is bound to at this boundary. The descriptor (and its computed
+    // `descriptor_sha256`) is then handed to the sink by reference so an NF3
+    // ClaimSession can durably record the digest. NF3 never reconstructs the
+    // descriptor from ambient state.
+    let descriptor = crate::capability::CapabilityDescriptor::new(
+        ctx.transaction_id,
+        ctx.foundation_sha256,
+        runtime_device,
+        runtime_inode,
+        crate::capability::CapabilityKind::ZeroFd,
+    );
+    notify_sink(sink.on_capability_issued(&descriptor), "capability_issued")?;
     continue_with_exit_trace(&child, &mut trace_stage)?;
     child.ensure_live()?;
     sealed.reverify()?;

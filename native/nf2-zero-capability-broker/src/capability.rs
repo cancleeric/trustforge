@@ -14,6 +14,32 @@ use crate::sha256;
 /// equal digests can never be confused across domains.
 const DESCRIPTOR_DOMAIN_TAG: &[u8] = b"trustforge-nf2-capability-descriptor-v1\x1f";
 
+/// Carrier of the two transaction-scoped identity fields the broker needs to
+/// build a [`CapabilityDescriptor`] at the release boundary: the NF3
+/// `transaction_id` and the accepted `foundation_sha256`. Both are fixed-width
+/// public identities; this type carries no authority material. The broker
+/// receives it from the NF3 orchestrator (which decodes it from the durable
+/// `Binding`) and combines it with the sealed runtime device/inode to construct
+/// the descriptor in-process, so the descriptor is always live-bound and never
+/// reconstructed from ambient state.
+#[derive(Debug, Clone, Copy)]
+pub struct CapabilityContext {
+    pub transaction_id: [u8; 32],
+    pub foundation_sha256: [u8; 32],
+}
+
+impl CapabilityContext {
+    /// All-zero context for the default [`crate::NoopSink`] path, which never
+    /// constructs a descriptor. A live transaction always supplies a non-zero
+    /// context decoded from its durable `Binding`.
+    pub const fn zero() -> Self {
+        Self {
+            transaction_id: [0; 32],
+            foundation_sha256: [0; 32],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CapabilityKind {
     /// v1: no file descriptor is transferred across the capability boundary.
