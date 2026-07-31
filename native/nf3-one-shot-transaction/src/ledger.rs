@@ -17,6 +17,9 @@ const ZERO: &str = "000000000000000000000000000000000000000000000000000000000000
 pub enum State {
     Prepared,
     Claimed,
+    ReadyBound,
+    CapabilityIssued,
+    DerivedPendingRecheck,
     Committed,
     Tombstoned,
 }
@@ -275,7 +278,16 @@ impl LedgerStore {
                 {
                     return Err(Error::UnsafeObject("burn/record semantic mismatch"));
                 }
-                Some(record) if matches!(record.state, State::Prepared | State::Claimed) => {
+                Some(record)
+                    if matches!(
+                        record.state,
+                        State::Prepared
+                            | State::Claimed
+                            | State::ReadyBound
+                            | State::CapabilityIssued
+                            | State::DerivedPendingRecheck
+                    ) =>
+                {
                     self.append(lock, &record.binding, State::Tombstoned)?
                 }
                 _ => {}
@@ -348,9 +360,17 @@ impl LedgerStore {
                 let legal = matches!(
                     (prior.state, record.state),
                     (State::Prepared, State::Claimed)
+                        | (State::Prepared, State::ReadyBound)
                         | (State::Prepared, State::Tombstoned)
+                        | (State::Claimed, State::ReadyBound)
                         | (State::Claimed, State::Committed)
                         | (State::Claimed, State::Tombstoned)
+                        | (State::ReadyBound, State::CapabilityIssued)
+                        | (State::ReadyBound, State::Tombstoned)
+                        | (State::CapabilityIssued, State::DerivedPendingRecheck)
+                        | (State::CapabilityIssued, State::Tombstoned)
+                        | (State::DerivedPendingRecheck, State::Committed)
+                        | (State::DerivedPendingRecheck, State::Tombstoned)
                 );
                 if !legal {
                     return Err(Error::UnsafeObject("STORE_POISONED"));
@@ -434,6 +454,13 @@ impl ClaimSession<'_> {
     pub fn binding(&self) -> &Binding {
         &self.binding
     }
+    fn append_state(&self, state: State) -> Result<(), Error> {
+        let lock = self
+            .lock
+            .as_ref()
+            .ok_or(Error::UnsafeObject("session terminal"))?;
+        self.store.append(lock, &self.binding, state)
+    }
     pub fn commit(mut self) -> Result<(), Error> {
         self.finish(State::Committed)
     }
@@ -464,6 +491,25 @@ impl ClaimSession<'_> {
         self.terminal = true;
         self.lock.take();
         Ok(())
+    }
+}
+
+impl trustforge_nf2_zero_capability_broker::CapabilitySink for ClaimSession<'_> {
+    fn on_ready_bound(&self) -> Result<(), &'static str> {
+        self.append_state(State::ReadyBound)
+            .map_err(|_| "ledger append ready_bound failed")
+    }
+    fn on_capability_issued(&self) -> Result<(), &'static str> {
+        self.append_state(State::CapabilityIssued)
+            .map_err(|_| "ledger append capability_issued failed")
+    }
+    fn on_derived_pending_recheck(&self) -> Result<(), &'static str> {
+        self.append_state(State::DerivedPendingRecheck)
+            .map_err(|_| "ledger append derived_pending_recheck failed")
+    }
+    fn on_committed(&self) -> Result<(), &'static str> {
+        recheck_kernel(&self.binding)
+            .map_err(|_| "ledger recheck kernel at commit boundary failed")
     }
 }
 
@@ -528,6 +574,9 @@ fn parse_record(bytes: &[u8]) -> Result<Record, Error> {
     let state = match value(&mut lines, "state")? {
         "PREPARED" => State::Prepared,
         "CLAIMED" => State::Claimed,
+        "READY_BOUND" => State::ReadyBound,
+        "CAPABILITY_ISSUED" => State::CapabilityIssued,
+        "DERIVED_PENDING_RECHECK" => State::DerivedPendingRecheck,
         "COMMITTED" => State::Committed,
         "TOMBSTONED" => State::Tombstoned,
         _ => return Err(Error::UnsafeObject("state")),
@@ -641,6 +690,9 @@ fn state_name(s: State) -> &'static str {
     match s {
         State::Prepared => "PREPARED",
         State::Claimed => "CLAIMED",
+        State::ReadyBound => "READY_BOUND",
+        State::CapabilityIssued => "CAPABILITY_ISSUED",
+        State::DerivedPendingRecheck => "DERIVED_PENDING_RECHECK",
         State::Committed => "COMMITTED",
         State::Tombstoned => "TOMBSTONED",
     }
@@ -1064,5 +1116,153 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    fn new_capability_binding() -> Binding {
+        Binding {
+            transaction_id: "ab".repeat(32),
+            request_sha256: "cd".repeat(32),
+            foundation_sha256: "33".repeat(32),
+            boot_id: kernel_boot_id().unwrap(),
+            deadline_boottime_ns: 200,
+        }
+    }
+
+    #[test]
+    fn new_state_names_round_trip_through_record_codec() {
+        for state in [
+            State::ReadyBound,
+            State::CapabilityIssued,
+            State::DerivedPendingRecheck,
+        ] {
+            let binding = Binding {
+                transaction_id: "11".repeat(32),
+                request_sha256: "22".repeat(32),
+                foundation_sha256: "33".repeat(32),
+                boot_id: "boot-A".into(),
+                deadline_boottime_ns: 42,
+            };
+            let bytes = encode_record(0, state, &binding, &"44".repeat(32), ZERO);
+            let parsed = parse_record(&bytes).unwrap();
+            assert_eq!(parsed.state, state, "state {state:?} did not round-trip");
+            assert_eq!(parsed.binding, binding);
+        }
+        assert!(parse_record(b"v1\nsequence=0\nstate=READY_BOUN\n").is_err());
+    }
+
+    #[test]
+    fn new_capability_chain_forward_transitions_are_legal_and_terminal_locked() {
+        let _clock = TestClockGuard::at(100);
+        if crate::linux::kernel_boottime_ns().is_err() {
+            return;
+        }
+        let path = test_root("newchain");
+        let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
+        let lock = store.locks.lock("global.lock").unwrap();
+        let binding = new_capability_binding();
+        store.append(&lock, &binding, State::Prepared).unwrap();
+        store.append(&lock, &binding, State::ReadyBound).unwrap();
+        store
+            .append(&lock, &binding, State::CapabilityIssued)
+            .unwrap();
+        store
+            .append(&lock, &binding, State::DerivedPendingRecheck)
+            .unwrap();
+        store.append(&lock, &binding, State::Committed).unwrap();
+        let records = store.records(&lock).unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.state).collect::<Vec<_>>(),
+            vec![
+                State::Prepared,
+                State::ReadyBound,
+                State::CapabilityIssued,
+                State::DerivedPendingRecheck,
+                State::Committed,
+            ]
+        );
+        assert!(store.append(&lock, &binding, State::Tombstoned).is_err());
+        drop(lock);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn illegal_skip_transition_is_rejected() {
+        let _clock = TestClockGuard::at(100);
+        if crate::linux::kernel_boottime_ns().is_err() {
+            return;
+        }
+        let path = test_root("illegalskip");
+        let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
+        let lock = store.locks.lock("global.lock").unwrap();
+        let binding = new_capability_binding();
+        store.append(&lock, &binding, State::Prepared).unwrap();
+        assert!(store
+            .append(&lock, &binding, State::CapabilityIssued)
+            .is_err());
+        drop(lock);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn reconcile_stranded_capability_issued_forces_tombstone_and_blocks_replay() {
+        let _clock = TestClockGuard::at(100);
+        if crate::linux::kernel_boottime_ns().is_err() {
+            return;
+        }
+        let path = test_root("reconcile-cap");
+        let store_id = "44".repeat(32);
+        let store = LedgerStore::provision_for_test(&path, &store_id).unwrap();
+        let tx = "ab".repeat(32);
+        let request = Request {
+            foundation_sha256: "33".repeat(32),
+            operation: "execute".into(),
+            payload: b"stranded".to_vec(),
+            deadline_boottime_ns: 200,
+        };
+        let lock = store.locks.lock("global.lock").unwrap();
+        let canonical = canonical_request(&request).unwrap();
+        let replay = canonical_replay_identity(&request).unwrap();
+        let request_sha = request_digest(&replay).unwrap();
+        let burn = format!(
+            "v1\nrequest={}\ntransaction={}\nstore={}\nlength={}\ncanonical={}\nreplay_length={}\nreplay={}\n",
+            request_sha,
+            tx,
+            store_id,
+            canonical.len(),
+            hex(&canonical),
+            replay.len(),
+            hex(&replay)
+        );
+        lock.create_in(&store.burns, &format!("{request_sha}.burn"), burn.as_bytes(), RECORD_MAX)
+            .unwrap();
+        let binding = Binding {
+            transaction_id: tx.clone(),
+            request_sha256: request_sha,
+            foundation_sha256: request.foundation_sha256.clone(),
+            boot_id: kernel_boot_id().unwrap(),
+            deadline_boottime_ns: request.deadline_boottime_ns,
+        };
+        store.append(&lock, &binding, State::Prepared).unwrap();
+        store.append(&lock, &binding, State::ReadyBound).unwrap();
+        store.append(&lock, &binding, State::CapabilityIssued).unwrap();
+        drop(lock);
+        drop(store);
+
+        let reopened = LedgerStore::open_for_test(&path).unwrap();
+        {
+            let lock = reopened.locks.lock("global.lock").unwrap();
+            let records = reopened.records(&lock).unwrap();
+            let last = records
+                .iter()
+                .rev()
+                .find(|r| r.binding.transaction_id == tx)
+                .unwrap();
+            assert_eq!(last.state, State::Tombstoned);
+        }
+        assert!(reopened.claim(&tx, request.clone()).is_err());
+        drop(reopened);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

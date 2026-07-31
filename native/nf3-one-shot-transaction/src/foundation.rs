@@ -9,7 +9,7 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0";
+    "a099468430c69736bf2823cf0d91ab014e11076e38611484f5035502bd05963f";
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
     "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1";
 const NF2_LINKED_RELEASE_RLIB_SHA256: &str =
@@ -113,7 +113,7 @@ fn linked_nf2_build_sha256(identity: &BuildIdentity) -> String {
 }
 
 pub(crate) fn linked_nf2_source_sha256() -> String {
-    const SOURCES: [(&str, &[u8]); 11] = [
+    const SOURCES: [(&str, &[u8]); 12] = [
         (
             "Cargo.lock",
             include_bytes!("../../nf2-zero-capability-broker/Cargo.lock"),
@@ -125,6 +125,10 @@ pub(crate) fn linked_nf2_source_sha256() -> String {
         (
             "src/canonical_json.rs",
             include_bytes!("../../nf2-zero-capability-broker/src/canonical_json.rs"),
+        ),
+        (
+            "src/capability.rs",
+            include_bytes!("../../nf2-zero-capability-broker/src/capability.rs"),
         ),
         (
             "src/lib.rs",
@@ -197,7 +201,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "f5c726893b278bdad9204ef201b826418eb402d07f58ec865c515ccfb94f827b"
+            "2ea84cc61014632d3cb76de81cdaa6df066276b392ce4cf9eb448a53f8db1308"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -220,11 +224,11 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "f5c726893b278bdad9204ef201b826418eb402d07f58ec865c515ccfb94f827b"
+            "2ea84cc61014632d3cb76de81cdaa6df066276b392ce4cf9eb448a53f8db1308"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "e5bb12ff9bc2bd371cd2e196399838a7f7ae1b803b5481861f36fca16b09e245"
+            "464c846a5be2f64ad574c89361b9bab1a546d1f7966bf6f44eac46d25a38b7c2"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
@@ -235,11 +239,11 @@ mod tests {
         for (name, value) in [
             (
                 "git_subtree_oid_sha1",
-                "cb56a4bef9708da3f9f1468aff11734f2f50adcd",
+                "e906cd4bad2f9eba0dbf11a765465edbe1726de1",
             ),
             (
                 "linked_source_sha256",
-                "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc",
+                "8835b3194d471b040c4b8a73d6ae1d30b0ef8379e167437a4704429f0b1bfb70",
             ),
         ] {
             frame(&mut canonical, name.as_bytes());

@@ -1,4 +1,4 @@
-use super::live::LiveAuthority;
+use super::live::{LiveAuthority, PeerCredential};
 use super::sealed::SealedNf1;
 use core::ffi::{c_char, c_int, c_long, c_void};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -51,6 +51,21 @@ const DEADLINE: Duration = Duration::from_secs(5);
 const POLLIN: i16 = 1;
 #[cfg(feature = "adversarial-test-hooks")]
 const SYS_GETPID: c_long = 39;
+
+// SO_PEERCRED peer-credential channel. The child connects to the broker's
+// abstract listener so SO_PEERCRED on the accepted socket attests the *child's*
+// identity (a socketpair created in the broker would attest the broker).
+const AF_UNIX: c_int = 1;
+const SOCK_STREAM: c_int = 1;
+const SOCK_CLOEXEC: c_int = 0o2000000;
+const SYS_SOCKET: c_long = 41;
+const SYS_BIND: c_long = 49;
+const SYS_LISTEN: c_long = 50;
+const SYS_ACCEPT4: c_long = 288;
+const SYS_CONNECT: c_long = 42;
+const SYS_CLOSE: c_long = 3;
+const PEER_LISTEN_BACKLOG: c_int = 1;
+const PEER_NAME_PREFIX: &[u8] = b"trustforge-nf2-peer-";
 
 // Static-musl startup plus exit. write/prctl/execveat are constrained below.
 const ALLOWED_SYSCALLS: [u32; 18] = [
@@ -124,6 +139,13 @@ struct SigInfo {
     uid: u32,
     status: c_int,
     remaining: [u8; 100],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SockAddrUn {
+    sun_family: u16,
+    sun_path: [u8; 108],
 }
 
 unsafe extern "C" {
@@ -299,7 +321,7 @@ impl Drop for Child {
 
 use std::os::fd::AsRawFd;
 
-pub fn run(sealed: &SealedNf1) -> Result<(), &'static str> {
+pub fn run<S: crate::CapabilitySink>(sealed: &SealedNf1, sink: &S) -> Result<(), &'static str> {
     sealed.reverify()?;
     let test_mode = test_mode();
     #[cfg(feature = "adversarial-test-hooks")]
@@ -328,6 +350,7 @@ pub fn run(sealed: &SealedNf1) -> Result<(), &'static str> {
     let child_stdout = duplicate_high(stdout_write.as_raw_fd())?;
     let child_stderr = duplicate_high(stderr_write.as_raw_fd())?;
     let parent_pid = std::process::id() as c_int;
+    let peer_listener = create_peer_listener(parent_pid)?;
     // SAFETY: fork is performed before this broker creates any threads.
     let pid = unsafe { fork() };
     if pid < 0 {
@@ -370,6 +393,22 @@ pub fn run(sealed: &SealedNf1) -> Result<(), &'static str> {
         reaped: false,
     };
     wait_for_stop(&child, SIGSTOP, 0)?;
+    // The child connected to the peer listener before raising SIGSTOP, so its
+    // connection is queued and its connector descriptor is still open. Capture
+    // the kernel credential now, then close the listener; neither descriptor
+    // lives in the child's post-exec FD space.
+    let peer_credential = capture_child_peer_credential(&peer_listener, &child)?;
+    drop(peer_listener);
+    #[cfg(feature = "adversarial-test-hooks")]
+    let peer_credential = if test_mode == 16 {
+        PeerCredential {
+            pid: peer_credential.pid,
+            uid: peer_credential.uid ^ 1,
+            gid: peer_credential.gid,
+        }
+    } else {
+        peer_credential
+    };
     pause_broker_at(test_mode, 13);
     set_initial_trace_options(&child)?;
     let mut trace_stage = TraceStage::AwaitFirstSeccomp;
@@ -392,6 +431,7 @@ pub fn run(sealed: &SealedNf1) -> Result<(), &'static str> {
     continue_trace_stage(&child, &mut trace_stage)?;
     child.ensure_live()?;
     sealed.reverify()?;
+    notify_sink(sink.on_ready_bound(), "ready_bound")?;
     pause_broker_at(test_mode, 15);
     #[cfg(feature = "adversarial-test-hooks")]
     if test_mode == 12 {
@@ -414,15 +454,44 @@ pub fn run(sealed: &SealedNf1) -> Result<(), &'static str> {
         authority.inject_map_identity_mismatch();
     }
     authority.reverify(sealed)?;
+    authority.verify_peer_credential(sealed, peer_credential, child.pid)?;
+    notify_sink(sink.on_capability_issued(), "capability_issued")?;
     continue_with_exit_trace(&child, &mut trace_stage)?;
     child.ensure_live()?;
     sealed.reverify()?;
     authority.reverify(sealed)?;
+    authority.verify_peer_credential(sealed, peer_credential, child.pid)?;
+    notify_sink(sink.on_derived_pending_recheck(), "derived_pending_recheck")?;
     read_exact_diagnostics(stdout_read.as_raw_fd(), stderr_read.as_raw_fd(), sealed)?;
     child.ensure_live()?;
     sealed.reverify()?;
     authority.reverify(sealed)?;
+    authority.verify_peer_credential(sealed, peer_credential, child.pid)?;
     child.continue_and_reap_clean()?;
+    notify_sink(sink.on_committed(), "committed")?;
+    Ok(())
+}
+
+/// Records a capability-sink rejection to stderr, then forwards the error so the
+/// caller's `?` aborts the transaction. The live `Child` is still in scope at
+/// every call site, so returning `Err` reuses the existing fail-closed
+/// kill/reap cleanup in `Child::drop`; no new kill path is introduced.
+fn notify_sink(result: Result<(), &'static str>, stage: &str) -> Result<(), &'static str> {
+    if let Err(error) = result {
+        // SAFETY: write is async-signal-safe; all buffers are fixed/static. This
+        // is broker-thread code (not a signal handler), matching Child::drop's
+        // diagnostic style. The error is a fixed &'static str from the sink.
+        unsafe {
+            const TAG: &[u8] = b"CAPABILITY-SINK: ";
+            write(2, TAG.as_ptr().cast(), TAG.len());
+            write(2, stage.as_ptr().cast(), stage.len());
+            const ARROW: &[u8] = b" -> ";
+            write(2, ARROW.as_ptr().cast(), ARROW.len());
+            write(2, error.as_ptr().cast(), error.len());
+            write(2, b"\n".as_ptr().cast(), 1);
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -543,6 +612,114 @@ fn duplicate_high(fd: RawFd) -> Result<OwnedFd, &'static str> {
     Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 }
 
+/// Builds the abstract AF_UNIX address both endpoints share. The address is
+/// keyed by the broker pid so concurrent brokers cannot collide, and is built
+/// with no allocation so the post-fork child (async-signal-safe context) and
+/// the broker thread produce byte-identical sockaddrs. `sun_path[0] == 0`
+/// selects the abstract namespace, which is independent of the filesystem and
+/// thus unaffected by the broker's retained-root resolution constraints.
+fn peer_address(name_key: c_int) -> (SockAddrUn, c_int) {
+    let mut addr = SockAddrUn {
+        sun_family: AF_UNIX as u16,
+        sun_path: [0; 108],
+    };
+    let mut offset = 1usize;
+    addr.sun_path[offset..offset + PEER_NAME_PREFIX.len()].copy_from_slice(PEER_NAME_PREFIX);
+    offset += PEER_NAME_PREFIX.len();
+    offset += write_decimal(&mut addr.sun_path[offset..], name_key.max(0) as u64);
+    let addrlen = (2 + offset) as c_int;
+    (addr, addrlen)
+}
+
+/// Writes the decimal expansion of `value` into `target` without allocating.
+/// Returns the number of digits written. Async-signal-safe.
+fn write_decimal(target: &mut [u8], value: u64) -> usize {
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    let mut remaining = value;
+    if remaining == 0 {
+        digits[0] = b'0';
+        count = 1;
+    } else {
+        while remaining > 0 {
+            digits[count] = b'0' + (remaining % 10) as u8;
+            count += 1;
+            remaining /= 10;
+        }
+        digits[..count].reverse();
+    }
+    target[..count].copy_from_slice(&digits[..count]);
+    count
+}
+
+/// Creates the broker-side listening AF_UNIX socket in the abstract namespace.
+/// Created before fork; the child inherits a copy that close_range later
+/// discards, so the listener never reaches the NF1 runtime FD closure.
+fn create_peer_listener(name_key: c_int) -> Result<OwnedFd, &'static str> {
+    // SAFETY: socket allocates a new AF_UNIX stream socket.
+    let fd = unsafe {
+        syscall(
+            SYS_SOCKET,
+            AF_UNIX as c_long,
+            (SOCK_STREAM | SOCK_CLOEXEC) as c_long,
+            0,
+        )
+    } as c_int;
+    if fd < 0 {
+        return Err("peer listener socket creation failed");
+    }
+    // SAFETY: successful socket returns a newly owned descriptor.
+    let listener = unsafe { OwnedFd::from_raw_fd(fd) };
+    let (addr, addrlen) = peer_address(name_key);
+    // SAFETY: bind receives the initialized abstract sockaddr and its length.
+    if unsafe {
+        syscall(
+            SYS_BIND,
+            fd as c_long,
+            &addr as *const SockAddrUn as *const c_void,
+            addrlen as c_long,
+        )
+    } != 0
+    {
+        return Err("peer listener bind failed");
+    }
+    // SAFETY: listen marks the bound socket with a single-slot backlog.
+    if unsafe { syscall(SYS_LISTEN, fd as c_long, PEER_LISTEN_BACKLOG as c_long) } != 0 {
+        return Err("peer listener listen failed");
+    }
+    Ok(listener)
+}
+
+/// Accepts the child's connection (queued before it raised SIGSTOP) and reads
+/// its SO_PEERCRED. The child's connector descriptor is still open at this
+/// point, so the accepted socket carries a live, kernel-verified credential.
+fn capture_child_peer_credential(
+    listener: &OwnedFd,
+    child: &Child,
+) -> Result<PeerCredential, &'static str> {
+    child.ensure_live()?;
+    if !poll_readable(listener.as_raw_fd(), DEADLINE.as_millis() as c_int)? {
+        return Err("peer credential listener deadline exceeded");
+    }
+    // SAFETY: listener is readable with a queued connection; accept4 returns a
+    // newly owned connected descriptor carrying the child's peer credential.
+    let accepted = unsafe {
+        syscall(
+            SYS_ACCEPT4,
+            listener.as_raw_fd() as c_long,
+            core::ptr::null::<c_void>(),
+            core::ptr::null::<c_void>(),
+            SOCK_CLOEXEC as c_long,
+        )
+    } as c_int;
+    if accepted < 0 {
+        return Err("peer credential accept failed");
+    }
+    // SAFETY: successful accept4 returns a newly owned descriptor.
+    let accepted = unsafe { OwnedFd::from_raw_fd(accepted) };
+    LiveAuthority::capture_peer_credential(accepted.as_raw_fd())
+}
+
 fn wait_for_stop(child: &Child, signal: c_int, event: c_int) -> Result<(), &'static str> {
     let deadline = Instant::now() + DEADLINE;
     loop {
@@ -590,6 +767,9 @@ fn child_exec(
     {
         child_fail();
     }
+    // Declared at function scope so it survives across the close_range and the
+    // exec unsafe blocks: assigned after close_range, closed before execveat.
+    let peer_sock: c_int;
     // SAFETY: close all descriptors above the retained exec FD.
     unsafe {
         if !skip_close_range(test_mode) && syscall(SYS_CLOSE_RANGE, 4_u32, u32::MAX, 0_u32) != 0 {
@@ -615,6 +795,27 @@ fn child_exec(
             };
             if let Some((fd, bytes)) = injection
                 && write(fd, bytes.as_ptr().cast(), bytes.len()) != bytes.len() as isize
+            {
+                child_fail();
+            }
+        }
+        // Connect to the broker's abstract listener so SO_PEERCRED on the
+        // accepted socket attests THIS child. Created after close_range (lands
+        // on a fresh descriptor) and held open across SIGSTOP so the broker can
+        // accept it; closed before execveat below so it never enters the NF1 FD
+        // closure.
+        peer_sock = syscall(SYS_SOCKET, AF_UNIX as c_long, SOCK_STREAM as c_long, 0) as c_int;
+        if peer_sock < 0 {
+            child_fail();
+        }
+        {
+            let (addr, addrlen) = peer_address(parent);
+            if syscall(
+                SYS_CONNECT,
+                peer_sock as c_long,
+                &addr as *const SockAddrUn as *const c_void,
+                addrlen as c_long,
+            ) != 0
             {
                 child_fail();
             }
@@ -657,6 +858,12 @@ fn child_exec(
     #[cfg(not(feature = "adversarial-test-hooks"))]
     let exec_fd = 3;
     unsafe {
+        // Close the peer-credential descriptor so the exec descriptor set is
+        // exactly {0,1,2,3} at the exec boundary. close is syscall 3, which the
+        // seccomp policy allowlists; it is never traced.
+        if syscall(SYS_CLOSE, peer_sock as c_long) != 0 {
+            child_fail();
+        }
         syscall(
             SYS_EXECVEAT,
             exec_fd,
@@ -700,6 +907,7 @@ fn test_mode() -> u8 {
             Ok("pause-bootstrap-stop") => 13,
             Ok("pause-seccomp-stop") => 14,
             Ok("pause-post-exec-stop") => 15,
+            Ok("peer-mismatch") => 16,
             _ => 0,
         }
     }
@@ -1152,5 +1360,36 @@ mod tests {
         let mut runtime = TraceStage::AwaitExit;
         assert!(runtime.accept(PTRACE_EVENT_SECCOMP).is_err());
         assert_eq!(runtime, TraceStage::AwaitExit);
+    }
+
+    #[test]
+    fn decimal_expansion_is_exact_and_unpadded() {
+        let mut buf = [b'X'; 8];
+        let n = write_decimal(&mut buf, 0);
+        assert_eq!(&buf[..n], b"0");
+        let n = write_decimal(&mut buf, 7);
+        assert_eq!(&buf[..n], b"7");
+        let n = write_decimal(&mut buf, 12345);
+        assert_eq!(&buf[..n], b"12345");
+        // No leading zeros, no trailing bytes touched beyond the digits.
+        let n = write_decimal(&mut buf, 42);
+        assert_eq!(&buf[..n], b"42");
+        assert_eq!(buf[n], b'X');
+    }
+
+    #[test]
+    fn peer_address_is_abstract_and_deterministic() {
+        let (addr, addrlen) = peer_address(99);
+        // Abstract namespace: sun_path[0] is the null marker.
+        assert_eq!(addr.sun_family, AF_UNIX as u16);
+        assert_eq!(addr.sun_path[0], 0);
+        let name = &addr.sun_path[1..(addrlen as usize - 2)];
+        let expected = b"trustforge-nf2-peer-99";
+        assert_eq!(name, expected);
+        // Broker and child build byte-identical addresses from the same key.
+        assert_eq!(peer_address(99), peer_address(99));
+        assert_ne!(peer_address(99), peer_address(100));
+        // Name stays well inside the 108-byte sun_path bound.
+        assert!((addrlen as usize) < 2 + 108);
     }
 }

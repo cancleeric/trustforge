@@ -1,4 +1,4 @@
-use crate::{Binding, Error, LedgerStore, Request, accepted_foundation_sha256};
+use crate::{Binding, ClaimSession, Error, LedgerStore, Request, accepted_foundation_sha256};
 use trustforge_nf2_zero_capability_broker::Outcome;
 
 const FIXED_OPERATION: &str = "nf2-fixed-diagnostic";
@@ -58,7 +58,7 @@ impl IntegratedRunner {
             transaction_id,
             deadline_boottime_ns,
             foundation,
-            trustforge_nf2_zero_capability_broker::run,
+            |sink| trustforge_nf2_zero_capability_broker::run_transactional(sink),
         )
     }
 
@@ -67,10 +67,10 @@ impl IntegratedRunner {
         transaction_id: &str,
         deadline_boottime_ns: u64,
         foundation_sha256: String,
-        executor: F,
+        run_nf2: F,
     ) -> Result<Binding, IntegratedError>
     where
-        F: FnOnce() -> Result<Outcome, &'static str>,
+        F: FnOnce(&ClaimSession<'_>) -> Result<Outcome, &'static str>,
     {
         let request = Request {
             foundation_sha256,
@@ -85,7 +85,7 @@ impl IntegratedRunner {
         // ATTEMPT is durable immediately before calling NF2. It is not proof
         // that NF2 reached its irreversible action.
         execution_witness("ATTEMPT", self.store.store_id(), &binding)?;
-        match executor() {
+        match run_nf2(&session) {
             Ok(Outcome::Completed) => {
                 execution_witness("DEFINITE_SUCCESS", self.store.store_id(), &binding)?;
                 integration_checkpoint("AFTER_NF2_SUCCESS")?;
@@ -108,16 +108,16 @@ impl IntegratedRunner {
         &self,
         transaction_id: &str,
         deadline_boottime_ns: u64,
-        executor: F,
+        run_nf2: F,
     ) -> Result<Binding, IntegratedError>
     where
-        F: FnOnce() -> Result<Outcome, &'static str>,
+        F: FnOnce(&ClaimSession<'_>) -> Result<Outcome, &'static str>,
     {
         self.execute_with_foundation(
             transaction_id,
             deadline_boottime_ns,
             "33".repeat(32),
-            executor,
+            run_nf2,
         )
     }
 
@@ -255,20 +255,31 @@ mod tests {
         crate::linux::kernel_boottime_ns().unwrap() + 60_000_000_000
     }
 
+    fn completed_via_capability_chain(
+        sink: &ClaimSession<'_>,
+    ) -> Result<Outcome, &'static str> {
+        use trustforge_nf2_zero_capability_broker::CapabilitySink;
+        sink.on_ready_bound()?;
+        sink.on_capability_issued()?;
+        sink.on_derived_pending_recheck()?;
+        sink.on_committed()?;
+        Ok(Outcome::Completed)
+    }
+
     #[test]
     fn success_commits_and_replay_never_executes() {
         let path = root("success");
         let runner = IntegratedRunner::provision_for_test(&path, &"44".repeat(32)).unwrap();
         let calls = AtomicU64::new(0);
         let tx = "11".repeat(32);
-        let result = runner.execute_with(&tx, deadline(), || {
+        let result = runner.execute_with(&tx, deadline(), |sink| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Outcome::Completed)
+            completed_via_capability_chain(sink)
         });
         assert!(result.is_ok());
-        let replay = runner.execute_with(&"22".repeat(32), deadline(), || {
+        let replay = runner.execute_with(&"22".repeat(32), deadline(), |sink| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Outcome::Completed)
+            completed_via_capability_chain(sink)
         });
         assert!(replay.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -282,7 +293,7 @@ mod tests {
         let calls = AtomicU64::new(0);
         let tx = "11".repeat(32);
         assert!(matches!(
-            runner.execute_with(&tx, deadline(), || {
+            runner.execute_with(&tx, deadline(), |_sink| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err("injected NF2 failure")
             }),
@@ -290,7 +301,7 @@ mod tests {
         ));
         assert!(
             runner
-                .execute_with(&tx, deadline(), || {
+                .execute_with(&tx, deadline(), |_sink| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(Outcome::Completed)
                 })
@@ -322,7 +333,7 @@ mod tests {
         };
         assert!(
             reopened
-                .execute_with(&tx, deadline(), || {
+                .execute_with(&tx, deadline(), |_sink| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(Outcome::Completed)
                 })

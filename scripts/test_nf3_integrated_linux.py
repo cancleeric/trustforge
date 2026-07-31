@@ -26,12 +26,12 @@ from pathlib import Path
 
 BLOCKED = 77
 ACCEPTED_NF2_MERGE = "7c26416581a8437a6d00d7941357826b2650c474"
-ACCEPTED_NF2_TREE = "cb56a4bef9708da3f9f1468aff11734f2f50adcd"
+ACCEPTED_NF2_TREE = "e906cd4bad2f9eba0dbf11a765465edbe1726de1"
 ACCEPTED_NF2_SOURCE_TREE_RECEIPT_SHA256 = (
-    "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0"
+    "a099468430c69736bf2823cf0d91ab014e11076e38611484f5035502bd05963f"
 )
 ACCEPTED_LINKED_SOURCE_SHA256 = (
-    "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc"
+    "8835b3194d471b040c4b8a73d6ae1d30b0ef8379e167437a4704429f0b1bfb70"
 )
 EXPECTED_RELEASE_RLIB_SHA256 = (
     "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4"
@@ -1232,6 +1232,7 @@ def linked_source_digest(repo: Path) -> str:
         "Cargo.lock",
         "Cargo.toml",
         "src/canonical_json.rs",
+        "src/capability.rs",
         "src/lib.rs",
         "src/linux.rs",
         "src/linux/live.rs",

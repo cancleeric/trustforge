@@ -9,6 +9,7 @@ compile_error!("adversarial-test-hooks are structurally forbidden in release bui
 pub const BLOCKED_EXTERNAL_LINUX: i32 = 77;
 
 pub mod canonical_json;
+pub mod capability;
 pub mod manifest;
 pub mod sha256;
 
@@ -18,13 +19,66 @@ pub enum Outcome {
     BlockedExternalLinux,
 }
 
+/// Sink notified at each capability-protocol reverify boundary.
+///
+/// Methods take no descriptor argument: descriptor construction is deferred to
+/// the caller that holds a live capability binding (a later NF3 step, where a
+/// `ClaimSession` carries the runtime binding). This crate only emits *stage*
+/// notifications. Returning `Err` makes the broker fail closed: the live child
+/// is killed/reaped via the existing `Child` cleanup and the transaction is
+/// aborted. [`NoopSink`] never returns `Err`, so the default [`run`] path is
+/// behaviorally identical to before this hook existed.
+pub trait CapabilitySink {
+    /// Child is ptrace-stopped at the EXEC event, bound to the sealed runtime,
+    /// and the post-exec sealed reverify passed.
+    fn on_ready_bound(&self) -> Result<(), &'static str>;
+    /// Authority reverify passed and the capability is about to be released to
+    /// let the child produce its derived work.
+    fn on_capability_issued(&self) -> Result<(), &'static str>;
+    /// Child is ptrace-stopped at the EXIT event after producing derived work;
+    /// the exit-stop sealed + authority reverify passed.
+    fn on_derived_pending_recheck(&self) -> Result<(), &'static str>;
+    /// Child reaped a clean exit and the final sealed + authority reverify
+    /// passed: the transaction is committed.
+    fn on_committed(&self) -> Result<(), &'static str>;
+}
+
+/// Default sink whose hooks are all no-ops. Restores the exact pre-hook
+/// control flow when used via [`run`].
+pub struct NoopSink;
+
+impl CapabilitySink for NoopSink {
+    fn on_ready_bound(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn on_capability_issued(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn on_derived_pending_recheck(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn on_committed(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+}
+
+/// Default entry point. Behaviorally identical to the pre-hook `run()`: it
+/// delegates to [`run_transactional`] with [`NoopSink`], so no sink can ever
+/// abort the default path.
 pub fn run() -> Result<Outcome, &'static str> {
+    run_transactional(&NoopSink)
+}
+
+/// Transactional entry point that emits a stage notification at each capability
+/// reverify boundary. Non-Linux-x86_64 hosts are still explicitly blocked.
+pub fn run_transactional<S: CapabilitySink>(sink: &S) -> Result<Outcome, &'static str> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        linux::run().map(|()| Outcome::Completed)
+        linux::run_transactional(sink).map(|()| Outcome::Completed)
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
+        let _ = sink;
         Ok(Outcome::BlockedExternalLinux)
     }
 }
@@ -38,5 +92,14 @@ mod tests {
     #[test]
     fn unsupported_host_is_explicitly_blocked() {
         assert_eq!(super::run(), Ok(super::Outcome::BlockedExternalLinux));
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[test]
+    fn noop_sink_path_matches_default_run() {
+        assert_eq!(
+            super::run_transactional(&super::NoopSink),
+            Ok(super::Outcome::BlockedExternalLinux)
+        );
     }
 }

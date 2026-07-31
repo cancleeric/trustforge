@@ -7,8 +7,8 @@ mod live;
 mod process;
 mod sealed;
 
-pub fn run() -> Result<(), &'static str> {
+pub fn run_transactional<S: crate::CapabilitySink>(sink: &S) -> Result<(), &'static str> {
     let sealed = sealed::SealedNf1::open()?;
     sealed.reverify()?;
-    process::run(&sealed)
+    process::run(&sealed, sink)
 }
