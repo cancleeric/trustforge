@@ -37,6 +37,7 @@ def test_offline_sample_pipeline_no_crash_with_legacy_no_author_data():
     `str | None = None`，缺鍵=未知，不再用空字串冒充）。"""
     report, evidence, _log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True,
+        run_scope_id="test-w3-legacy-author",
     )
     assert report.coin == "BTC"
     assert len(evidence) > 0
@@ -69,6 +70,7 @@ def test_mixed_authored_and_legacy_docs_author_survives_to_evidence():
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1.0), now_fn=lambda: 1.0,
+        run_scope_id="test-w3-author",
     )
     assert report.coin == "BTC"
 

@@ -60,7 +60,7 @@ def test_run_comparison_returns_five_tuple(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+    result = run_comparison("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-two")
     assert len(result) == 5, f"期望 5 元組，實際長度 {len(result)}"
     report_a, ev_a, report_b, ev_b, log = result
     assert report_a.coin == "BTC"
@@ -74,7 +74,7 @@ def test_run_comparison_both_pipelines_executed(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report_a, ev_a, report_b, ev_b, log = run_comparison("BTC", "ETH", "比較", offline=True)
+    report_a, ev_a, report_b, ev_b, log = run_comparison("BTC", "ETH", "比較", offline=True, run_scope_id="test-comparison")
     assert report_a.coin == "BTC"
     assert report_b.coin == "ETH"
     assert ev_a, "BTC evidence 不可空"
@@ -88,7 +88,7 @@ def test_run_comparison_evidence_has_source_fields(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    _, ev_a, _, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True)
+    _, ev_a, _, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True, run_scope_id="test-comparison")
     for ev in ev_a + ev_b:
         d = ev.to_dict()
         for field in ("source", "fetched_at", "content_reference", "related_claim"):
@@ -102,7 +102,7 @@ def test_run_comparison_shared_log(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    _, _, _, _, log = run_comparison("BTC", "ETH", "比較", offline=True)
+    _, _, _, _, log = run_comparison("BTC", "ETH", "比較", offline=True, run_scope_id="test-comparison")
     # 共用 log 應包含 comparison.start + 兩幣各自 ingestion.collect 等事件
     tools = [e["tool"] for e in log.events]
     assert "comparison.start" in tools
@@ -146,7 +146,7 @@ def test_comparison_markdown_has_required_sections(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report_a, ev_a, report_b, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True)
+    report_a, ev_a, report_b, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True, run_scope_id="test-comparison")
     md = comparison_to_markdown(report_a, ev_a, report_b, ev_b, "比較")
 
     for section in ("相對強弱比較", "流動性", "各類訊號一致程度", "合併證據清單"):
@@ -160,7 +160,7 @@ def test_comparison_markdown_labels_both_coins(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report_a, ev_a, report_b, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True)
+    report_a, ev_a, report_b, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True, run_scope_id="test-comparison")
     md = comparison_to_markdown(report_a, ev_a, report_b, ev_b, "比較")
     assert "BTC" in md
     assert "ETH" in md
@@ -213,7 +213,7 @@ def test_multi_source_still_works(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-comparison-run-btc")
     assert report.coin == "BTC"
     assert evidence
 
@@ -225,7 +225,7 @@ def test_hypothesis_still_works(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report, evidence, log = run("ETH", "ETH 短期將盤整", QuestionType.HYPOTHESIS, offline=True)
+    report, evidence, log = run("ETH", "ETH 短期將盤整", QuestionType.HYPOTHESIS, offline=True, run_scope_id="test-comparison-run-eth")
     assert report.coin == "ETH"
     assert "假設" in report.market_judgment
 
@@ -336,7 +336,7 @@ def test_report_direction_field_set(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report, _ev, _log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+    report, _ev, _log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-comparison-direction")
     assert report.direction in ("偏多", "偏空", "中性", "不明"), (
         f"direction 欄位未正確填入，實際 {report.direction!r}"
     )
@@ -349,7 +349,7 @@ def test_comparison_markdown_uses_direction_field(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report_a, ev_a, report_b, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True)
+    report_a, ev_a, report_b, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True, run_scope_id="test-comparison")
     # 人工覆寫 direction（確保測的是結構化欄位，不是 market_judgment 掃字）
     report_a.direction = "偏多_TEST"
     report_b.direction = "偏空_TEST"

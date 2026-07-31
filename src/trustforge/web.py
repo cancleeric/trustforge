@@ -4236,11 +4236,18 @@ def _do_analyze(
         )
         if _force_offline:
             _extra["force_stance_offline"] = True
+        # #960：web 非 formal analyze 路徑須提供 caller-scoped run id（契約 §2.2），
+        # 否則 build_report fail-closed。formal 路徑（analysis_flow job_id）才是權威來源。
+        _web_scope = f"web-{secrets.token_hex(8)}"
         report, evidence, log = run(
-            coin, query, qtype, data_mode="live", llm_mode="off", **_extra,
+            coin, query, qtype, data_mode="live", llm_mode="off",
+            run_scope_id=_web_scope, **_extra,
         )
     else:
-        report, evidence, log = run(coin, query, qtype, offline=not live)
+        report, evidence, log = run(
+            coin, query, qtype, offline=not live,
+            run_scope_id=f"web-{secrets.token_hex(8)}",
+        )
     # 成本會計階段3：只有 real/live（data_mode 最終落在 "live"，真的透過
     # CachedSource 讀連接器資料）才計入「真連接器」服務次數；純離線示範
     # （樣本資料，未觸碰任何連接器/cache）不計，見 `_record_analyze_service_calls`。
@@ -4313,12 +4320,15 @@ def _do_comparison(
         )
         if _force_offline:
             _extra["force_stance_offline"] = True
+        _cmp_scope = f"webcmp-{secrets.token_hex(8)}"
         result = run_comparison(
-            coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
+            coin_a, coin_b, query, data_mode="live", llm_mode="off",
+            run_scope_id=_cmp_scope, **_extra,
         )
     else:
         result = run_comparison(
-            coin_a, coin_b, query, offline=not live
+            coin_a, coin_b, query, offline=not live,
+            run_scope_id=f"webcmp-{secrets.token_hex(8)}",
         )
     # 成本會計階段3：comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，
     # 記 2 次（見 `_record_analyze_service_calls` docstring），理由同 `_do_analyze`。

@@ -14,7 +14,8 @@ def _run(coin="BTC", query="分析 BTC 過去兩週市場狀況", qtype=Question
     brief = aggregate(score(extract_claims(docs), now=now), query)
     log = ExecutionLog(now_fn=lambda: 1000.0)
     return build_report(query, coin, qtype, brief,
-                        client=BedrockClient(offline=True), log=log, now_fn=lambda: 1000.0)
+                        client=BedrockClient(offline=True), log=log, now_fn=lambda: 1000.0,
+                        run_scope_id="test-report")
 
 
 def test_report_has_required_sections():

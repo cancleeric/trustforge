@@ -24,21 +24,21 @@ from trustforge.comparison_snapshot import synthesize_comparison_from_snapshots
 
 class TestComparisonE2E:
     def test_e2e_run_comparison_offline_returns_valid_report(self):
-        result = run_comparison("BTC", "ETH", "compare", offline=True)
+        result = run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         assert result.comparison is not None
         violations = validate_comparison_report(result.comparison)
         assert violations == []
 
     def test_e2e_comparison_has_four_dimensions(self):
-        result = run_comparison("BTC", "ETH", "compare", offline=True)
+        result = run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         assert len(result.comparison.dimensions) == 4
 
     def test_e2e_comparison_conclusion_not_empty(self):
-        result = run_comparison("BTC", "ETH", "compare", offline=True)
+        result = run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         assert result.comparison.conclusion.strip()
 
     def test_e2e_comparison_to_dict_roundtrip(self):
-        result = run_comparison("BTC", "ETH", "compare", offline=True)
+        result = run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         d = result.comparison.to_dict()
         assert "conclusion" in d
         assert "dimensions" in d
@@ -51,7 +51,7 @@ class TestComparisonE2E:
 class TestComparisonDeadline:
     def test_deadline_offline_mode(self):
         start = time.time()
-        run_comparison("BTC", "ETH", "compare", offline=True)
+        run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         elapsed = time.time() - start
         assert elapsed < 600, f"Took {elapsed}s"
 
@@ -87,7 +87,7 @@ class TestPublicHTTPE2E:
         """Simulate /analyze.json?type=comparison route."""
         from trustforge import web
 
-        result = run_comparison("BTC", "ETH", "compare", offline=True)
+        result = run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         payload = web._build_comparison_json_payload(result)
         assert "comparison_report" in payload
         assert payload["comparison_report"] is not None
@@ -104,7 +104,7 @@ class TestBedrockMatrix:
 
     def test_offline_mode_produces_comparison(self, monkeypatch):
         """Offline mode produces a deterministic comparison without Bedrock."""
-        result = run_comparison("BTC", "ETH", "compare", offline=True)
+        result = run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         assert result.comparison is not None
         assert result.comparison.conclusion.strip()
         assert len(result.comparison.dimensions) == 4
@@ -135,6 +135,7 @@ class TestBedrockMatrix:
         result = run_comparison(
             "BTC", "ETH", "compare",
             offline=False, data_mode="live", llm_mode="off",
+            run_scope_id="test-comparison-e2e-live",
         )
         assert result.comparison is not None
         assert result.comparison.conclusion.strip()
@@ -161,7 +162,7 @@ class TestBedrockMatrix:
             "trustforge.pipeline.try_reserve_request_budget", _spy_reserve
         )
 
-        result = run_comparison("BTC", "ETH", "compare", offline=True)
+        result = run_comparison("BTC", "ETH", "compare", offline=True, run_scope_id="test-comparison-e2e")
         assert result.comparison is not None
 
         # offline 模式 llm_mode=off，pipeline.run 中 _wants_bedrock 為 False，

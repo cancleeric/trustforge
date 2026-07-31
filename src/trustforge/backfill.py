@@ -631,6 +631,7 @@ class BackfillWorker:
         report, evidence = run_agent_pipeline(
             query, coin, QuestionType.MULTI_SOURCE, docs,
             client=client, log=log, now_fn=lambda: boundary,
+            run_scope_id=f"backfill-{coin}-{date_str}",
         )
 
         return {

@@ -78,6 +78,7 @@ def write_trust_snapshots(
             report, evidence, _log = pipeline_run(
                 coin, _SNAPSHOT_QUERY, QuestionType.MULTI_SOURCE,
                 data_mode="live", llm_mode="off",
+                run_scope_id=f"snapshot-writer-{coin}-{time.time_ns()}",
             )
         except Exception as exc:
             logger.warning(

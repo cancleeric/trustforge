@@ -290,6 +290,7 @@ def verify_degraded_mode(coin: str = "BTC") -> dict:
             docs=docs,
             client=client,
             log=log,
+            run_scope_id=f"verify-traceability-{coin}",
         )
         # Pipeline 不應中斷
         result["pipeline_completed"] = True
@@ -434,6 +435,7 @@ def run_full_verification(coin: str = "BTC", offline_only: bool = False) -> int:
             docs=docs,
             client=client,
             log=log,
+            run_scope_id=f"verify-traceability-{coin}",
         )
         elapsed = time.time() - t0
         print(f"  Pipeline 完成：{elapsed:.1f}s")

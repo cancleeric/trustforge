@@ -140,6 +140,7 @@ def test_run_agent_pipeline_persist_failure_records_unledgered_spend(monkeypatch
     run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-budget-ledger-integrity",
     )
 
     log_cost_sum = round(
@@ -161,6 +162,7 @@ def test_run_agent_pipeline_persist_success_does_not_touch_unledgered_spend(monk
     run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-budget-ledger-integrity",
     )
 
     assert bg._UNLEDGERED_SPEND.total() == 0.0
@@ -179,6 +181,7 @@ def test_run_agent_pipeline_offline_persist_failure_does_not_pollute_counter(mon
     run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-budget-ledger-integrity",
     )
 
     assert bg._UNLEDGERED_SPEND.total() == 0.0
@@ -255,6 +258,7 @@ def test_pipeline_run_repeated_persist_failures_eventually_forces_offline(monkey
         report, evidence, log = pl.run(
             "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
             data_mode="live", llm_mode="bedrock",
+            run_scope_id="test-budget-ledger-plrun",
         )
         # 每次都重新建構 client，讀取這次建構時 pipeline 決定的 offline 旗標
         # 透過 report.limits 判斷這次是否真的被擋下（"已達上限" 訊息出現）。

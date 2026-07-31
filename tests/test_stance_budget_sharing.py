@@ -99,6 +99,7 @@ def test_run_agent_pipeline_shares_one_stance_fn_between_score_and_stance_pairs(
         query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1000.0), now_fn=lambda: 1000.0,
+        run_scope_id="test-stance-share-resolution",
     )
 
     assert captured.get("resolution_stance_fn") is not None, (
@@ -242,6 +243,7 @@ def test_run_agent_pipeline_step25_stance_cost_is_harvested_into_ledger(monkeypa
     report, _evidence = run_agent_pipeline(
         query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-stance-share-narrative-fail",
     )
 
     assert any("線上模型生成失敗" in limit for limit in report.limits)
@@ -302,6 +304,7 @@ def test_stance_cost_does_not_leak_across_runs_with_same_client(monkeypatch):
     run_agent_pipeline(
         query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
         docs=docs_eth, client=client, log=log_eth, now_fn=lambda: 1000.0,
+        run_scope_id="test-stance-share-twoeth-eth",
     )
     assert client.cost_events == [], "第一輪（ETH）跑完 cost_events 應歸零"
     eth_cost_events = [e for e in log_eth.events if e["tool"] == "llm.cost"]
@@ -311,6 +314,7 @@ def test_stance_cost_does_not_leak_across_runs_with_same_client(monkeypatch):
     run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs_btc, client=client, log=log_btc, now_fn=lambda: 2000.0,
+        run_scope_id="test-stance-share-twoeth-btc",
     )
     assert client.cost_events == [], "第二輪（BTC）跑完 cost_events 應歸零"
     btc_cost_events = [e for e in log_btc.events if e["tool"] == "llm.cost"]
@@ -339,6 +343,7 @@ def test_step25_offline_no_bedrock_produces_zero_stance_cost_without_crashing():
         query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
         docs=_opposite_direction_news_docs(),
         client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-stance-share-integration",
     )
     assert client.cost_events == []
     cost_events = [e for e in log.events if e["tool"] == "llm.cost"]
