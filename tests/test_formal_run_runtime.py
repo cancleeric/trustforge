@@ -52,3 +52,29 @@ def test_production_factory_builds_dynamodb(monkeypatch):
 
     monkeypatch.setattr("boto3.client", lambda *_args, **_kwargs: Client())
     assert isinstance(formal_run_store(), DynamoDbFormalRunIdempotencyStore)
+
+
+def test_secret_prefers_env_when_present(monkeypatch):
+    from trustforge.formal_run_runtime import _secret
+
+    monkeypatch.setenv("TEST_FORMAL_SECRET", "x" * 40)
+    assert _secret("TEST_FORMAL_SECRET") == b"x" * 40
+
+
+def test_secret_falls_back_to_ssm_when_env_absent(monkeypatch):
+    from trustforge import ssm_params
+    from trustforge.formal_run_runtime import _secret
+
+    monkeypatch.delenv("TEST_FORMAL_SECRET", raising=False)
+    monkeypatch.setattr(ssm_params, "get_runtime_token", lambda name: "y" * 50)
+    assert _secret("TEST_FORMAL_SECRET") == b"y" * 50
+
+
+def test_secret_fails_closed_when_env_and_ssm_absent(monkeypatch):
+    from trustforge import ssm_params
+    from trustforge.formal_run_runtime import _secret
+
+    monkeypatch.delenv("TEST_FORMAL_SECRET", raising=False)
+    monkeypatch.setattr(ssm_params, "get_runtime_token", lambda name: None)
+    with pytest.raises(IdempotencyUnavailable, match="32 bytes"):
+        _secret("TEST_FORMAL_SECRET")
