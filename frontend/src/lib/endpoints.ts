@@ -16,7 +16,7 @@ import {
   isStatusData,
 } from './validators'
 import { isWhaleAlertCredentialStatus } from './validators'
-import type { WhaleAlertCredentialStatus } from './types'
+import type { CmcCredentialStatus, WhaleAlertCredentialStatus } from './types'
 import type {
   AdminAuditData,
   AdminBackendProvidersData,
@@ -520,6 +520,34 @@ export function updateWhaleAlertCredential(
       cache: 'no-store',
     },
   )
+}
+
+export function getCmcCredentialStatus(
+  adminToken: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<CmcCredentialStatus>> {
+  return apiFetch<CmcCredentialStatus>('/api/admin/cmc', undefined, isWhaleAlertCredentialStatus, {
+    signal,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    headers: { 'X-Admin-Token': adminToken },
+    cache: 'no-store',
+  })
+}
+
+export function updateCmcCredential(
+  adminToken: string,
+  action: 'set' | 'clear' | 'test',
+  apiKey?: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<CmcCredentialStatus>> {
+  return apiFetch<CmcCredentialStatus>('/api/admin/cmc', undefined, isWhaleAlertCredentialStatus, {
+    signal,
+    timeoutMs: action === 'test' ? 10_000 : DEFAULT_TIMEOUT_MS,
+    method: 'POST',
+    headers: { 'X-Admin-Token': adminToken },
+    jsonBody: action === 'set' ? { action, api_key: apiKey } : { action },
+    cache: 'no-store',
+  })
 }
 
 export function getAdminBackendProviders(

@@ -347,6 +347,87 @@ def test_whale_alert_admin_set_audit_logs_client_ip(admin_enabled, monkeypatch, 
     assert secret not in joined  # api_key 明文絕不入 log
 
 
+def test_cmc_admin_status_is_authenticated_and_masked(admin_enabled, monkeypatch):
+    monkeypatch.setattr(
+        web.cmc_secret,
+        "status",
+        lambda: web.cmc_secret.SecretStatus(True, "ssm", None),
+    )
+    denied, _, _ = _request("GET", "/api/admin/cmc")
+    status, body, headers = _request("GET", "/api/admin/cmc", token=admin_enabled)
+
+    assert denied == 401
+    assert status == 200
+    assert headers["Cache-Control"] == "no-store"
+    assert json.loads(body)["data"] == {
+        "configured": True,
+        "source": "ssm",
+        "last_verified_at": None,
+    }
+
+
+@pytest.mark.parametrize("action", ["set", "clear", "test"])
+def test_cmc_admin_actions_are_tls_only_write_only_and_audited(
+    admin_enabled, monkeypatch, caplog, action
+):
+    secret = "write-only-cmc-key-123456"
+    called = []
+    result = web.cmc_secret.SecretStatus(True, "ssm", None)
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    monkeypatch.setattr(
+        web.cmc_secret,
+        "put_api_key",
+        lambda value: called.append(("set", value)) or result,
+    )
+    monkeypatch.setattr(
+        web.cmc_secret,
+        "clear_api_key",
+        lambda: called.append(("clear", None)) or result,
+    )
+    monkeypatch.setattr(
+        web.cmc_secret,
+        "verify_connection",
+        lambda: called.append(("test", None)) or result,
+    )
+    payload = {"action": action}
+    if action == "set":
+        payload["api_key"] = secret
+    with caplog.at_level("INFO"):
+        status, body, _ = _request(
+            "POST",
+            "/api/admin/cmc",
+            token=admin_enabled,
+            body=json.dumps(payload),
+            headers={"X-Forwarded-Proto": "https"},
+            ip="198.51.100.8",
+        )
+
+    assert status == 200
+    assert called == [(action, secret if action == "set" else None)]
+    assert secret not in body
+    logs = " ".join(record.getMessage() for record in caplog.records)
+    assert "client_ip=198.51.100.8" in logs
+    assert secret not in logs
+
+
+def test_cmc_admin_rejects_insecure_transport_before_reading_body(
+    admin_enabled, monkeypatch
+):
+    called = []
+    monkeypatch.setattr(web, "TRUST_PROXY", False)
+    monkeypatch.setattr(web.cmc_secret, "put_api_key", lambda value: called.append(value))
+    status, body, _ = _request(
+        "POST",
+        "/api/admin/cmc",
+        token=admin_enabled,
+        body=json.dumps({"action": "set", "api_key": "cmc-key-1234567890"}),
+    )
+
+    assert status == 426
+    assert json.loads(body)["error"]["code"] == "upgrade_required"
+    assert called == []
+
+
 def _put_config(
     payload_json: str,
     *,

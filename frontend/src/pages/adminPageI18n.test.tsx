@@ -53,7 +53,12 @@ vi.mock('../lib/endpoints', () => ({
     ok: true,
     data: { configured: false, source: 'unconfigured', last_verified_at: null },
   }),
+  getCmcCredentialStatus: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { configured: false, source: 'unconfigured', last_verified_at: null },
+  }),
   updateWhaleAlertCredential: vi.fn(),
+  updateCmcCredential: vi.fn(),
   putAdminConfig: vi.fn(),
   setAdminBackendProvider: vi.fn(),
   setAllAdminBackendProviders: vi.fn(),

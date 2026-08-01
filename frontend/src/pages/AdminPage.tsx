@@ -23,11 +23,13 @@ import {
   getAdminAudit,
   getAdminBackendProviders,
   getAdminConfig,
+  getCmcCredentialStatus,
   getWhaleAlertCredentialStatus,
   putAdminConfig,
   setAdminBackendProvider,
   setAllAdminBackendProviders,
   updateWhaleAlertCredential,
+  updateCmcCredential,
 } from '../lib/endpoints'
 import type {
   AdminAuditRecord,
@@ -36,6 +38,7 @@ import type {
   AdminConfigData,
   BackendProvider,
   BackendProviderKey,
+  CmcCredentialStatus,
   WhaleAlertCredentialStatus,
 } from '../lib/types'
 import { ErrorState, LoadingState } from '../components/StatusStates'
@@ -156,6 +159,10 @@ export default function AdminPage() {
   const [whaleKey, setWhaleKey] = useState('')
   const [whaleSaving, setWhaleSaving] = useState(false)
   const [whaleError, setWhaleError] = useState<{ code: string; message: string } | null>(null)
+  const [cmcStatus, setCmcStatus] = useState<CmcCredentialStatus | null>(null)
+  const [cmcKey, setCmcKey] = useState('')
+  const [cmcSaving, setCmcSaving] = useState(false)
+  const [cmcError, setCmcError] = useState<{ code: string; message: string } | null>(null)
   const [confirmBedrockOn, setConfirmBedrockOn] = useState(false)
   // live token 明文一次性顯示（僅本次 render 週期的 state，不落任何儲存）
   const [freshLiveToken, setFreshLiveToken] = useState<string | null>(null)
@@ -180,6 +187,25 @@ export default function AdminPage() {
     return () => controller.abort()
   }, [token])
 
+  useEffect(() => {
+    if (!token) {
+      setCmcStatus(null)
+      setCmcKey('')
+      return
+    }
+    const controller = new AbortController()
+    getCmcCredentialStatus(token, controller.signal).then((res) => {
+      if (controller.signal.aborted) return
+      if (res.ok) {
+        setCmcStatus(res.data)
+        setCmcError(null)
+      } else {
+        setCmcError(res.error)
+      }
+    })
+    return () => controller.abort()
+  }, [token])
+
   async function runWhaleAction(action: 'set' | 'clear' | 'test') {
     if (!token) return
     if (action === 'set' && whaleKey.trim().length < 16) {
@@ -194,6 +220,22 @@ export default function AdminPage() {
     setWhaleKey('')
     if (res.ok) setWhaleStatus(res.data)
     else setWhaleError(res.error)
+  }
+
+  async function runCmcAction(action: 'set' | 'clear' | 'test') {
+    if (!token) return
+    if (action === 'set' && cmcKey.trim().length < 16) {
+      setCmcError({ code: 'bad_request', message: t('adminCmcNotConfigured') })
+      return
+    }
+    setCmcSaving(true)
+    setCmcError(null)
+    const key = cmcKey
+    const res = await updateCmcCredential(token, action, key)
+    setCmcSaving(false)
+    setCmcKey('')
+    if (res.ok) setCmcStatus(res.data)
+    else setCmcError(res.error)
   }
 
   // PUT/重載共用：任何成功拿到的最新 config 都同步 cap 輸入框
@@ -808,6 +850,34 @@ export default function AdminPage() {
           </button>
         </div>
         <p className="mt-2 text-xs text-tf-muted">{t('adminWhaleAlertHint')}</p>
+      </SectionCard>
+
+      <SectionCard title={t('adminCmcSectionTitle')}>
+        <div className="mb-3 space-y-1 text-sm text-tf-text2">
+          <p><strong className="text-tf-text">
+            {cmcStatus?.configured ? t('adminCmcConfigured') : t('adminCmcNotConfigured')}
+          </strong></p>
+          {cmcStatus && <>
+            <p>{t('adminCmcSource')}{cmcStatus.source}</p>
+            <p>{t('adminCmcLastVerified')}{cmcStatus.last_verified_at ?? t('adminCmcNeverVerified')}</p>
+          </>}
+        </div>
+        {cmcError && <ErrorState code={cmcError.code} message={cmcError.message} />}
+        <label className="mb-3 block text-sm text-tf-text2">
+          <span className="mb-1 block">{t('adminCmcKeyLabel')}</span>
+          <input type="password" value={cmcKey} onChange={(event) => setCmcKey(event.target.value)}
+            autoComplete="new-password" spellCheck={false}
+            className="w-full max-w-md rounded-md border border-tf-border bg-tf-bg px-3 py-1.5 text-sm text-tf-text" />
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" disabled={cmcSaving || cmcKey.trim().length < 16}
+            onClick={() => runCmcAction('set')} className={BTN_PRIMARY}>{t('adminCmcSave')}</button>
+          <button type="button" disabled={cmcSaving || !cmcStatus?.configured}
+            onClick={() => runCmcAction('test')} className={BTN_PLAIN}>{t('adminCmcTest')}</button>
+          <button type="button" disabled={cmcSaving || !cmcStatus?.configured}
+            onClick={() => runCmcAction('clear')} className={BTN_PLAIN}>{t('adminCmcClear')}</button>
+        </div>
+        <p className="mt-2 text-xs text-tf-muted">{t('adminCmcHint')}</p>
       </SectionCard>
 
       {/* §4-2 live token 管理 */}
