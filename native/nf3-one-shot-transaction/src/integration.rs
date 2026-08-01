@@ -1,4 +1,4 @@
-use crate::{Binding, Error, LedgerStore, Request, accepted_foundation_sha256};
+use crate::{Binding, ClaimSession, Error, LedgerStore, Request, accepted_foundation_sha256};
 use trustforge_nf2_zero_capability_broker::Outcome;
 
 const FIXED_OPERATION: &str = "nf2-fixed-diagnostic";
@@ -58,7 +58,7 @@ impl IntegratedRunner {
             transaction_id,
             deadline_boottime_ns,
             foundation,
-            trustforge_nf2_zero_capability_broker::run,
+            |sink, ctx| trustforge_nf2_zero_capability_broker::run_transactional(sink, ctx),
         )
     }
 
@@ -67,10 +67,13 @@ impl IntegratedRunner {
         transaction_id: &str,
         deadline_boottime_ns: u64,
         foundation_sha256: String,
-        executor: F,
+        run_nf2: F,
     ) -> Result<Binding, IntegratedError>
     where
-        F: FnOnce() -> Result<Outcome, &'static str>,
+        F: FnOnce(
+            &ClaimSession<'_>,
+            &trustforge_nf2_zero_capability_broker::capability::CapabilityContext,
+        ) -> Result<Outcome, &'static str>,
     {
         let request = Request {
             foundation_sha256,
@@ -82,10 +85,26 @@ impl IntegratedRunner {
         // The non-Send session retains the same lock throughout NF2 execution.
         let session = self.store.claim(transaction_id, request)?;
         let binding = session.binding().clone();
+        // Build the transaction-scoped context the broker combines with the
+        // sealed runtime identity to construct the live-bound capability
+        // descriptor. Both fields are fixed-width public identities decoded
+        // from the durable Binding; no authority material crosses this boundary.
+        let ctx = trustforge_nf2_zero_capability_broker::capability::CapabilityContext {
+            transaction_id:
+                trustforge_nf2_zero_capability_broker::capability::decode_hex_32(
+                    &binding.transaction_id,
+                )
+                .map_err(IntegratedError::Nf2)?,
+            foundation_sha256:
+                trustforge_nf2_zero_capability_broker::capability::decode_hex_32(
+                    &binding.foundation_sha256,
+                )
+                .map_err(IntegratedError::Nf2)?,
+        };
         // ATTEMPT is durable immediately before calling NF2. It is not proof
         // that NF2 reached its irreversible action.
         execution_witness("ATTEMPT", self.store.store_id(), &binding)?;
-        match executor() {
+        match run_nf2(&session, &ctx) {
             Ok(Outcome::Completed) => {
                 execution_witness("DEFINITE_SUCCESS", self.store.store_id(), &binding)?;
                 integration_checkpoint("AFTER_NF2_SUCCESS")?;
@@ -108,16 +127,19 @@ impl IntegratedRunner {
         &self,
         transaction_id: &str,
         deadline_boottime_ns: u64,
-        executor: F,
+        run_nf2: F,
     ) -> Result<Binding, IntegratedError>
     where
-        F: FnOnce() -> Result<Outcome, &'static str>,
+        F: FnOnce(
+            &ClaimSession<'_>,
+            &trustforge_nf2_zero_capability_broker::capability::CapabilityContext,
+        ) -> Result<Outcome, &'static str>,
     {
         self.execute_with_foundation(
             transaction_id,
             deadline_boottime_ns,
             "33".repeat(32),
-            executor,
+            run_nf2,
         )
     }
 
@@ -255,20 +277,45 @@ mod tests {
         crate::linux::kernel_boottime_ns().unwrap() + 60_000_000_000
     }
 
+    fn completed_via_capability_chain(
+        sink: &ClaimSession<'_>,
+        ctx: &trustforge_nf2_zero_capability_broker::capability::CapabilityContext,
+    ) -> Result<Outcome, &'static str> {
+        use trustforge_nf2_zero_capability_broker::CapabilitySink;
+        use trustforge_nf2_zero_capability_broker::capability::{
+            CapabilityDescriptor, CapabilityKind,
+        };
+        // Mirror the broker: build the live-bound descriptor from the
+        // transaction-scoped context plus a runtime identity, then hand it by
+        // reference so the ledger durably records its digest.
+        let descriptor = CapabilityDescriptor::new(
+            ctx.transaction_id,
+            ctx.foundation_sha256,
+            0xfd00,
+            0x1,
+            CapabilityKind::ZeroFd,
+        );
+        sink.on_ready_bound()?;
+        sink.on_capability_issued(&descriptor)?;
+        sink.on_derived_pending_recheck()?;
+        sink.on_committed()?;
+        Ok(Outcome::Completed)
+    }
+
     #[test]
     fn success_commits_and_replay_never_executes() {
         let path = root("success");
         let runner = IntegratedRunner::provision_for_test(&path, &"44".repeat(32)).unwrap();
         let calls = AtomicU64::new(0);
         let tx = "11".repeat(32);
-        let result = runner.execute_with(&tx, deadline(), || {
+        let result = runner.execute_with(&tx, deadline(), |sink, ctx| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Outcome::Completed)
+            completed_via_capability_chain(sink, ctx)
         });
         assert!(result.is_ok());
-        let replay = runner.execute_with(&"22".repeat(32), deadline(), || {
+        let replay = runner.execute_with(&"22".repeat(32), deadline(), |sink, ctx| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Outcome::Completed)
+            completed_via_capability_chain(sink, ctx)
         });
         assert!(replay.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -282,7 +329,7 @@ mod tests {
         let calls = AtomicU64::new(0);
         let tx = "11".repeat(32);
         assert!(matches!(
-            runner.execute_with(&tx, deadline(), || {
+            runner.execute_with(&tx, deadline(), |_sink, _ctx| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err("injected NF2 failure")
             }),
@@ -290,7 +337,7 @@ mod tests {
         ));
         assert!(
             runner
-                .execute_with(&tx, deadline(), || {
+                .execute_with(&tx, deadline(), |_sink, _ctx| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(Outcome::Completed)
                 })
@@ -322,7 +369,7 @@ mod tests {
         };
         assert!(
             reopened
-                .execute_with(&tx, deadline(), || {
+                .execute_with(&tx, deadline(), |_sink, _ctx| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(Outcome::Completed)
                 })

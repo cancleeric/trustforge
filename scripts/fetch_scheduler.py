@@ -117,6 +117,9 @@ from trustforge.ingestion.taiwan_regulatory import build_taiwan_regulatory_sourc
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
 from trustforge.ingestion.hoyabit import build_hoyabit_sources, log_hoyabit_startup_status  # noqa: E402
 from trustforge.ingestion.whale_trades import build_whale_sources  # noqa: E402
+from trustforge.ingestion.defillama import build_defillama_sources  # noqa: E402
+from trustforge.ingestion.cmc import build_cmc_sources  # noqa: E402
+from trustforge.ingestion.etherscan import build_etherscan_sources  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
@@ -142,6 +145,17 @@ def build_registry() -> dict[str, Source]:
         + build_coingecko_sources()
         + build_hoyabit_sources()
         + build_whale_sources()
+        + build_defillama_sources()
+        # #1161 CoinMarketCap（key-based）。build_cmc_sources() 永遠註冊來源
+        # （同 build_whale_sources 慣例，不在 build-time resolve 憑證）；憑證在
+        # fetch() 時解析——unconfigured→回 []（靜默），unavailable→raise（本處
+        # catch+log 並計入 failures，可觀測）。
+        + build_cmc_sources()
+        # #1168 Etherscan（key-based V2 query-param key）。build_etherscan_sources()
+        # 永遠註冊（同 cmc/whale 慣例），沿用 whale_onchain kind，憑證在 fetch() 時
+        # 解析——unconfigured→回 []（靜默），unavailable→raise（本處 catch+log 並
+        # 計入 failures，可觀測）。只覆 ETH。
+        + build_etherscan_sources()
     )
     return {s.name: s for s in sources}
 
@@ -1337,6 +1351,7 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             report, evidence, _log = pipeline_run(
                 coin, _SNAPSHOT_QUERY, QuestionType.MULTI_SOURCE,
                 data_mode="live", llm_mode="off",
+                run_scope_id=f"fetch-scheduler-{coin}-{time.time_ns()}",
             )
         except Exception as exc:  # noqa: BLE001 — 單幣失敗（含 collect 全
             # cache-miss/過期時 pipeline.run() 內部 `collect()` 回傳空清單

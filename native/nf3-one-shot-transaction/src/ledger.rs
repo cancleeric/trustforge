@@ -1,6 +1,6 @@
 use crate::Error;
 use crate::linux::{Dir, StoreLockGuard, Vfs, kernel_boottime_ns, kernel_pid};
-use crate::sha256::{digest, hex};
+use trustforge_native_sys::sha256::{digest, hex};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{marker::PhantomData, rc::Rc};
@@ -17,6 +17,9 @@ const ZERO: &str = "000000000000000000000000000000000000000000000000000000000000
 pub enum State {
     Prepared,
     Claimed,
+    ReadyBound,
+    CapabilityIssued,
+    DerivedPendingRecheck,
     Committed,
     Tombstoned,
 }
@@ -204,15 +207,17 @@ impl LedgerStore {
             None
         };
         if let Some(error) = temporal_error {
-            if let Err(append_error) = self.append(&lock, &binding, State::Tombstoned) {
+            if let Err(append_error) =
+                self.append(&lock, &binding, State::Tombstoned, None)
+            {
                 self.poison_or_latch(&lock)?;
                 return Err(append_error);
             }
             return Err(error);
         }
         if let Err(error) = self
-            .append(&lock, &binding, State::Prepared)
-            .and_then(|_| self.append(&lock, &binding, State::Claimed))
+            .append(&lock, &binding, State::Prepared, None)
+            .and_then(|_| self.append(&lock, &binding, State::Claimed, None))
         {
             self.poison_or_latch(&lock)?;
             return Err(error);
@@ -266,7 +271,7 @@ impl LedgerStore {
                         boot_id: kernel_boot_id()?,
                         deadline_boottime_ns: burn.request.deadline_boottime_ns,
                     };
-                    self.append(lock, &binding, State::Tombstoned)?;
+                    self.append(lock, &binding, State::Tombstoned, None)?;
                 }
                 Some(record)
                     if record.binding.foundation_sha256 != burn.request.foundation_sha256
@@ -275,8 +280,17 @@ impl LedgerStore {
                 {
                     return Err(Error::UnsafeObject("burn/record semantic mismatch"));
                 }
-                Some(record) if matches!(record.state, State::Prepared | State::Claimed) => {
-                    self.append(lock, &record.binding, State::Tombstoned)?
+                Some(record)
+                    if matches!(
+                        record.state,
+                        State::Prepared
+                            | State::Claimed
+                            | State::ReadyBound
+                            | State::CapabilityIssued
+                            | State::DerivedPendingRecheck
+                    ) =>
+                {
+                    self.append(lock, &record.binding, State::Tombstoned, None)?
                 }
                 _ => {}
             }
@@ -348,9 +362,17 @@ impl LedgerStore {
                 let legal = matches!(
                     (prior.state, record.state),
                     (State::Prepared, State::Claimed)
+                        | (State::Prepared, State::ReadyBound)
                         | (State::Prepared, State::Tombstoned)
+                        | (State::Claimed, State::ReadyBound)
                         | (State::Claimed, State::Committed)
                         | (State::Claimed, State::Tombstoned)
+                        | (State::ReadyBound, State::CapabilityIssued)
+                        | (State::ReadyBound, State::Tombstoned)
+                        | (State::CapabilityIssued, State::DerivedPendingRecheck)
+                        | (State::CapabilityIssued, State::Tombstoned)
+                        | (State::DerivedPendingRecheck, State::Committed)
+                        | (State::DerivedPendingRecheck, State::Tombstoned)
                 );
                 if !legal {
                     return Err(Error::UnsafeObject("STORE_POISONED"));
@@ -404,6 +426,7 @@ impl LedgerStore {
         lock: &StoreLockGuard<'_>,
         binding: &Binding,
         state: State,
+        descriptor_sha256: Option<&str>,
     ) -> Result<(), Error> {
         let records = self.checked_records(lock)?;
         let sequence = records.len() as u64;
@@ -411,7 +434,14 @@ impl LedgerStore {
             .last()
             .map(|r| r.hash.clone())
             .unwrap_or_else(|| ZERO.into());
-        let bytes = encode_record(sequence, state, binding, &self.store_id, &previous);
+        let bytes = encode_record(
+            sequence,
+            state,
+            binding,
+            &self.store_id,
+            &previous,
+            descriptor_sha256,
+        );
         let hash = hash_bytes(&bytes, RECORD_MAX)?;
         let record_name = format!("{sequence:08}-{hash}.record");
         lock.create_in(&self.heads, &record_name, &bytes, RECORD_MAX)?;
@@ -433,6 +463,14 @@ impl LedgerStore {
 impl ClaimSession<'_> {
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+    fn append_state(&self, state: State, descriptor_sha256: Option<&str>) -> Result<(), Error> {
+        let lock = self
+            .lock
+            .as_ref()
+            .ok_or(Error::UnsafeObject("session terminal"))?;
+        self.store
+            .append(lock, &self.binding, state, descriptor_sha256)
     }
     pub fn commit(mut self) -> Result<(), Error> {
         self.finish(State::Committed)
@@ -456,7 +494,8 @@ impl ClaimSession<'_> {
             .lock
             .as_ref()
             .ok_or(Error::UnsafeObject("session terminal"))?;
-        self.store.append(lock, &self.binding, state)?;
+        self.store
+            .append(lock, &self.binding, state, None)?;
         if lock.revalidate().is_err() {
             self.store.failed_closed.store(true, Ordering::SeqCst);
             return Err(Error::UnsafeObject("STORE_POISONED"));
@@ -464,6 +503,54 @@ impl ClaimSession<'_> {
         self.terminal = true;
         self.lock.take();
         Ok(())
+    }
+}
+
+impl trustforge_nf2_zero_capability_broker::CapabilitySink for ClaimSession<'_> {
+    fn on_ready_bound(&self) -> Result<(), &'static str> {
+        self.append_state(State::ReadyBound, None)
+            .map_err(|_| "ledger append ready_bound failed")
+    }
+    fn on_capability_issued(
+        &self,
+        desc: &trustforge_nf2_zero_capability_broker::capability::CapabilityDescriptor,
+    ) -> Result<(), &'static str> {
+        // The broker hands us the already-constructed, live-bound descriptor.
+        // Assert it carries no authority material, then durably record its
+        // domain-separated digest as part of the CapabilityIssued record. The
+        // descriptor itself never crosses back into ambient state: only its
+        // fixed-width public digest is persisted.
+        desc.assert_no_authority_fields()?;
+        // Integrity: the public descriptor_sha256 field must equal the digest
+        // recomputed over the identity fields (reject a tampered/forged digest).
+        if desc.descriptor_sha256 != desc.compute_sha256() {
+            return Err("capability descriptor digest mismatch");
+        }
+        // Binding: the descriptor must bind THIS transaction + foundation.
+        // A foreign descriptor (even if well-formed) is rejected so the durable
+        // audit record can never claim an arbitrary identity under this tx.
+        let bound_tx = trustforge_nf2_zero_capability_broker::capability::decode_hex_32(
+            &self.binding.transaction_id,
+        )
+        .map_err(|_| "capability transaction_id hex decode failed")?;
+        let bound_foundation = trustforge_nf2_zero_capability_broker::capability::decode_hex_32(
+            &self.binding.foundation_sha256,
+        )
+        .map_err(|_| "capability foundation_sha256 hex decode failed")?;
+        if desc.transaction_id != bound_tx || desc.foundation_sha256 != bound_foundation {
+            return Err("capability descriptor binding mismatch");
+        }
+        let descriptor_sha256 = hex(&desc.descriptor_sha256);
+        self.append_state(State::CapabilityIssued, Some(&descriptor_sha256))
+            .map_err(|_| "ledger append capability_issued failed")
+    }
+    fn on_derived_pending_recheck(&self) -> Result<(), &'static str> {
+        self.append_state(State::DerivedPendingRecheck, None)
+            .map_err(|_| "ledger append derived_pending_recheck failed")
+    }
+    fn on_committed(&self) -> Result<(), &'static str> {
+        recheck_kernel(&self.binding)
+            .map_err(|_| "ledger recheck kernel at commit boundary failed")
     }
 }
 
@@ -479,7 +566,7 @@ impl Drop for ClaimSession<'_> {
             && let Some(lock) = self.lock.as_ref()
             && self
                 .store
-                .append(lock, &self.binding, State::Tombstoned)
+                .append(lock, &self.binding, State::Tombstoned, None)
                 .is_err()
         {
             let marker = format!("{}.poison", self.binding.transaction_id);
@@ -500,6 +587,14 @@ struct Record {
     binding: Binding,
     store_id: String,
     previous_sha256: String,
+    /// Durable capability descriptor digest, present only on CapabilityIssued
+    /// records written with a live descriptor. `None` for every other state and
+    /// for older CapabilityIssued records that predate the durable field. It is
+    /// durable audit state: the recovery write path does not re-validate it
+    /// (only its format), so external attestation and the unit tests are its
+    /// readers.
+    #[allow(dead_code)]
+    descriptor_sha256: Option<String>,
     hash: String,
 }
 struct Burn {
@@ -508,10 +603,35 @@ struct Burn {
     request: Request,
 }
 
-fn encode_record(seq: u64, state: State, b: &Binding, store: &str, previous: &str) -> Vec<u8> {
-    format!("v1\nsequence={seq}\nstate={}\ntransaction={}\nrequest={}\nfoundation={}\nboot={}\ndeadline={}\nstore={store}\nprevious={previous}\n",
-        state_name(state), b.transaction_id, b.request_sha256, b.foundation_sha256,
-        b.boot_id, b.deadline_boottime_ns).into_bytes()
+fn encode_record(
+    seq: u64,
+    state: State,
+    b: &Binding,
+    store: &str,
+    previous: &str,
+    descriptor_sha256: Option<&str>,
+) -> Vec<u8> {
+    let mut body = format!(
+        "v1\nsequence={seq}\nstate={}\ntransaction={}\nrequest={}\nfoundation={}\nboot={}\ndeadline={}\nstore={store}\nprevious={previous}\n",
+        state_name(state),
+        b.transaction_id,
+        b.request_sha256,
+        b.foundation_sha256,
+        b.boot_id,
+        b.deadline_boottime_ns
+    );
+    // The capability descriptor digest is durable only at the CapabilityIssued
+    // boundary, where the broker hands the live-bound descriptor to the sink.
+    // Other states never emit this line, and even CapabilityIssued records only
+    // emit it when a descriptor was supplied, so older records parse tolerantly.
+    if state == State::CapabilityIssued
+        && let Some(descriptor) = descriptor_sha256
+    {
+        body.push_str("descriptor=");
+        body.push_str(descriptor);
+        body.push('\n');
+    }
+    body.into_bytes()
 }
 fn parse_record(bytes: &[u8]) -> Result<Record, Error> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::UnsafeObject("record utf8"))?;
@@ -528,6 +648,9 @@ fn parse_record(bytes: &[u8]) -> Result<Record, Error> {
     let state = match value(&mut lines, "state")? {
         "PREPARED" => State::Prepared,
         "CLAIMED" => State::Claimed,
+        "READY_BOUND" => State::ReadyBound,
+        "CAPABILITY_ISSUED" => State::CapabilityIssued,
+        "DERIVED_PENDING_RECHECK" => State::DerivedPendingRecheck,
         "COMMITTED" => State::Committed,
         "TOMBSTONED" => State::Tombstoned,
         _ => return Err(Error::UnsafeObject("state")),
@@ -541,6 +664,23 @@ fn parse_record(bytes: &[u8]) -> Result<Record, Error> {
         .map_err(|_| Error::UnsafeObject("deadline"))?;
     let store_id = value(&mut lines, "store")?.to_owned();
     let previous_sha256 = value(&mut lines, "previous")?.to_owned();
+    // Optional descriptor digest line, present only on CapabilityIssued records
+    // emitted after the durable-descriptor change. Older records (and every
+    // other state) omit it; a descriptor line on any other state is tampering.
+    let descriptor_sha256 = match lines.next() {
+        Some(line) => {
+            if state != State::CapabilityIssued {
+                return Err(Error::UnsafeObject("record descriptor field"));
+            }
+            let digest = line
+                .strip_prefix("descriptor=")
+                .ok_or(Error::UnsafeObject("record trailing field"))?;
+            let digest = digest.to_owned();
+            valid_hex(&digest)?;
+            Some(digest)
+        }
+        None => None,
+    };
     if lines.next().is_some() {
         return Err(Error::UnsafeObject("record fields"));
     }
@@ -560,6 +700,7 @@ fn parse_record(bytes: &[u8]) -> Result<Record, Error> {
         binding,
         store_id,
         previous_sha256,
+        descriptor_sha256,
         hash: hash_bytes(bytes, RECORD_MAX)?,
     })
 }
@@ -641,6 +782,9 @@ fn state_name(s: State) -> &'static str {
     match s {
         State::Prepared => "PREPARED",
         State::Claimed => "CLAIMED",
+        State::ReadyBound => "READY_BOUND",
+        State::CapabilityIssued => "CAPABILITY_ISSUED",
+        State::DerivedPendingRecheck => "DERIVED_PENDING_RECHECK",
         State::Committed => "COMMITTED",
         State::Tombstoned => "TOMBSTONED",
     }
@@ -830,7 +974,7 @@ mod tests {
             boot_id: "boot-A".into(),
             deadline_boottime_ns: 42,
         };
-        let bytes = encode_record(0, State::Prepared, &binding, &"44".repeat(32), ZERO);
+        let bytes = encode_record(0, State::Prepared, &binding, &"44".repeat(32), ZERO, None);
         assert_eq!(parse_record(&bytes).unwrap().binding, binding);
         let mut extra = bytes;
         extra.extend_from_slice(b"extra=x\n");
@@ -1064,5 +1208,215 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    fn new_capability_binding() -> Binding {
+        Binding {
+            transaction_id: "ab".repeat(32),
+            request_sha256: "cd".repeat(32),
+            foundation_sha256: "33".repeat(32),
+            boot_id: kernel_boot_id().unwrap(),
+            deadline_boottime_ns: 200,
+        }
+    }
+
+    #[test]
+    fn new_state_names_round_trip_through_record_codec() {
+        for state in [
+            State::ReadyBound,
+            State::CapabilityIssued,
+            State::DerivedPendingRecheck,
+        ] {
+            let binding = Binding {
+                transaction_id: "11".repeat(32),
+                request_sha256: "22".repeat(32),
+                foundation_sha256: "33".repeat(32),
+                boot_id: "boot-A".into(),
+                deadline_boottime_ns: 42,
+            };
+            let bytes = encode_record(0, state, &binding, &"44".repeat(32), ZERO, None);
+            let parsed = parse_record(&bytes).unwrap();
+            assert_eq!(parsed.state, state, "state {state:?} did not round-trip");
+            assert_eq!(parsed.binding, binding);
+            assert!(
+                parsed.descriptor_sha256.is_none(),
+                "non-capability record must carry no descriptor"
+            );
+        }
+        assert!(parse_record(b"v1\nsequence=0\nstate=READY_BOUN\n").is_err());
+    }
+
+    #[test]
+    fn capability_issued_record_durably_carries_descriptor_digest() {
+        let binding = Binding {
+            transaction_id: "11".repeat(32),
+            request_sha256: "22".repeat(32),
+            foundation_sha256: "33".repeat(32),
+            boot_id: "boot-A".into(),
+            deadline_boottime_ns: 42,
+        };
+        let descriptor = "deadbeef".repeat(8);
+        // A CapabilityIssued record with a descriptor emits the durable line.
+        let bytes = encode_record(
+            0,
+            State::CapabilityIssued,
+            &binding,
+            &"44".repeat(32),
+            ZERO,
+            Some(&descriptor),
+        );
+        assert!(
+            std::str::from_utf8(&bytes).unwrap().contains("descriptor="),
+            "CapabilityIssued record must carry the descriptor digest line"
+        );
+        let parsed = parse_record(&bytes).unwrap();
+        assert_eq!(parsed.state, State::CapabilityIssued);
+        assert_eq!(parsed.descriptor_sha256.as_deref(), Some(descriptor.as_str()));
+
+        // A descriptor line on any other state is rejected as tampering.
+        let mut smuggled = encode_record(
+            0,
+            State::ReadyBound,
+            &binding,
+            &"44".repeat(32),
+            ZERO,
+            None,
+        );
+        smuggled.extend_from_slice(format!("descriptor={descriptor}\n").as_bytes());
+        assert!(parse_record(&smuggled).is_err());
+
+        // A malformed descriptor digest is rejected.
+        let mut bad = encode_record(
+            0,
+            State::CapabilityIssued,
+            &binding,
+            &"44".repeat(32),
+            ZERO,
+            None,
+        );
+        bad.extend_from_slice(b"descriptor=not-hex\n");
+        assert!(parse_record(&bad).is_err());
+    }
+
+    #[test]
+    fn new_capability_chain_forward_transitions_are_legal_and_terminal_locked() {
+        let _clock = TestClockGuard::at(100);
+        if crate::linux::kernel_boottime_ns().is_err() {
+            return;
+        }
+        let path = test_root("newchain");
+        let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
+        let lock = store.locks.lock("global.lock").unwrap();
+        let binding = new_capability_binding();
+        store.append(&lock, &binding, State::Prepared, None).unwrap();
+        store.append(&lock, &binding, State::ReadyBound, None).unwrap();
+        store
+            .append(&lock, &binding, State::CapabilityIssued, None)
+            .unwrap();
+        store
+            .append(&lock, &binding, State::DerivedPendingRecheck, None)
+            .unwrap();
+        store.append(&lock, &binding, State::Committed, None).unwrap();
+        let records = store.records(&lock).unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.state).collect::<Vec<_>>(),
+            vec![
+                State::Prepared,
+                State::ReadyBound,
+                State::CapabilityIssued,
+                State::DerivedPendingRecheck,
+                State::Committed,
+            ]
+        );
+        // A CapabilityIssued record appended without a descriptor (the legacy
+        // direct-append path) must still parse with a absent descriptor digest.
+        assert_eq!(
+            records[2].descriptor_sha256, None,
+            "descriptor-less CapabilityIssued record must stay parseable"
+        );
+        assert!(store.append(&lock, &binding, State::Tombstoned, None).is_err());
+        drop(lock);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn illegal_skip_transition_is_rejected() {
+        let _clock = TestClockGuard::at(100);
+        if crate::linux::kernel_boottime_ns().is_err() {
+            return;
+        }
+        let path = test_root("illegalskip");
+        let store = LedgerStore::provision_for_test(&path, &"44".repeat(32)).unwrap();
+        let lock = store.locks.lock("global.lock").unwrap();
+        let binding = new_capability_binding();
+        store.append(&lock, &binding, State::Prepared, None).unwrap();
+        assert!(store
+            .append(&lock, &binding, State::CapabilityIssued, None)
+            .is_err());
+        drop(lock);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn reconcile_stranded_capability_issued_forces_tombstone_and_blocks_replay() {
+        let _clock = TestClockGuard::at(100);
+        if crate::linux::kernel_boottime_ns().is_err() {
+            return;
+        }
+        let path = test_root("reconcile-cap");
+        let store_id = "44".repeat(32);
+        let store = LedgerStore::provision_for_test(&path, &store_id).unwrap();
+        let tx = "ab".repeat(32);
+        let request = Request {
+            foundation_sha256: "33".repeat(32),
+            operation: "execute".into(),
+            payload: b"stranded".to_vec(),
+            deadline_boottime_ns: 200,
+        };
+        let lock = store.locks.lock("global.lock").unwrap();
+        let canonical = canonical_request(&request).unwrap();
+        let replay = canonical_replay_identity(&request).unwrap();
+        let request_sha = request_digest(&replay).unwrap();
+        let burn = format!(
+            "v1\nrequest={}\ntransaction={}\nstore={}\nlength={}\ncanonical={}\nreplay_length={}\nreplay={}\n",
+            request_sha,
+            tx,
+            store_id,
+            canonical.len(),
+            hex(&canonical),
+            replay.len(),
+            hex(&replay)
+        );
+        lock.create_in(&store.burns, &format!("{request_sha}.burn"), burn.as_bytes(), RECORD_MAX)
+            .unwrap();
+        let binding = Binding {
+            transaction_id: tx.clone(),
+            request_sha256: request_sha,
+            foundation_sha256: request.foundation_sha256.clone(),
+            boot_id: kernel_boot_id().unwrap(),
+            deadline_boottime_ns: request.deadline_boottime_ns,
+        };
+        store.append(&lock, &binding, State::Prepared, None).unwrap();
+        store.append(&lock, &binding, State::ReadyBound, None).unwrap();
+        store.append(&lock, &binding, State::CapabilityIssued, None).unwrap();
+        drop(lock);
+        drop(store);
+
+        let reopened = LedgerStore::open_for_test(&path).unwrap();
+        {
+            let lock = reopened.locks.lock("global.lock").unwrap();
+            let records = reopened.records(&lock).unwrap();
+            let last = records
+                .iter()
+                .rev()
+                .find(|r| r.binding.transaction_id == tx)
+                .unwrap();
+            assert_eq!(last.state, State::Tombstoned);
+        }
+        assert!(reopened.claim(&tx, request.clone()).is_err());
+        drop(reopened);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

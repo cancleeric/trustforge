@@ -16,6 +16,7 @@ function LocaleSwitcher({ to }: { to: 'en' | 'zh-TW' }) {
   return null
 }
 
+vi.mock('../lib/analysisWip', () => ({ ANALYSIS_FORMAL_WIP: false }))
 vi.mock('../components/AnalysisReportView', () => ({
   default: ({ data }: { data: AnalyzeData }) => <div aria-label="analysis report">{data.report.coin}</div>,
 }))

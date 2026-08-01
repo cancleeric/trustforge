@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrustForge 專案完整說明與分析報告</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Microsoft JhengHei','Noto Sans TC',sans-serif; line-height: 1.7; color: #1a1a2e; background: linear-gradient(135deg,#0f0c29,#302b63,#24243e); min-height: 100vh; padding: 40px 20px; }
+.container { max-width: 920px; margin: 0 auto; background: rgba(255,255,255,0.97); border-radius: 16px; padding: 48px 40px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+h1 { text-align: center; font-size: 2em; color: #1a1a2e; margin-bottom: 8px; }
+.subtitle { text-align: center; color: #666; font-size: 0.95em; margin-bottom: 36px; }
+h2 { color: #302b63; font-size: 1.5em; margin-top: 44px; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 2px solid #e0d6ff; }
+h3 { color: #4a3f8a; font-size: 1.15em; margin-top: 24px; margin-bottom: 10px; }
+p { margin-bottom: 12px; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 0.92em; }
+th, td { padding: 9px 12px; text-align: left; border: 1px solid #e0e0e0; }
+th { background: #4a3f8a; color: white; font-weight: 600; }
+tr:nth-child(even) { background: #f8f6ff; }
+ul, ol { margin: 8px 0 16px 24px; }
+li { margin-bottom: 5px; }
+.highlight-box { background: linear-gradient(135deg,#667eea22,#764ba222); border-left: 4px solid #667eea; padding: 14px 18px; border-radius: 8px; margin: 14px 0; }
+.warning-box { background: #fff3cd; border-left: 4px solid #ffc107; padding: 14px 18px; border-radius: 8px; margin: 14px 0; }
+.danger-box { background: #fee2e2; border-left: 4px solid #ef4444; padding: 14px 18px; border-radius: 8px; margin: 14px 0; }
+.formula-box { background: #1a1a2e; color: #4dd8e0; font-family: Consolas,monospace; padding: 18px 22px; border-radius: 10px; margin: 14px 0; font-size: 1em; line-height: 1.8; }
+code { background: #f3f0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
+.tag-on { background: #d1fae5; color: #065f46; }
+.tag-off { background: #fee2e2; color: #991b1b; }
+.tag-ready { background: #fef3c7; color: #92400e; }
+.divider { height: 1px; background: linear-gradient(to right, transparent, #ccc, transparent); margin: 44px 0; }
+.toc { background: #f8f6ff; border: 1px solid #e0d6ff; border-radius: 10px; padding: 20px 24px; margin: 20px 0; }
+.toc a { color: #4a3f8a; text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+.toc ul { list-style: none; margin: 0; padding: 0; }
+.toc li { margin: 4px 0; padding-left: 16px; border-left: 2px solid #e0d6ff; }
+@media (max-width: 600px) { .container { padding: 24px 16px; } h1 { font-size: 1.5em; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>TrustForge Hermes 專案完整說明與分析報告</h1>
+<p class="subtitle">版本 v0.27.0 ｜ 2026-07-30 ｜ 供團隊成員與外部分析使用</p>
+
+<div class="toc">
+<strong>目錄</strong>
+<ul>
+<li><a href="#what">一、專案是什麼</a></li>
+<li><a href="#scale">二、專案規模</a></li>
+<li><a href="#arch">三、系統架構</a></li>
+<li><a href="#trust">四、信任評分公式</a></li>
+<li><a href="#data">五、資料來源</a></li>
+<li><a href="#agent">六、Hermes Agent 能力</a></li>
+<li><a href="#prod">七、生產環境狀態</a></li>
+<li><a href="#tech">八、技術棧</a></li>
+<li><a href="#demo">九、如何跑 Demo</a></li>
+<li><a href="#analysis">十、根因分析：為什麼會讓人覺得空泛</a></li>
+<li><a href="#action">十一、決賽前行動建議</a></li>
+</ul>
+</div>
+
+<!-- ===== SECTION 1 ===== -->
+<h2 id="what">一、專案是什麼</h2>
+<div class="highlight-box">
+<strong>TrustForge Hermes（信源熔爐）</strong>是一個加密貨幣市場分析 AI Agent。它不預測漲跌，而是對多個來源的消息逐條評估可信度，產出帶信任分數和原始出處的市場分析報告。
+</div>
+<p><strong>核心理念：「我們交付的不是一個答案，而是一個你能查證的答案。」</strong></p>
+<p>團隊：HurricaneSoft（颶風軟體）4 人｜比賽：2026 雲湧智生 台灣生成式 AI 應用黑客松｜命題方：HOYA BIT｜決賽：8/1–8/2（30 小時）</p>
+
+<h3>與一般 Crypto AI 的差異</h3>
+<table>
+<tr><th>一般做法</th><th>TrustForge</th></tr>
+<tr><td>多源 → 直接丟 LLM 摘要</td><td>多源 → 逐條可信度評分 → 信任加權後才進 LLM</td></tr>
+<tr><td>來源不分等級</td><td>來源信譽 + 交叉佐證 + 時效 三維評分</td></tr>
+<tr><td>結論無溯源</td><td>每個結論帶溯源鏈，可點開看原始來源</td></tr>
+<tr><td>一句話結論</td><td>信任分數 + 反方證據 + 溯源鏈，給人決策而非代替決策</td></tr>
+</table>
+
+<!-- ===== SECTION 2 ===== -->
+<h2 id="scale">二、專案規模</h2>
+<table>
+<tr><th>指標</th><th>數字</th></tr>
+<tr><td>開發期間</td><td>2026/6/30 ~ 2026/7/30（31 天）</td></tr>
+<tr><td>總 commit</td><td>1,811</td></tr>
+<tr><td>Python 模組</td><td>220 個</td></tr>
+<tr><td>Rust 模組</td><td>3 個</td></tr>
+<tr><td>前端元件</td><td>80+</td></tr>
+<tr><td>測試檔案</td><td>250+</td></tr>
+<tr><td>覆蓋率</td><td>~86%</td></tr>
+<tr><td>幣種支援</td><td>BTC / ETH / SOL / BNB / XRP</td></tr>
+<tr><td>題型支援</td><td>多源整合 / 假設驗證 / 比較分析 / 多角度分析</td></tr>
+</table>
+
+<!-- ===== SECTION 3 ===== -->
+<h2 id="arch">三、系統架構（五層）</h2>
+<div class="formula-box">
+Layer 1 — Ingestion（多源輸入）14 個連接器<br>
+Layer 2 — Trust（信任提煉 ★ 核心護城河）<br>
+Layer 3 — Agent（編排 + 溯源生成）<br>
+Layer 4 — AGOS（Agent OS：記憶 / 技能 / 工具）<br>
+Layer 5 — Delivery（部署治理：canary / preview / rollback）
+</div>
+
+<h3>Layer 1 — Ingestion（14 個連接器）</h3>
+<p>prices / news / social / onchain / hoyabit / regulatory / coingecko / whale_trades / taiwan_regulatory / safe_fetch / coingecko_live / blockchain_charts / whale_api / base</p>
+
+<h3>Layer 2 — Trust（核心計算）</h3>
+<p><code>scoring.py</code>（111KB）信任評分主引擎、<code>kernel.py</code> 純計算核心（零外部依賴）、<code>dawid_skene.py</code> 動態信譽 EM、<code>conformal.py</code> 統計校準</p>
+
+<h3>Layer 3 — Agent（編排）</h3>
+<p><code>orchestrator.py</code>（99KB）主編排器、shadow_runtime 影子分析、evidence_grouper 證據分組、narrative_locale 中英敘事</p>
+
+<h3>Layer 4 — AGOS（Agent OS）</h3>
+<p><code>agos_runtime.py</code> / <code>memory_os.py</code> / <code>memory_retrieval.py</code> / <code>skill_registry.py</code> / <code>tool_registry.py</code> / <code>context_builder.py</code></p>
+<div class="warning-box">⚠️ AGOS 程式碼已完成，但生產環境尚未啟用旗標。</div>
+
+<h3>Layer 5 — Delivery（部署治理）</h3>
+<p><code>canary_control.py</code> / <code>preview_admission_*.py</code> / <code>release_router.py</code> / <code>formal_run_idempotency*.py</code> / <code>native/</code>（Rust 密封打包、零權限代理、原子交易）</p>
+
+<!-- ===== SECTION 4 ===== -->
+<h2 id="trust">四、信任評分公式</h2>
+<div class="formula-box">
+TrustScore = 來源信譽 × 0.50<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ 交叉佐證 × 0.25<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ 資料時效 × 0.15<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;− 操縱懲罰 × 0.40
+</div>
+
+<h3>來源基礎信譽</h3>
+<table>
+<tr><th>來源類型</th><th>信譽</th><th>說明</th></tr>
+<tr><td>price / onchain</td><td>0.95</td><td>客觀事實，鏈上帳本難造假</td></tr>
+<tr><td>regulatory</td><td>0.90</td><td>官方公告，有法律責任</td></tr>
+<tr><td>hoyabit</td><td>0.85</td><td>交易所一手行情</td></tr>
+<tr><td>news</td><td>0.65</td><td>新聞媒體，有編輯把關</td></tr>
+<tr><td>sentiment</td><td>0.50</td><td>輔助訊號</td></tr>
+<tr><td>social</td><td>0.35</td><td>匿名社群（最低）</td></tr>
+</table>
+
+<h3>分數代表什麼</h3>
+<table>
+<tr><th>範圍</th><th>意義</th></tr>
+<tr><td>0.8 以上</td><td>多個獨立可靠來源一致、資料新、無操縱跡象</td></tr>
+<tr><td>0.5 左右</td><td>證據不夠充分，或來源一般</td></tr>
+<tr><td>0.3 以下</td><td>來源不可靠、操縱嫌疑、或太舊</td></tr>
+</table>
+
+<div class="divider"></div>
+
+<!-- ===== SECTION 5 ===== -->
+<h2 id="data">五、資料來源</h2>
+<table>
+<tr><th>來源</th><th>類型</th><th>狀態</th></tr>
+<tr><td>HOYA BIT 官方 OHLCV</td><td>5 幣×5 年日線</td><td><span class="tag tag-on">✅ 已接</span></td></tr>
+<tr><td>CoinGecko</td><td>即時價格/情緒</td><td><span class="tag tag-on">✅ 已接</span></td></tr>
+<tr><td>SEC EDGAR</td><td>美國監管公告</td><td><span class="tag tag-on">✅ 已接</span></td></tr>
+<tr><td>Blockchain.com</td><td>BTC 鏈上指標</td><td><span class="tag tag-on">✅ 已接</span></td></tr>
+<tr><td>Cointelegraph</td><td>加密新聞 RSS</td><td><span class="tag tag-on">✅ 已接</span></td></tr>
+<tr><td>Whale Alert / Arkham</td><td>鯨魚大額轉帳</td><td><span class="tag tag-on">✅ 已接</span></td></tr>
+<tr><td>台灣監管（金管會/MOPS）</td><td>台灣政策</td><td><span class="tag tag-on">✅ 已接</span></td></tr>
+<tr><td>Reddit</td><td>社群</td><td><span class="tag tag-off">⛔ 排除（API 關閉）</span></td></tr>
+</table>
+
+<!-- ===== SECTION 6 ===== -->
+<h2 id="agent">六、Hermes Agent 能力</h2>
+<p>14 個工具、5 條鐵律、自我改善迴圈。</p>
+
+<h3>5 條不可變鐵律</h3>
+<ol>
+<li>每個價格事實帶 SHA-256 和資料血緣</li>
+<li>每個結論連結到原始來源（source / fetched_at / content_reference）</li>
+<li>反方證據必須保持可見，不得靜默丟棄</li>
+<li>報告必含判斷、依據、校準信心、限制、反轉條件</li>
+<li>只能提出實驗建議，生產變更必須人工批准</li>
+</ol>
+
+<h3>自我改善迴圈</h3>
+<div class="formula-box">
+measure_quality + replay_history → 量測<br>
+&nbsp;&nbsp;→ diagnose_improvement → 診斷提案<br>
+&nbsp;&nbsp;→ review_upgrades（Bedrock 對抗審查）<br>
+&nbsp;&nbsp;→ 人工批准 → 生產變更
+</div>
+<p>Agent 只量測、診斷、提案。不會自行修改程式、批准或部署。</p>
+
+<!-- ===== SECTION 7 ===== -->
+<h2 id="prod">七、生產環境狀態</h2>
+<table>
+<tr><th>元件</th><th>狀態</th><th>證據</th></tr>
+<tr><td>Hermes 30 分鐘自主循環</td><td><span class="tag tag-on">✅ 運行中</span></td><td>每 30 分鐘，最近一次 ~127 秒完成</td></tr>
+<tr><td>即時 Analysis Flow</td><td><span class="tag tag-on">✅ 運行中</span></td><td>daemon active，API 顯示 continuous</td></tr>
+<tr><td>AWS Bedrock (Claude Haiku 4.5)</td><td><span class="tag tag-on">✅ 已使用</span></td><td>累計 83K tokens，成本 ~$0.25</td></tr>
+<tr><td>研究快照記憶</td><td><span class="tag tag-on">✅ 運行中</span></td><td>569 份持續累積</td></tr>
+<tr><td>校準訓練資料</td><td><span class="tag tag-on">✅ 存在</span></td><td>5 幣 2,005 筆（離線回填）</td></tr>
+<tr><td>Three-track 學習</td><td><span class="tag tag-ready">⚠️ 就緒未啟用</span></td><td>hook 已接線，旗標未設定</td></tr>
+<tr><td>AGOS 記憶/技能</td><td><span class="tag tag-ready">⚠️ 就緒未啟用</span></td><td>runtime 已接線，旗標未設定</td></tr>
+<tr><td>Backfill daemon</td><td><span class="tag tag-off">❌ 未啟用</span></td><td>service inactive</td></tr>
+</table>
+
+<!-- ===== SECTION 8 ===== -->
+<h2 id="tech">八、技術棧</h2>
+<table>
+<tr><th>層面</th><th>技術</th></tr>
+<tr><td>後端</td><td>Python 3.11+，零第三方 runtime 依賴（僅 boto3）</td></tr>
+<tr><td>前端</td><td>React + Vite 8 + TypeScript + Tailwind CSS</td></tr>
+<tr><td>LLM</td><td>AWS Bedrock Claude Haiku 4.5（唯一模型入口）</td></tr>
+<tr><td>安全層</td><td>Rust（密封打包、零權限代理、原子交易帳本）</td></tr>
+<tr><td>部署</td><td>App Runner / EC2 / Lambda / Docker</td></tr>
+<tr><td>資料庫</td><td>SQLite（本機）/ DynamoDB（生產）</td></tr>
+<tr><td>限流</td><td>DynamoDB 原子計數器（跨實例）</td></tr>
+<tr><td>CI</td><td>本機 .githooks/pre-push（GitHub Actions disabled）</td></tr>
+</table>
+
+<!-- ===== SECTION 9 ===== -->
+<h2 id="demo">九、如何跑 Demo</h2>
+<div class="formula-box">
+# 安裝<br>
+python -m venv .venv && .venv\Scripts\activate<br>
+pip install -e ".[dev]"<br><br>
+# 離線跑一次分析（不需 AWS）<br>
+python -m trustforge.cli analyze --coin BTC --type multi_source --query "分析 BTC" --offline --out out/btc<br><br>
+# 啟動 Web UI<br>
+set CACHE_BACKEND=sqlite<br>
+set TRUSTFORGE_DISABLE_ADMIN_CONFIG=1<br>
+python -m trustforge.web<br>
+# 瀏覽器開 http://127.0.0.1:8799
+</div>
+
+<div class="divider"></div>
+
+<!-- ===== SECTION 10 ===== -->
+<h2 id="analysis">十、根因分析：為什麼會讓人覺得「空泛」</h2>
+
+<div class="danger-box">
+<strong>一句話根因：</strong>系統的深度在後端 220 個模組裡，但用戶看到的只有一頁報告和幾個數字。冰山露出水面的部分太小，水下的龐然大物別人感受不到。
+</div>
+
+<h3>問題 1：功能多但實際在跑的少（紙上富貴）</h3>
+<table>
+<tr><th>現象</th><th>具體證據</th><th>根因</th><th>改善方向</th></tr>
+<tr><td>220 模組但生產只啟用一部分</td><td>Three-track ❌、AGOS ❌、Backfill ❌、fetch-scheduler ❌</td><td>工程師思維：先把架構寫完再啟用。對外看起來是「寫了沒用」</td><td>展示時明確分「在跑的」vs「待啟用的」</td></tr>
+<tr><td>版本跳躍 v0.16→v0.27</td><td>CHANGELOG 中間沒有 v0.17~v0.26</td><td>短時間大量開發直接合併</td><td>補段落說明這是內部開發合併</td></tr>
+<tr><td>大量模組名稱像「未來規劃」</td><td>preview_admission_*、quota_key_*</td><td>部署治理層對評審不重要但佔大量程式碼</td><td>簡報不提這些</td></tr>
+</table>
+
+<h3>問題 2：信任分數缺乏「證明有用」的證據</h3>
+<table>
+<tr><th>現象</th><th>具體證據</th><th>根因</th><th>改善方向</th></tr>
+<tr><td>沒有「分高的事後比較準」的回測</td><td>conformal pseudo-AUC≈0.49（等同隨機）</td><td>代理訊號沒有預測力——但這不是信任分的目的</td><td>重新定位：信任分是「資訊品質工具」不是「預測工具」</td></tr>
+<tr><td>交叉佐證在離線 demo 大多是 0</td><td>evidence.json 裡 corroboration: 0.0 居多</td><td>離線樣本來源太少（每種 1~4 筆），不夠互相佐證</td><td>用真 Bedrock + 真資料源跑一次</td></tr>
+<tr><td>操縱偵測幾乎沒觸發</td><td>manipulation: 0.0 居多</td><td>樣本資料是正常文字，當然不觸發</td><td>準備「正常 vs 被操縱」的對比 demo</td></tr>
+<tr><td>Dawid-Skene 動態信譽沒效果</td><td>只跑 2 次 EM 迭代就收斂</td><td>5~8 個來源不夠讓 EM 區分好壞</td><td>誠實說明「需要累積更多歷史才有效」</td></tr>
+</table>
+
+<h3>問題 3：報告制式化，缺乏「真看出什麼」的感覺</h3>
+<table>
+<tr><th>現象</th><th>具體證據</th><th>根因</th><th>改善方向</th></tr>
+<tr><td>每份報告結構完全相同</td><td>BTC/ETH/SOL 換名字內容差不多</td><td>offline 模式用模板生成，沒 Bedrock 敘事</td><td>用真 Bedrock 跑一次，AI 會寫出具體分析</td></tr>
+<tr><td>「獨特洞察」不獨特</td><td>「聰明錢背離：無法判定」每次都出現</td><td>離線樣本不滿足判定條件（量沒上升）</td><td>解釋「無法判定也是有價值的誠實輸出」</td></tr>
+<tr><td>方向判斷過度依賴 14 天報酬率</td><td>Layer 1 幾乎永遠決定方向</td><td>Layer 2 需要 Bedrock stance 分類；offline 下全降級 neutral</td><td>展示一次 online stance 分類效果</td></tr>
+</table>
+
+<h3>問題 4：技術深度強但「看不出來」（冰山問題）</h3>
+<table>
+<tr><th>現象</th><th>具體證據</th><th>根因</th><th>改善方向</th></tr>
+<tr><td>評審只看到一頁 markdown 報告</td><td>信任層計算過程全在後端</td><td>前端只顯示結果，不展示過程</td><td>讓信任雷達圖、證據展開可互動</td></tr>
+<tr><td>15 分鐘預算追蹤不可見</td><td>只在 JSONL 裡，沒人看</td><td>預算追蹤是給系統用的</td><td>加執行進度條視覺化</td></tr>
+<tr><td>溯源鏈需要主動去挖</td><td>evidence.json 裡有但要手動開</td><td>第一眼看不到</td><td>Demo 時故意點開展示追溯過程</td></tr>
+</table>
+
+<h3>問題 5：新手完全看不懂</h3>
+<table>
+<tr><th>現象</th><th>具體證據</th><th>根因</th><th>改善方向</th></tr>
+<tr><td>UI 充滿專有名詞</td><td>「交叉佐證 0.25」「recency decay」</td><td>開發者預設用戶懂</td><td>#847 hover tooltip（已開 issue）</td></tr>
+<tr><td>星系視覺化炫但不知道代表什麼</td><td>5 顆行星，大小位置意義不明</td><td>視覺設計先於功能解釋</td><td>加 onboarding 引導</td></tr>
+<tr><td>報告開頭直接丟數字</td><td>「信任分 0.63」但 0.63 是高是低？</td><td>沒有白話語境</td><td>加「根據 7 個來源，目前偏空，63% 把握」</td></tr>
+</table>
+
+<h3>問題 6：開發節奏問題（最後一天還在加功能）</h3>
+<table>
+<tr><th>現象</th><th>具體證據</th><th>根因</th><th>改善方向</th></tr>
+<tr><td>7/28~7/30 兩天 +538 commits</td><td>multi-angle、AGOS、comparison、Rust 全在最後三天</td><td>工程師 deadline 前衝刺本能</td><td>現在起凍結功能，只穩定和準備 demo</td></tr>
+<tr><td>新功能沒有穩定化時間</td><td>multi_angle_batch_store 88KB 兩天內寫完</td><td>沒時間 soak test</td><td>準備 fallback（退回 single-angle）</td></tr>
+<tr><td>Windows 不相容</td><td>asset:eth 路徑在 Windows 爆炸</td><td>全在 macOS 開發</td><td>確認團隊 Windows 成員能跑</td></tr>
+</table>
+
+<h3>問題 7：競賽策略面風險</h3>
+<table>
+<tr><th>風險</th><th>說明</th><th>對策</th></tr>
+<tr><td>評審只有 30 秒耐心</td><td>220 模組但只有 30 秒讓人理解</td><td>一句話：「我們不預測漲跌，我們幫你分辨哪條消息值得信」</td></tr>
+<tr><td>「跟 ChatGPT 問幣圈有何不同」</td><td>最常見的挑戰</td><td>「ChatGPT 給你無法驗證的答案；我們給你每條結論的出處和可信度」</td></tr>
+<tr><td>被問校準準確率</td><td>pseudo-AUC 0.49 = 隨機</td><td>不提預測準確率。定位：「校準讓信心數字更誠實，不是預測漲跌」</td></tr>
+<tr><td>大來源造假怎麼辦</td><td>單一知名來源造假時反應慢</td><td>誠實說：「需等其他來源反駁才會降分——這是已知限制」</td></tr>
+<tr><td>其他隊伍更花俏</td><td>別人可能有即時看盤、AI 對話</td><td>差異化是「可查證」——別人給答案，你給證據</td></tr>
+</table>
+
+<div class="divider"></div>
+
+<!-- ===== SECTION 11 ===== -->
+<h2 id="action">十一、所有問題的具體解決方法</h2>
+
+<h3>問題 1：功能多但實際在跑的少</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>220 模組但一半沒啟用</td>
+<td>
+1. 在簡報中畫一張「已啟用 vs 待啟用」的兩欄圖<br>
+2. 已啟用的用綠色標記：Hermes cycle、Analysis Flow、Bedrock、研究快照<br>
+3. 待啟用的用灰色標記並加「未來路線」字樣：AGOS、Three-track、Backfill<br>
+4. 被問時回答：「我們刻意分階段啟用，確保每層穩定後才開下一層」
+</td>
+<td>簡報製作者</td>
+<td>30 分鐘</td>
+</tr>
+<tr>
+<td>版本跳躍 v0.16→v0.27</td>
+<td>
+1. 在 CHANGELOG.md 的 v0.27.0 下方加一段：<br>
+<code>注：v0.17~v0.26 為內部密集開發期間的合併版本，功能包含 multi-angle、AGOS、comparison、formal-run、canary 部署等。</code><br>
+2. 不需要補完整 log，一段說明即可
+</td>
+<td>cancleeric</td>
+<td>5 分鐘</td>
+</tr>
+<tr>
+<td>部署治理模組太多讓人困惑</td>
+<td>
+1. 簡報和 demo 中不提 preview_admission、quota_key、canary_control<br>
+2. 只在被問「部署安全性」時說：「我們有金絲雀發布 + 自動回滾，確保上線不會炸」<br>
+3. 一句話帶過就好
+</td>
+<td>上台報告者</td>
+<td>0（不做事，只是不提）</td>
+</tr>
+</table>
+
+<h3>問題 2：信任分數缺乏「有用」的證據</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>沒有「分高 = 事後準」的回測數據</td>
+<td>
+<strong>不要試圖證明預測力。改變敘事角度：</strong><br>
+1. 簡報中明確說：「信任分不是預測漲跌機率，是資訊品質指標」<br>
+2. 用比喻：「就像食品安全標章——有標章不代表好吃，但至少不會中毒」<br>
+3. 如果評審追問「那這有什麼用」，回答：「幫你在 100 條消息裡快速找到值得看的 10 條」
+</td>
+<td>上台報告者</td>
+<td>練習 5 分鐘</td>
+</tr>
+<tr>
+<td>離線 demo 交叉佐證都是 0</td>
+<td>
+1. 用真 Bedrock + 真資料源跑一次完整分析：<br>
+<code>python -m trustforge.cli analyze --coin BTC --type multi_source --query "分析 BTC 近兩週" --out out/btc-live</code><br>
+（不加 --offline）<br>
+2. 需要設定 AWS_REGION + BEDROCK_MODEL_ID<br>
+3. 把這次的輸出截圖/錄影，作為 demo 素材<br>
+4. 真實來源夠多時，佐證分自然會 >0
+</td>
+<td>cancleeric</td>
+<td>15 分鐘（含等 Bedrock 回應）</td>
+</tr>
+<tr>
+<td>操縱偵測沒觸發</td>
+<td>
+準備一組對比 demo 資料：<br>
+1. 在 <code>demo/sample_data/social.json</code> 複製一份 <code>social_manipulated.json</code><br>
+2. 裡面放 5 條同一帳號在 10 分鐘內發的類似喊單文<br>
+3. Demo 時先跑正常版，再跑操縱版，讓評審看到操縱偵測前後的分數差異<br>
+4. 或者用已有的 demo 輸出指著「反方/低信任證據」區說：「你看，x-panic-88 這種煽動帳號被自動壓低到 0.44」
+</td>
+<td>任何成員</td>
+<td>20 分鐘</td>
+</tr>
+<tr>
+<td>Dawid-Skene 在少量來源沒效果</td>
+<td>
+1. 不在簡報中強調 Dawid-Skene<br>
+2. 如果評審問到動態信譽，回答：「目前以初始信譽為主，Dawid-Skene EM 是累積足夠歷史後的進階機制。我們選擇誠實地先不啟用它，而不是在少量資料下硬跑得出虛假的動態調整。」<br>
+3. 這反而展示了「對不確定性的清醒判斷」——評審加分項
+</td>
+<td>上台報告者</td>
+<td>0（只是話術調整）</td>
+</tr>
+</table>
+
+<h3>問題 3：報告制式化</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>每份報告結構一樣</td>
+<td>
+1. 跑一次真 Bedrock 分析（上面說的 live run）<br>
+2. Bedrock 會根據具體內容生成不同敘事，不會每幣一樣<br>
+3. 如果時間不夠跑真 Bedrock，至少在 demo 時說明：「離線模式用模板確保結構完整；線上模式會由 AI 根據具體證據寫出客製化分析」
+</td>
+<td>cancleeric</td>
+<td>15 分鐘</td>
+</tr>
+<tr>
+<td>「聰明錢背離：無法判定」每次出現</td>
+<td>
+<strong>不需要修——反而要主動解釋這是優點：</strong><br>
+1. Demo 時說：「你看這裡寫了『無法判定』——這就是我們跟其他 AI 的差別。別人會硬給你一個結論，我們判斷不了就直接告訴你為什麼判斷不了（成交量沒上升，無法確認吸籌）」<br>
+2. 這直接對應 30% 主題切合度的「不確定性與限制說明」
+</td>
+<td>上台報告者</td>
+<td>0（話術）</td>
+</tr>
+<tr>
+<td>方向判斷過度依賴 14 天報酬率</td>
+<td>
+1. 如果有真 Bedrock 環境，跑一次 online stance 分類<br>
+2. stance 分類會讓 Layer 2（多源共識）生效，方向判斷不再只看價格<br>
+3. 如果沒環境，demo 時解釋：「離線模式只有 Layer 1（價格趨勢），線上模式會加上 Layer 2（語意立場分類），用 Bedrock 判斷每條消息是看多還是看空」
+</td>
+<td>cancleeric</td>
+<td>15 分鐘（如果要跑）/ 0（如果只解釋）</td>
+</tr>
+</table>
+
+<h3>問題 4：技術深度看不出來（冰山問題）</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>評審只看到一頁報告</td>
+<td>
+Demo 流程設計（3 分鐘內）：<br>
+1. <strong>30 秒</strong>：打開 Web UI 首頁，點一個幣種<br>
+2. <strong>30 秒</strong>：指著信任雷達圖說「這四個維度是怎麼算的」<br>
+3. <strong>30 秒</strong>：展開一筆證據，點開溯源鏈 →「你看，這筆結論追到 Blockchain.com 的這個 hash」<br>
+4. <strong>30 秒</strong>：指著反方證據說「我們故意不藏壞消息」<br>
+5. <strong>60 秒</strong>：跑一次即時分析，看五節點進度條跑完
+</td>
+<td>上台 demo 者</td>
+<td>練習 15 分鐘</td>
+</tr>
+<tr>
+<td>15 分鐘預算追蹤不可見</td>
+<td>
+1. Demo 跑分析時，打開 execution_log 頁面<br>
+2. 指著時間戳說：「整個分析花了 X 秒，五個步驟各花多久都有記錄」<br>
+3. 或者指著 UI 上的 Hermes 執行面板（已有五節點視覺化）
+</td>
+<td>上台 demo 者</td>
+<td>0（已有功能，只需展示）</td>
+</tr>
+<tr>
+<td>溯源鏈需主動挖</td>
+<td>
+1. Demo 腳本中固定安排一個「點開證據 → 展示完整溯源」的動作<br>
+2. 講解詞：「每個結論都像論文的參考文獻——你可以點開看原文，驗證我說的是不是真的」
+</td>
+<td>上台 demo 者</td>
+<td>0（已有功能，只需展示）</td>
+</tr>
+</table>
+
+<h3>問題 5：新手看不懂</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>UI 充滿專有名詞</td>
+<td>
+短期（決賽前）：<br>
+1. Demo 時口頭解釋：「交叉佐證就是有沒有別人也這樣說」<br>
+2. 指著信任分數說：「0.8 以上很可信，0.3 以下存疑」<br><br>
+長期（賽後）：<br>
+3. 實作 #847 hover tooltip（已開 issue）
+</td>
+<td>上台者（短期）/ cancleeric（長期）</td>
+<td>0（短期）/ 4h（長期）</td>
+</tr>
+<tr>
+<td>星系 UI 不知道代表什麼</td>
+<td>
+1. Demo 時第一句話就說：「這五顆星代表五個幣種，大小代表資訊完整度，顏色代表目前方向」<br>
+2. 如果評審問為什麼用星系——「加密市場像宇宙，每個幣是一個星球，我們是望遠鏡幫你看清楚」
+</td>
+<td>上台 demo 者</td>
+<td>0（話術）</td>
+</tr>
+<tr>
+<td>報告開頭直接丟數字</td>
+<td>
+如果有時間改程式碼：<br>
+1. 在 <code>agent/orchestrator.py</code> 的 <code>_format_report</code> 開頭加一行白話摘要<br>
+2. 格式：「根據 {n} 個不同來源交叉比對，目前 {coin} 市場資訊{方向描述}，我們有 {confidence}% 把握」<br><br>
+如果沒時間改：<br>
+3. Demo 時口頭加一句：「簡單說就是——7 個來源裡有 5 個都指向偏空，所以我們的結論是偏空，63% 把握」
+</td>
+<td>cancleeric（改程式）/ 上台者（口述）</td>
+<td>30 分鐘（改程式）/ 0（口述）</td>
+</tr>
+</table>
+
+<h3>問題 6：開發節奏問題</h3>
+
+<table>
+<tr><th>子問題</th><th>具體解決步驟</th><th>誰做</th><th>耗時</th></tr>
+<tr>
+<td>最後三天加 538 commits</td>
+<td>
+<strong>立即凍結功能：</strong><br>
+1. 從現在起不再加新功能<br>
+2. 只允許：修 bug、準備 demo 素材、調整文案<br>
+3. 如果 multi-angle 或 comparison 有問題，準備 fallback：退回 single-angle / 單幣分析
+</td>
+<td>cancleeric</td>
+<td>0（決定不做事）</td>
+</tr>
+<tr>
+<td>Windows 不相容（asset:eth）</td>
+<td>
+1. 已開 issue #1159<br>
+2. 改名 <code>asset:eth</code> → <code>asset_eth</code><br>
+3. 更新所有引用路徑<br>
+4. push 後 Windows 用戶重新 clone<br><br>
+暫時 workaround（如果來不及修）：<br>
+5. Windows 用戶用 sparse-checkout 排除：<br>
+<code>git sparse-checkout set --no-cone "/*" "!data/asset_intrinsic_evidence/pep/"</code>
+</td>
+<td>cancleeric</td>
+<td>15 分鐘</td>
+</tr>
+<tr>
+<td>新功能沒穩定化時間</td>
+<td>
+1. 決賽前一晚跑一次完整的 multi-angle + comparison 測試<br>
+2. 如果失敗，記住 fallback 指令：<br>
+<code>python -m trustforge.cli analyze --coin BTC --type multi_source --query "..." --offline --out out/btc</code><br>
+（single-angle multi_source 是最穩定的模式）<br>
+3. 決賽時如果新功能出問題，立刻切回穩定版，不要現場 debug
+</td>
+<td>全體</td>
+<td>20 分鐘（跑測試）</td>
+</tr>
+</table>
+
+<h3>問題 7：競賽策略面</h3>
+
+<table>
+<tr><th>情境</th><th>準備好的回答</th></tr>
+<tr>
+<td>「30 秒講完你們在做什麼」</td>
+<td>「幣圈消息真假難辨。我們不預測漲跌，我們幫你分辨哪條消息值得信——每個結論都可以追溯到原始來源，讓你自己判斷。」</td>
+</tr>
+<tr>
+<td>「跟 ChatGPT 問幣圈有什麼不同」</td>
+<td>「ChatGPT 給你一個你無法驗證的答案。我們給你每條結論的原始出處、可信度分數、還有反方證據——你可以自己查證。」</td>
+</tr>
+<tr>
+<td>「信任分準不準」</td>
+<td>「信任分不是預測準確率，是資訊品質指標。就像食品標章不代表好吃，但至少確保來源可靠、有人附議、沒被灌水。」</td>
+</tr>
+<tr>
+<td>「如果知名媒體造假呢」</td>
+<td>「老實說，如果只有一個知名來源在說，其他來源沒反應，我們的佐證分會很低。單一來源的可信度有上限——這是設計，不是 bug。」</td>
+</tr>
+<tr>
+<td>「為什麼不用 OpenAI / 其他模型」</td>
+<td>「比賽規定只能用 AWS 基礎模型。我們全程 Bedrock 直連，所有呼叫集中在一個檔案，合規可審查。」</td>
+</tr>
+<tr>
+<td>「你們的 AI 會不會幻覺」</td>
+<td>「我們的判斷不是 AI 生成的——是確定性公式算出來的。AI 只負責最後一步：把結果寫成人話。所以不存在幻覺問題。」</td>
+</tr>
+<tr>
+<td>「資料不夠怎麼辦」</td>
+<td>「我們會標『資訊完整度：低』，告訴你證據不足，而不是硬掰一個結論。不知道就說不知道。」</td>
+</tr>
+</table>
+
+<div class="divider"></div>
+
+<h2>執行優先序總表</h2>
+
+<table>
+<tr><th>優先</th><th>動作</th><th>耗時</th><th>影響評分項目</th></tr>
+<tr><td><strong>P0</strong></td><td>跑一次真 Bedrock 完整分析並錄影</td><td>15 分鐘</td><td>創意度 15% + 完成度 10%</td></tr>
+<tr><td><strong>P0</strong></td><td>設計 3 分鐘 demo 流程腳本</td><td>15 分鐘</td><td>商業應用性 25% + 主題切合度 30%</td></tr>
+<tr><td><strong>P0</strong></td><td>每個成員練習 30 秒電梯簡報 + QA 回答</td><td>15 分鐘</td><td>全部</td></tr>
+<tr><td><strong>P0</strong></td><td>凍結功能，不再加新東西</td><td>0</td><td>完成度 10%（穩定性）</td></tr>
+<tr><td><strong>P1</strong></td><td>準備操縱偵測對比 demo</td><td>20 分鐘</td><td>主題切合度 30%</td></tr>
+<tr><td><strong>P1</strong></td><td>確認 comparison 題型能穩定跑完</td><td>10 分鐘</td><td>完成度 10%</td></tr>
+<tr><td><strong>P1</strong></td><td>修 Windows 路徑問題（#1159）</td><td>15 分鐘</td><td>團隊協作</td></tr>
+<tr><td><strong>P2</strong></td><td>報告開頭加白話摘要</td><td>30 分鐘</td><td>商業應用性 25%</td></tr>
+<tr><td><strong>P2</strong></td><td>補 CHANGELOG 說明段落</td><td>5 分鐘</td><td>完成度 10%</td></tr>
+</table>
+
+<div class="highlight-box">
+<strong>核心策略：不是加更多功能，而是讓已經有的東西「被看見」。</strong><br><br>
+系統深度已經夠了。問題不是能力不足，是呈現方式讓人感受不到深度。決賽勝負在於：<br>
+• 30 秒內讓評審理解你的獨特價值<br>
+• 3 分鐘內用 live demo 證明<br>
+• 被追問時有準備好的誠實回答
+</div>
+
+<p style="text-align:center;color:#999;font-size:0.85em;margin-top:40px">
+TrustForge by HurricaneSoft（颶風軟體）<br>
+專案分析報告 ｜ 2026-07-30<br>
+2026 雲湧智生：臺灣生成式 AI 應用黑客松
+</p>
+
+</div>
+</body>
+</html>

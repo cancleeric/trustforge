@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "nf2-zero-capability-broker",
+    "nf3-one-shot-transaction",
+    "trustforge-native-sys",
+]
+# hermetic-package is excluded: it is an NF1 leaf node with no workspace
+# dependents and must build STANDALONE so its own [profile.release]
+# (lto=true, opt-level="z") takes effect. As a workspace member its per-crate
+# profile was silently overridden by the root [profile.release]
+# (lto=false, opt-level=3).
+exclude = ["hermetic-package"]
+
+# evidence profile (nf3 adversarial clippy/check via --profile evidence) must
+# be at workspace root — member [profile.*] is ignored under a workspace.
+# Moved from nf3/Cargo.toml in PR-B2 (pre-push gate requires it here).
+[profile.evidence]
+inherits = "dev"
+opt-level = 2
+debug-assertions = true
+incremental = false
+codegen-units = 1
+lto = false
+panic = "unwind"
+strip = "none"
+
+# release profile (consolidated at workspace root; nf2/nf3 per-crate release
+# tables are ignored under workspace). nf3 semantics as baseline; per-crate
+# lto differences + byte-identical reconciled in PR-B3.
+[profile.release]
+opt-level = 3
+debug-assertions = false
+incremental = false
+codegen-units = 1
+lto = false
+panic = "abort"
+strip = "symbols"

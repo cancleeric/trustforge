@@ -370,7 +370,8 @@ def test_api_analyze_trust_radar_reflects_manipulation_flag_and_matches_ssr_rend
     assert flagged_ev.trust < control_ev.trust
 
     real_report, real_evidence, real_log = web.run(
-        "BTC", "radar manip test", QuestionType.MULTI_SOURCE, offline=True
+        "BTC", "radar manip test", QuestionType.MULTI_SOURCE, offline=True,
+        run_scope_id="test-jsonapi-radar",
     )
     evidence_with_manip = list(real_evidence) + [flagged_ev]
     evidence_without_manip = list(real_evidence) + [control_ev]
@@ -1746,7 +1747,7 @@ def test_api_analyze_dedup_key_captures_online_stance_force_offline_per_caller(m
     def _capturing_run(coin, query, qtype, offline=False, data_dir=None,
                         data_mode=None, llm_mode=None, **kwargs):
         calls.append({"force_stance_offline": kwargs.get("force_stance_offline", False)})
-        return real_run(coin, query, qtype, offline=True)
+        return real_run(coin, query, qtype, offline=True, run_scope_id="test-jsonapi-spy")
 
     monkeypatch.setattr(web, "run", _capturing_run)
 
@@ -1883,7 +1884,7 @@ def test_api_analyze_dedup_key_distinguishes_token_whitespace_suffix(monkeypatch
     def _stub_run_1(*args, **kwargs):
         counter1.hit()
         coin, query, qtype = args[0], args[1], args[2]
-        return real_run(coin, query, qtype, offline=True)
+        return real_run(coin, query, qtype, offline=True, run_scope_id="test-jsonapi-spy")
 
     monkeypatch.setattr(web, "run", _stub_run_1)
     code1, _ = web._handle_api_analyze(qs_valid, client_ip="10.1.6.1")
@@ -1899,7 +1900,7 @@ def test_api_analyze_dedup_key_distinguishes_token_whitespace_suffix(monkeypatch
     def _stub_run_2(*args, **kwargs):
         counter2.hit()
         coin, query, qtype = args[0], args[1], args[2]
-        return real_run(coin, query, qtype, offline=True)
+        return real_run(coin, query, qtype, offline=True, run_scope_id="test-jsonapi-spy")
 
     monkeypatch.setattr(web, "run", _stub_run_2)
     code3, _ = web._handle_api_analyze(qs_ws, client_ip="10.1.6.2")
@@ -1949,7 +1950,7 @@ def test_api_analyze_dedup_key_live_ignores_sample_real_bypass(monkeypatch):
         # 用真正的 pipeline.run 跑一次真正的離線 offline 分析，$0、
         # 不觸發任何真 Bedrock/AWS 呼叫——這裡只是要驗證 dedup 的呼叫
         # 次數，不是要驗證 pipeline 本身的輸出內容。
-        return real_run(coin, q, qtype_arg, offline=True)
+        return real_run(coin, q, qtype_arg, offline=True, run_scope_id="test-jsonapi-spy-q")
 
     monkeypatch.setattr(web, "run", _stub_run_live)
 
@@ -2030,7 +2031,7 @@ def test_api_analyze_dedup_key_live_ignores_sample_real_bypass(monkeypatch):
     def _stub_run_modes(*args, **kwargs):
         counter_modes.hit()
         coin, q, qtype_arg = args[0], args[1], args[2]
-        return real_run(coin, q, qtype_arg, offline=True)
+        return real_run(coin, q, qtype_arg, offline=True, run_scope_id="test-jsonapi-spy-q")
 
     monkeypatch.setattr(web, "run", _stub_run_modes)
 
@@ -2119,7 +2120,7 @@ def test_api_analyze_dedup_key_distinguishes_query_whitespace_variant(monkeypatc
 
     def _stub_run_1(coin, query, qtype, *args, **kwargs):
         seen_queries_1.append(query)
-        return real_run(coin, query, qtype, offline=True)
+        return real_run(coin, query, qtype, offline=True, run_scope_id="test-jsonapi-spy")
 
     monkeypatch.setattr(web, "run", _stub_run_1)
     code1, _ = web._handle_api_analyze(qs_plain, client_ip="10.1.7.1")
@@ -2136,7 +2137,7 @@ def test_api_analyze_dedup_key_distinguishes_query_whitespace_variant(monkeypatc
 
     def _stub_run_2(coin, query, qtype, *args, **kwargs):
         seen_queries_2.append(query)
-        return real_run(coin, query, qtype, offline=True)
+        return real_run(coin, query, qtype, offline=True, run_scope_id="test-jsonapi-spy")
 
     monkeypatch.setattr(web, "run", _stub_run_2)
     code3, _ = web._handle_api_analyze(qs_spaced, client_ip="10.1.7.2")
@@ -3135,7 +3136,7 @@ def _real_evidence_plus_authored(coin: str, query: str) -> tuple:
     """回傳一組真實跑過 `web.run()` 的 (report, evidence, log)，並在
     evidence 尾端多附一筆帶 `author` 的 `Evidence`——模擬「連接器真的抓到
     來源平台公開 username」的情境，供三個公開端點測試共用。"""
-    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-jsonapi-author")
     authored_ev = Evidence(
         source="reddit-bitcoin",
         fetched_at="2026-07-06T00:00:00Z",
@@ -3190,6 +3191,7 @@ def test_api_analyze_comparison_public_response_excludes_author(monkeypatch):
     需分開驗證，不能假設「單幣測過等於 comparison 也測過」。"""
     report_a, evidence_a, report_b, evidence_b, log = web.run_comparison(
         "BTC", "ETH", "comparison author leak test", offline=True,
+        run_scope_id="test-jsonapi-cmp-author",
     )
     authored_ev = Evidence(
         source="reddit-bitcoin",
@@ -3223,6 +3225,7 @@ def test_analyze_json_route_comparison_excludes_author(monkeypatch):
     需要獨立驗證 comparison 分支不洩漏 author。"""
     report_a, evidence_a, report_b, evidence_b, log = web.run_comparison(
         "BTC", "ETH", "analyze.json comparison author leak", offline=True,
+        run_scope_id="test-jsonapi-route-cmp-author",
     )
     authored_ev = Evidence(
         source="reddit-bitcoin",

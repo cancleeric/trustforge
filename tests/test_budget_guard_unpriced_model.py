@@ -196,6 +196,7 @@ def test_pipeline_run_unpriced_narrative_model_never_admits_bedrock(monkeypatch)
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
         data_mode="live", llm_mode="bedrock",
+        run_scope_id="test-budget-unpriced-bedrock",
     )
 
     assert captured[0] == {"offline": True, "stance_offline": True}
@@ -228,6 +229,7 @@ def test_pipeline_run_known_priced_model_admits_normally(monkeypatch):
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
         data_mode="live", llm_mode="bedrock",
+        run_scope_id="test-budget-unpriced-bedrock",
     )
 
     assert captured[0] == {"offline": False, "stance_offline": False}
@@ -263,6 +265,7 @@ def test_pipeline_run_unpriced_stance_model_only_blocks_stance_not_narrative(
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
         data_mode="live", llm_mode="bedrock",
+        run_scope_id="test-budget-unpriced-bedrock",
     )
 
     assert captured[0] == {"offline": False, "stance_offline": True}
@@ -297,6 +300,7 @@ def test_pipeline_run_unpriced_stance_model_blocks_online_stance_only_mode(
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
         data_mode="live", llm_mode="off",
+        run_scope_id="test-budget-unpriced-off",
     )
 
     assert captured[0] == {"offline": True, "stance_offline": True}
@@ -329,6 +333,7 @@ def test_pipeline_run_priced_stance_model_online_stance_still_works(monkeypatch)
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
         data_mode="live", llm_mode="off",
+        run_scope_id="test-budget-unpriced-off",
     )
 
     assert captured[0] == {"offline": True, "stance_offline": False}

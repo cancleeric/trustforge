@@ -11,7 +11,7 @@ from trustforge.data_contracts import (
 )
 from trustforge.ingestion.base import Document
 from trustforge.ingestion.cache import doc_from_dict, doc_to_dict
-from trustforge.schema import Evidence
+from trustforge.schema import BasisItem, Evidence
 
 
 def test_versioned_payloads_round_trip_and_legacy_default() -> None:
@@ -38,3 +38,44 @@ def test_compatibility_gate_detects_breaking_changes() -> None:
     assert compatibility_violations(previous, current) == [
         "changed type: a", "removed property: b", "removed required field: a"
     ]
+
+
+def test_schema_versions_bumped_to_1_1_0() -> None:
+    assert EVIDENCE_SCHEMA_VERSION == "1.1.0"
+    assert REPORT_SCHEMA_VERSION == "1.1.0"
+
+
+def test_claim_id_dark_field_round_trip() -> None:
+    evidence = Evidence(
+        source="unit", fetched_at="2026-01-01T00:00:00Z",
+        content_reference="x", related_claim="c",
+    )
+    assert evidence.claim_id == ""
+    dumped = asdict(evidence)
+    assert dumped["claim_id"] == ""
+    # dark 欄位 round-trip：dict -> Evidence 重建後仍一致（向後相容）
+    assert Evidence(**dumped).claim_id == ""
+
+    basis = BasisItem(claim="c", explanation="why")
+    assert basis.claim_ids == []
+    assert asdict(basis)["claim_ids"] == []
+
+
+def test_adding_optional_claim_id_is_additive() -> None:
+    previous = {
+        "required": ["schema_version", "source"],
+        "properties": {
+            "schema_version": {"type": "string"},
+            "source": {"type": "string"},
+        },
+    }
+    current = {
+        # required 不變——只加 optional property，無移除／改型
+        "required": ["schema_version", "source"],
+        "properties": {
+            "schema_version": {"type": "string"},
+            "source": {"type": "string"},
+            "claim_id": {"type": "string"},
+        },
+    }
+    assert compatibility_violations(previous, current) == []

@@ -32,7 +32,9 @@ OHLCV_DIR = SAMPLE_DIR / "ohlcv"                 # 合成樣本（測試/快速 
 OFFICIAL_OHLCV_DIR = _HOME / "data" / "data"     # HOYA BIT 官方基準 OHLCV
 
 # 文件型來源類型（有對應的 sample_data/*.json）。price 走 OHLCV CSV，另行處理。
-SOURCE_KINDS = ("onchain", "regulatory", "hoyabit", "news", "social")
+# `defi_tvl`（#1162 DefiLlama）：新增客觀 TVL 維度，離線樣本驅動（demo/sample_data/
+# defi_tvl.json），使離線管線無需任何外部 API 即可涵蓋此 kind。
+SOURCE_KINDS = ("onchain", "regulatory", "hoyabit", "news", "social", "defi_tvl")
 
 @dataclass
 class Document:
@@ -438,6 +440,9 @@ def collect(query: str, coin: str | None = None,
             from .coingecko import build_coingecko_sources
             from .hoyabit import build_hoyabit_sources
             from .whale_trades import build_whale_sources
+            from .defillama import build_defillama_sources
+            from .cmc import build_cmc_sources
+            from .etherscan import build_etherscan_sources
             from .cache import CachedSource
             raw_sources = (
                 build_news_sources()
@@ -451,6 +456,16 @@ def collect(query: str, coin: str | None = None,
                 + build_coingecko_sources()
                 + build_hoyabit_sources()
                 + build_whale_sources()
+                + build_defillama_sources()
+                # #1161 CoinMarketCap（key-based，無 key→build_cmc_sources() 回 []）：
+                # 第三條獨立現價來源，與 coingecko-price/defillama-price 形成
+                # corroboration consensus。無憑證時不註冊任何來源（靜默降級）。
+                + build_cmc_sources()
+                # #1168 Etherscan（key-based V2 query-param key）。沿用 whale_onchain
+                # kind，與 whale-alert 同 kind 不同 source，互為獨立佐證。build 永
+                # 遠註冊（同 cmc/whale 慣例），憑證在 fetch() 時解析——unconfigured→回 []
+                # （靜默），unavailable→raise（可觀測）。只覆 ETH。
+                + build_etherscan_sources()
             )
             # 階段2（cache + 排程 fetcher）：產品路徑一律讀快取，不直接打真連接器
             # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程

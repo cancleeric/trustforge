@@ -48,10 +48,10 @@ def _make_fake_run(calls: list):
     import trustforge.pipeline as _pl
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         calls.append({"offline": offline, "data_mode": data_mode, "llm_mode": llm_mode})
         # 強制離線避免真打 Bedrock/真連接器
-        return _pl.run(coin, query, qtype, offline=True, data_dir=data_dir)
+        return _pl.run(coin, query, qtype, offline=True, data_dir=data_dir, run_scope_id=run_scope_id)
 
     return fake_run
 

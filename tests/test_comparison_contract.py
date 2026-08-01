@@ -103,7 +103,7 @@ def btc_eth_fixture(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    return run_comparison("BTC", "ETH", "比較 BTC 與 ETH 的市場表現、鏈上活動、情緒與生態發展", offline=True)
+    return run_comparison("BTC", "ETH", "比較 BTC 與 ETH 的市場表現、鏈上活動、情緒與生態發展", offline=True, run_scope_id="test-comparison-contract-full")
 
 
 # ===========================================================================
@@ -652,8 +652,8 @@ class TestMetamorphicSwap:
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        fwd = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
-        swp = run_comparison("ETH", "BTC", "比較兩幣", offline=True)
+        fwd = run_comparison("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-contract")
+        swp = run_comparison("ETH", "BTC", "比較兩幣", offline=True, run_scope_id="test-comparison-contract-swp")
 
         fwd_c = fwd.comparison
         swp_c = swp.comparison
@@ -709,8 +709,8 @@ class TestMetamorphicSwap:
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        _, ev_a1, _, ev_b1, _ = run_comparison("BTC", "ETH", "比較", offline=True)
-        _, ev_a2, _, ev_b2, _ = run_comparison("ETH", "BTC", "比較", offline=True)
+        _, ev_a1, _, ev_b1, _ = run_comparison("BTC", "ETH", "比較", offline=True, run_scope_id="test-comparison-contract-ev1")
+        _, ev_a2, _, ev_b2, _ = run_comparison("ETH", "BTC", "比較", offline=True, run_scope_id="test-comparison-contract-ev2")
 
         # 相同幣種的 evidence 筆數應一致（BTC=BTC, ETH=ETH）
         assert len(ev_a1) == len(ev_b2), (
@@ -1130,7 +1130,7 @@ class TestBackwardCompatibility:
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        result = rc("BTC", "ETH", "比較兩幣", offline=True)
+        result = rc("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-contract-rc")
         assert len(result) == 5
         report_a, ev_a, report_b, ev_b, log = result
         assert report_a.coin == "BTC"
@@ -1147,7 +1147,7 @@ class TestBackwardCompatibility:
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-contract")
         assert isinstance(result, ComparisonRunResult), (
             f"期望 ComparisonRunResult，實際 {type(result)}"
         )
@@ -1159,7 +1159,7 @@ class TestBackwardCompatibility:
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-contract")
         report_a, ev_a, report_b, ev_b, log = result
         assert report_a.coin == "BTC"
         assert report_b.coin == "ETH"
@@ -1174,7 +1174,7 @@ class TestBackwardCompatibility:
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        result = run_comparison("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-contract")
         assert result.comparison is not None, (
             "CA-03: comparison 應由 build_comparison_report 填入"
         )
@@ -1537,8 +1537,8 @@ class TestCostNonDuplication:
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-        r1 = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
-        r2 = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
+        r1 = run_comparison("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-contract")
+        r2 = run_comparison("BTC", "ETH", "比較兩幣", offline=True, run_scope_id="test-comparison-contract")
 
         # comparison report 一致
         assert r1.comparison is not None, "r1.comparison 不可為 None"

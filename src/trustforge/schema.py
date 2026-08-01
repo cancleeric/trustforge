@@ -88,6 +88,10 @@ class Evidence:
     # 價格基準（特別是主辦五年 OHLCV）可重現性：檔名、SHA-256、列數、完整
     # 覆蓋期、分析窗口與 schema。None 代表非檔案型 Evidence，並非資料遺漏。
     data_lineage: dict | None = None
+    # #960 PR1 dark field：claim 穩定識別碼（供未來 evidence↔claim 回溯）。
+    # 空字串 = 尚未填寫。純 additive：預設空字串保 asdict round-trip 與所有
+    # 呼叫端不受影響；本 PR 不消費此欄位（dark），僅定義 schema 位置。
+    claim_id: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -99,6 +103,9 @@ class BasisItem:
     claim: str
     explanation: str
     evidence_idx: list[int] = field(default_factory=list)
+    # #960 PR1 dark field：此依據所支持的 claim 識別碼清單。預設空 list，
+    # 純 additive；本 PR 不消費此欄位（dark），僅定義 schema 位置。
+    claim_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -306,7 +306,7 @@ def _build_profile(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pep_dir", type=Path, help="PEP directory (e.g. data/asset_intrinsic_evidence/pep/asset:eth)")
+    parser.add_argument("pep_dir", type=Path, help="PEP directory (e.g. data/asset_intrinsic_evidence/pep/asset_eth)")
     parser.add_argument("--dry-run", action="store_true", help="Validate without emitting JSON")
     parser.add_argument(
         "--evidence-root",

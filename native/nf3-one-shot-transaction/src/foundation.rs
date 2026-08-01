@@ -1,5 +1,5 @@
 use crate::Error;
-use crate::sha256::{digest, hex};
+use trustforge_native_sys::sha256::{digest, hex};
 use trustforge_nf2_zero_capability_broker::manifest::{
     ACCEPTED_ARCHIVE_SHA256, ACCEPTED_MANIFEST_SHA256, ACCEPTED_RUNTIME_SHA256,
 };
@@ -9,11 +9,13 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "4fe965e40c31916d8ae01ef55ee93be66af5ff214e6c0caf9997535df83f47c0";
+    "636361176b16b3d85ccce2db3789d69a193a984619df3a76617f34a1dac7700a";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
-    "84eeca2087f46a12d71efb472ad31d27c1322ac769b2a9793d8e6c96a2bdc8f1";
+    "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_RELEASE_RLIB_SHA256: &str =
-    "1f3c09df97298013ae1d67b8618de6b66492267d0fd59b3053d9f71fa48872a4";
+    "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38";
 const NF2_FIXED_TOOLCHAIN_RECEIPT_SHA256: &str =
     "3ddca04f9011db7eba5f0a85103ce62710f6be8d20aca02850aec5774301ee26";
 #[cfg(test)]
@@ -113,10 +115,13 @@ fn linked_nf2_build_sha256(identity: &BuildIdentity) -> String {
 }
 
 pub(crate) fn linked_nf2_source_sha256() -> String {
-    const SOURCES: [(&str, &[u8]); 11] = [
+    const SOURCES: [(&str, &[u8]); 12] = [
+        // The workspace-root Cargo.lock is the authoritative resolution for
+        // every member build (nf2/nf3/hermetic-package share it); per-crate
+        // locks are no longer maintained once the workspace exists.
         (
             "Cargo.lock",
-            include_bytes!("../../nf2-zero-capability-broker/Cargo.lock"),
+            include_bytes!("../../Cargo.lock"),
         ),
         (
             "Cargo.toml",
@@ -125,6 +130,10 @@ pub(crate) fn linked_nf2_source_sha256() -> String {
         (
             "src/canonical_json.rs",
             include_bytes!("../../nf2-zero-capability-broker/src/canonical_json.rs"),
+        ),
+        (
+            "src/capability.rs",
+            include_bytes!("../../nf2-zero-capability-broker/src/capability.rs"),
         ),
         (
             "src/lib.rs",
@@ -154,9 +163,11 @@ pub(crate) fn linked_nf2_source_sha256() -> String {
             "src/manifest.rs",
             include_bytes!("../../nf2-zero-capability-broker/src/manifest.rs"),
         ),
+        // The shared zero-dependency syscall crate (sha256 + openat2 ABI) that
+        // nf2 path-depends on; its bytes are part of the linked source binding.
         (
-            "src/sha256.rs",
-            include_bytes!("../../nf2-zero-capability-broker/src/sha256.rs"),
+            "src/native_sys.rs",
+            include_bytes!("../../trustforge-native-sys/src/lib.rs"),
         ),
     ];
     let mut canonical = b"trustforge.nf2.linked-source.v1\0".to_vec();
@@ -197,7 +208,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "f5c726893b278bdad9204ef201b826418eb402d07f58ec865c515ccfb94f827b"
+            "d4d080f116e5967e2dd7c8cca02e471f754484ca529b48f22c2106ed8c819568"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -220,27 +231,27 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "f5c726893b278bdad9204ef201b826418eb402d07f58ec865c515ccfb94f827b"
+            "d4d080f116e5967e2dd7c8cca02e471f754484ca529b48f22c2106ed8c819568"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "e5bb12ff9bc2bd371cd2e196399838a7f7ae1b803b5481861f36fca16b09e245"
+            "07a3a28ceb2ecfaed3f2ca334f60228bfbc8c500d67223aa9b4c0220e15e5005"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
 
     #[test]
     fn source_tree_receipt_is_platform_independent_framing() {
+        // linked_source is derived from the SOURCES binding (single source of
+        // truth); only the reviewed git tree OID is an inline input here.
+        let linked = linked_nf2_source_sha256();
         let mut canonical = b"trustforge.nf2.source-tree-receipt.v1\0".to_vec();
         for (name, value) in [
             (
                 "git_subtree_oid_sha1",
-                "cb56a4bef9708da3f9f1468aff11734f2f50adcd",
+                "c43e08d8ce5cded900282ca4ddda681fe148594a",
             ),
-            (
-                "linked_source_sha256",
-                "dc7541f5c4e409a2dd038795bcffab8d4dca442266d6efdae36564ef5c421abc",
-            ),
+            ("linked_source_sha256", linked.as_str()),
         ] {
             frame(&mut canonical, name.as_bytes());
             frame(&mut canonical, value.as_bytes());

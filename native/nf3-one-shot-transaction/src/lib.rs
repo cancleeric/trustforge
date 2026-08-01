@@ -38,7 +38,6 @@ mod integration;
 mod ledger;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
-mod sha256;
 pub use foundation::{BuildIdentity, accepted_build_identity, accepted_foundation_sha256};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use integration::{IntegratedError, IntegratedRunner};

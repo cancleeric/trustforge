@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import re
+import uuid
 from pathlib import Path
 
 from .pipeline import run, run_comparison
@@ -41,6 +42,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             result = run_comparison(
                 coin_a, coin_b, args.query,
                 offline=args.offline, data_dir=args.data_dir,
+                run_scope_id=f"cli-{uuid.uuid4().hex}",
             )
         except ValueError as e:
             print(f"錯誤（{e}）")
@@ -96,7 +98,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     try:
         report, evidence, log = run(coin, args.query, qtype,
-                                    offline=args.offline, data_dir=args.data_dir)
+                                    offline=args.offline, data_dir=args.data_dir,
+                                    run_scope_id=f"cli-{uuid.uuid4().hex}")
     except ValueError as e:
         print(f"錯誤（{e}）")
         return 1

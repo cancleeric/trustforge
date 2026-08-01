@@ -15,6 +15,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+import os
+from botocore.exceptions import ClientError
 from typing import Any, Protocol
 
 ANGLE_MODES = ("risk", "sentiment", "fundamentals", "news", "catalyst")
@@ -293,11 +295,42 @@ class DynamoDBAtomicMultiAngleBatchStore:
         request.validate()
         return self._read_replay(request)
 
+    def ensure_budget_bootstrapped(self, *, day: str, config_version: str) -> None:
+        """Idempotent 建立當天 BUDGET counter（補 #808/#809 daily bootstrap 缺失）。
+
+        僅在明確設了 TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD 時才 auto-bootstrap
+        （明確授權當日預算）；否則保留既有 fail-closed 行為（不自動建立、讓上游
+        決策）。create_batch 前以 attribute_not_exists 條件 idempotent 建立
+        （已存在不覆蓋、不影響既有餘額）。
+        """
+        cap_env = os.getenv("TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD", "").strip()
+        if not cap_env:
+            return  # 未明確授權 daily budget → 保留 fail-closed，不自動 bootstrap
+        daily_cap = Decimal(cap_env)
+        try:
+            self._client.put_item(
+                TableName=self._table_name,
+                Item={
+                    "pk": self._s(f"BUDGET#{day}"),
+                    "sk": self._s("COUNTER"),
+                    "remaining_usd": self._n(daily_cap),
+                    "reserved_total": self._n(Decimal(0)),
+                    "config_version": self._s(config_version),
+                },
+                ConditionExpression="attribute_not_exists(pk)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+
     def create_batch(self, request: AtomicBatchRequest) -> AtomicBatchResult:
         request.validate()
         replay = self._read_replay(request)
         if replay is not None:
             return replay
+        self.ensure_budget_bootstrapped(
+            day=request.day, config_version=request.config_version
+        )
 
         tx: list[dict[str, Any]] = [
             {

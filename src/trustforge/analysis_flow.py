@@ -3492,6 +3492,7 @@ class AnalysisFlow:
                 client=client, log=log, stance_fn=package["stance"], scored=package["scored"],
                 kernel_judgment=package["kernel_judgment"],
                 locale=package.get("locale", DEFAULT_NARRATIVE_LOCALE),
+                run_scope_id=job["job_id"],
             )
 
         narrative_tool_id = "bedrock-narrative-generation"
