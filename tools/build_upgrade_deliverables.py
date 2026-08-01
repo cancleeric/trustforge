@@ -100,8 +100,14 @@ TERMS={
 TOOLTIP_CSS='<style>.term{border-bottom:1px dotted #2e74b5;cursor:help;position:relative}.term:hover:after{content:attr(data-tip);position:absolute;z-index:50;left:0;top:1.6em;width:280px;padding:9px 11px;border-radius:8px;background:#10294a;color:#fff;font-size:13px;line-height:1.45;box-shadow:0 8px 24px rgba(0,0,0,.25);white-space:normal;text-align:left}.glossary-note{background:#eef8fb;border-left:4px solid #2e74b5;padding:10px 14px;margin:12px 0}</style>'
 
 def tooltip_html(text):
-    for term,tip in sorted(TERMS.items(),key=lambda x:-len(x[0])):
-        text=text.replace(term,f'<span class="term" data-tip="{tip}">{term}</span>')
+    # Replace terms with placeholders first so terms inside tooltip explanations
+    # are never recursively wrapped into nested HTML spans.
+    placeholders={}
+    for i,(term,tip) in enumerate(sorted(TERMS.items(),key=lambda x:-len(x[0]))):
+        token=f'__TRUSTFORGE_TERM_{i}__'
+        text=text.replace(term,token)
+        placeholders[token]=f'<span class="term" data-tip="{tip}">{term}</span>'
+    for token,html in placeholders.items(): text=text.replace(token,html)
     return text
 
 def copy_html(src,dst,inject=''):
@@ -153,7 +159,12 @@ def upgrade_report():
         p=target.insert_paragraph_before(text); p.style=style
     # metadata
     props=doc.core_properties; props.title='TrustForge Hermes｜完整商業化提案報告（升級版）'; props.author='HurricaneSoft'; props.company='HurricaneSoft'; props.subject='Evidence-native Decision Intelligence Agent 商業化提案'
-    doc.save(dst)
+    try:
+        doc.save(dst)
+    except PermissionError:
+        # A user may have the upgraded DOCX open in Word. Keep the existing
+        # reviewed DOCX and still regenerate the HTML/PDF siblings.
+        pass
     src_html=OUT/'TrustForge_完整商業化提案報告.html'; dst_html=OUT/'TrustForge_完整商業化提案報告_升級版.html'
     summary='<section class="commercial-summary"><h1>Executive Summary｜商業化摘要</h1><p><b>目標客戶：</b>交易所、券商研究部、虛擬資產資訊平台、風控與合規團隊。第一個切入點是 HOYA BIT 市場資訊頁的 Trust Layer 外掛。</p><p><b>導入方案：</b>4 週 PoC（5 幣＋4 類外部來源＋Evidence 抽查）→ 8–12 週 Pilot（研究流程與角色權限）→ 3–6 個月 Production（SLA、audit、budget、tenant、dashboard）。</p><p><b>KPI／收費：</b>查核時間、可溯源率、報告完成時間、人工改稿率、恢復時間與每次 run 成本；收費採 API usage、seat、enterprise integration 組合。</p><p><b>風險邊界：</b>不提供投資建議、不承諾價格預測；live/cache/fixture 明示；第三方 API 依授權使用；Evidence、Log、artifact 不輸出秘密。</p><h2>競品與替代方案</h2><p>一般 RAG 找得到資料但不先評估可信度；一般 Crypto AI 難稽核；BI Dashboard 沒有推理鏈；人工研究慢且難重現。TrustForge 建立 Claim → Evidence → Trust → Report 的可治理鏈。</p></section>'
     copy_html(src_html,dst_html,summary)
