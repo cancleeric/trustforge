@@ -33,9 +33,10 @@ def test_offline_contract_has_no_secret_model_or_data_access():
     ]
 
 
-def test_live_activation_is_explicitly_blocked_but_fully_pinned():
+def test_live_activation_is_owner_authorized_but_pending_final_review():
     live = CONTRACT["live_activation"]
-    assert live["status"] == "blocked-pending-owner-and-ciso-approval"
+    assert live["status"] == "owner-authorized-pending-final-ciso-review"
+    assert live["contract"] == "deploy/competition-lambda-live-contract.json"
     assert live["region"] == "us-east-1"
     assert live["narrative_model_id"] == live["stance_model_id"]
     assert live["narrative_model_id"].startswith("us.")

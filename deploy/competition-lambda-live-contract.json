@@ -1,5 +1,5 @@
 {
-  "status": "approved-for-owner-authorized-deployment",
+  "status": "owner-authorized-pending-final-ciso-review",
   "account_id": "850849012389",
   "region": "us-east-1",
   "function_name": "competition-trustforge-team11-live",
@@ -19,7 +19,11 @@
     "TRUSTFORGE_BUDGET_COUNTER_TABLE": "competition-trustforge-team11-budget",
     "COST_LEDGER_BACKEND": "dynamodb",
     "TRUSTFORGE_COST_LEDGER_TABLE": "competition-trustforge-team11-cost-ledger",
-    "TRUSTFORGE_DISABLE_ADMIN_CONFIG": "true"
+    "TRUSTFORGE_DISABLE_ADMIN_CONFIG": "true",
+    "CACHE_BACKEND": "json",
+    "TRUSTFORGE_CACHE_JSON_PATH": "/tmp/trustforge-connector-cache.json",
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/live-token-OOlkjq",
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID": "f004e6f6-42d6-48eb-94a0-175159442246"
   },
   "secret_environment_inputs": [
     "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN",
@@ -31,6 +35,51 @@
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN"
+  ],
+  "execution_role": {
+    "trust_policy": {
+      "principal": "lambda.amazonaws.com",
+      "action": "sts:AssumeRole"
+    },
+    "statements": [
+      {
+        "actions": ["logs:CreateLogStream", "logs:PutLogEvents"],
+        "resources": ["arn:aws:logs:us-east-1:850849012389:log-group:/aws/lambda/competition-trustforge-team11-live:*"]
+      },
+      {
+        "actions": ["secretsmanager:GetSecretValue"],
+        "resources": ["arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/live-token-OOlkjq"]
+      },
+      {
+        "actions": ["bedrock:InvokeModel"],
+        "resources": [
+          "arn:aws:bedrock:us-east-1:850849012389:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+        ]
+      },
+      {
+        "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+        "resources": ["arn:aws:dynamodb:us-east-1:850849012389:table/competition-trustforge-team11-budget"]
+      },
+      {
+        "actions": ["dynamodb:PutItem", "dynamodb:Scan"],
+        "resources": ["arn:aws:dynamodb:us-east-1:850849012389:table/competition-trustforge-team11-cost-ledger"]
+      }
+    ]
+  },
+  "function_url_policy": [
+    {
+      "action": "lambda:InvokeFunctionUrl",
+      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live",
+      "condition": {"lambda:FunctionUrlAuthType": "NONE"}
+    },
+    {
+      "action": "lambda:InvokeFunction",
+      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live",
+      "condition": {"lambda:InvokedViaFunctionUrl": "true"}
+    }
   ],
   "public_requests": [
     {"method": "GET", "path": "/"},

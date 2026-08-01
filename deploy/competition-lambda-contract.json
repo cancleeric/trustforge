@@ -35,7 +35,8 @@
     "expiry": "2026-08-03"
   },
   "live_activation": {
-    "status": "blocked-pending-owner-and-ciso-approval",
+    "status": "owner-authorized-pending-final-ciso-review",
+    "contract": "deploy/competition-lambda-live-contract.json",
     "region": "us-east-1",
     "narrative_model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "stance_model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",

@@ -15,6 +15,7 @@ from .budget_guard import (
     narrative_model_priced,
     online_stance_requested,
     release_request_budget,
+    mark_reservation_accounting_uncertain,
     stance_model_priced,
     try_reserve_request_budget,
 )
@@ -354,10 +355,18 @@ def run(coin: str, query: str, qtype: QuestionType,
         stance_offline=stance_offline,
     )
 
+    _durable_ledger_commit = True
+
+    def _observe_ledger_persistence(persisted: bool, cost_usd: float) -> None:
+        nonlocal _durable_ledger_commit
+        if cost_usd > 0 and not persisted:
+            _durable_ledger_commit = False
+
     try:
         report, evidence = run_agent_pipeline(
             query, coin, qtype, docs,
             client=llm_client, log=log,
+            ledger_persistence_observer=_observe_ledger_persistence,
         )
         if "report" in _runtime_policies:
             _apply_report_policy(
@@ -367,7 +376,15 @@ def run(coin: str, query: str, qtype: QuestionType,
                 origin=_runtime_policy_origins.get("report"),
             )
     finally:
-        release_request_budget(_reservation)
+        if _reservation is not None and not _durable_ledger_commit:
+            # A real Bedrock cost with no durable ledger receipt must retain its
+            # shared reservation.  Releasing here would let a subsequent cold
+            # start forget the process-local uncertainty and re-spend the same
+            # daily capacity.  The retained token expires/reconciles through the
+            # shared authority instead of failing open.
+            mark_reservation_accounting_uncertain(_reservation)
+        else:
+            release_request_budget(_reservation)
     if _degrade_reason == "unpriced_model":
         report.limits.append(
             "本次未使用線上深度分析（所設定的 Bedrock 模型尚未登記計價，"
