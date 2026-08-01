@@ -91,7 +91,7 @@ def test_run_offline_true_still_uses_sample_and_free_llm(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report, evidence, log = pl.run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = pl.run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-credit-offline-true")
     assert seen["offline"] is True
     assert _total_cost(log) == 0.0
     assert report.coin == "BTC"
@@ -111,7 +111,7 @@ def test_run_offline_false_still_uses_live_collect(monkeypatch):
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    report, evidence, log = pl.run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=False)
+    report, evidence, log = pl.run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=False, run_scope_id="test-credit-offline-false")
     assert seen["offline"] is False
     assert report.coin == "BTC"
 
@@ -134,7 +134,7 @@ def test_run_live_data_off_llm_is_credit_safe(monkeypatch):
 
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
-        data_mode="live", llm_mode="off",
+        data_mode="live", llm_mode="off", run_scope_id="test-credit-live-off",
     )
 
     # 3a. collect() 收到 offline=False → 走真連接器分支，不是 OfflineSampleSource 樣本路徑
@@ -171,7 +171,7 @@ def test_run_live_data_off_llm_credit_safe_even_with_model_id_configured(monkeyp
 
     report, evidence, log = pl.run(
         "ETH", "分析 ETH", QuestionType.MULTI_SOURCE,
-        data_mode="live", llm_mode="off",
+        data_mode="live", llm_mode="off", run_scope_id="test-credit-eth-live-off",
     )
     assert _total_cost(log) == 0.0
 
@@ -188,6 +188,7 @@ def test_run_comparison_live_data_off_llm_credit_safe(monkeypatch):
 
     report_a, ev_a, report_b, ev_b, log = pl.run_comparison(
         "BTC", "ETH", "比較", data_mode="live", llm_mode="off",
+        run_scope_id="test-credit-safe-cmp",
     )
     assert seen_offline == [False, False]
     assert _total_cost(log) == 0.0
@@ -207,11 +208,11 @@ def test_web_real_mode_routes_to_live_data_off_llm(monkeypatch):
     captured = {}
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         captured["data_mode"] = data_mode
         captured["llm_mode"] = llm_mode
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)  # 強制真正執行時用離線樣本，避免真打連接器
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)  # 強制真正執行時用離線樣本，避免真打連接器
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -234,9 +235,9 @@ def test_web_real_mode_not_rate_limited_by_live_bucket_conflict(monkeypatch):
     web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -265,9 +266,9 @@ def test_web_real_mode_rate_limited_at_real_threshold(monkeypatch):
     web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -290,12 +291,12 @@ def test_web_real_mode_without_flag_is_new_default(monkeypatch):
     captured = {}
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         captured["offline"] = offline
         captured["data_mode"] = data_mode
         captured["llm_mode"] = llm_mode
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)  # 強制真正執行時用離線樣本，避免真打連接器
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)  # 強制真正執行時用離線樣本，避免真打連接器
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -314,10 +315,10 @@ def test_web_sample_flag_still_reaches_offline_sample_path(monkeypatch):
 
     captured = {}
 
-    def fake_run(coin, query, qtype, offline=False, data_dir=None):
+    def fake_run(coin, query, qtype, offline=False, data_dir=None, run_scope_id=""):
         captured["offline"] = offline
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -337,12 +338,12 @@ def test_web_live_takes_priority_over_real(monkeypatch):
     captured = {}
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         captured["offline"] = offline
         captured["data_mode"] = data_mode
         captured["llm_mode"] = llm_mode
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)  # 強制離線避免真打 Bedrock
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)  # 強制離線避免真打 Bedrock
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -365,9 +366,9 @@ def test_web_do_analyze_real_mode_increments_service_counter(monkeypatch):
     web._analyze_service_count = 0
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -384,9 +385,9 @@ def test_web_do_analyze_sample_flag_does_not_increment_service_counter(monkeypat
     monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._analyze_service_count = 0
 
-    def fake_run(coin, query, qtype, offline=False, data_dir=None):
+    def fake_run(coin, query, qtype, offline=False, data_dir=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -403,9 +404,9 @@ def test_web_do_analyze_default_mode_increments_service_counter(monkeypatch):
     web._analyze_service_count = 0
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -423,11 +424,11 @@ def test_web_do_comparison_real_mode(monkeypatch):
     captured = {}
 
     def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
-                            data_mode=None, llm_mode=None):
+                            data_mode=None, llm_mode=None, run_scope_id=""):
         captured["data_mode"] = data_mode
         captured["llm_mode"] = llm_mode
         import trustforge.pipeline as _pl
-        return _pl.run_comparison(coin_a, coin_b, query, offline=True)
+        return _pl.run_comparison(coin_a, coin_b, query, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 
@@ -446,9 +447,9 @@ def test_web_do_comparison_real_mode_increments_service_counter_by_two(monkeypat
     web._analyze_service_count = 0
 
     def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
-                            data_mode=None, llm_mode=None):
+                            data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run_comparison(coin_a, coin_b, query, offline=True)
+        return _pl.run_comparison(coin_a, coin_b, query, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 
@@ -628,9 +629,9 @@ def test_do_analyze_live_mode_json_link_preserves_live_but_not_token(monkeypatch
     web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)  # 強制離線，避免真打 Bedrock
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)  # 強制離線，避免真打 Bedrock
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -877,9 +878,9 @@ def test_active_mode_no_params_request_shows_only_real_active(monkeypatch):
     monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -899,9 +900,9 @@ def test_active_mode_sample_request_shows_only_offline_active(monkeypatch):
     monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
     monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
-    def fake_run(coin, query, qtype, offline=False, data_dir=None):
+    def fake_run(coin, query, qtype, offline=False, data_dir=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -921,9 +922,9 @@ def test_active_mode_real_request_shows_only_real_active(monkeypatch):
     monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -945,9 +946,9 @@ def test_active_mode_live_request_shows_only_live_active(monkeypatch):
     web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)  # 強制離線避免真打 Bedrock
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)  # 強制離線避免真打 Bedrock
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -1170,9 +1171,9 @@ def test_do_analyze_default_query_has_no_date_regardless_of_coin(monkeypatch):
     captured = {}
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                  data_mode=None, llm_mode=None):
+                  data_mode=None, llm_mode=None, run_scope_id=""):
         captured["query"] = query
-        return pl.run(coin, query, qtype, offline=True)
+        return pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -1190,9 +1191,9 @@ def test_do_comparison_default_query_has_no_date(monkeypatch):
     captured = {}
 
     def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
-                             data_mode=None, llm_mode=None):
+                             data_mode=None, llm_mode=None, run_scope_id=""):
         captured["query"] = query
-        return pl.run_comparison(coin_a, coin_b, query, offline=True)
+        return pl.run_comparison(coin_a, coin_b, query, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 
@@ -1234,9 +1235,9 @@ def test_form_submit_with_switched_coin_query_still_shows_correct_coin_provenanc
     captured = {}
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                  data_mode=None, llm_mode=None):
+                  data_mode=None, llm_mode=None, run_scope_id=""):
         captured["query"] = query
-        return pl.run(coin, query, qtype, offline=True, data_dir=tmp_path)
+        return pl.run(coin, query, qtype, offline=True, data_dir=tmp_path, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -1271,8 +1272,8 @@ def test_comparison_submit_provenance_shows_each_coins_own_date(monkeypatch, tmp
     _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])
 
     def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
-                             data_mode=None, llm_mode=None):
-        return pl.run_comparison(coin_a, coin_b, query, offline=True, data_dir=tmp_path)
+                             data_mode=None, llm_mode=None, run_scope_id=""):
+        return pl.run_comparison(coin_a, coin_b, query, offline=True, data_dir=tmp_path, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 

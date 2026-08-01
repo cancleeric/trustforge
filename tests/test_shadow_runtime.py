@@ -661,7 +661,7 @@ def test_candidate_success_cannot_change_active_report_or_evidence(monkeypatch, 
         "BTC", "BTC", QuestionType.MULTI_SOURCE, docs,
         client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=now_fn, run_id="hermes-baseline"),
-        now_fn=now_fn,
+        now_fn=now_fn, run_scope_id="test-shadow",
     )
 
     _configure(monkeypatch, tmp_path / "private" / "shadow.sqlite3")
@@ -670,6 +670,9 @@ def test_candidate_success_cannot_change_active_report_or_evidence(monkeypatch, 
     shadow_report, shadow_evidence = run_agent_pipeline(
         "BTC", "BTC", QuestionType.MULTI_SOURCE, docs,
         client=BedrockClient(offline=True), log=shadow_log, now_fn=now_fn,
+        # 與 baseline 同一 run_scope：shadow 是同一 run 的候選重評，相同 scope 才能保持
+        # claim_id byte-identical（契約 §1.1 same-job-replay）。
+        run_scope_id="test-shadow",
     )
     derive = next(
         event for event in shadow_log.events if event["tool"] == "judgment.derive"

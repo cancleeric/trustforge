@@ -407,7 +407,7 @@ active 站壞掉、且沒有任何 rollback 機制救得回來的做法。
 
 **`react` vs `react-http` 怎麼選**：兩者是同一套 React 前端拓樸，差別只在
 nginx 層有沒有 TLS。**DNS 已就緒**（`trustforge.hurricanesoft.com.tw →
-13.211.110.218`，見 `deploy/nginx.conf`／`deploy/TLS-SETUP.md`）——**production
+<EC2_PUBLIC_IP>`，見 `deploy/nginx.conf`／`deploy/TLS-SETUP.md`）——**production
 唯一路徑是 `react`**（TLS 版，需先跑 `deploy/setup_tls.sh` 簽出憑證，見下方
 「完整 cutover runbook」）。
 
@@ -521,7 +521,7 @@ python 端 `TRUSTFORGE_CSP_MODE` `react`/`react-http` 兩者都設成 `react`
 ### TLS
 
 `deploy/TLS-SETUP.md` + `deploy/setup_tls.sh`：domain 已就緒
-（`trustforge.hurricanesoft.com.tw → 13.211.110.218`），但**這個任務仍是
+（`trustforge.hurricanesoft.com.tw → <EC2_PUBLIC_IP>`），但**這個任務仍是
 config-only，沒有實際簽發憑證**——`setup_tls.sh` 預設只印出會執行的內容、
 不真的呼叫 `aws ssm`/`certbot`，需同時設
 `TRUSTFORGE_RUN_CERTBOT=yes` + 真實 `ADMIN_EMAIL` 才會真跑（CEO 真部署時
@@ -533,7 +533,7 @@ runbook」。
 
 ### 完整 cutover runbook（react-TLS domain cutover）
 
-1. **DNS**：`trustforge.hurricanesoft.com.tw → 13.211.110.218`（✓ 已完成）。
+1. **DNS**：`trustforge.hurricanesoft.com.tw → <EC2_PUBLIC_IP>`（✓ 已完成）。
 2. **deploy legacy**（nginx 在 80 上先服務）：`bash deploy/deploy_frontend_nginx.sh`
    ——預設啟用 `deploy/nginx-legacy.conf`。
 3. **certbot 簽發**：

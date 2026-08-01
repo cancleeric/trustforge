@@ -63,7 +63,7 @@ describe('HermesPlanningComposer', () => {
       expect.any(AbortSignal),
     )
     expect(screen.getByText(readyPlan.strategy_summary)).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: '分析策略' })).toHaveFocus()
+    await waitFor(() => expect(screen.getByRole('heading', { name: '分析策略' })).toHaveFocus())
   })
 
   it('cancels an in-flight request and ignores its late response', async () => {

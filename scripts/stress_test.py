@@ -113,7 +113,8 @@ def run_single_case(
         "pass": False,
     }
     try:
-        data = run(coin, query, QuestionType(qtype), offline=offline)
+        data = run(coin, query, QuestionType(qtype), offline=offline,
+            run_scope_id=f"stress-{label}-{time.time_ns()}")
         report, evidence, log = data
         _write_deliverables(out_dir, data)
 
@@ -153,7 +154,8 @@ def run_comparison_case(
         "pass": False,
     }
     try:
-        data = run_comparison(coin_a, coin_b, query, offline=offline)
+        data = run_comparison(coin_a, coin_b, query, offline=offline,
+            run_scope_id=f"stress-{label}-{time.time_ns()}")
         report_a, evidence_a, report_b, evidence_b, log = data
         _write_deliverables(out_dir, data)
 
@@ -234,7 +236,8 @@ def run_degradation_tests(offline: bool) -> list[dict]:
         _pipeline_mod.collect = _patched_collect
         try:
             report, evidence, log = run(
-                "BTC", "分析 BTC 壓測降級", QuestionType.MULTI_SOURCE, offline=True
+                "BTC", "分析 BTC 壓測降級", QuestionType.MULTI_SOURCE, offline=True,
+                run_scope_id=f"stress-degrade1-{time.time_ns()}",
             )
         finally:
             _pipeline_mod.collect = _orig_collect
@@ -262,7 +265,8 @@ def run_degradation_tests(offline: bool) -> list[dict]:
     try:
         # offline=True 即模擬 Bedrock 不可用（regex fallback）
         report, evidence, log = run(
-            "ETH", "假設 ETH 將突破歷史高點", QuestionType.HYPOTHESIS, offline=True
+            "ETH", "假設 ETH 將突破歷史高點", QuestionType.HYPOTHESIS, offline=True,
+            run_scope_id=f"stress-degrade2-{time.time_ns()}",
         )
         has_narrative = bool(report.market_judgment)
         bedrock_events = [e for e in log.events if e["tool"] == "bedrock.complete"]

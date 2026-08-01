@@ -44,6 +44,7 @@ def test_formal_run_logs_policy_provider_and_kernel_evidence(monkeypatch):
         "分析 BTC",
         QuestionType.MULTI_SOURCE,
         offline=True,
+        run_scope_id="test-pipeline-lifecycle",
     )
 
     events = log.events

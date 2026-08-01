@@ -1,6 +1,6 @@
 use crate::Error;
 use crate::linux::{Dir, StoreLockGuard, Vfs, kernel_boottime_ns, kernel_pid};
-use crate::sha256::{digest, hex};
+use trustforge_native_sys::sha256::{digest, hex};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{marker::PhantomData, rc::Rc};

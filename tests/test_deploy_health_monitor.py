@@ -5,7 +5,9 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -13,27 +15,39 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "monitor_deploy_health.sh"
 
 
-def _unused_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+class _QuietHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(ROOT), **kwargs)
+
+    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+        return
 
 
-def _server(port: int) -> subprocess.Popen[bytes]:
-    process = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(port), "--directory", str(ROOT)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    for _ in range(50):
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                return process
-        except OSError:
-            time.sleep(0.02)
-    process.terminate()
-    process.wait(timeout=5)
-    raise RuntimeError("test HTTP server did not start")
+class _ThreadedServer:
+    def __init__(self) -> None:
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _QuietHandler)
+        self.port = int(self.httpd.server_address[1])
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._stopped = False
+
+    def start(self) -> "_ThreadedServer":
+        self.thread.start()
+        for _ in range(50):
+            try:
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.1):
+                    return self
+            except OSError:
+                time.sleep(0.02)
+        self.stop()
+        raise RuntimeError("test HTTP server did not start")
+
+    def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
 
 
 def _monitor(tmp_path: Path, port: int, command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -56,13 +70,11 @@ def _monitor(tmp_path: Path, port: int, command: list[str]) -> subprocess.Comple
 
 
 def test_monitor_records_healthy_deploy(tmp_path):
-    port = _unused_port()
-    server = _server(port)
+    server = _ThreadedServer().start()
     try:
-        result = _monitor(tmp_path, port, ["sleep", "0.15"])
+        result = _monitor(tmp_path, server.port, ["sleep", "0.15"])
     finally:
-        server.terminate()
-        server.wait(timeout=5)
+        server.stop()
 
     assert result.returncode == 0, result.stderr
     rows = [json.loads(line) for line in (tmp_path / "canary.jsonl").read_text().splitlines()]
@@ -72,18 +84,20 @@ def test_monitor_records_healthy_deploy(tmp_path):
 
 
 def test_monitor_fails_when_service_drops_during_deploy(tmp_path):
-    port = _unused_port()
-    server = _server(port)
+    server = _ThreadedServer().start()
     try:
+        stopper = threading.Thread(
+            target=lambda: (time.sleep(0.08), server.stop()),
+            daemon=True,
+        )
+        stopper.start()
         result = _monitor(
             tmp_path,
-            port,
-            ["sh", "-c", f"sleep 0.08; kill {server.pid}; sleep 0.15"],
+            server.port,
+            [sys.executable, "-c", "import time; time.sleep(0.15)"],
         )
     finally:
-        if server.poll() is None:
-            server.terminate()
-        server.wait(timeout=5)
+        server.stop()
 
     assert result.returncode != 0
     rows = [json.loads(line) for line in (tmp_path / "canary.jsonl").read_text().splitlines()]

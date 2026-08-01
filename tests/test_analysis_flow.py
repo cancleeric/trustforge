@@ -1013,6 +1013,7 @@ def _claim_extraction_package() -> dict:
         "docs": _docs(),
         "log": ExecutionLog(run_id="test-run"),
         "job": {
+            "job_id": "test-job-id",
             "mode": "risk",
             "question": "BTC 近期風險？",
             "coin": "BTC",
@@ -1160,7 +1161,7 @@ def test_evidence_assembly_rechecks_gate_and_can_flip_to_offline_when_cap_hits_b
 
     def _fake_build_report(question, coin, qtype, brief, *, client, log, stance_fn, scored,
                            kernel_judgment,
-                           locale="zh-Hant"):
+                           locale="zh-Hant", run_scope_id=""):
         captured["offline_at_call"] = client.offline
         return {"report": "stub"}, {"evidence": "stub"}
 

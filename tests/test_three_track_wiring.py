@@ -132,6 +132,13 @@ class TestFlagOffRegression:
             payload = json.loads(row["payload_json"])
             report = dict(payload["report"])
             report.pop("generated_at", None)
+            # #960：claim_id / claim_ids 是 run-scoped（契約 §1.1）——與 generated_at
+            # 同性質：兩次 formal run（相異 job_id → 相異 scope）必然相異。比對分析
+            # 信號時須剔除，否則會把「設計上的 run-scoped 差異」誤判為 flag 擾動。
+            for _ev in report.get("evidence", []):
+                _ev.pop("claim_id", None)
+            for _bi in report.get("key_basis", []):
+                _bi.pop("claim_ids", None)
             out[row["mode"]] = report
         return out
 

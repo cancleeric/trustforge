@@ -141,6 +141,7 @@ def _run_report(brief):
         client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1_000_000.0),
         now_fn=lambda: 1_000_000.0,
+        run_scope_id="test-canonical-source-d01",
     )
 
 

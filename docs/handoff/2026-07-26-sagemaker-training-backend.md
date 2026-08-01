@@ -23,7 +23,7 @@ SageMaker 訓練後端已實作完成，五幣 dry-run 通過。可安全使用 
 | 資源 | 值 |
 |------|-----|
 | S3 Bucket | `trustforge-training-ap-southeast-2` |
-| IAM Role | `arn:aws:iam::795930814369:role/TrustForgeSageMakerTrainingRole` |
+| IAM Role | `arn:aws:iam::<ACCOUNT_ID>:role/TrustForgeSageMakerTrainingRole` |
 | Region | `ap-southeast-2` |
 | Inline Policy | S3 讀寫 training bucket + CloudWatch Logs |
 
@@ -64,7 +64,7 @@ PYTHONPATH=src python3 -m trustforge.cli sagemaker-train --all --dry-run
 # Live（需設定環境變數）
 export TRAINING_BACKEND=sagemaker
 export SAGEMAKER_TRAINING_BUCKET=trustforge-training-ap-southeast-2
-export SAGEMAKER_ROLE_ARN=arn:aws:iam::795930814369:role/TrustForgeSageMakerTrainingRole
+export SAGEMAKER_ROLE_ARN=arn:aws:iam::<ACCOUNT_ID>:role/TrustForgeSageMakerTrainingRole
 export AWS_REGION=ap-southeast-2
 PYTHONPATH=src python3 -m trustforge.cli sagemaker-train --all
 ```

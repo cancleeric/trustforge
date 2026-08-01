@@ -1,7 +1,7 @@
 # TLS 設定（Let's Encrypt / certbot）— task #28 Phase 3（react-TLS domain cutover）
 
 domain：`trustforge.hurricanesoft.com.tw` → DNS A record 已指到 EC2
-`13.211.110.218`（✓ 已完成）。
+`<EC2_PUBLIC_IP>`（✓ 已完成）。
 
 > ⛔ 本文件只寫**設定與步驟**；實際簽發憑證這個任務**不真跑**
 > （config-only，禁真跑 AWS/certbot——CEO 主線親自跑真部署）。CTO 這邊只
@@ -19,7 +19,7 @@ URL 驗證你真的控制這個 domain——**這代表 nginx 必須先在 80 po
 
 完整 cutover runbook（見 `deploy/README.md` 同名章節有更完整版本）：
 
-1. **DNS**：`trustforge.hurricanesoft.com.tw → 13.211.110.218`（✓ 已完成）。
+1. **DNS**：`trustforge.hurricanesoft.com.tw → <EC2_PUBLIC_IP>`（✓ 已完成）。
 2. **deploy legacy（nginx 在 80 上先服務）**：`bash deploy/deploy_frontend_nginx.sh`
    ——預設啟用 `deploy/nginx-legacy.conf`（SSR 全轉發，HTTP-only）；bare-IP
    現況若已切過 `deploy/cutover_switch.sh react-http` 也可以，重點是 nginx

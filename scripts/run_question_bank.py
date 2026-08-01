@@ -54,11 +54,13 @@ def _run_case(case: QuestionCase, offline: bool) -> tuple[dict, list[dict]]:
     if case.question_type.value == "comparison":
         report_a, evidence_a, report_b, evidence_b, log = run_comparison(
             case.coin_a, case.coin_b, case.query, offline=offline,
+            run_scope_id=f"question-bank-{case.id}-{time.time_ns()}",
         )
         gaps = _validate(report_a, evidence_a, log) + _validate(report_b, evidence_b, log)
         evidence_count = len(evidence_a) + len(evidence_b)
     else:
-        report, evidence, log = run(case.coin or "BTC", case.query, case.question_type, offline=offline)
+        report, evidence, log = run(case.coin or "BTC", case.query, case.question_type, offline=offline,
+            run_scope_id=f"question-bank-{case.id}-{time.time_ns()}")
         gaps = _validate(report, evidence, log)
         evidence_count = len(evidence)
     source_events = [event for event in log.events if event["tool"] == "ingestion.source"]

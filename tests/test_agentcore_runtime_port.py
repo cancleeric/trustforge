@@ -66,7 +66,12 @@ def test_analyze_market_delegates_to_governed_pipeline():
     assert isinstance(result["execution_log"], list)
     assert all(isinstance(ev, dict) for ev in result["execution_log"])
     assert pipeline.call_args.args[:3][0:2] == ("BTC", "市場如何")
-    assert pipeline.call_args.kwargs == {"data_mode": "sample", "llm_mode": "off"}
+    _kwargs = dict(pipeline.call_args.kwargs)
+    # #960：analyze_market 注入 colon-free run_scope_id（`agentcore-{uuid}`），非固定值。
+    _scope = _kwargs.pop("run_scope_id", "")
+    import re as _re
+    assert _re.match(r"^agentcore-[0-9a-f]+$", _scope), _scope
+    assert _kwargs == {"data_mode": "sample", "llm_mode": "off"}
 
 
 def test_analyze_market_execution_log_excludes_raw_sensitive_params():

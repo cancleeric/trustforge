@@ -29,7 +29,6 @@ import { useAdaptiveQuality } from '../hermes/useAdaptiveQuality'
 import FpsMeter from '../hermes/FpsMeter'
 import WorkspaceStageDrilldown from '../hermes/WorkspaceStageDrilldown'
 import { buildWorkspaceStageDetails } from '../hermes/workspaceStageDetails'
-import DiandianAvatar from '../components/DiandianAvatar'
 import DiandianOnboarding from '../components/DiandianOnboarding'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'

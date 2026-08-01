@@ -161,6 +161,7 @@ def test_build_report_annotation_injection_pipeline():
         coin="BTC",
         qtype=pytest.importorskip("trustforge.schema").QuestionType.MULTI_SOURCE,
         brief=brief,
+        run_scope_id="test-term-annotations",
     )
 
     # build_report 產出的 Report 應有 term_annotations（由 #583 接線注入）
@@ -203,6 +204,7 @@ def test_build_report_term_annotations_roundtrip():
         coin="ETH",
         qtype=pytest.importorskip("trustforge.schema").QuestionType.MULTI_SOURCE,
         brief=brief,
+        run_scope_id="test-term-annotations-roundtrip",
     )
 
     d = dataclasses.asdict(report)

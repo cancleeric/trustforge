@@ -3,7 +3,7 @@
 > 目的：決賽 Live Demo（桌機 + 手機）證據封存，確保每個關鍵畫面都有截圖 + 錄影。
 > **此檔只列清單，不執行**。執行由真人擇時一次收齊。
 >
-> Demo URL：`http://3.106.220.68/`
+> Demo URL：由部署環境提供
 
 ---
 
@@ -36,7 +36,7 @@
 ### A. 主頁（Hero / Market Snapshot）
 
 - [ ] **A1.** 主頁全貌（5 幣信任卡 + 來源健康度 + Hero CTA「新增分析」）
-  - URL：`http://3.106.220.68/`
+  - URL：由部署環境提供
   - 檢查項：至少 BTC/ETH 有可信分數、來源新鮮/過期/缺席數字有值
 - [ ] **A2.** Hover 任一幣卡看 hover 狀態
 - [ ] **A3.** 頁尾（Footer / 團隊資訊）
@@ -129,7 +129,7 @@ evidence/
 // evidence/collect-screenshots.ts
 import { chromium } from 'playwright'
 
-const BASE = 'http://3.106.220.68'
+const BASE = process.env.TRUSTFORGE_DEMO_URL
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
   mobile:  { width: 375, height: 812 },

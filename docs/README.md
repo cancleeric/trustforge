@@ -15,6 +15,15 @@ Governance index:
 開發、合併、release 與 production deployment 的權威門控規則見
 [RELEASE-DEPLOY-GOVERNANCE.md](RELEASE-DEPLOY-GOVERNANCE.md)。
 
+AIMS 改善治理草案見 [aims/README.md](aims/README.md)；該文件集未經核准，亦不代表
+ISO/IEC 42001 認證或符合性聲明。
+
+EN 18286／EU AI Act 初步適用性與差距分析見
+[plans/ANALYSIS-EN-18286-EU-AI-ACT-GAP-2026-08-01.md](plans/ANALYSIS-EN-18286-EU-AI-ACT-GAP-2026-08-01.md)；
+EN 18286 bibliographic／publication／official status 及合法標準全文均待 authoritative source；
+目前沒有 Official Journal citation 或 presumption of conformity 主張。該 overlay 尚待 Compliance
+Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certification。
+
 ---
 
 ## competition/ — 命題與交付規範

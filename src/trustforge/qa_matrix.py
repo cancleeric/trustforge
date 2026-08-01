@@ -71,6 +71,7 @@ def run_matrix(offline: bool = False, data_dir: str | None = None) -> dict:
                     report_a, evidence_a, report_b, evidence_b, log = run_comparison(
                         coin, coin_b, query,
                         offline=offline, data_dir=data_dir,
+                        run_scope_id=f"qamatrix-{coin}-{time.time_ns()}",
                     )
                     # Check both reports for degradation
                     report_text = report_a.to_markdown(evidence_a) + report_b.to_markdown(evidence_b)
@@ -82,6 +83,7 @@ def run_matrix(offline: bool = False, data_dir: str | None = None) -> dict:
                     report, evidence, log = run(
                         coin, query, qtype,
                         offline=offline, data_dir=data_dir,
+                        run_scope_id=f"qamatrix-{coin}-{time.time_ns()}",
                     )
                     report_text = report.to_markdown(evidence)
                     evidence_count = len(evidence)

@@ -81,7 +81,7 @@ def btc_eth_comparison(monkeypatch):
         return _make_fixture_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
-    result = run_comparison("BTC", "ETH", "比較 BTC 與 ETH 的市場表現、鏈上活動、情緒與生態發展", offline=True)
+    result = run_comparison("BTC", "ETH", "比較 BTC 與 ETH 的市場表現、鏈上活動、情緒與生態發展", offline=True, run_scope_id="test-comparison-markdown")
     assert result.comparison is not None, "comparison 應已填入"
     return result.comparison
 

@@ -11,7 +11,7 @@ npm install
 npm run dev      # http://localhost:5173，/api/* 由 vite.config.ts proxy 轉發
 ```
 
-預設 proxy 指向 live API（`http://13.211.110.218`）。若本機另起後端，用
+預設 proxy 指向 live API（`http://<EC2_PUBLIC_IP>`）。若本機另起後端，用
 `VITE_API_PROXY_TARGET=http://127.0.0.1:8080 npm run dev` 覆寫。
 
 ## Build

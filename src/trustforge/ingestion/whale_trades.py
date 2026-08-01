@@ -31,6 +31,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from . import safe_fetch
@@ -64,7 +65,9 @@ _ARKHAM_COIN_CHAINS: dict[str, str] = {
     "SOL": "solana",
     "BNB": "bsc",
     "XRP": "xrp",
-    "ARB": "arbitrum",
+    # Arkham 註冊名為 `arbitrum_one`；`arbitrum` 會被 API 拒為
+    # `invalid chain: chain unregistered`，導致 ARB 永遠取不到資料。
+    "ARB": "arbitrum_one",
 }
 
 # API key 環境變數名稱
@@ -307,7 +310,12 @@ class WhaleAlertSource(Source):
             params["currency"] = coin.lower()
 
         url = "https://api.whale-alert.io/v1/transactions?" + urlencode(params)
-        raw = _fetch_url(url)
+        try:
+            raw = _fetch_url(url)
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"Whale Alert request failed: HTTP {exc.code} {exc.reason or ''}"
+            ) from None
         data = json.loads(raw)
 
         if not isinstance(data, dict) or data.get("result") != "success":
