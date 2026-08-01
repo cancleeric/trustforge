@@ -13,7 +13,7 @@
 <p class="sub">依正式6頁提案簡報與實際程式碼整理｜先回答、再指證、最後說界線</p>
 <div class="notice"><b>答題節奏：</b>第一句直接回答；第二句指出畫面、交付物或程式證據；被追問時再展開限制。不要把簡報重新講一遍。</div>
 
-<h2>十四題核心備詢</h2>
+<h2>十四題核心備詢｜依六段提案框架延伸</h2>
 <section class="qa"><h3>1. 你們自行訓練的是什麼模型？</h3><p class="answer">我們自行訓練的是TrustForge信心校準模型，不是大型語言模型。它把分析當下的raw confidence與T+7等後續真實結果接合，再用Isotonic Regression校準成較符合歷史表現的信心。</p><p class="proof">calibration_model.py、modelhub_training.py、training JSONL與model artifact。</p><p class="boundary">它不生成市場文章、不取代Bedrock，也不等於價格預測模型。</p></section>
 
 <section class="qa"><h3>2. 為什麼不只使用AWS現成模型？</h3><p class="answer">AWS基礎模型擅長語意理解與生成，但不知道TrustForge的Evidence契約、來源可靠度與信心定義。自有校準模型能針對任務修正過度自信、跟上市場變化，並累積來源可靠度資料護城河。</p><p class="proof">Bedrock負責extract／stance／narrative；Trust Layer與calibration_model負責信任計算與校準。</p><p class="boundary">不是排斥AWS，而是把AWS基礎模型與自有任務模型放在不同責任層。</p></section>
