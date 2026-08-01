@@ -94,6 +94,34 @@ describe('AnalysisReportView compact 模式（比較頁）', () => {
     }
   })
 
+  it('localizes the new dashboard copy in English', () => {
+    document.cookie = 'trustforge_hermes_locale=en; Path=/'
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-01T00:07:00Z'))
+    try {
+      renderWithCompact(false)
+      expect(screen.getByText('Updated 7 minutes ago')).toBeInTheDocument()
+      expect(screen.getByText('L2 · Pro and con evidence')).toBeInTheDocument()
+      expect(screen.getByText(/L3 · Deep dive/)).toBeInTheDocument()
+      expect(screen.getByText(/L4 · Evidence list/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+      document.cookie = 'trustforge_hermes_locale=zh-TW; Path=/'
+    }
+  })
+
+  it('supports roving keyboard focus across the deep-dive tabs', () => {
+    renderWithCompact(false)
+    const trust = screen.getByRole('tab', { name: '信任分數' })
+    trust.focus()
+    fireEvent.keyDown(trust, { key: 'ArrowRight' })
+    const reasoning = screen.getByRole('tab', { name: '推理依據' })
+    expect(reasoning).toHaveFocus()
+    expect(reasoning).toHaveAttribute('aria-selected', 'true')
+    expect(reasoning).toHaveAttribute('aria-controls', 'deep-dive-panel-reasoning')
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'deep-dive-tab-reasoning')
+  })
+
   it('does not mount lazy evidence charts until the evidence details are opened', async () => {
     const { container } = renderWithCompact(false)
     const details = container.querySelector('#evidence-list') as HTMLDetailsElement

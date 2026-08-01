@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useState, type KeyboardEvent } from 'react'
 import type { AnalyzeData } from '../lib/types'
 import ConfidenceGauge from './ConfidenceGauge'
 import TrustBreakdown from './TrustBreakdown'
@@ -29,12 +29,12 @@ const EvidenceDistributionCharts = lazy(() => import('./EvidenceDistributionChar
 
 type DeepDiveTab = 'trust' | 'reasoning' | 'risk'
 
-function relativeMinutes(timestamp: string): string {
+function relativeMinutes(timestamp: string, copy: { unknown: string; justNow: string; minutesAgo: (minutes: number) => string }): string {
   const value = Date.parse(timestamp)
-  if (!Number.isFinite(value)) return '時間未知'
+  if (!Number.isFinite(value)) return copy.unknown
   const minutes = Math.max(0, Math.floor((Date.now() - value) / 60_000))
-  if (minutes < 1) return '剛剛'
-  return `${minutes} 分鐘前`
+  if (minutes < 1) return copy.justNow
+  return copy.minutesAgo(minutes)
 }
 
 function evidenceKindCounts(data: AnalyzeData): Array<[string, number]> {
@@ -72,6 +72,29 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
     elapsed_sec: 0, budget_sec: 900, nodes: [],
   }
   const kindCounts = evidenceKindCounts(data)
+  const generatedAgo = relativeMinutes(data.report.generated_at, {
+    unknown: t('arvTimeUnknown'),
+    justNow: t('arvTimeJustNow'),
+    minutesAgo: (minutes) => t('arvMinutesAgo', { minutes }),
+  })
+  const deepDiveTabs: Array<[DeepDiveTab, string]> = [
+    ['trust', t('arvTrustTab')],
+    ['reasoning', t('arvReasoningTab')],
+    ['risk', t('arvRiskTab')],
+  ]
+  const selectDeepDiveTab = (event: KeyboardEvent<HTMLButtonElement>, current: DeepDiveTab) => {
+    const currentIndex = deepDiveTabs.findIndex(([id]) => id === current)
+    let targetIndex = currentIndex
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') targetIndex = (currentIndex + 1) % deepDiveTabs.length
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') targetIndex = (currentIndex - 1 + deepDiveTabs.length) % deepDiveTabs.length
+    else if (event.key === 'Home') targetIndex = 0
+    else if (event.key === 'End') targetIndex = deepDiveTabs.length - 1
+    else return
+    event.preventDefault()
+    const target = deepDiveTabs[targetIndex][0]
+    setDeepDiveTab(target)
+    document.getElementById(`deep-dive-tab-${target}`)?.focus()
+  }
   return (
     <div className="flex flex-col gap-4">
       <div className="border-b border-tf-border pb-4">
@@ -86,7 +109,7 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-tf-muted">
           <span title={`${t('arvGeneratedAtPrefix')}${formatTimestamp(data.report.generated_at)}`}>
-            更新於 {relativeMinutes(data.report.generated_at)}
+            {t('arvUpdatedAt', { time: generatedAgo })}
           </span>
           <span>{data.evidence.length}{t('arvEvidenceCountSuffix')}</span>
           <span>{t('arvVersionPrefix')}{data.version}</span>
@@ -112,7 +135,7 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">L1 · Executive Summary</p>
           <DirectionBadge direction={data.report.direction} />
-          <span className="ml-auto text-xs text-tf-muted">{data.evidence.length} 筆證據</span>
+          <span className="ml-auto text-xs text-tf-muted">{t('arvEvidenceCount', { count: data.evidence.length })}</span>
           {kindCounts.map(([kind, count]) => (
             <span key={kind} className="rounded-full border border-tf-border px-2 py-0.5 text-xs text-tf-muted">{kind} {count}</span>
           ))}
@@ -138,28 +161,28 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
       />
 
       <details id="technical-analysis" className="hermes-technical-details hermes-clip border border-tf-border bg-tf-card">
-        <summary>L3 · 深度面板 <span>預設收合，依主題切換</span></summary>
+        <summary>{t('arvDeepDiveSummary')} <span>{t('arvDeepDiveHint')}</span></summary>
         <div className="flex flex-col gap-4 p-4">
-          <div role="tablist" aria-label="深度分析分類" className="flex flex-wrap gap-2 border-b border-tf-border pb-2">
-            {([
-              ['trust', '信任分數'],
-              ['reasoning', '推理依據'],
-              ['risk', '限制與反轉'],
-            ] as Array<[DeepDiveTab, string]>).map(([id, label]) => (
+          <div role="tablist" aria-label={t('arvDeepDiveTabs')} className="flex flex-wrap gap-2 border-b border-tf-border pb-2">
+            {deepDiveTabs.map(([id, label]) => (
               <button
                 key={id}
+                id={`deep-dive-tab-${id}`}
                 type="button"
                 role="tab"
                 aria-selected={deepDiveTab === id}
+                aria-controls={`deep-dive-panel-${id}`}
+                tabIndex={deepDiveTab === id ? 0 : -1}
                 className={`rounded-md px-3 py-1.5 text-sm ${deepDiveTab === id ? 'bg-tf-accent text-white' : 'border border-tf-border text-tf-text2'}`}
                 onClick={() => setDeepDiveTab(id)}
+                onKeyDown={(event) => selectDeepDiveTab(event, id)}
               >
                 {label}
               </button>
             ))}
           </div>
           {deepDiveTab === 'trust' && (
-            <div role="tabpanel" className="flex flex-col gap-4">
+            <div id="deep-dive-panel-trust" role="tabpanel" aria-labelledby="deep-dive-tab-trust" className="flex flex-col gap-4">
               <TrustBreakdown data={data.trust_components_aggregate} />
               <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
                 <TrustRadarChart radar={data.trust_radar} />
@@ -168,14 +191,14 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
             </div>
           )}
           {deepDiveTab === 'reasoning' && (
-            <div role="tabpanel" className="flex flex-col gap-4">
+            <div id="deep-dive-panel-reasoning" role="tabpanel" aria-labelledby="deep-dive-tab-reasoning" className="flex flex-col gap-4">
               <FactsInferenceLadder facts={data.report.facts} inferences={data.report.inferences} marketJudgment={data.report.market_judgment} />
               <div id="key-basis"><KeyBasisList items={data.report.key_basis} /></div>
               <HypothesisLedgerPanel ledger={data.report.hypothesis_ledger} evidence={data.evidence} />
             </div>
           )}
           {deepDiveTab === 'risk' && (
-            <div role="tabpanel" className="flex flex-col gap-4">
+            <div id="deep-dive-panel-risk" role="tabpanel" aria-labelledby="deep-dive-tab-risk" className="flex flex-col gap-4">
               <AssetIntrinsicShadowPanel value={data.report.asset_intrinsic_assessment} />
               <TrustTrendSection coin={data.report.coin} />
               {data.report.limits.length > 0 && (
@@ -202,7 +225,7 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
       <details id="evidence-list" className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card" onToggle={(event) => setEvidenceOpen(event.currentTarget.open)}>
         <summary>L4 · {t('arvEvidenceList')}（{data.evidence.length}）</summary>
         <div className="flex flex-col gap-4 p-4">
-          {evidenceOpen && <Suspense fallback={<LoadingState label="圖表載入中" />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>}
+          {evidenceOpen && <Suspense fallback={<LoadingState label={t('arvChartsLoading')} />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>}
           <EvidenceTable evidence={data.evidence} evidenceGroups={data.report.evidence_groups} />
           <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
           <PriceProvenancePanel priceProvenance={data.price_provenance} evidence={data.evidence} />

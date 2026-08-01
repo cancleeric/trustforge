@@ -1,6 +1,7 @@
 import type { CrossSourceSignal, Evidence, Insight } from '../lib/types'
 import AnnotatedText from './AnnotatedText'
 import CrossSourceSignalPanel from './CrossSourceSignalPanel'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 function averageTrust(evidence: Evidence[], direction: 'bullish' | 'bearish'): string {
   const values = evidence
@@ -15,13 +16,13 @@ function ArgumentColumn({
   title,
   tone,
   items,
-  trust,
+  trustLabel,
   empty,
 }: {
   title: string
   tone: string
   items: string[]
-  trust: string
+  trustLabel: string
   empty: string
 }) {
   return (
@@ -29,7 +30,7 @@ function ArgumentColumn({
       <div className="mb-3 flex items-center justify-between gap-3">
         <h4 className="text-sm font-semibold" style={{ color: tone }}>{title}</h4>
         <span className="tf-num rounded-full border border-tf-border px-2 py-0.5 text-xs text-tf-muted">
-          Trust Avg {trust}
+          {trustLabel}
         </span>
       </div>
       {items.length ? (
@@ -61,6 +62,7 @@ export default function ProConPanel({
   insights?: Insight[]
   compact?: boolean
 }) {
+  const { t } = useHermesI18n()
   const unresolved = (insights ?? []).filter((item) => item.coverage === 'insufficient')
   const hasDivergence = signal?.type === 'divergence'
 
@@ -68,30 +70,30 @@ export default function ProConPanel({
     <section aria-labelledby="pro-con-title" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">L2 · 正反證據對照</p>
-          <h3 id="pro-con-title" className="mt-1 text-base font-semibold text-tf-text">支持、反方與未決訊號</h3>
+          <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">{t('arvL2Kicker')}</p>
+          <h3 id="pro-con-title" className="mt-1 text-base font-semibold text-tf-text">{t('pcTitle')}</h3>
         </div>
-        <span className="text-xs text-tf-muted">先看分歧，再決定是否深入</span>
+        <span className="text-xs text-tf-muted">{t('pcSubtitle')}</span>
       </div>
       <div className={`grid grid-cols-1 gap-3 ${compact ? '' : 'lg:grid-cols-2'}`}>
         <ArgumentColumn
-          title="▲ 支持／偏多"
+          title={t('pcPro')}
           tone="var(--color-tf-good)"
           items={facts}
-          trust={averageTrust(evidence, 'bullish')}
-          empty="目前沒有可列出的支持事實。"
+          trustLabel={t('pcTrustAvg', { value: averageTrust(evidence, 'bullish') })}
+          empty={t('pcEmptyPro')}
         />
         <ArgumentColumn
-          title="▼ 反方／偏空"
+          title={t('pcCon')}
           tone="var(--color-tf-bad)"
           items={contrarian}
-          trust={averageTrust(evidence, 'bearish')}
-          empty="目前沒有可列出的反方訊號。"
+          trustLabel={t('pcTrustAvg', { value: averageTrust(evidence, 'bearish') })}
+          empty={t('pcEmptyCon')}
         />
       </div>
       {(hasDivergence || unresolved.length > 0) && (
-        <section className="hermes-clip rounded-lg border border-tf-warn bg-tf-card p-4" aria-label="矛盾與未決">
-          <h4 className="mb-2 text-sm font-semibold text-tf-warn">矛盾／未決</h4>
+        <section className="hermes-clip rounded-lg border border-tf-warn bg-tf-card p-4" aria-label={t('pcUnresolved')}>
+          <h4 className="mb-2 text-sm font-semibold text-tf-warn">{t('pcUnresolved')}</h4>
           {hasDivergence && <CrossSourceSignalPanel signal={signal} />}
           {unresolved.length > 0 && (
             <ul className={`${hasDivergence ? 'mt-3' : ''} list-disc space-y-1 pl-5 text-xs text-tf-text2`}>
