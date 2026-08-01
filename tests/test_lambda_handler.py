@@ -224,6 +224,26 @@ def test_live_invalid_comparison_second_coin_never_refreshes_provider(monkeypatc
     assert calls == []
 
 
+def test_live_invalid_question_type_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "bogus", "coin": "BTC", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
 def test_live_rate_limited_request_never_refreshes_provider(monkeypatch):
     monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
