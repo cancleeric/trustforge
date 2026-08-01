@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "packages": {
+    "core": {"depends_on": []},
+    "platform": {"depends_on": ["core"]},
+    "connectors": {"depends_on": ["core", "platform"]},
+    "agent": {"depends_on": ["core", "platform", "connectors"]},
+    "web": {"depends_on": ["core", "platform", "connectors", "agent"]},
+    "frontend": {"depends_on": ["web"]},
+    "native": {"depends_on": []}
+  },
+  "inventory_globs": [
+    "src/**/*.py",
+    "tests/**/test_*.py",
+    "frontend/**",
+    "native/**"
+  ],
+  "global_trigger_globs": [
+    ".githooks/**",
+    ".github/**",
+    "agentcore/**",
+    "app/**",
+    "data/**",
+    "deploy/**",
+    "qa/**",
+    "scripts/**",
+    "tests/**",
+    ".dockerignore",
+    ".gitignore",
+    ".nvmrc",
+    "Dockerfile",
+    "apprunner.yaml",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/vite.config.*",
+    "frontend/tsconfig*.json",
+    "native/**/Cargo.toml",
+    "native/**/Cargo.lock",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "owned_over_global_globs": [
+    "tests/**/test_*.py"
+  ],
+  "explicit_ignore_globs": [
+    ".eye-cache/**",
+    ".kiro/**",
+    ".venv",
+    ".venv/**",
+    "archive/**",
+    "demo/**",
+    "docs/**",
+    "skills/**",
+    "\"docs/**",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "README.md",
+    "ROADMAP.md",
+    "llms.txt",
+    "opencode.json"
+  ],
+  "rules": [
+    {"owner": "core", "priority": 100, "glob": "src/trustforge_core/*.py"},
+    {"owner": "core", "priority": 100, "glob": "src/trustforge_core/**/*.py"},
+    {"owner": "core", "priority": 100, "glob": "src/trustforge/trust/*.py"},
+    {"owner": "core", "priority": 100, "glob": "src/trustforge/trust/**/*.py"},
+
+    {"owner": "platform", "priority": 80, "glob": "src/trustforge/policy/**/*.py"},
+    {"owner": "platform", "priority": 80, "glob": "src/trustforge/ports.py"},
+    {"owner": "platform", "priority": 80, "glob": "src/trustforge/*telemetry*.py"},
+    {"owner": "platform", "priority": 80, "glob": "src/trustforge/*ledger*.py"},
+    {"owner": "platform", "priority": 80, "glob": "src/trustforge/*idempotency*.py"},
+
+    {"owner": "connectors", "priority": 70, "glob": "src/trustforge/ingestion/**/*.py"},
+    {"owner": "connectors", "priority": 70, "glob": "src/trustforge/*connector*.py"},
+    {"owner": "connectors", "priority": 70, "glob": "src/trustforge/bedrock.py"},
+    {"owner": "connectors", "priority": 70, "glob": "src/trustforge/*_client.py"},
+    {"owner": "connectors", "priority": 70, "glob": "src/trustforge/*_secret.py"},
+
+    {"owner": "agent", "priority": 60, "glob": "src/trustforge/agent/**/*.py"},
+    {"owner": "agent", "priority": 60, "glob": "src/trustforge/analysis_*.py"},
+    {"owner": "agent", "priority": 60, "glob": "src/trustforge/*runtime*.py"},
+    {"owner": "agent", "priority": 60, "glob": "src/trustforge/pipeline.py"},
+    {"owner": "agent", "priority": 60, "glob": "src/trustforge/backfill.py"},
+
+    {"owner": "web", "priority": 10, "glob": "src/trustforge/*.py"},
+    {"owner": "web", "priority": 10, "glob": "src/trustforge/**/*.py"},
+    {"owner": "core", "priority": 50, "glob": "tests/test_aggregate*.py"},
+    {"owner": "core", "priority": 50, "glob": "tests/test_*scor*.py"},
+    {"owner": "core", "priority": 50, "glob": "tests/test_*corrobor*.py"},
+    {"owner": "core", "priority": 50, "glob": "tests/test_*dawid*.py"},
+    {"owner": "core", "priority": 50, "glob": "tests/test_trust*.py"},
+
+    {"owner": "platform", "priority": 55, "glob": "tests/test_*telemetry*.py"},
+    {"owner": "platform", "priority": 55, "glob": "tests/test_*ledger*.py"},
+    {"owner": "platform", "priority": 55, "glob": "tests/test_*idempotency*.py"},
+    {"owner": "platform", "priority": 55, "glob": "tests/test_*policy*.py"},
+
+    {"owner": "connectors", "priority": 60, "glob": "tests/test_*connector*.py"},
+    {"owner": "connectors", "priority": 60, "glob": "tests/test_bedrock*.py"},
+    {"owner": "connectors", "priority": 60, "glob": "tests/test_cmc*.py"},
+    {"owner": "connectors", "priority": 60, "glob": "tests/test_etherscan*.py"},
+    {"owner": "connectors", "priority": 60, "glob": "tests/test_ingestion*.py"},
+    {"owner": "connectors", "priority": 60, "glob": "tests/test_tvl*.py"},
+    {"owner": "connectors", "priority": 60, "glob": "tests/test_whale*.py"},
+
+    {"owner": "agent", "priority": 70, "glob": "tests/test_agent*.py"},
+    {"owner": "agent", "priority": 70, "glob": "tests/test_agos*.py"},
+    {"owner": "agent", "priority": 70, "glob": "tests/test_analysis*.py"},
+    {"owner": "agent", "priority": 70, "glob": "tests/test_*runtime*.py"},
+    {"owner": "agent", "priority": 70, "glob": "tests/test_pipeline*.py"},
+
+    {"owner": "web", "priority": 10, "glob": "tests/test_*.py"},
+    {"owner": "web", "priority": 10, "glob": "tests/**/test_*.py"},
+    {"owner": "frontend", "priority": 100, "glob": "frontend/**"},
+    {"owner": "native", "priority": 100, "glob": "native/**"}
+  ]
+}
