@@ -50,9 +50,9 @@
 生命週期從構想到退役均納入；實際 production 身分、資料地域與 retention 是 scope 核准前的 blocker，
 不得因「暫定納入」推論已完成清冊、控制有效或已覆蓋未知環境。
 
-客戶 PII 禁止從 production 複製到 repo、本機、測試、tabletop 或稽核重演環境；需查證 production
-evidence 時只能使用受控存取與非敏感證明。任何例外均須另經合規、法務與 CEO 明確核准，本草案
-與其後續 merge／核准均不自動授權例外。
+客戶 PII 禁止從 production 複製到 repo、本機、測試、tabletop 或稽核重演環境，且不存在允許其
+離開 production 的例外核准路徑。需查證 production evidence 時只能使用受控存取與非敏感證明；
+另行核准只能適用於 production 內的受控存取，或已確認不可回復識別、因而不再屬於客戶 PII 的資料。
 
 ## 未決事項
 
