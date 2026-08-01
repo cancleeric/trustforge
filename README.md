@@ -1,215 +1,159 @@
 # TrustForge Hermes（信源熔爐）
 
-> Hermes 加密市場分析 AI Agent — **多源資訊的信任提煉**
-> 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽 ｜ 黑客組
+> 加密市場分析 AI Agent — **多源資訊的信任提煉**
+>
+> 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽｜黑客組
+>
 > 命題：【智慧金融：HOYA BIT】加密市場分析 AI Agent：多源資訊的信任提煉
+>
 > 出品：HurricaneSoft（颶風軟體）
 
 ---
 
-## 專案開發團隊 — 中再參與
+## 專案定位
 
-| 成員 | 角色 |
-|------|------|
-| 王英豪 | 隊長 |
-| 嵋婕 | 團隊成員 |
-| 林子彤 | 團隊成員 |
-| 王榆翔（Nicholas） | 團隊成員 |
+TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，但真假、時效、來源可信度與推論鏈不透明**。
 
-（詳見 [`docs/competition/TEAM.md`](docs/competition/TEAM.md)）
-
----
-
-## 一句話
-
-加密市場的資訊又多又雜、真假難辨（拉盤喊單、假新聞、機器人轉發）。
-**TrustForge 不是「再問 AI 一次幣價」，而是把多源資訊先做「信任提煉」**——
-對每一條主張評估可信度、做交叉佐證、保留溯源軌跡，最後輸出**信任加權**的市場分析。
+本專案不是「再做一個幣價聊天機器人」，而是把新聞、鏈上訊號、社群、監管公告、HOYA BIT 行情與歷史 OHLCV 先經過 **Trust Layer（信任層）**，再輸出可查證的市場分析。
 
 > 我們交付的不是「一個答案」，而是「一個你能查證的答案」。
 
 ---
 
-## 為什麼是這個切角（信任提煉 = 護城河）
+## 目前專案快照
 
-評審看的是**技術深度 + 創意可用性**。一般做法的天花板是「RAG 餵料 → LLM 摘要」，
-問題是：來源沒有可信度區分、單一來源造假無法察覺、結論無法溯源、無法落地給真實交易者用。
+| 項目 | 狀態 |
+|---|---:|
+| Canonical version | `0.27.51` |
+| Tracked files | 1,837 |
+| 程式／設定／文件行數 | 約 369,717 行 |
+| 測試檔 | 394 個 |
+| 測試函式 | 6,259 個 |
+| 主文件索引 | [`docs/README.md`](docs/README.md) |
+| 技術文件（Markdown） | [`docs/technical-docs/README.md`](docs/technical-docs/README.md)；HTML 版另存 [`docs/technical-docs/html/`](docs/technical-docs/html/) |
+| 比賽交付文件 | [`docs/competition/`](docs/competition/) |
 
-TrustForge 的差異化在中間那層 **Trust Layer（信任層）**：
+---
+
+## 核心差異：Trust Layer
 
 | 一般 crypto AI agent | TrustForge |
 |---|---|
-| 多源 → 直接丟給 LLM 摘要 | 多源 → **逐條主張可信度評分** → 信任加權後才進 LLM |
-| 來源不分等級 | **來源信譽 + 交叉佐證 + 時效** 三維評分 |
-| 結論無溯源 | 每個結論帶 **provenance（溯源鏈）**，可點開看原始來源 |
-| 一句話結論 | **校準後資訊完整度分數 + 反方證據 + 溯源鏈**，給人決策而非代替決策 |
+| 多源資料直接交給 LLM 摘要 | 多源資料先拆成主張、評分、交叉佐證，再交給 Bedrock 組織報告 |
+| 來源不分可信度 | 來源信譽、交叉佐證、時效衰減三維評估 |
+| 結論難以追溯 | 每個結論保留 evidence 與 provenance |
+| 只輸出一句方向 | 輸出信任分數、反方證據、限制條件與反轉條件 |
+| demo 常靠人手補故事 | pipeline 產出分析報告、證據清單與執行紀錄 |
 
 ---
 
-## 系統架構（三層）
+## 系統架構
 
-```
-        多源輸入                信任提煉 (核心)              Agent 編排 / 輸出
- ┌─────────────────┐     ┌──────────────────────┐     ┌────────────────────┐
- │ 新聞 / RSS       │     │ 1. 主張抽取            │     │ Bedrock Agent       │
- │ 社群 / X         │     │    (claim extraction) │     │  - 信任加權融合       │
- │ 鏈上 on-chain    │ ──▶ │ 2. 來源信譽評分        │ ──▶ │  - 帶溯源生成分析     │
- │ HOYA BIT 行情    │     │ 3. 交叉佐證 corroborate│     │  - 反方證據 / 資訊完整度分級 │
- │ 監管 / 公告      │     │ 4. 時效衰減 recency    │     │                      │
- └─────────────────┘     │ ⇒ TrustScore per claim│     └──────────┬─────────┘
-                          └──────────────────────┘                │
-                                                        ┌──────────▼─────────┐
-                                                        │ Live Demo (Web UI)  │
-                                                        │ 信任分數 + 溯源面板   │
-                                                        └────────────────────┘
+```text
+多源輸入                    Trust Layer（核心）                  Agent 編排 / 輸出
+┌─────────────────┐       ┌────────────────────────┐       ┌─────────────────────┐
+│ HOYA BIT 行情    │       │ 1. Claim extraction     │       │ AWS Bedrock          │
+│ OHLCV 歷史資料   │       │ 2. Source reputation    │       │ - 信任加權融合        │
+│ News / RSS       │  ──▶  │ 3. Corroboration        │  ──▶  │ - 有引文敘事化        │
+│ Social / X       │       │ 4. Recency decay        │       │ - 反方證據與限制條件  │
+│ On-chain 訊號    │       │ 5. TrustScore per claim │       └──────────┬──────────┘
+│ Regulatory 公告  │       └────────────────────────┘                  │
+└─────────────────┘                                            ┌────────▼────────┐
+                                                               │ Web / CLI Demo   │
+                                                               │ Report + Evidence│
+                                                               │ Execution Log    │
+                                                               └─────────────────┘
 ```
 
-詳見 [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)。
+詳見：
+
+- [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)
+- [`docs/architecture/AWS-ARCHITECTURE.md`](docs/architecture/AWS-ARCHITECTURE.md)
+- [`docs/technical-docs/02-architecture.md`](docs/technical-docs/02-architecture.md)（HTML 版：[`docs/technical-docs/html/02-architecture.html`](docs/technical-docs/html/02-architecture.html)）
 
 ---
 
-## Hermes Agent 能力總覽
+## Hermes Agent 能力
 
-Hermes 不只是單次分析工具，而是一個**有界自主研究 Agent**，具備持續研究、品質自測、校準訓練、自我診斷的完整循環。
+Hermes 是 TrustForge 的有界自主研究 Agent。它可以執行資料刷新、快照建構、品質量測、回放、診斷、升級候選審查與正式分析，但所有生產變更都受 fail-closed 與人工核准邊界限制。
 
-### Agent 工具（14 個）
+### 主要工具鏈
 
-| 工具 | 用途 | 模式 |
-|------|------|------|
-| `refresh_sources` | 刷新爬蟲來源到帶時戳快取 | autonomous |
-| `archive_source_snapshot` | 持久化來源文件（published_at/fetched_at/snapshot_at） | autonomous |
-| `build_snapshots` | 從快取建構每幣信任快照 | autonomous |
-| `cache_freshness_dashboard` | 快取年齡/缺口/排程健康狀態 | autonomous |
-| `measure_connector_reliability` | 每來源失敗率與七次成功閘門 | autonomous |
-| `measure_quality` | 有界離線迴歸與重播量測 | autonomous |
-| `read_snapshot` | 讀取正式 run 開始前的快照 | formal |
-| `replay_history` | 歷史決策 vs OHLCV 實際結果接合 | offline |
-| `diagnose_improvement` | QA/排程/重播證據 → 待批准實驗 | autonomous |
-| `review_upgrades` | Bedrock 對抗式審查升級候選 | autonomous |
-| `extract_claims` | Bedrock 從證據抽取結構化主張 | formal |
-| `classify_stance` | Bedrock 有界語義立場分類 | formal |
-| `assemble_report` | Bedrock 將 pipeline 產出加引文敘事化 | formal |
-| `export_deliverables` | 匯出報告/證據/JSONL 執行紀錄 | formal |
+| 類別 | 能力 |
+|---|---|
+| 資料刷新 | `refresh_sources`、`archive_source_snapshot`、`build_snapshots` |
+| 品質與可靠度 | `measure_connector_reliability`、`measure_quality`、`replay_history` |
+| 正式分析 | `read_snapshot`、`extract_claims`、`classify_stance`、`assemble_report`、`export_deliverables` |
+| 自我改善 | `diagnose_improvement`、`review_upgrades`；只產生候選，不自動改生產 |
 
-### Agent 技能約束（5 條鐵律）
+### 技能約束
 
-1. **five-year-ohlcv-lineage** — 每個價格事實帶 SHA-256、覆蓋範圍與分析窗口
-2. **evidence-contract** — 每個結論連結到 source/fetched_at/content_reference/related_claim
-3. **contrarian-evidence** — 矛盾和低信任證據保持可見，不得靜默丟棄
-4. **report-contract** — 報告必含判斷、關鍵依據、校準信心、限制條件、反轉條件
-5. **bounded-self-improvement** — 診斷持久失敗，提出沙盒實驗，需人工批准才改動生產
+1. **five-year-ohlcv-lineage** — 價格事實必須能回到資料範圍與 checksum。
+2. **evidence-contract** — 結論必須連到 `source/fetched_at/content_reference/related_claim`。
+3. **contrarian-evidence** — 反方與低信任證據不得靜默丟棄。
+4. **report-contract** — 報告必含判斷、關鍵依據、校準信心、限制條件、反轉條件。
+5. **bounded-self-improvement** — 診斷可提出沙盒實驗；生產啟用需人工核准。
 
-### 校準模型與生產學習機制
-
-```
-BackfillWorker（離線回填歷史日期）
-    → data/training/{COIN}.jsonl（2005 筆）
-    → enrich ground truth（T+7 OHLCV 標註方向）
-    → Isotonic Regression 訓練
-    → data/model-artifacts/calibration-model.json
-```
-
-- **模型類型**：Isotonic Regression 校準（raw confidence → calibrated confidence）
-- **訓練資料**：5 幣共 2005 筆（全部來自離線 backfill）
-- **生產即時分析不寫舊 training JSONL**；會寫 FeatureStore + Ledger
-- **Three-track learning hook 已實作但生產未啟用**，目前沒有即時 learning events
-- **AGOS skill/memory lineage 已實作但生產未啟用**
-- **重訓入口**：`scripts/retrain_calibrator.py`、CLI `trustforge train-calibration`
-- 詳細的 implemented / enabled / observed 證據見 [`docs/HERMES-CAPABILITIES-REVIEW.md`](docs/HERMES-CAPABILITIES-REVIEW.md)
-
-### 自我改善迴圈
-
-```
-measure_quality + replay_history → 量測
-    → diagnose_improvement → 診斷提案
-    → review_upgrades（Bedrock 對抗審查）
-    → 人工批准 → 生產變更
-```
-
-### 生產排程
-
-| 服務 | 說明 |
-|------|------|
-| `hermes-cycle.timer` | 每 30 分鐘自主研究循環（budget 900s） |
-| `trustforge-analysis-flow.service` | always-on 正式分析佇列 daemon |
-| `fetch_scheduler` | 平行抓取 → DynamoDB 快取 |
-
-- 生產預設 **fail-closed**；目前 `hermes-cycle.timer` 已啟用且有成功執行紀錄
-- 控制優先級：runtime stop/production guard > DynamoDB admin config > autonomy env > production default
+詳細證據見 [`docs/HERMES-CAPABILITIES-REVIEW.md`](docs/HERMES-CAPABILITIES-REVIEW.md)。
 
 ---
 
-## ⚠️ 競賽硬約束（務必遵守）
+## 競賽硬約束
 
-1. **僅限使用 AWS 服務提供之基礎模型** → 本專案**直連 AWS Bedrock**（`bedrock-runtime`）。
-   - **不走集團電話總機 / anemone 閘道**（那是給內部產品用的）。競賽期間一律 Bedrock 直連。
-2. 須使用 HOYA BIT 提供之企業數據（7/13 企業數據工作坊取得規格）。
-3. 30 小時內（8/1–8/2）繳交：命題連結、企業數據應用、技術架構、生成式 AI 應用、**Live Demo**。
-4. 可佈署實證、現場展示成果。
+1. 生成式 AI 模型入口以 **AWS Bedrock** 為準；競賽路徑不走內部模型閘道。
+2. 使用 HOYA BIT 企業資料與官方 OHLCV 基準資料。
+3. 交付需包含技術架構、企業資料應用、生成式 AI 應用與 Live Demo。
+4. 所有功能主張必須對應可驗證 evidence；不得虛報 demo 能力。
+5. Kiro 使用採 evidence-first、保守口徑：只主張部分 spec-driven workflow，不宣稱全程使用。
 
-時程與須知見 [`docs/competition/COMPETITION.md`](docs/competition/COMPETITION.md)。
+競賽文件入口：
+
+- [`docs/competition/COMPETITION.md`](docs/competition/COMPETITION.md)
+- [`docs/competition/COMPLIANCE-CHECK.md`](docs/competition/COMPLIANCE-CHECK.md)
+- [`docs/competition/SUBMISSION-CHECKLIST.md`](docs/competition/SUBMISSION-CHECKLIST.md)
+- [`docs/competition/SLIDE-DECK.md`](docs/competition/SLIDE-DECK.md)
+- [`docs/competition/SPEECH-SCRIPT-6MIN.md`](docs/competition/SPEECH-SCRIPT-6MIN.md)
+- [`docs/competition/TRUST-EXPLAINABILITY.md`](docs/competition/TRUST-EXPLAINABILITY.md)
 
 ---
 
 ## 快速開始
 
 ```bash
-# 1. 安裝
-python3 -m venv .venv && source .venv/bin/activate
+# 1. 建立 Python 環境
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 設定 AWS Bedrock（競賽用 AWS 帳號）
+# 2. 設定 AWS Bedrock（live 模式需要）
 export AWS_REGION=us-east-1
-export BEDROCK_MODEL_ID="<8/1 現場公告的 Bedrock 模型 id>"   # 例：us.anthropic.claude-...
+export BEDROCK_MODEL_ID="<Bedrock model id>"
 
-# 3. 跑一條 demo pipeline（離線樣本資料，不需 AWS 也能看信任層）
-#    產出官方 4 交付件到 out/ ：report.md / evidence.json / execution_log.jsonl
+# 3. 離線 demo：不呼叫 AWS，也能看信任層與交付件格式
 python -m trustforge.cli analyze \
-    --coin BTC --type multi_source \
-    --query "分析 BTC 過去兩週市場狀況，整合多源資料" --offline --out out/btc
-
-# 題型：multi_source（多源整合）/ hypothesis（假設驗證）/ comparison（比較分析）
-# 幣種池：BTC / ETH / SOL / BNB / XRP
+  --coin BTC \
+  --type multi_source \
+  --query "分析 BTC 過去兩週市場狀況，整合多源資料" \
+  --offline \
+  --out out/btc
 
 # 4. 測試
 pytest -q
 ```
 
-> 本機 pre-push gate（`.githooks/pre-push`）前端步驟需 Node >=20.12（Vite 8），請依 `.nvmrc` 執行 `nvm use`。
+題型：
 
-### Bedrock 驗證（issue #863）
+| 題型 | 用途 |
+|---|---|
+| `multi_source` | 多源市場整合分析 |
+| `hypothesis` | 假設驗證 |
+| `comparison` | 幣種／事件比較分析 |
 
-設定好 `AWS_REGION` 與 `BEDROCK_MODEL_ID` 後，可依序執行驗證腳本確認推理服務正常：
+幣種池：`BTC`、`ETH`、`SOL`、`BNB`、`XRP`。
 
-```bash
-# Step 1: 環境與 IAM 權限檢查（--dry-run 只查環境變數不呼叫 AWS）
-python3 scripts/verify_bedrock.py
-python3 scripts/verify_bedrock.py --dry-run
+---
 
-# Step 2: Smoke test（驗證敘事模型 + stance 分類模型可用）
-python3 scripts/smoke_test_bedrock_extended.py
-
-# Step 3: 完整溯源驗證（claim_id 溯源 + 行文層次 + 護欄生效）
-python3 scripts/verify_traceability.py --coin BTC
-
-# 只跑降級正確性驗證（不需 Bedrock 存取）
-python3 scripts/verify_traceability.py --offline-only
-```
-
-驗證結果輸出到 `out/bedrock_smoke_test.json` 與 `out/bedrock_traceability.json`。
-
-## 資料來源
-
-| 資料 | 位置 | 說明 |
-|------|------|------|
-| 官方基準 OHLCV | `data/`（HOYA BIT 提供）| 5 幣 × 5 年 Daily OHLCV，UTC，USDT 計價；`data/dataset_metadata.json` 為規格 |
-| 合成樣本 | `demo/sample_data/` | 測試 / 快速 demo 用；`ohlcv/` 為合成價格、`*.json` 為各來源樣本 |
-
-- **價格資料預設讀 `data/`（官方）**；OHLCV 連接器自動辨識官方檔名 `{COIN}_daily_ohlcv.csv`。
-- 指定其他目錄：`--data-dir <dir>`。`--offline` 僅影響 Bedrock（不呼叫 AWS）與文件型樣本來源。
-- 新聞 / 鏈上 / 社群等非價格來源於 7/13 工作坊後接真實 API（目前為樣本）。
-
-## Live Demo（web 服務）
+## Live Demo
 
 ```bash
 ./scripts/trustforge_control.sh start
@@ -217,114 +161,104 @@ python3 scripts/verify_traceability.py --offline-only
 ./scripts/trustforge_control.sh stop
 ```
 
-`start` 只啟動本機 web runtime 與本機 runtime switch；不會自動打開 Bedrock。
-生產環境的 Hermes continuous cycle 預設關閉，避免測試或排程把費用燒光。
-若真的要在 production 跑背景循環，必須同時設定：
+本機 demo 預設不自動打開 Bedrock；要走真實 Bedrock 與 production continuous cycle，需明確設定 runtime switch 與成本上限。詳見：
 
-```bash
-export TRUSTFORGE_RUNTIME_SWITCH=on
-export TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS=1
-```
+- [`docs/competition/AWS-LAMBDA-DEPLOYMENT.md`](docs/competition/AWS-LAMBDA-DEPLOYMENT.md)
+- [`docs/runbooks/HERMES_PRODUCTION_AUDIT.md`](docs/runbooks/HERMES_PRODUCTION_AUDIT.md)
+- [`deploy/README.md`](deploy/README.md)
 
-緊急停止 Bedrock 成本仍使用最高優先 kill switch：
+---
 
-```bash
-export TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0
-```
+## 官方交付件
 
-```bash
-# 本機起 Live Demo（SQLite 共用快取，免 AWS 即可看完整管線）
-CACHE_BACKEND=sqlite ./scripts/trustforge_control.sh start   # → http://127.0.0.1:8799（PORT 預設 8799）
-# ⚠️ 請用控制腳本啟動，勿裸跑 `python -m trustforge.web`：缺 TRUSTFORGE_DISABLE_ADMIN_CONFIG 時
-#    每個請求會嘗試讀遠端 admin config，憑證未就緒會使整個 server 卡住（全站逾時）。
-# 首次由舊版 JSON 升級時先執行：python scripts/migrate_json_cache_to_sqlite.py
-#   /            首頁表單（選幣種/題型/問題）
-#   /analyze     HTML 報告　/analyze.json  JSON（report+evidence+log）　/healthz  健康檢查
-```
+每次正式分析會產生或對應下列交付物：
 
-> **本機真 Bedrock + Hermes daemon（自動分析 → 信任分數）**：完整環境變數、每日花費上限、
-> `X-Live-Token`、以及用 `POST /api/analysis-question` 強制產生新分析等步驟見 runbook —
-> Wiki `hurricanesoft/trustforge/local-live-analysis-runbook`、
-> SkillHub `ops/trustforge-local-live-bedrock-and-daemon-real-analysis`。
+| 交付件 | 範例位置 | 說明 |
+|---|---|---|
+| 專題報告／分析報告／最終報告 | `out/<coin>/report.md` | 市場判斷、關鍵依據、信心與限制條件 |
+| 證據清單 | `out/<coin>/evidence.json` | 每筆證據含來源、時間、引用與對應主張 |
+| 執行紀錄 | `out/<coin>/execution_log.jsonl` | 工具呼叫、流程時戳、預算與狀態 |
+| 程式碼與設定 | 本 repo | pipeline、模型入口、測試、部署與文件 |
 
-**佈署到 AWS**：推薦 **App Runner 原始碼模式**——連 GitHub repo 即讀 `apprunner.yaml` 自動建置（**雲端建置，本機免 Docker**），給公開 HTTPS Live Demo URL、push 即重佈。設 `BEDROCK_MODEL_ID`+`AWS_REGION` 並給 instance role `bedrock:InvokeModel` 後，帶 `?live=1` 走真實 Bedrock。完整步驟見 [`docs/competition/SUBMISSION-CHECKLIST.md`](docs/competition/SUBMISSION-CHECKLIST.md)。容器路線另附 `Dockerfile`。
+> 反作弊邊界：市場判斷、證據整合與信任評分由本 pipeline 產生；Bedrock 負責受約束的語意抽取、立場分類與敘事化，不得把第三方現成結論當主要結果。
 
-## 交付件（對齊官方）
+---
 
-每次 `analyze` 產出官方要求的 4 件（程式碼/設定即本 repo）：
+## 文件導覽
 
-| 交付件 | 檔案 | 內容 |
-|--------|------|------|
-| 分析報告 Final Report | `out/<coin>/report.md` | 結論/市場判斷 → 關鍵依據(事實→推論→結論) → 信心說明(限制) |
-| 證據清單 Evidence List | `out/<coin>/evidence.json` | 每筆含 `source/fetched_at/content_reference/related_claim` |
-| 執行紀錄 Execution Log | `out/<coin>/execution_log.jsonl` | 時戳 + 工具呼叫 + 流程，含 15 分鐘預算追蹤 |
-
-> **反作弊鐵則**：市場判斷、證據整合、信任評分由本 pipeline 產生；Bedrock 只負責
-> 把推理「行文」，不得把第三方現成結論當主要結果。詳見 `docs/competition/COMPETITION.md`。
-
-## ModelHub／AWS SageMaker 校準器候選流程（#351）
-
-TrustForge 的校準器候選流程支援 **ModelHub** 與 **AWS SageMaker**，可依部署環境選擇模型訓練與核准後端。輸入真相是
-`data/training/{BTC,ETH,SOL,BNB,XRP}.jsonl`；流程會先做資料 gate 與 chronological split，
-再以 weighted ECE 比較 baseline/candidate。改善至少 `0.02` 才建立 immutable proposal。
-候選永遠是 `automatic_apply: false`、`requires_human_approval: true`，不會自動啟用模型。
-
-```bash
-# 安全 dry-run：不呼叫 ModelHub 或 AWS SageMaker；macOS 請使用 /private/tmp，避免 /tmp symlink 被拒絕
-python -m trustforge.cli modelhub-train --all --dry-run \
-  --out-dir /private/tmp/trustforge-modelhub-proposals
-python -m trustforge.cli sagemaker-train --all --dry-run \
-  --out-dir /private/tmp/trustforge-sagemaker-proposals
-
-# live 編排兩者皆可使用，都是 state-changing 操作：須先取得 Eric 或具名後端操作負責人的明確授權。
-# ModelHub：為五幣各提供一個不同、真實存在的 ModelHub req_no。
-# 取得 API key、AWS credential 或通過 reviewer/CISO 審查，本身都不構成執行授權。
-python -m trustforge.cli modelhub-train --all \
-  --req-no-map "BTC=$MODELHUB_BTC_REQ" --req-no-map "ETH=$MODELHUB_ETH_REQ" \
-  --req-no-map "SOL=$MODELHUB_SOL_REQ" --req-no-map "BNB=$MODELHUB_BNB_REQ" \
-  --req-no-map "XRP=$MODELHUB_XRP_REQ"
-
-# AWS SageMaker：使用已設定的 SageMaker backend 執行五幣訓練編排。
-python -m trustforge.cli sagemaker-train --all \
-  --out-dir out/sagemaker-proposals
-```
-
-輸出目錄包含 immutable `execution-<run_id>.jsonl`、候選 proposal，以及每幣可覆寫的
-`<COIN>.json` current manifest。blocked、unavailable、timeout、no_improvement、error 在 durable
-persistence 成功時會留下可稽核的 terminal log/current；若 log/path persistence 本身失敗，
-流程會 fail closed，可能沒有新 log/current，或保留舊 current。dry-run 只留 execution log，
-不建立 current。詳見
-[`docs/qa/modelhub-integration-351.md`](docs/qa/modelhub-integration-351.md)。
+| 區域 | 入口 | 用途 |
+|---|---|---|
+| 主文件索引 | [`docs/README.md`](docs/README.md) | 所有規劃、技術、交付文件總入口 |
+| 技術文件（Markdown） | [`docs/technical-docs/README.md`](docs/technical-docs/README.md) | 從 devlog 技術文件同步到主 repo 的交付版文件；GitHub / code review 以 Markdown 為主 |
+| 技術文件（HTML） | [`docs/technical-docs/html/index.html`](docs/technical-docs/html/index.html) | 原 devlog 視覺版另存一份，適合瀏覽器展示或離線交付 |
+| Evidence map | [`docs/technical-docs/00-evidence-map.md`](docs/technical-docs/00-evidence-map.md) | 技術主張與佐證矩陣；HTML 版：[`docs/technical-docs/html/00-evidence-map.html`](docs/technical-docs/html/00-evidence-map.html) |
+| 比賽投稿 | [`docs/technical-docs/16-competition-submission.md`](docs/technical-docs/16-competition-submission.md) | 投稿與展示口徑；HTML 版：[`docs/technical-docs/html/16-competition-submission.html`](docs/technical-docs/html/16-competition-submission.html) |
+| 架構 | [`docs/architecture/`](docs/architecture/) | 架構設計、ADR、資料契約 |
+| 競賽 | [`docs/competition/`](docs/competition/) | 官方規範、簡報、講稿、交付清單 |
+| AIMS / EU AI | [`docs/aims/README.md`](docs/aims/README.md) | ISO/IEC 42001 與 EU AI Act overlay 草案；不代表正式認證或 conformity claim |
 
 ---
 
 ## 倉庫結構
 
-```
+```text
 trustforge/
 ├── README.md
-├── ROADMAP.md              # 對齊黑客松里程碑
 ├── pyproject.toml
-├── docs/                  # 見 docs/README.md 索引（competition/architecture/plans/qa/design/archive）
-│   ├── competition/COMPETITION.md   # 競賽時程 / 須知 / 約束
-│   └── architecture/ARCHITECTURE.md # 三層架構與信任演算法設計
-├── src/trustforge/
-│   ├── bedrock.py          # AWS Bedrock runtime 封裝（唯一模型入口）
-│   ├── schema.py           # Coin 池 / 題型 / Evidence / Report（對齊交付規格）
-│   ├── execlog.py          # 執行紀錄 + 15 分鐘預算追蹤
-│   ├── ingestion/          # 多源連接器：prices(OHLCV) + news/social/onchain/hoyabit/regulatory
-│   ├── trust/              # ★ 信任提煉引擎（本專案核心競爭力）
-│   ├── agent/              # Bedrock 編排 → Report + Evidence + Log
-│   └── cli.py              # demo / 競賽執行入口
-├── demo/sample_data/       # 離線樣本：ohlcv/*.csv + 各來源 *.json
-└── tests/                  # 4100+ 測試（信任評分 / 價格 / 報告管線 / 安全 / 觀測 / 校準；覆蓋率 ~86%）
+├── src/trustforge/              # Python backend、Trust Layer、Bedrock、CLI、web API
+├── frontend/                    # React + Vite + TypeScript UI
+├── native/                      # native trust / immutable runtime foundation
+├── deploy/                      # App Runner、Lambda、nginx、release router、TLS、scheduler scripts
+├── docs/
+│   ├── README.md                # 文件總索引
+│   ├── competition/             # 競賽規範、簡報、講稿、交付清單
+│   ├── architecture/            # 架構、資料契約、ADR
+│   ├── technical-docs/          # Markdown 技術文件；html/ 另存 HTML 靜態版
+│   ├── plans/                   # 開發計劃與差距分析
+│   ├── qa/                      # 測試、QA、研究發現
+│   └── aims/                    # AIMS / EU AI Act overlay 草案
+├── data/                        # 官方 OHLCV、資料集 metadata、training/evidence fixtures
+├── demo/sample_data/            # 離線 demo 樣本
+├── scripts/                     # 驗證、訓練、打包、release 輔助腳本
+└── tests/                       # pytest regression / security / release / API / frontend-adjacent gates
 ```
+
+---
+
+## 開發與 release 紀律
+
+本 repo 採 **local pre-push gate 為準**；GitHub Actions 不是 release gate。
+
+1. 從 issue 與 acceptance criteria 開始。
+2. 建 scoped branch，不直接在 `main` 開發。
+3. 實作需附 regression tests 或文件驗證。
+4. push 前跑 `.githooks/pre-push`；至少需 `git diff --check` 無誤。
+5. PR 需記錄驗證證據、reviewer attestation、必要時 `/codex-review`。
+6. 安全／成本敏感變更需具名安全或成本審查。
+7. production deploy 走明確 release workflow，部署後驗證 health 與實際使用者流程。
+
+權威規則見 [`docs/RELEASE-DEPLOY-GOVERNANCE.md`](docs/RELEASE-DEPLOY-GOVERNANCE.md) 與 [`docs/governance/PRE_PUSH_RELEASE_GATES.md`](docs/governance/PRE_PUSH_RELEASE_GATES.md)。
 
 ---
 
 ## 版控
 
-- **GitHub（主）**：`cancleeric/trustforge`（private）
-- **Gitea（鏡像）**：`http://YINGdeMacBook-Pro.local:3030/hurricanesoft/trustforge`
+| 位置 | 說明 |
+|---|---|
+| GitHub | `https://github.com/cancleeric/trustforge` |
+| Gitea | `http://appleteki-MacBook-Air-2.local:3033` |
 
-比照 agentic-os-console：GitHub 為主、Gitea 鏡像。
+GitHub 是主 repo；Gitea 為公司內部 Git 伺服器入口。不要在文件中寫死區網 IP，使用 mDNS hostname。
+
+---
+
+## 團隊
+
+| 成員 | 角色 |
+|---|---|
+| 王英豪 | 隊長 |
+| 嵋婕 | 團隊成員 |
+| 林子彤 | 團隊成員 |
+| 王榆翔（Nicholas） | 團隊成員 |
+
+詳見 [`docs/competition/TEAM.md`](docs/competition/TEAM.md)。

@@ -1,0 +1,322 @@
+<!doctype html><html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>04 — 環境變數參考 | TrustForge 技術文件</title>
+<meta name="description" content="TrustForge 完整環境變數清單：預設值、生產建議值、安全注意事項、fail-closed 行為。">
+<link rel="stylesheet" href="style.css?v=20260726-evidence-grade">
+<style>
+.toc { margin:1rem 0 1.2rem; border:1px solid var(--bd); border-radius:10px; background:var(--card); padding:.6rem .9rem; }
+.toc summary { cursor:pointer; color:var(--acc); font-size:.9rem; }
+.toc ol { margin:.5rem 0 0; padding-left:1.2rem; }
+.toc li { margin:.2rem 0; }
+.toc a { color:var(--mut); font-size:.88rem; }
+.toc a:hover { color:var(--fg); }
+.nav-bar { display:flex; gap:.6rem; margin-bottom:1.2rem; flex-wrap:wrap; }
+.nav-bar a { font-size:.9rem; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+.nav-bar a:hover { text-decoration:none; border-color:var(--acc); }
+.warn-box { background:rgba(210,153,34,.08); border:1px solid var(--warn); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.warn-box strong { color:var(--warn); }
+.danger-box { background:rgba(248,81,73,.08); border:1px solid #f85149; border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.danger-box strong { color:#f85149; }
+.env-table { font-size:.85rem; }
+.env-table td:first-child { font-family:monospace; font-weight:600; color:var(--acc); white-space:nowrap; font-size:.82rem; }
+.env-table td:last-child { font-size:.8rem; color:var(--mut); min-width:200px; }
+.env-cat { background:var(--card2); border-top:2px solid var(--acc); padding:.3rem .6rem; font-weight:700; color:var(--acc); font-size:.82rem; margin:1.5rem 0 .3rem; letter-spacing:.05em; text-transform:uppercase; }
+</style>
+</head><body><div class="wrap">
+
+<div class="nav-bar"><a href="03-deployment.html">← 03 部署指南</a><a href="index.html">文件首頁</a><a href="05-api.html">05 API 參考 →</a></div>
+
+<article>
+<h2>04 — 環境變數參考</h2>
+<p style="color:var(--mut)">Configuration Reference · 全部 25+ 環境變數、預設值、生產建議值、fail-closed 行為</p>
+
+<details class="toc" open>
+<summary>目錄</summary>
+<ol>
+  <li><a href="#principles">設定原則</a></li>
+  <li><a href="#bedrock">Bedrock / LLM</a></li>
+  <li><a href="#server">HTTP Server</a></li>
+  <li><a href="#cache">Cache / 儲存後端</a></li>
+  <li><a href="#cost">成本控管</a></li>
+  <li><a href="#security">安全 / Token / 管理</a></li>
+  <li><a href="#hermes">Hermes 自主排程</a></li>
+  <li><a href="#frontend">前端建置</a></li>
+  <li><a href="#priority">設定優先級（Config Store → Env）</a></li>
+</ol>
+</details>
+
+<h3 id="principles">1. 設定原則</h3>
+
+<ul>
+  <li><strong>Fail-closed</strong>：未設定 = 功能關閉。不存在「漏設就意外開啟」的情境。</li>
+  <li><strong>機敏值不入版控</strong>：token 類變數一律經 SSM Parameter Store 或手動設 env，不寫入部署腳本、不存 GitHub。</li>
+  <li><strong>三層 cap 順序</strong>：DynamoDB Admin Config Store → 環境變數 fallback → 程式碼預設常數。</li>
+  <li><strong>Production guards</strong>：<code>TRUSTFORGE_ENV=production</code> 時，Hermes 連續排程 fail-closed，除非同時設兩個 opt-in 旗標。</li>
+</ul>
+
+<h3 id="bedrock" class="env-cat">2. Bedrock / LLM</h3>
+
+<table class="env-table">
+<tr><th>變數</th><th>預設值</th><th>必要</th><th>說明</th></tr>
+<tr>
+  <td>BEDROCK_MODEL_ID</td>
+  <td><code>""</code></td>
+  <td>—</td>
+  <td>AWS Bedrock 模型 ID。設為空 = 離線模式（不呼叫 Bedrock，不燒 credit）。<br>範例：<code>au.anthropic.claude-sonnet-4-6</code></td>
+</tr>
+<tr>
+  <td>AWS_REGION</td>
+  <td><code>ap-southeast-2</code></td>
+  <td>—</td>
+  <td>AWS 區域。Bedrock 呼叫、DynamoDB 連線、SSM 讀取共用。</td>
+</tr>
+<tr>
+  <td>BEDROCK_HAIKU_MODEL_ID</td>
+  <td><code>au.anthropic.claude-haiku-4-5-20251001-v1:0</code></td>
+  <td>—</td>
+  <td>Haiku 模型 ID，用於 Stance 分類（比 Sonnet 便宜）。</td>
+</tr>
+<tr>
+  <td>BEDROCK_MAX_TOKENS</td>
+  <td><code>1024</code></td>
+  <td>—</td>
+  <td>Bedrock 敘事生成最大 token 數。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_ONLINE_STANCE</td>
+  <td>未設</td>
+  <td>—</td>
+  <td>即使在 <code>real-off</code> 模式也啟用線上 stance 分類。未設 = stance 離線。</td>
+</tr>
+</table>
+
+<h3 id="server" class="env-cat">3. HTTP Server</h3>
+
+<table class="env-table">
+<tr><th>變數</th><th>預設值</th><th>必要</th><th>說明</th></tr>
+<tr>
+  <td>PORT</td>
+  <td><code>8080</code></td>
+  <td>—</td>
+  <td>HTTP server 監聽埠。App Runner 預設 PORT=8080。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_CSP_MODE</td>
+  <td><code>legacy</code></td>
+  <td>—</td>
+  <td>CSP 模式：<code>legacy</code>（零 JS SSR）／ <code>react</code>（SPA）。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_TRUST_PROXY</td>
+  <td>未設</td>
+  <td>—</td>
+  <td>信任 X-Real-IP / X-Forwarded-For headers（nginx 反向代理時需設）。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_CORS_ALLOW_ORIGINS</td>
+  <td><code>""</code></td>
+  <td>—</td>
+  <td>CORS 允許來源（逗號分隔）。空白 = same-origin only。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_WEB_MAX_ACTIVE_REQUESTS</td>
+  <td><code>32</code></td>
+  <td>—</td>
+  <td>請求並行上限。超過回 <code>503</code>。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_SWAGGER</td>
+  <td><code>0</code></td>
+  <td>—</td>
+  <td>設 <code>1</code> 啟用 Swagger UI @ <code>/docs</code>。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_ENV</td>
+  <td>未設</td>
+  <td>—</td>
+  <td><code>prod</code> 或 <code>production</code> 觸發 production guard。</td>
+</tr>
+</table>
+
+<h3 id="cache" class="env-cat">4. Cache / 儲存後端</h3>
+
+<table class="env-table">
+<tr><th>變數</th><th>預設值</th><th>必要</th><th>說明</th></tr>
+<tr>
+  <td>CACHE_BACKEND</td>
+  <td><code>dynamodb</code></td>
+  <td>—</td>
+  <td>Connector cache 後端：<code>dynamodb</code> / <code>json</code> / <code>sqlite</code>。<br>測試預設強制 <code>json</code>（conftest.py）。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_SQLITE_PATH</td>
+  <td><code>out/trustforge.sqlite3</code></td>
+  <td>—</td>
+  <td>SQLite 資料庫路徑（shared cache 模式）。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_HOME</td>
+  <td>src/ 父目錄</td>
+  <td>—</td>
+  <td>根目錄覆寫。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_CACHE_DIR</td>
+  <td>自動</td>
+  <td>—</td>
+  <td>JSON cache 目錄（CACHE_BACKEND=json 時使用）。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_COST_LEDGER_PATH</td>
+  <td><code>out/cost_ledger.jsonl</code></td>
+  <td>—</td>
+  <td>成本帳本檔案路徑。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_SOURCE_ARCHIVE_PATH</td>
+  <td>SQLite out/</td>
+  <td>—</td>
+  <td>來源事件歸檔位置（SQLite）。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_RUNTIME_STATE_PATH</td>
+  <td><code>out/trustforge-runtime-control.json</code></td>
+  <td>—</td>
+  <td>Runtime control 狀態檔案路徑。</td>
+</tr>
+</table>
+
+<h3 id="cost" class="env-cat">5. 成本控管</h3>
+
+<table class="env-table">
+<tr><th>變數</th><th>預設值</th><th>必要</th><th>說明</th></tr>
+<tr>
+  <td>TRUSTFORGE_BEDROCK_DAILY_USD_CAP</td>
+  <td><code>3</code></td>
+  <td>—</td>
+  <td>每日 Bedrock 花費上限（USD）。DynamoDB config store 有值時優先。<br>設 <code>0</code> = 完全禁用 Bedrock。</td>
+</tr>
+<tr>
+  <td>COST_BUDGET_USD</td>
+  <td>未設</td>
+  <td>—</td>
+  <td>Budget 告警門檻，供 <code>/api/costs</code> 前端用量條顯示。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_BUDGET_GUARD_BACKEND</td>
+  <td><code>dynamodb</code></td>
+  <td>—</td>
+  <td>Budget counter 後端：<code>dynamodb</code> / <code>local</code>。<br>local = process-local 計數，多實例不安全。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_BUDGET_COUNTER_TABLE</td>
+  <td><code>trustforge-budget-guard</code></td>
+  <td>—</td>
+  <td>DynamoDB budget counter 表名。</td>
+</tr>
+</table>
+
+<h3 id="security" class="env-cat">6. 安全 / Token / 管理</h3>
+
+<table class="env-table">
+<tr><th>變數</th><th>預設值</th><th>必要</th><th>說明</th></tr>
+<tr>
+  <td>TRUSTFORGE_LIVE_TOKEN</td>
+  <td><code>""</code></td>
+  <td>★</td>
+  <td>Live Bedrock 模式的 token（前端 <code>X-Live-Token</code> header 需匹配）。空白 = 禁用 live 模式。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_ADMIN_TOKEN</td>
+  <td>未設</td>
+  <td>—</td>
+  <td>Admin API token。未設 = admin API fail-closed。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_TOKEN_SSM_PREFIX</td>
+  <td>未設</td>
+  <td>—</td>
+  <td>SSM 參數名前綴（非機敏）。設如 <code>/trustforge/runtime</code>，app 啟動期自行從 SSM 讀取 token 值。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND</td>
+  <td><code>dynamodb</code></td>
+  <td>—</td>
+  <td>Analyze 去重後端：<code>dynamodb</code> / <code>json</code>。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_LEASE_TABLE</td>
+  <td><code>trustforge-analyze-leases</code></td>
+  <td>—</td>
+  <td>DynamoDB lease 表名。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_CW_METRICS</td>
+  <td><code>1</code></td>
+  <td>—</td>
+  <td>設 <code>1</code> 啟用 CloudWatch 指標上報。設 <code>0</code> 關閉。</td>
+</tr>
+</table>
+
+<h3 id="hermes" class="env-cat">7. Hermes 自主排程</h3>
+
+<table class="env-table">
+<tr><th>變數</th><th>預設值</th><th>必要</th><th>說明</th></tr>
+<tr>
+  <td>TRUSTFORGE_RUNTIME_SWITCH</td>
+  <td>未設</td>
+  <td>—</td>
+  <td>Runtime state 覆寫：<code>on</code> / <code>off</code>。local dev 預設 on；production 預設 off。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS</td>
+  <td>未設</td>
+  <td>★</td>
+  <td>Production 環境啟用 Hermes 連續排程的 opt-in 旗標。<br>在 production 中，即使 <code>TRUSTFORGE_RUNTIME_SWITCH=on</code>，沒設此旗標也 fail-closed。</td>
+</tr>
+<tr>
+  <td>TRUSTFORGE_AGENTCORE</td>
+  <td>未設</td>
+  <td>—</td>
+  <td>啟用 AgentCore/Strands LLM 橋接器（實驗性）。</td>
+</tr>
+</table>
+
+<h3 id="frontend" class="env-cat">8. 前端建置</h3>
+
+<table class="env-table">
+<tr><th>變數</th><th>預設值</th><th>必要</th><th>說明</th></tr>
+<tr>
+  <td>VITE_API_PROXY_TARGET</td>
+  <td><code>http://13.211.110.218</code></td>
+  <td>—</td>
+  <td>前端 dev server（<code>npm run dev</code>）的 API proxy 目標。<br>本機開發設 <code>http://127.0.0.1:8080</code>。</td>
+</tr>
+</table>
+
+<h3 id="priority">9. 設定優先級（Config Store → Env）</h3>
+
+<p>部分設定存在 DynamoDB Admin Config Store（<code>admin_config.py</code>）中，可在執行期透過 Admin API 動態變更，不必重啟服務：</p>
+
+<table>
+<tr><th>Config Key</th><th>環境變數 fallback</th><th>說明</th></tr>
+<tr><td><code>live_token</code></td><td><code>TRUSTFORGE_LIVE_TOKEN</code></td><td>DynamoDB 有值 → 用 DynamoDB；否則用 env</td></tr>
+<tr><td><code>bedrock_enabled</code></td><td>—</td><td>布林值。DynamoDB 設定優先</td></tr>
+<tr><td><code>daily_usd_cap</code></td><td><code>TRUSTFORGE_BEDROCK_DAILY_USD_CAP</code></td><td>DynamoDB 有值 → 用 DynamoDB；否則用 env 預設常數</td></tr>
+</table>
+
+<div class="danger-box">
+<strong>安全提醒：</strong><code>TRUSTFORGE_LIVE_TOKEN</code> 和 <code>TRUSTFORGE_ADMIN_TOKEN</code> 為機敏值。來源碼一律不存真實 token 值（即使測試也不存）。deploy_ec2.sh 不含 token 傳遞——改由 app 啟動期從 SSM Parameter Store 讀取。
+</div>
+
+</article>
+
+<footer>
+  <a href="03-deployment.html">← 03 部署指南</a>
+  <span style="float:right"><a href="05-api.html">05 API 參考 →</a></span>
+  <div style="clear:both;margin-top:1rem;color:var(--mut);font-size:.8rem">
+    TrustForge 技術文件 · 04 環境變數參考 · v0.18.5
+  </div>
+</footer>
+
+</div></body></html>

@@ -1,0 +1,299 @@
+<!doctype html><html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>06 — 資料流與連接器 | TrustForge 技術文件</title>
+<meta name="description" content="TrustForge 完整資料流：從 7 大來源到最終報告的 Ingestion → Cache → Trust → Agent → Report 旅程。">
+<link rel="stylesheet" href="style.css?v=20260726-evidence-grade">
+<style>
+.toc { margin:1rem 0 1.2rem; border:1px solid var(--bd); border-radius:10px; background:var(--card); padding:.6rem .9rem; }
+.toc summary { cursor:pointer; color:var(--acc); font-size:.9rem; }
+.toc ol { margin:.5rem 0 0; padding-left:1.2rem; }
+.toc li { margin:.2rem 0; }
+.toc a { color:var(--mut); font-size:.88rem; }
+.toc a:hover { color:var(--fg); }
+.nav-bar { display:flex; gap:.6rem; margin-bottom:1.2rem; flex-wrap:wrap; }
+.nav-bar a { font-size:.9rem; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+.nav-bar a:hover { text-decoration:none; border-color:var(--acc); }
+.warn-box { background:rgba(210,153,34,.08); border:1px solid var(--warn); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.warn-box strong { color:var(--warn); }
+.info-box { background:rgba(88,166,255,.06); border:1px solid var(--acc); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.data-flow-diagram { background:var(--card2); border:1px solid var(--bd); border-radius:10px; padding:1.2rem; margin:1rem 0; font-family:monospace; font-size:.8rem; line-height:1.7; overflow:auto; white-space:pre; color:var(--fg); }
+</style>
+</head><body><div class="wrap">
+
+<div class="nav-bar"><a href="05-api.html">← 05 API 參考</a><a href="index.html">文件首頁</a><a href="07-operations.html">07 運維手冊 →</a></div>
+
+<article>
+<h2>06 — 資料流與連接器</h2>
+<p style="color:var(--mut)">Data Flow & Connectors · 從 7 大來源到最終報告的完整旅程</p>
+
+<details class="toc" open>
+<summary>目錄</summary>
+<ol>
+  <li><a href="#flow-overview">資料流全景</a></li>
+  <li><a href="#connectors">7 大來源連接器</a></li>
+  <li><a href="#cache">Cache 層設計</a></li>
+  <li><a href="#document">Document 資料結構</a></li>
+  <li><a href="#claim">Claim 抽取流程</a></li>
+  <li><a href="#evidence">Evidence 溯源鏈</a></li>
+  <li><a href="#report">Report 生成</a></li>
+  <li><a href="#lineage">Analysis Lineage（可稽核性）</a></li>
+  <li><a href="#storage">儲存層架構</a></li>
+</ol>
+</details>
+
+<h3 id="flow-overview">1. 資料流全景</h3>
+
+<div class="data-flow-diagram">
+                    ┌──────────────────────────────────────────────┐
+                    │          資料流全景：5 階段端到端             │
+                    └──────────────────────────────────────────────┘
+使用者 Query
+  │  coin=BTC, type=multi_source, q="現在適合進場嗎？"
+  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 1: Source Ingestion（多源收集）                            │
+│                                                                  │
+│  prices ───→ load_ohlcv() ───→ data/data/{COIN}_daily_ohlcv.csv │
+│  news ─────→ CachedSource ──→ DynamoDB / JSON cache             │
+│  social ───→ CachedSource ──→ DynamoDB / JSON cache             │
+│  onchain ──→ CachedSource ──→ DynamoDB / JSON cache             │
+│  regulatory→ CachedSource ──→ DynamoDB / JSON cache             │
+│  coingecko → CachedSource ──→ DynamoDB / JSON cache             │
+│  hoyabit ──→ CachedSource ──→ DynamoDB / JSON cache             │
+│                                                                  │
+│  輸出: List[Document]                                            │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 2: Claim Extraction（主張抽取）★ 首次 Bedrock 呼叫         │
+│                                                                  │
+│  bedrock.extract_claims_with_llm() ─→ List[Claim]                │
+│  若 Bedrock 不可用 → regex fallback                              │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 3: Trust Scoring（信任評分）★ 純演算法，無 Bedrock         │
+│                                                                  │
+│  trust.scoring.score() ─→ List[ScoredClaim]                      │
+│    ├─ SourceReputation: 來源信譽 × 0.50                          │
+│    ├─ CrossSourceCorroboration: 多源佐證 × 0.25                  │
+│    ├─ RecencyDecay: 時效衰減 × 0.15                              │
+│    └─ ManipulationPenalty: 操縱偵測 − 0.40                       │
+│                                                                  │
+│  trust.scoring.aggregate() ─→ TrustedBrief                       │
+│    ├─ 支撐證據 (supporting claims)                               │
+│    └─ 反方證據 (contrarian claims)                               │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 4: Narrative Generation（行文生成）★ 第二次 Bedrock 呼叫  │
+│                                                                  │
+│  agent.orchestrator.build_report()                               │
+│    ├─ _scored_to_evidence() ─→ List[Evidence]                   │
+│    ├─ _direction() ─→ 市場方向                                   │
+│    ├─ _derive_limits() ─→ 限制條件                               │
+│    ├─ detect_cross_source_signal() ─→ 來源分歧/共識              │
+│    ├─ trust.insights.detect_insights() ─→ 獨特洞察               │
+│    └─ Bedrock narrative ─→ market_judgment（含 claim_id 溯源）   │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 5: Delivery（交付）                                        │
+│                                                                  │
+│  輸出: Report + List[Evidence] + ExecutionLog                    │
+│  格式: report.md + evidence.json + execution_log.jsonl           │
+│  或 Web UI: HTML (SSR) / JSON (/api/analyze)                    │
+└─────────────────────────────────────────────────────────────────┘
+</div>
+
+<h3 id="connectors">2. 7 大來源連接器</h3>
+
+<table>
+<tr><th>來源</th><th>模組</th><th>輸入</th><th>輸出</th><th>Cache 後端</th></tr>
+<tr>
+  <td><strong>價格 OHLCV</strong></td>
+  <td><code>ingestion/prices.py</code></td>
+  <td><code>data/data/{COIN}_daily_ohlcv.csv</code><br>HOYA BIT 官方 5 年日線（2021-06 至 2026-05）</td>
+  <td>價格事實（Document 含 SHA-256 lineage）</td>
+  <td>不經 cache（本地檔案讀取）</td>
+</tr>
+<tr>
+  <td><strong>新聞</strong></td>
+  <td><code>ingestion/news.py</code></td>
+  <td>RSS feeds（CoinDesk, CoinTelegraph, The Block, Reuters, Bloomberg 等）</td>
+  <td>標題、摘要、發布時間、來源 URL</td>
+  <td>DynamoDB / JSON</td>
+</tr>
+<tr>
+  <td><strong>社群</strong></td>
+  <td><code>ingestion/social.py</code></td>
+  <td>Reddit RSS, X/Twitter</td>
+  <td>情緒、熱度、喊單、討論量</td>
+  <td>DynamoDB / JSON</td>
+</tr>
+<tr>
+  <td><strong>鏈上</strong></td>
+  <td><code>ingestion/onchain.py</code></td>
+  <td>blockchain.com, etherscan, Fear & Greed Index</td>
+  <td>大額轉帳、交易所流入/流出、恐懼貪婪</td>
+  <td>DynamoDB / JSON</td>
+</tr>
+<tr>
+  <td><strong>監管</strong></td>
+  <td><code>ingestion/regulatory.py</code></td>
+  <td>SEC EDGAR, 政府公告</td>
+  <td>政策、合規事件</td>
+  <td>DynamoDB / JSON</td>
+</tr>
+<tr>
+  <td><strong>CoinGecko</strong></td>
+  <td><code>ingestion/coingecko.py</code></td>
+  <td>CoinGecko API</td>
+  <td>即時報價、社群情緒、開發活動</td>
+  <td>DynamoDB / JSON</td>
+</tr>
+<tr>
+  <td><strong>HOYA BIT</strong></td>
+  <td><code>ingestion/hoyabit.py</code></td>
+  <td>HOYA BIT exchange API</td>
+  <td>報價、深度、成交</td>
+  <td>DynamoDB / JSON</td>
+</tr>
+</table>
+
+<h3 id="cache">3. Cache 層設計</h3>
+
+<div class="info-box">
+<strong>核心原則：產品路徑永不直接打真實 API。</strong>所有即時資料來源都經 <code>CachedSource</code> 包裝（<code>ingestion/cache.py</code>），只讀 cache。真實 API 抓取由 <code>scripts/fetch_scheduler.py</code> 排程寫入。
+</div>
+
+<h4>3.1 Cache 後端架構</h4>
+
+<table>
+<tr><th>後端</th><th>類別</th><th>適用場景</th><th>多實例安全</th></tr>
+<tr><td><code>DynamoDBCache</code></td><td><code>DynamoDBCache</code></td><td>Production（多 EC2 / Lambda 共享）</td><td>是</td></tr>
+<tr><td><code>JsonCacheBackend</code></td><td><code>JsonCacheBackend</code></td><td>本地開發、測試、單機部署</td><td>否</td></tr>
+<tr><td><code>SqliteCacheBackend</code></td><td><code>SqliteCacheBackend</code></td><td>單機開發（跨啟動持久）</td><td>否</td></tr>
+</table>
+
+<h4>3.2 Source Archive（歸檔層）</h4>
+
+<p><code>source_archive.py</code> 提供不可變的來源事件歸檔（SQLite），供歷史 replay 使用：</p>
+<ul>
+  <li>每筆記錄有 <strong>三個時間值</strong>：<code>published_at</code>（文檔發布時間／或明確 unknown）、<code>fetched_at</code>（cache 抓取時間）、<code>snapshot_at</code>（歸檔時間）</li>
+  <li>Formal replay 只能選取 <code>snapshot_at</code> ≤ <code>run_started_at</code> 的歸檔——同日稍晚拍的 snapshot 會被拒絕</li>
+  <li>缺失的歷史歸檔不會被「用當前 cache 重建」——保持誠實的資訊時間邊界</li>
+</ul>
+
+<h3 id="document">4. Document 資料結構</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>Document</b>（schema_version: 1.0.0）
+  ├─ source      : str         # 來源名稱（e.g. "BTC price OHLCV"）
+  ├─ kind        : str         # 來源類別（price/news/social/onchain/regulatory/hoyabit/coingecko）
+  ├─ content     : str         # 原始內容
+  ├─ corpus      : str         # 清洗後內容（用於 claim 抽取）
+  ├─ published_at: datetime    # 文檔發布時間
+  ├─ fetched_at  : datetime    # cache 抓取時間
+  ├─ meta        : dict        # 來源特異欄位（如 author、tag、url）
+  ├─ timestamp   : datetime    # Document 建構時間
+  └─ schema_version: str      # 契約版本
+</pre>
+
+<h3 id="claim">5. Claim 抽取流程</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>Claim</b>
+  ├─ claim_id    : str         # 唯一識別碼（全管線不變）
+  ├─ text        : str         # 主張內容
+  ├─ kind        : str         # fact | inference | opinion
+  │                              fact: 只能來自 price/onchain/regulatory
+  │                              inference: 社群/新聞推論
+  │                              opinion: 主觀判斷
+  ├─ direction   : str         # bullish | bearish | neutral
+  ├─ confidence  : float       # 來源信心（由 stance classifier 產出）
+  └─ source_doc  : Document    # 來源文檔引用
+</pre>
+
+<p><strong>Fact 型強制規則</strong>：<code>bedrock.py</code> 強制 <code>fact</code> 型 claim 只能來自客觀來源（price/onchain/regulatory）。社群/新聞主張一律降為 <code>inference</code>，不得宣稱是事實。這是競賽反作弊的核心機制。</p>
+
+<h3 id="evidence">6. Evidence 溯源鏈</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>Evidence</b>（schema_version: 1.0.0）
+  ├─ source         : str      # 來源名稱
+  ├─ fetched_at     : datetime # 資料抓取時間
+  ├─ content_reference: str    # 引用內容片段
+  ├─ claim_id       : str      # 對應的 Claim ID（全管線溯源）
+  ├─ trust_score    : float    # 信任分數
+  ├─ trust_components: {       # 信任分數分量分解
+  │    reputation     : float
+  │    corroboration  : float
+  │    recency        : float
+  │    manipulation   : float
+  │  }
+  ├─ stance         : str      # bullish | bearish | neutral
+  ├─ author         : str|null # 來源使用者名稱（內部用，不對外暴露）
+  └─ decision_score : float    # 比較模式決策分
+</pre>
+
+<div class="warn-box">
+<strong>隱私邊界：</strong><code>author</code> 僅存於內部 cache/快照，供未來 detect 用。<code>/api/analyze</code>、<code>/api/overview</code>、<code>/api/history</code> 等公開端點在序列化邊界過濾掉此欄位。
+</div>
+
+<h3 id="report">7. Report 生成</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>Report</b>（schema_version: 1.0.0）
+  ├─ coin             : str    # 幣種
+  ├─ coin_cn          : str    # 幣種中文名
+  ├─ question         : str    # 原始問題
+  ├─ question_type    : str    # multi_source | hypothesis | comparison
+  ├─ direction        : str    # 偏多 | 偏空 | 中性 | 不明
+  ├─ decision_state   : str    # abstain | low_confidence | normal
+  ├─ calibrated_confidence: float  # 校準信心
+  ├─ market_judgment  : str    # 市場判斷（Bedrock 生成，含 claim_id）
+  ├─ key_basis        : list   # 關鍵支撐證據
+  ├─ limits           : list   # 限制條件／可推翻結論的因素
+  ├─ trust_radar      : dict   # 多維度信任雷達（按 kind 分）
+  ├─ trust_components_aggregate: dict  # 信任分量聚合
+  ├─ insight_labels   : list   # 獨特洞察標籤
+  ├─ cross_source_signal: dict # 跨源分歧/共識
+  ├─ snapshots        : list   # 歷史快照（比較模式用）
+  └─ schema_version   : str    # 契約版本
+</pre>
+
+<h3 id="lineage">8. Analysis Lineage（可稽核性）</h3>
+
+<p>每份結果都能由 <code>analysis_lineage_events</code> 反向追溯到固定 snapshot 與完整五階段執行：</p>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">snapshot_created → job_enqueued → stage_started/stage_completed → result_published</pre>
+
+<ul>
+  <li>每個事件保存 <code>snapshot_id</code>、<code>job_id</code>、stage、entity/parent 關係、時間與非敏感執行 metadata</li>
+  <li>SQLite trigger 禁止 UPDATE/DELETE——重試與失敗追加新 event，不覆蓋先前歷史</li>
+  <li><code>AnalysisFlow.lineage(job_id=...)</code> 提供稽核查詢</li>
+</ul>
+
+<h3 id="storage">9. 儲存層架構</h3>
+
+<p>詳見 <code>docs/architecture/TRUSTFORGE-STORAGE-ROADMAP.md</code>。三個階段：</p>
+
+<table>
+<tr><th>階段</th><th>技術</th><th>用途</th><th>狀態</th></tr>
+<tr><td><strong>現在</strong></td><td>SQLite</td><td>活動題目、分析 queue、不可變 snapshot、結果、lineage、feature values、upgrade approvals</td><td>repo 已實作；線上狀態以 <code>/api/status</code> 為準</td></tr>
+<tr><td><strong>下一階段</strong></td><td>Parquet + DuckDB</td><td>當 SQLite >10GB 或 replay query p95 >30s 時，匯出 immutable Bronze/quarantine/lineage/feature values</td><td>已規劃</td></tr>
+<tr><td><strong>Production Scale</strong></td><td>S3 + Iceberg</td><td>多 worker/節點共享、schema evolution、time travel、retention</td><td>已規劃</td></tr>
+</table>
+
+</article>
+
+<footer>
+  <a href="05-api.html">← 05 API 參考</a>
+  <span style="float:right"><a href="07-operations.html">07 運維手冊 →</a></span>
+  <div style="clear:both;margin-top:1rem;color:var(--mut);font-size:.8rem">
+    TrustForge 技術文件 · 06 資料流與連接器 · v0.18.5
+  </div>
+</footer>
+
+</div></body></html>
