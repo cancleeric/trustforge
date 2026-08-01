@@ -30,7 +30,7 @@ TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，�
 | 測試檔 | 394 個 |
 | 測試函式 | 6,259 個 |
 | 主文件索引 | [`docs/README.md`](docs/README.md) |
-| Devlog 技術文件鏡像 | [`docs/technical-docs/README.md`](docs/technical-docs/README.md) |
+| 技術文件（Markdown） | [`docs/technical-docs/README.md`](docs/technical-docs/README.md)；HTML 版另存 [`docs/technical-docs/html/`](docs/technical-docs/html/) |
 | 比賽交付文件 | [`docs/competition/`](docs/competition/) |
 
 ---
@@ -69,7 +69,7 @@ TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，�
 
 - [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)
 - [`docs/architecture/AWS-ARCHITECTURE.md`](docs/architecture/AWS-ARCHITECTURE.md)
-- [`docs/technical-docs/02-architecture.html`](docs/technical-docs/02-architecture.html)
+- [`docs/technical-docs/02-architecture.md`](docs/technical-docs/02-architecture.md)（HTML 版：[`docs/technical-docs/html/02-architecture.html`](docs/technical-docs/html/02-architecture.html)）
 
 ---
 
@@ -189,9 +189,10 @@ pytest -q
 | 區域 | 入口 | 用途 |
 |---|---|---|
 | 主文件索引 | [`docs/README.md`](docs/README.md) | 所有規劃、技術、交付文件總入口 |
-| 技術文件鏡像 | [`docs/technical-docs/README.md`](docs/technical-docs/README.md) | 從 devlog 技術文件同步到主 repo 的交付版文件 |
-| Evidence map | [`docs/technical-docs/00-evidence-map.html`](docs/technical-docs/00-evidence-map.html) | 技術主張與佐證矩陣 |
-| 比賽投稿 | [`docs/technical-docs/16-competition-submission.html`](docs/technical-docs/16-competition-submission.html) | 投稿與展示口徑 |
+| 技術文件（Markdown） | [`docs/technical-docs/README.md`](docs/technical-docs/README.md) | 從 devlog 技術文件同步到主 repo 的交付版文件；GitHub / code review 以 Markdown 為主 |
+| 技術文件（HTML） | [`docs/technical-docs/html/index.html`](docs/technical-docs/html/index.html) | 原 devlog 視覺版另存一份，適合瀏覽器展示或離線交付 |
+| Evidence map | [`docs/technical-docs/00-evidence-map.md`](docs/technical-docs/00-evidence-map.md) | 技術主張與佐證矩陣；HTML 版：[`docs/technical-docs/html/00-evidence-map.html`](docs/technical-docs/html/00-evidence-map.html) |
+| 比賽投稿 | [`docs/technical-docs/16-competition-submission.md`](docs/technical-docs/16-competition-submission.md) | 投稿與展示口徑；HTML 版：[`docs/technical-docs/html/16-competition-submission.html`](docs/technical-docs/html/16-competition-submission.html) |
 | 架構 | [`docs/architecture/`](docs/architecture/) | 架構設計、ADR、資料契約 |
 | 競賽 | [`docs/competition/`](docs/competition/) | 官方規範、簡報、講稿、交付清單 |
 | AIMS / EU AI | [`docs/aims/README.md`](docs/aims/README.md) | ISO/IEC 42001 與 EU AI Act overlay 草案；不代表正式認證或 conformity claim |
@@ -212,7 +213,7 @@ trustforge/
 │   ├── README.md                # 文件總索引
 │   ├── competition/             # 競賽規範、簡報、講稿、交付清單
 │   ├── architecture/            # 架構、資料契約、ADR
-│   ├── technical-docs/          # devlog 技術文件鏡像
+│   ├── technical-docs/          # Markdown 技術文件；html/ 另存 HTML 靜態版
 │   ├── plans/                   # 開發計劃與差距分析
 │   ├── qa/                      # 測試、QA、研究發現
 │   └── aims/                    # AIMS / EU AI Act overlay 草案

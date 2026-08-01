@@ -1,0 +1,253 @@
+<!doctype html><html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>08 — 信任演算法詳解 | TrustForge 技術文件</title>
+<meta name="description" content="TrustForge 信任評分演算法：TrustScore 公式、權重矩陣、Stance 分類、Dawid-Skene EM、Conformal Calibration。">
+<link rel="stylesheet" href="style.css?v=20260726-evidence-grade">
+<style>
+.toc { margin:1rem 0 1.2rem; border:1px solid var(--bd); border-radius:10px; background:var(--card); padding:.6rem .9rem; }
+.toc summary { cursor:pointer; color:var(--acc); font-size:.9rem; }
+.toc ol { margin:.5rem 0 0; padding-left:1.2rem; }
+.toc li { margin:.2rem 0; }
+.toc a { color:var(--mut); font-size:.88rem; }
+.toc a:hover { color:var(--fg); }
+.nav-bar { display:flex; gap:.6rem; margin-bottom:1.2rem; flex-wrap:wrap; }
+.nav-bar a { font-size:.9rem; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+.nav-bar a:hover { text-decoration:none; border-color:var(--acc); }
+.warn-box { background:rgba(210,153,34,.08); border:1px solid var(--warn); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.warn-box strong { color:var(--warn); }
+.info-box { background:rgba(88,166,255,.06); border:1px solid var(--acc); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.formula { background:var(--card2); border:1px solid var(--bd); border-radius:10px; padding:1rem; margin:.8rem 0; font-family:monospace; font-size:.88rem; line-height:1.8; overflow:auto; }
+.math-var { color:var(--acc); }
+.math-op { color:var(--warn); }
+.math-score { color:var(--good); }
+</style>
+</head><body><div class="wrap">
+
+<div class="nav-bar"><a href="07-operations.html">← 07 運維手冊</a><a href="index.html">文件首頁</a><a href="09-frontend.html">09 前端架構 →</a></div>
+
+<article>
+<h2>08 — 信任演算法詳解</h2>
+<p style="color:var(--mut)">Trust Algorithm · TrustScore 公式、權重矩陣、Stance 分類、Dawid-Skene、Conformal</p>
+
+<details class="toc" open>
+<summary>目錄</summary>
+<ol>
+  <li><a href="#overview">演算法總覽</a></li>
+  <li><a href="#trust-score">TrustScore 計算公式</a></li>
+  <li><a href="#weights">預設權重矩陣</a></li>
+  <li><a href="#reputation">Source Reputation（來源信譽）</a></li>
+  <li><a href="#corroboration">Cross-Source Corroboration（多源佐證）</a></li>
+  <li><a href="#recency">Recency Decay（時效衰減）</a></li>
+  <li><a href="#manipulation">Manipulation Penalty（操縱懲罰）</a></li>
+  <li><a href="#stance">Stance 分類（立場分類器）</a></li>
+  <li><a href="#dawid-skene">Dawid-Skene EM（動態來源信譽）</a></li>
+  <li><a href="#conformal">Conformal Calibration（校準）</a></li>
+  <li><a href="#insights">獨特洞察偵測</a></li>
+  <li><a href="#coordination">協同操縱偵測</a></li>
+</ol>
+</details>
+
+<h3 id="overview">1. 演算法總覽</h3>
+
+<p>TrustForge 的信任層（Layer 2）是整個系統的核心差異點。它不是把原始資料直接餵給 LLM 後再做分數後處理，而是在 LLM <strong>之前</strong>對每條主張做獨立信任評分。每個分量都有明確的數學定義和可調整的權重。</p>
+
+<div class="info-box">
+<strong>不可變量：</strong>TrustScore 四分量設計保證以下不變量——任一已確認操縱筆（<code>manipulation=1.0</code>）必然使總分低於無操縱情境；來源信譽由 Dawid-Skene EM 動態學習，不靠靜態白名單。
+</div>
+
+<h3 id="trust-score">2. TrustScore 計算公式</h3>
+
+<div class="formula">
+<span class="math-score">TrustScore</span> = <span class="math-var">w_src</span> <span class="math-op">×</span> <span class="math-var">SourceReputation</span>
+          <span class="math-op">+</span> <span class="math-var">w_corr</span> <span class="math-op">×</span> <span class="math-var">CrossSourceCorroboration</span>
+          <span class="math-op">+</span> <span class="math-var">w_rec</span> <span class="math-op">×</span> <span class="math-var">RecencyDecay</span>
+          <span class="math-op">−</span> <span class="math-var">w_manip</span> <span class="math-op">×</span> <span class="math-var">ManipulationPenalty</span>
+</div>
+
+<p>每個分量標準化至 [0, 1] 範圍。總分 range 為 [−w_manip, w_src + w_corr + w_rec]。</p>
+
+<table>
+<tr><th>分量</th><th>數學定義</th><th>範圍</th><th>說明</th></tr>
+<tr>
+  <td>SourceReputation</td>
+  <td>Dawid-Skene posterior（動態）+ static tier weight</td>
+  <td>[0, 1]</td>
+  <td>來源歷史正確率 × 來源等級權重</td>
+</tr>
+<tr>
+  <td>CrossSourceCorroboration</td>
+  <td>Jaccard 相似度（同主張 ÷ 獨立來源總數），扣除回音室</td>
+  <td>[0, 1]</td>
+  <td>越多獨立來源佐證同一主張 → 越高分</td>
+</tr>
+<tr>
+  <td>RecencyDecay</td>
+  <td><code>e^(−λ × hours_ago)</code>，加密幣市場半衰期 λ = ln(2)/4（~4h）</td>
+  <td>[0, 1]</td>
+  <td>資訊越新 → 權重越重</td>
+</tr>
+<tr>
+  <td>ManipulationPenalty</td>
+  <td>4 項子分數合計（見 §7）</td>
+  <td>[0, 1]</td>
+  <td>喊單/bot/極化 → 懲罰扣分</td>
+</tr>
+</table>
+
+<h3 id="weights">3. 預設權重矩陣</h3>
+
+<table>
+<tr><th>權重</th><th>值</th><th>占總正分比例</th><th>說明</th></tr>
+<tr><td><code>w_src</code></td><td>0.50</td><td>55.6%</td><td>來源信譽最重要——可靠來源的資訊價值高於不可靠來源</td></tr>
+<tr><td><code>w_corr</code></td><td>0.25</td><td>27.8%</td><td>多源佐證次重要——獨立確認提供信心加成</td></tr>
+<tr><td><code>w_rec</code></td><td>0.15</td><td>16.7%</td><td>時效性輔助——加密市場資訊快速貶值</td></tr>
+<tr><td><code>w_manip</code></td><td>0.40</td><td>44.4%*</td><td>操縱懲罰權重故意設高——寧可錯殺，避免把操縱訊號當合法資訊</td></tr>
+</table>
+
+<p>*w_manip 是扣分項，百分比為相對總正分 (0.90) 的比例。</p>
+
+<p>權重定義在 <code>trust/scoring.py::DEFAULT_WEIGHTS</code>，可透過環境變數調整。</p>
+
+<h3 id="reputation">4. Source Reputation（來源信譽）</h3>
+
+<p>來源信譽由兩層組合：</p>
+
+<h4>4.1 Static Tier Weight（靜態來源等級）</h4>
+<table>
+<tr><th>等級</th><th>來源類型</th><th>權重</th></tr>
+<tr><td>Tier 1</td><td>On-chain、OHLCV、Regulatory（SEC）</td><td>1.00</td></tr>
+<tr><td>Tier 2</td><td>Mainstream News（Reuters, Bloomberg）</td><td>0.80</td></tr>
+<tr><td>Tier 3</td><td>Crypto Media（CoinDesk, CoinTelegraph）</td><td>0.60</td></tr>
+<tr><td>Tier 4</td><td>CoinGecko</td><td>0.50</td></tr>
+<tr><td>Tier 5</td><td>Anonymous Social（Reddit, X）</td><td>0.30</td></tr>
+</table>
+
+<h4>4.2 Dawid-Skene Dynamic Reputation（動態信譽）</h4>
+<p>Dawid-Skene EM 演算法（<code>trust/dawid_skene.py</code>）根據來源歷史正確率動態更新信譽分數：</p>
+<ul>
+  <li>收集每輪分析中各來源對各 claim 的 stance 標記（bullish/bearish/neutral）</li>
+  <li>EM iteration 收斂到每個來源的 error rate matrix（confusion matrix）</li>
+  <li>Error rate 轉換為動態信譽乘數（1 − error_estimate）</li>
+  <li>靜態 tier weight × 動態信譽乘數 = 最終 SourceReputation</li>
+</ul>
+
+<div class="warn-box">
+<strong>離線 fallback：</strong>當 Bedrock 不可用、stance 分類無法線上進行時，Dawid-Skene 從歷史 stance cache（<code>trust/stance_cache.py</code>）讀取標記。若連 cache 都沒有 → 使用靜態 tier weight，不誤報。
+</div>
+
+<h3 id="corroboration">5. Cross-Source Corroboration（多源佐證）</h3>
+
+<p>計算同一主張被幾個<strong>獨立</strong>來源佐證：</p>
+
+<div class="formula">
+CorroborationScore = |S_supporting| / (|S_supporting| + α × |S_contrarian|)
+</div>
+
+<ul>
+  <li><strong>回音室排除</strong>：轉發、引述同一來源的不計為獨立佐證。來源間若有明確轉發鏈（如 X 轉發 Reddit、新聞轉述 X），從來源等級判斷獨立性。</li>
+  <li><strong>Stance pair</strong>：兩個來源同時出現 bullish + bearish 主張時，視為「分歧（divergence）」，不是佐證——反而會觸發 <code>cross_source_signal</code> 標記。</li>
+  <li><strong>α = 0.5</strong>：反方證據加權——讓分歧更有影響力（不一致的資訊比一致的資訊更有資訊量）。</li>
+</ul>
+
+<h3 id="recency">6. Recency Decay（時效衰減）</h3>
+
+<div class="formula">
+RecencyDecay(doc) = e^(−λ × hours_since_publish)
+</div>
+
+<table>
+<tr><th>參數</th><th>值</th><th>說明</th></tr>
+<tr><td>λ</td><td>ln(2) / 4 ≈ 0.173</td><td>加密市場資訊半衰期 ~4 小時</td></tr>
+<tr><td>4h 後</td><td>0.50</td><td>可信度剩一半</td></tr>
+<tr><td>12h 後</td><td>0.125</td><td>幾乎不具時效價值</td></tr>
+<tr><td>24h 後</td><td>0.016</td><td>接近無效</td></tr>
+</table>
+
+<p>若文檔無 <code>published_at</code> → 使用 <code>fetched_at</code>。若兩者皆缺 → 給予預設 0.3（中性保守值）。</p>
+
+<h3 id="manipulation">7. Manipulation Penalty（操縱懲罰）</h3>
+
+<p>ManipulationPenalty 由 4 項子分數加總（上限 1.0）：</p>
+
+<table>
+<tr><th>子偵測器</th><th>偵測目標</th><th>觸發條件</th><th>子分數</th></tr>
+<tr><td><strong>Sentiment Polarization</strong></td><td>情緒極化</td><td>同一來源短期內全部 bullish/bearish，方向單一且強度極端</td><td>0.25</td></tr>
+<tr><td><strong>Bot Detection</strong></td><td>Bot 轉發</td><td>相同文字在短時間內被多個帳號重複發送</td><td>0.25</td></tr>
+<tr><td><strong>Pump-and-Dump Pattern</strong></td><td>拉盤/砸盤</td><td>極端正面 + 無實質內容（無價格/鏈上支撐）+ 短時間群發</td><td>0.30</td></tr>
+<tr><td><strong>Contradiction with Objective Data</strong></td><td>與客觀資料矛盾</td><td>社群說 bullish 但 OHLCV/鏈上資料是 bearish</td><td>0.20</td></tr>
+</table>
+
+<p>Bedrock judge（Haiku）輔助評分：對高風險 discourse 做 semantic evaluation，但不完全依賴 LLM——所有偵測器都有 rule-based 基礎。</p>
+
+<h3 id="stance">8. Stance 分類（立場分類器）</h3>
+
+<p>Stance 分類器（透過 <code>bedrock.classify_stance()</code>）使用 AWS Bedrock Converse API + tool-use 將每條 claim 分類為三種立場：</p>
+
+<table>
+<tr><th>Stance</th><th>語意</th><th>範例</th></tr>
+<tr><td><code>bullish</code></td><td>看多 / 正面</td><td>「BTC 突破 7 萬，機構資金流入加速」</td></tr>
+<tr><td><code>bearish</code></td><td>看空 / 負面</td><td>「交易所 BTC 流入量創 3 月新高，潛在賣壓」</td></tr>
+<tr><td><code>neutral</code></td><td>中性 / 事實描述</td><td>「BTC 24h 成交量 25B USD」</td></tr>
+</table>
+
+<div class="info-box">
+<strong>Stance Cache（<code>trust/stance_cache.py</code>）：</strong>為了避免重複 Bedrock 呼叫（每條 claim 都打一次太貴），stance 分類結果會寫入持久化 cache。相同 content hash 的 claim 可重用前次 stance 結果。Bedrock Haiku 用於 stance（便宜）、Sonnet 用於 narrative（貴重），成本拆分到成本帳本不同的 model key。
+</div>
+
+<h3 id="dawid-skene">9. Dawid-Skene EM（動態來源信譽）</h3>
+
+<p>Dawid-Skene 是一種無監督 EM 演算法，用於從多個 annotator（來源）的標記中估計每個 annotator 的 error rate。</p>
+
+<h4>演算法步驟</h4>
+<ol>
+  <li><strong>E-step</strong>：給定當前 error rate 估計，計算每個 claim 的真實立場（ground truth）後驗分布</li>
+  <li><strong>M-step</strong>：給定 ground truth 後驗，更新每個來源的 confusion matrix（P(標記=Y | 真實=X)）</li>
+  <li><strong>收斂</strong>：迭代至 error rate 變化 < ε（預設 1e-4）</li>
+  <li><strong>動態信譽乘數</strong>：1 − avg_error_rate（來源在三個 class 上的平均錯誤率）</li>
+</ol>
+
+<p>實作於 <code>trust/dawid_skene.py</code>。與 Dawid-Skene 配合的 truth-discovery 評估報告見 <code>docs/architecture/TRUTH-DISCOVERY-EVALUATION-2026-07-13.md</code>。</p>
+
+<h3 id="conformal">10. Conformal Calibration（校準）</h3>
+
+<p>TrustForge 的 <code>calibrated_confidence</code> 使用簡化版分位數校準（quantile calibration）——<strong>不是</strong>嚴謹 conformal prediction 的覆蓋率承諾。</p>
+
+<div class="warn-box">
+<strong>誠實邊界：</strong>W4 Split Conformal Prediction 研究（<code>docs/qa/CONFORMAL-FINDING.md</code>）數學實作完成、JOINT coverage 達標，但代理訊號 pseudo-AUC ≈ 0.49（等同隨機）——誠實負結果，不接進 production。當前 <code>calibrated_confidence</code> 反映的是<b>資訊完整度</b>（有多少資訊、多少來源支撐），不是預測準確度。
+</div>
+
+<table>
+<tr><th>信心等級</th><th>範圍</th><th>觸發條件</th></tr>
+<tr><td>高</td><td>> 0.75</td><td>3+ 獨立來源、claims > 10、無操縱訊號</td></tr>
+<tr><td>中</td><td>0.50 – 0.75</td><td>2+ 來源、claims > 5</td></tr>
+<tr><td>低</td><td>0.35 – 0.50</td><td>1 來源或 claims < 5</td></tr>
+<tr><td>棄權（abstain）</td><td>< 0.35</td><td>去重後獨立來源數 < 2 或 calibrated_confidence < 0.35</td></tr>
+</table>
+
+<h3 id="insights">11. 獨特洞察偵測</h3>
+
+<p><code>trust/insights.py</code> 提供四種洞察類型：</p>
+
+<table>
+<tr><th>洞察類型</th><th>偵測方法</th><th>範例</th></tr>
+<tr><td><strong>Smart-Money Divergence</strong></td><td>社群情緒 bullish 但鏈上大戶 outflow</td><td>「社群同步看多但鯨魚在出貨」</td></tr>
+<tr><td><strong>Manipulation Surge</strong></td><td>短期內 manipulation_score 急遽升高</td><td>「過去 2h 疑似喊單訊息暴增 5 倍」</td></tr>
+<tr><td><strong>Self-Contradiction</strong></td><td>同一來源短時間內立場 180 度轉變</td><td>「CoinDesk 先報 bullish 4h 後改 bearish」</td></tr>
+<tr><td><strong>Source Absence</strong></td><td>重要來源（SEC、鏈上）無資料</td><td>「監管來源近 72h 無更新——資訊缺口警告」</td></tr>
+</table>
+
+<h3 id="coordination">12. 協同操縱偵測（待實作）</h3>
+
+<p>Account 維度的資料累積已前置（<code>Evidence.author</code>），供未來 W3「協同操縱偵測」使用。目前不做任何跨平台關聯、衍生識別運算——不影響任何 trust 分數，不在 UI 顯示。上線前需重新評估 90-day TTL 是否足夠，是否需要主動刪除同步機制。</p>
+
+</article>
+
+<footer>
+  <a href="07-operations.html">← 07 運維手冊</a>
+  <span style="float:right"><a href="09-frontend.html">09 前端架構 →</a></span>
+  <div style="clear:both;margin-top:1rem;color:var(--mut);font-size:.8rem">
+    TrustForge 技術文件 · 07 信任演算法詳解 · v0.18.5
+  </div>
+</footer>
+
+</div></body></html>
