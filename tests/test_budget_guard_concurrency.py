@@ -275,6 +275,7 @@ def test_pipeline_run_concurrent_requests_only_admit_budget_bounded_bedrock(monk
             pl.run(
                 "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
                 data_mode="live", llm_mode="bedrock",
+                run_scope_id="test-budget-conc-thread",
             )
         except BaseException as exc:  # pragma: no cover - 只在真的爆炸時記錄
             with errors_lock:
@@ -327,6 +328,7 @@ def test_pipeline_run_single_request_degrades_when_remaining_budget_below_max_co
     report, evidence, log = pl.run(
         "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
         data_mode="live", llm_mode="bedrock",
+        run_scope_id="test-budget-conc-degrade",
     )
     assert captured[0] == {"offline": True, "stance_offline": True}
     assert any("今日 Bedrock 預算已達上限" in s for s in report.limits)
@@ -357,6 +359,7 @@ def test_pipeline_run_reservation_released_even_when_run_agent_pipeline_raises(
         pl.run(
             "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
             data_mode="live", llm_mode="bedrock",
+            run_scope_id="test-budget-conc-crash",
         )
 
     assert _RESERVATION._reserved == pytest.approx(0.0)

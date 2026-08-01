@@ -12,9 +12,14 @@ from urllib.parse import urlencode
 
 import pytest
 
-from trustforge import lambda_handler, web
+from trustforge import lambda_handler, lambda_provider_cache, web
 from trustforge.comparison_contract import ComparisonReport, ComparisonRunResult
 from trustforge.schema import Evidence, QuestionType
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_provider_refresh(monkeypatch):
+    monkeypatch.setattr(lambda_provider_cache, "refresh_provider_cache", lambda coin: {})
 
 
 def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> dict:
@@ -165,10 +170,140 @@ def test_noncompetition_function_preserves_existing_routes(monkeypatch):
     assert lambda_handler._competition_mode() is None
 
 
+def test_noncompetition_analysis_never_refreshes_providers(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", None)
+    monkeypatch.setattr(
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: pytest.fail(f"noncompetition refresh attempted for {coin}"),
+    )
+    monkeypatch.setattr(web, "_do_analyze", lambda *args, **kwargs: (object(), [], []))
+    monkeypatch.setattr(web, "_render_report", lambda *args: "ok")
+
+    assert lambda_handler.handler(_event("/analyze", {"coin": "BTC"}))["statusCode"] == 200
+
+
+@pytest.mark.parametrize("coin", ["", "DOGE", "X" * 2048])
+def test_live_invalid_coin_never_refreshes_provider(monkeypatch, coin):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": coin, "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_invalid_comparison_second_coin_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "comparison", "coin": "BTC", "coin2": "DOGE", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_invalid_question_type_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "bogus", "coin": "BTC", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_rate_limited_request_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        web,
+        "_analyze_enforce_caller_rate_limit",
+        lambda *_args: (_ for _ in ()).throw(web.TooManyRequests("limited")),
+    )
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": "BTC", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 429
+    assert calls == []
+
+
+def test_live_comparison_refreshes_both_coins_and_counts_rate_limit_once(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    refreshed = []
+    limited = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda coin: refreshed.append(coin)
+    )
+    monkeypatch.setattr(
+        web, "_analyze_enforce_caller_rate_limit", lambda qs, ip: limited.append(ip)
+    )
+
+    def _comparison(*args, **kwargs):
+        assert kwargs["client_ip"] == "9.9.9.9"
+        assert kwargs["enforce_rate_limit"] is False
+        raise ValueError("stop after admission")
+
+    monkeypatch.setattr(web, "_do_comparison", _comparison)
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "comparison", "coin": "BTC", "coin2": "ETH", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert refreshed == ["BTC", "ETH"]
+    assert limited == ["9.9.9.9"]
+
+
 def test_secret_hydration_precedes_delayed_web_import():
     source = __import__("inspect").getsource(lambda_handler)
 
-    assert source.index("hydrate_live_token()") < source.index(
+    assert source.index("hydrate_lambda_secrets()") < source.index(
         'importlib.import_module(".web", __package__)'
     )
 
@@ -282,7 +417,7 @@ def test_lambda_live_token_header_case_insensitive_upper(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
     captured_qs = {}
 
-    def _fake_do_analyze(qs, client_ip=None):
+    def _fake_do_analyze(qs, client_ip=None, **kwargs):
         captured_qs.update(qs)
         return (object(), [], [])
 
@@ -350,7 +485,7 @@ def test_lambda_analyze_json_success_unaffected():
 def _authored_single(coin="BTC", query="lambda author leak test"):
     """真的跑一次 `web.run()`，尾端多附一筆帶 `author` 的 `Evidence`，
     模擬「連接器真的抓到來源平台公開 username」的情境。"""
-    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-lambda-authored")
     authored_ev = Evidence(
         source="reddit-bitcoin",
         fetched_at="2026-07-06T00:00:00Z",

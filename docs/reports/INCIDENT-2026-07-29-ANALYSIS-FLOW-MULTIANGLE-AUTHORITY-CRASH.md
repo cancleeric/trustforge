@@ -2,7 +2,7 @@
 
 - 日期：2026-07-29
 - 嚴重度：**P0**（使用者提交分析後報告無法產出）
-- 受影響環境：`trustforge-demo` EC2 (`i-0152b70368358a81c`, ap-southeast-2)
+- 受影響環境：`trustforge-demo` EC2 (`<EC2_INSTANCE_ID>`, ap-southeast-2)
 - 狀態：**根因已定位，修復方案已備（未部署）**
 - 診斷者：CEO (HurricaneSoft)
 

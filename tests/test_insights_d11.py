@@ -117,7 +117,7 @@ def test_d11_build_report_carries_insights():
     brief = aggregate(scored, query="BTC 分析", coin="BTC")
     report, _ = build_report(
         query="BTC 分析", coin="BTC", qtype=QuestionType.MULTI_SOURCE, brief=brief,
-        scored=scored,
+        scored=scored, run_scope_id="test-insights-d11",
     )
     assert isinstance(report, Report)
     assert isinstance(report.insights, list) and len(report.insights) >= 1

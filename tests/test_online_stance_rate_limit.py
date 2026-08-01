@@ -107,10 +107,10 @@ def test_do_analyze_default_switch_off_never_touches_online_stance_bucket(monkey
     captured = []
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
+                 data_mode=None, llm_mode=None, run_scope_id=""):
         captured.append({"data_mode": data_mode, "llm_mode": llm_mode})
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=run_scope_id)
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -143,7 +143,7 @@ def test_do_analyze_switch_on_passes_force_stance_offline_only_after_limit(monke
                  data_mode=None, llm_mode=None, **kwargs):
         captured.append(kwargs.get("force_stance_offline", False))
         import trustforge.pipeline as _pl
-        return _pl.run(coin, query, qtype, offline=True)
+        return _pl.run(coin, query, qtype, offline=True, run_scope_id=kwargs.get("run_scope_id", "test-online-stance"))
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -175,6 +175,7 @@ def test_do_analyze_switch_on_returns_200_style_result_not_error_when_over_limit
         return _pl.run(
             coin, query, qtype, offline=True,
             force_stance_offline=kwargs.get("force_stance_offline", False),
+            run_scope_id=kwargs.get("run_scope_id", "test-online-stance-multiline"),
         )
 
     monkeypatch.setattr(web, "run", fake_run)
@@ -204,7 +205,7 @@ def test_do_comparison_switch_on_passes_force_stance_offline_only_after_limit(mo
                              data_mode=None, llm_mode=None, **kwargs):
         captured.append(kwargs.get("force_stance_offline", False))
         import trustforge.pipeline as _pl
-        return _pl.run_comparison(coin_a, coin_b, query, offline=True)
+        return _pl.run_comparison(coin_a, coin_b, query, offline=True, run_scope_id=kwargs.get("run_scope_id", "test-online-stance-cmp"))
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 

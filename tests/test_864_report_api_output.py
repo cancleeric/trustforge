@@ -124,6 +124,7 @@ class TestReportCrossSourceSignal:
             brief=brief,
             client=client,
             scored=scored_claims,
+            run_scope_id="test-864-report-api",
         )
 
         # Report 應含 cross_source_signal（divergence）

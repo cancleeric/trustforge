@@ -119,6 +119,7 @@ def test_run_agent_pipeline_dynamic_reputation_offline_triggers_ds_em():
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1.0), now_fn=lambda: 1.0,
+        run_scope_id="test-w2-ds-trigger",
     )
     ds_evs = [e for e in evidence if e.reputation_mode == "ds_em"]
     assert ds_evs, "reputation_mode 未接線進 Evidence（W2 未真正啟用 DS EM 分支）"
@@ -377,6 +378,7 @@ def test_run_agent_pipeline_bedrock_call_count_unaffected_by_dynamic_reputation(
     run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=BedrockClient(offline=True), log=log, now_fn=lambda: 1.0,
+        run_scope_id="test-w2-two-bedrock-events",
     )
     bedrock_events = [e for e in log.events if e.get("tool") == "bedrock.complete"]
     assert len(bedrock_events) == 2, (
@@ -398,6 +400,7 @@ def test_small_sample_gate_still_active_via_production_pipeline():
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1.0), now_fn=lambda: 1.0,
+        run_scope_id="test-w2-small-sample",
     )
     for ev in evidence:
         if "reputation_prior" in ev.trust_components:

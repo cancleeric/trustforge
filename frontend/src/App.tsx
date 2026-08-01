@@ -17,6 +17,7 @@ import PeerMetricsPage from './pages/PeerMetricsPage'
 import NotificationsPage from './pages/NotificationsPage'
 import PlanningPage from './pages/PlanningPage'
 import GoalsPage from './pages/GoalsPage'
+import CarbonPage from './pages/CarbonPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { HermesI18nProvider } from './hermes/hermesI18n'
 
@@ -65,6 +66,7 @@ function RoutedContent() {
         <Route path="/peer-metrics" element={<PeerMetricsPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="/goals" element={<GoalsPage />} />
+        <Route path="/carbon" element={<CarbonPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </ErrorBoundary>

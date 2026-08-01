@@ -44,7 +44,7 @@ PITR status, and restore-drill output in the release evidence.
   `8a09f4da0e0f2210eb82fcfdcc7c6ea01f37cdfdbf24acddfc21add552ef2edb`.
 - Verify and non-overwriting local restore drill both succeeded.
 - Off-table copy: versioned and AES256-encrypted under
-  `s3://trustforge-deploy-795930814369/trustforge-ledger-archives/20260714T001021Z/`.
+  `s3://trustforge-deploy-<ACCOUNT_ID>/trustforge-ledger-archives/20260714T001021Z/`.
   The bucket's S3 versioning is `Enabled`; JSONL version ID is
   `KWbEsHeLQeyNDRd55b1hcLIyEvF58r.3` and manifest version ID is
   `NVHTd.g0s0AFlvr2THeq5bTx_IxKbDTJ`.

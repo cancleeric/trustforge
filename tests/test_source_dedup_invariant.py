@@ -49,6 +49,7 @@ def _run_report(brief, qtype=QuestionType.MULTI_SOURCE, query="分析 BTC", now:
         client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: now),
         now_fn=lambda: now,
+        run_scope_id="test-source-dedup",
     )
 
 

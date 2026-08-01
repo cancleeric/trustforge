@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -172,12 +173,17 @@ def _store(path: Path, observations: list[ShadowObservation]) -> ShadowEvidenceS
     return ShadowEvidenceStore(path, read_only=True)
 
 
-def _build(store: ShadowEvidenceStore, **kwargs):
+def _build(
+    store: Any,
+    *,
+    pit_cutoff: str = _iso(TEST_CUTOFF),
+    **kwargs,
+):
     return build_promotion_evidence_dataset(
         store,
         _identity(),
         load_policy(),
-        pit_cutoff=_iso(TEST_CUTOFF),
+        pit_cutoff=pit_cutoff,
         stale_after_days=30,
         **kwargs,
     )

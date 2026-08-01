@@ -165,8 +165,14 @@ def run(coin: str, query: str, qtype: QuestionType,
         _log: ExecutionLog | None = None,
         data_mode: str | None = None,
         llm_mode: str | None = None,
-        force_stance_offline: bool = False) -> tuple[Report, list[Evidence], ExecutionLog]:
+        force_stance_offline: bool = False,
+        run_scope_id: str = "") -> tuple[Report, list[Evidence], ExecutionLog]:
     """跑完整管線：collect → 多步 agent 推理 → 報告。回傳 (report, evidence, log)。
+
+    #960 run_scope_id：sentinel 預設空字串。pipeline.run 本身無 run id；web/cli 等
+    caller 須各自傳入 colon-free scope（如 `web-{nonce}`），或接受空字串的
+    fail-closed——build_report 會在發出 Evidence 前 raise（契約 §2.2：只有帶 run id
+    的路徑才產出 canonical claim_id）。formal 路徑（analysis_flow）走自己的 job_id。
 
     _log：可傳入外部 ExecutionLog（供 run_comparison 共用同一 log）；
           None 時自行建立新 log（原始行為）。
@@ -371,6 +377,7 @@ def run(coin: str, query: str, qtype: QuestionType,
             query, coin, qtype, docs,
             client=llm_client, log=log,
             ledger_persistence_observer=_observe_ledger_persistence,
+            run_scope_id=run_scope_id,
         )
         if "report" in _runtime_policies:
             _apply_report_policy(
@@ -445,8 +452,13 @@ def run_comparison(
     data_mode: str | None = None,
     llm_mode: str | None = None,
     force_stance_offline: bool = False,
+    run_scope_id: str = "",
 ) -> ComparisonRunResult:
     """比較分析：各跑一次完整 pipeline，共用 ExecutionLog，回傳 ComparisonRunResult。
+
+    #960 run_scope_id：sentinel 空（與 run() 同語意）。非 formal 路徑；caller 須傳
+    colon-free scope（如 `comparison-{nonce}`）或接受 fail-closed。兩幣各以
+    `{run_scope_id}-{coin}` 衍生 sub-scope，保持 colon-free 且兩 run 相異。
 
     ComparisonRunResult 支援 unpack 為 5-tuple ``(report_a, ev_a, report_b, ev_b, log)``，
     確保現有呼叫端向後相容。
@@ -483,15 +495,21 @@ def run_comparison(
     # Resolve llm_mode from None (same default-resolution as run())
     _, resolved_llm_mode = _resolve_modes(offline, data_mode=None, llm_mode=llm_mode)
 
+    # #960：兩幣各以 caller scope 衍生 sub-scope（colon-free）；空 scope 時保持空，
+    # 由 run() 內部 fail-closed 拒絕（契約 §2.2）。
+    _scope_a = f"{run_scope_id}-{coin_a}" if run_scope_id else ""
+    _scope_b = f"{run_scope_id}-{coin_b}" if run_scope_id else ""
     report_a, evidence_a, _ = run(
         coin_a, query, QuestionType.COMPARISON, offline, data_dir, _log=log,
         data_mode=data_mode, llm_mode=llm_mode,
         force_stance_offline=force_stance_offline,
+        run_scope_id=_scope_a,
     )
     report_b, evidence_b, _ = run(
         coin_b, query, QuestionType.COMPARISON, offline, data_dir, _log=log,
         data_mode=data_mode, llm_mode=llm_mode,
         force_stance_offline=force_stance_offline,
+        run_scope_id=_scope_b,
     )
 
     log.record(

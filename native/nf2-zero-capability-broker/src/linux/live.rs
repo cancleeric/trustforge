@@ -4,27 +4,17 @@ use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
+use trustforge_native_sys::{OpenHow, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, SYS_OPENAT2};
 
 const O_RDONLY: c_int = 0;
 const O_CLOEXEC: c_int = 0o2000000;
 const O_DIRECTORY: c_int = 0o200000;
 const O_PATH: c_int = 0o10000000;
-const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-const RESOLVE_BENEATH: u64 = 0x08;
-const SYS_OPENAT2: c_long = 437;
 const SYS_GETDENTS64: c_long = 217;
 const SYS_GETSOCKOPT: c_long = 55;
 const SOL_SOCKET: c_int = 1;
 const SO_PEERCRED: c_int = 17;
 const PROC_TEXT_MAX: usize = 64 * 1024;
-
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
 
 unsafe extern "C" {
     fn openat(directory: c_int, path: *const c_char, flags: c_int, ...) -> c_int;

@@ -623,6 +623,7 @@ class TestPipelineProviderRuntimePath:
             QuestionType.MULTI_SOURCE,
             data_mode="sample",
             llm_mode="bedrock",
+            run_scope_id="test-provider-ports-pipeline",
         )
 
         assert seen["offline"] is False
@@ -667,6 +668,7 @@ class TestPipelineProviderRuntimePath:
         def fake_run_agent_pipeline(
             query, coin, qtype, docs, *, client, log,
             ledger_persistence_observer=None,
+            run_scope_id="",
         ):
             if ledger_persistence_observer is not None:
                 ledger_persistence_observer(True, 0.0)

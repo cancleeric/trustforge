@@ -392,7 +392,8 @@ def test_pipeline_missing_source_message_uses_display_name_not_raw_slug(monkeypa
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
     report, _evidence, _log = run(
-        "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True
+        "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True,
+        run_scope_id="test-brand-logos",
     )
     limits_text = " ".join(report.limits)
     assert "CoinGecko · 社群情緒" in limits_text

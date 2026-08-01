@@ -1351,6 +1351,7 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             report, evidence, _log = pipeline_run(
                 coin, _SNAPSHOT_QUERY, QuestionType.MULTI_SOURCE,
                 data_mode="live", llm_mode="off",
+                run_scope_id=f"fetch-scheduler-{coin}-{time.time_ns()}",
             )
         except Exception as exc:  # noqa: BLE001 — 單幣失敗（含 collect 全
             # cache-miss/過期時 pipeline.run() 內部 `collect()` 回傳空清單

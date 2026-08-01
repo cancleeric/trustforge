@@ -16,7 +16,7 @@
 
 - 腳本：`deploy/deploy_ec2.sh`
 - 流程：S3 上傳 → SSM update-in-place
-- 目標：EC2 實例 `i-0152b70368358a81c`（ap-southeast-2）
+- 目標：EC2 實例 `<EC2_INSTANCE_ID>`（ap-southeast-2）
 
 ## 遇到的問題
 
