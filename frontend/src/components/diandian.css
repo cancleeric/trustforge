@@ -318,7 +318,11 @@
   50% { opacity: 1; }
 }
 
-/* 修復底部節點列文字被壓縮問題 */
+/* 修復底部節點列文字被壓縮問題 + 不被遮擋 */
+.hermes-energy-deck {
+  z-index: 10 !important;
+  position: relative !important;
+}
 .hermes-energy-nodes {
   display: flex !important;
   flex-wrap: nowrap !important;
@@ -384,9 +388,9 @@
 }
 
 /* Left rail: narrower, 7 chars max */
-.hermes-left-rail {
-  width: clamp(160px, 14vw, 210px) !important;
-  flex-shrink: 0 !important;
+.hermes-left-rail,
+.hermes-glass.hermes-rail-split[data-region="left-rail"] {
+  width: clamp(150px, 13vw, 200px) !important;
 }
 .hermes-left-rail button,
 .hermes-left-rail label,

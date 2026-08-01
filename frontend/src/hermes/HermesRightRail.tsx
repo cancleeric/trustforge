@@ -57,11 +57,13 @@ export default function HermesRightRail({
            高的帶狀區域不再有東西填，就變成右下角一個空格（老闆原話
            「右下空了一格」）。跟 N44 左軌的處理一致：軌道自己貼到畫面底緣。 */
         height: 'calc(100% - var(--hermes-top))', zIndex: 5,
-        borderLeft: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
-        display: 'flex', flexDirection: 'column', gap: 12,
-        overflowY: 'auto',
+        borderLeft: '1px solid var(--color-hermes-bd)', padding: 0,
+        display: 'flex', flexDirection: 'column',
+        overflow: 'hidden',
       }}
     >
+      {/* === 固定頂部：信任分數 + 引擎狀態 === */}
+      <div style={{ flexShrink: 0, padding: '14px 16px 10px', borderBottom: '1px solid var(--color-hermes-bd)' }}>
       <div style={{ fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx2)' }}>{t('focused')}: <b style={{ color: 'var(--color-hermes-cyan)' }}>{full}</b></div>
 
       {/* gauge */}
@@ -92,6 +94,11 @@ export default function HermesRightRail({
           <span>{t('queued')} {queued}</span><span>{latestJob ? `${modeLabel(latestJob.mode, t)} · ${jobStateLabel(latestJob.state, t)}` : t('waitingSnapshot')}</span>
         </div>
       </div>
+
+      </div>{/* end fixed top */}
+
+      {/* === 可滾動下方 === */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '10px 16px 16px', display: 'flex', flexDirection: 'column', gap: 12, scrollbarWidth: 'thin' as unknown as undefined }}>
 
       {/* breakdown */}
       {/* N36: 原本是 `flex: 1, minHeight: 0`——minHeight:0 明確允許這塊被壓到比內容還矮，
@@ -171,6 +178,7 @@ export default function HermesRightRail({
           {divergenceSummary}
         </button>
       </div>
+      </div>{/* end scrollable */}
     </div>
   )
 }
