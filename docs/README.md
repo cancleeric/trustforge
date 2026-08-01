@@ -18,6 +18,11 @@ Governance index:
 AIMS 改善治理草案見 [aims/README.md](aims/README.md)；該文件集未經核准，亦不代表
 ISO/IEC 42001 認證或符合性聲明。
 
+EN 18286／EU AI Act 初步適用性與差距分析見
+[plans/ANALYSIS-EN-18286-EU-AI-ACT-GAP-2026-08-01.md](plans/ANALYSIS-EN-18286-EU-AI-ACT-GAP-2026-08-01.md)；
+該 overlay 尚待合法標準全文與 Compliance Counsel 核准，不代表 EU AI Act conformity、
+CE marking、EN certification 或 presumption of conformity。
+
 ---
 
 ## competition/ — 命題與交付規範

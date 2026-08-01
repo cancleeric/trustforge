@@ -27,6 +27,7 @@
 - [角色、RACI 與風險接受](02-policy/roles-raci-and-risk-acceptance.md)：責任介面及殘餘風險權限。
 - [文件控制與 evidence manifest](02-policy/document-control.md)：最低 metadata、狀態及證據欄位。
 - [AI 系統／資產清冊](02-policy/ai-system-inventory.md)：最低欄位與 TrustForge 初始登錄。
+- [EU AI Act／EN 18286 overlay](03-eu-ai-act/README.md)：適用性、分類與四向矩陣；目前仍待合法標準全文及合規核准。
 
 ## 共通狀態語意
 
