@@ -12,7 +12,12 @@ import sys
 # 讓 import 找到 scripts/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from security_gate import Finding, ScanResult, scan, write_report  # type: ignore
-from security_gate_push import PushUpdate, ZERO_SHA, run as run_push_scan  # type: ignore
+from security_gate_push import (  # type: ignore
+    PushUpdate,
+    ZERO_SHA,
+    _isolated_git_env,
+    run as run_push_scan,
+)
 
 
 def _write(tmp: Path, relpath: str, content: str) -> None:
@@ -180,7 +185,7 @@ def test_pre_push_runs_security_gate_fail_closed() -> None:
 
 def _git(repo: Path, *args: str) -> str:
     env = {
-        **os.environ,
+        **_isolated_git_env(),
         "GIT_AUTHOR_NAME": "Security Gate Test",
         "GIT_AUTHOR_EMAIL": "security-gate@example.invalid",
         "GIT_COMMITTER_NAME": "Security Gate Test",
@@ -194,6 +199,70 @@ def _git(repo: Path, *args: str) -> str:
         env=env,
     )
     return completed.stdout.strip()
+
+
+def test_git_helper_isolates_outer_repository_local_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    _git(outer, "init", "-q")
+    _write(outer, "outer.txt", "outer\n")
+    _git(outer, "add", "outer.txt")
+    _git(outer, "commit", "-q", "-m", "outer")
+    clean_env = dict(os.environ)
+
+    def outer_state() -> tuple[str, str, bytes, str, str]:
+        def inspect(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(outer), *args], check=True,
+                capture_output=True, text=True, env=clean_env,
+            ).stdout.strip()
+
+        return (
+            inspect("rev-parse", "HEAD"),
+            inspect("branch", "--show-current"),
+            (outer / ".git" / "index").read_bytes(),
+            inspect("status", "--porcelain=v1"),
+            inspect("show-ref"),
+        )
+
+    before = outer_state()
+    monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(outer / ".git" / "index"))
+
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    _git(inner, "init", "-q")
+    _write(inner, "inner.txt", "inner\n")
+    _git(inner, "add", "inner.txt")
+    _git(inner, "commit", "-q", "-m", "inner")
+    inner_before = _git(inner, "rev-parse", "HEAD")
+    _write(inner, "inner.txt", "inner advanced\n")
+    _git(inner, "add", "inner.txt")
+    _git(inner, "commit", "-q", "-m", "inner advanced")
+    inner_tip = _git(inner, "rev-parse", "HEAD")
+    update = PushUpdate("HEAD", inner_tip, "refs/heads/main", inner_before)
+
+    assert inner_tip != inner_before
+    assert run_push_scan(inner, [update], "", tmp_path / "report") == 0
+    assert outer_state() == before
+
+
+def test_git_helper_fails_closed_when_local_env_query_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_run = subprocess.run
+
+    def fail_query(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[0] == ["git", "rev-parse", "--local-env-vars"]:
+            raise subprocess.CalledProcessError(128, args[0])
+        return original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", fail_query)
+    with pytest.raises(subprocess.CalledProcessError):
+        _git(tmp_path, "status")
 
 
 def test_push_scan_uses_pushed_commits_not_checked_out_tree(tmp_path: Path) -> None:
