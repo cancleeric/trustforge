@@ -12,8 +12,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from urllib.parse import urlencode
 
+from .lambda_secret import hydrate_live_token
+
+
+# Must run before importing ``web`` because it reads environment-backed
+# security defaults during module initialization.  A configured secret that
+# cannot be retrieved intentionally fails the Lambda cold start closed.
+hydrate_live_token()
 from . import web
 from .ingestion.hoyabit import log_hoyabit_startup_status
 
@@ -50,6 +58,20 @@ def handler(event, context=None):
     # Function URL（payload v2）：rawPath + queryStringParameters(dict[str,str])
     path = (event.get("rawPath")
             or event.get("requestContext", {}).get("http", {}).get("path", "/"))
+    method = (
+        event.get("requestContext", {}).get("http", {}).get("method", "GET")
+        or "GET"
+    ).upper()
+    if os.getenv("TRUSTFORGE_COMPETITION_OFFLINE_HOSTED", "").strip() == "1" and (
+        method != "GET" or path not in ("/", "/healthz")
+    ):
+        return _resp(
+            404,
+            web.render_page(
+                web._render_error_card("找不到頁面", "此競賽離線展示端點未開放該路由。")
+            ),
+            "text/html; charset=utf-8",
+        )
     raw_qs = event.get("queryStringParameters") or {}
     qs = {k: [v] for k, v in raw_qs.items()}  # 轉成 _do_analyze 期望的 list 形式
     # CISO hardening R3（#2a, issue #134）：Function URL headers 是

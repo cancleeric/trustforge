@@ -10,6 +10,8 @@ import html
 import json
 from urllib.parse import urlencode
 
+import pytest
+
 from trustforge import lambda_handler, web
 from trustforge.comparison_contract import ComparisonReport, ComparisonRunResult
 from trustforge.schema import Evidence, QuestionType
@@ -26,6 +28,34 @@ def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> di
     if headers is not None:
         event["headers"] = headers
     return event
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("POST", "/"), ("GET", "/analyze"), ("POST", "/analyze.json"), ("GET", "/status")],
+)
+def test_competition_offline_hosted_rejects_non_allowlisted_routes(
+    monkeypatch, method, path
+):
+    monkeypatch.setenv("TRUSTFORGE_COMPETITION_OFFLINE_HOSTED", "1")
+    event = _event(path)
+    event["requestContext"]["http"].update({"method": method, "path": path})
+
+    response = lambda_handler.handler(event)
+
+    assert response["statusCode"] == 404
+    assert "未開放該路由" in response["body"]
+
+
+@pytest.mark.parametrize("path", ["/", "/healthz"])
+def test_competition_offline_hosted_allows_get_root_and_health(monkeypatch, path):
+    monkeypatch.setenv("TRUSTFORGE_COMPETITION_OFFLINE_HOSTED", "1")
+    event = _event(path)
+    event["requestContext"]["http"].update({"method": "GET", "path": path})
+
+    response = lambda_handler.handler(event)
+
+    assert response["statusCode"] == 200
 
 
 # ---------------------------------------------------------------------------
