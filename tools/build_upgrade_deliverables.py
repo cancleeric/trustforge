@@ -1,6 +1,9 @@
 from pathlib import Path
-from shutil import copy2
+import argparse
+import html
 import re
+import shutil
+import subprocess
 from docx import Document
 from docx.shared import Pt
 from docx.oxml import OxmlElement
@@ -9,6 +12,8 @@ from docx.oxml.ns import qn
 ROOT=Path(__file__).resolve().parents[1]
 SLIDE=ROOT/'docs/competition/slide-deck'
 OUT=ROOT/'outputs'
+
+CHROMIUM_VERSION = "151.0.7922.71"
 
 TERMS={
  'Trust Kernel':'可重現的信任計算核心：依來源、時效、交叉佐證與異常訊號計算信任與完整度。',
@@ -25,12 +30,26 @@ TERMS={
  'Trust Layer':'位於資料與生成模型之間的信任治理層。',
 }
 
+TERM_PATTERN = re.compile(
+    "|".join(re.escape(term) for term in sorted(TERMS, key=len, reverse=True))
+)
+
 TOOLTIP_CSS='<style>.term{border-bottom:1px dotted #2e74b5;cursor:help;position:relative}.term:hover:after{content:attr(data-tip);position:absolute;z-index:50;left:0;top:1.6em;width:280px;padding:9px 11px;border-radius:8px;background:#10294a;color:#fff;font-size:13px;line-height:1.45;box-shadow:0 8px 24px rgba(0,0,0,.25);white-space:normal;text-align:left}.glossary-note{background:#eef8fb;border-left:4px solid #2e74b5;padding:10px 14px;margin:12px 0}</style>'
 
 def tooltip_html(text):
-    for term,tip in sorted(TERMS.items(),key=lambda x:-len(x[0])):
-        text=text.replace(term,f'<span class="term" data-tip="{tip}">{term}</span>')
-    return text
+    # One substitution pass is essential: sequential ``str.replace`` calls can
+    # find a shorter term inside markup inserted for an earlier term and corrupt
+    # its ``data-tip`` attribute with nested ``<span>`` HTML.
+    return TERM_PATTERN.sub(
+        lambda match: (
+            '<span class="term" data-tip="'
+            + html.escape(TERMS[match.group(0)], quote=True)
+            + '">'
+            + match.group(0)
+            + "</span>"
+        ),
+        text,
+    )
 
 def copy_html(src,dst,inject=''):
     text=src.read_text(encoding='utf-8')
@@ -86,5 +105,52 @@ def upgrade_report():
     summary='<section class="commercial-summary"><h1>Executive Summary｜商業化摘要</h1><p><b>目標客戶：</b>交易所、券商研究部、虛擬資產資訊平台、風控與合規團隊。第一個切入點是 HOYA BIT 市場資訊頁的 Trust Layer 外掛。</p><p><b>導入方案：</b>4 週 PoC（5 幣＋4 類外部來源＋Evidence 抽查）→ 8–12 週 Pilot（研究流程與角色權限）→ 3–6 個月 Production（SLA、audit、budget、tenant、dashboard）。</p><p><b>KPI／收費：</b>查核時間、可溯源率、報告完成時間、人工改稿率、恢復時間與每次 run 成本；收費採 API usage、seat、enterprise integration 組合。</p><p><b>風險邊界：</b>不提供投資建議、不承諾價格預測；live/cache/fixture 明示；第三方 API 依授權使用；Evidence、Log、artifact 不輸出秘密。</p><h2>競品與替代方案</h2><p>一般 RAG 找得到資料但不先評估可信度；一般 Crypto AI 難稽核；BI Dashboard 沒有推理鏈；人工研究慢且難重現。TrustForge 建立 Claim → Evidence → Trust → Report 的可治理鏈。</p></section>'
     copy_html(src_html,dst_html,summary)
 
+def build_pdfs():
+    """Rebuild every committed upgraded PDF with a pinned Chromium version."""
+    chromium = shutil.which("chromium")
+    if chromium is None:
+        raise RuntimeError(
+            f"Chromium {CHROMIUM_VERSION} is required to rebuild upgraded PDFs"
+        )
+    version = subprocess.check_output(
+        [chromium, "--version"], text=True, encoding="utf-8"
+    ).strip()
+    if CHROMIUM_VERSION not in version:
+        raise RuntimeError(
+            f"expected Chromium {CHROMIUM_VERSION}, found {version!r}"
+        )
+
+    html_outputs = (
+        SLIDE/'TrustForge_正式提案簡報_6分鐘_升級版.html',
+        SLIDE/'TrustForge_正式提案講稿_6分鐘_升級版.html',
+        SLIDE/'TrustForge_正式提案_4分鐘備詢_升級版.html',
+        OUT/'TrustForge_完整商業化提案報告_升級版.html',
+    )
+    for source in html_outputs:
+        destination = source.with_suffix(".pdf")
+        subprocess.run(
+            [
+                chromium,
+                "--headless",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--no-pdf-header-footer",
+                f"--print-to-pdf={destination.resolve()}",
+                source.resolve().as_uri(),
+            ],
+            check=True,
+        )
+
 if __name__=='__main__':
-    upgrade_deck(); upgrade_script(); upgrade_qa(); upgrade_report(); print('upgrade deliverables generated')
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help=f"also rebuild PDFs with Chromium {CHROMIUM_VERSION}",
+    )
+    args = parser.parse_args()
+    upgrade_deck(); upgrade_script(); upgrade_qa(); upgrade_report()
+    if args.pdf:
+        build_pdfs()
+    print('upgrade deliverables generated')
