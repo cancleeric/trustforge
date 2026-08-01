@@ -76,11 +76,11 @@ def table(d, headers, rows, widths):
 def page(d): d.add_section(WD_SECTION.NEW_PAGE)
 
 def proposal():
-    d = base("TrustForge Hermes 賽前提案報告", "加密市場多源資訊的信任提煉 AI Agent", "正式繳交版｜提案大綱＋技術架構＋Demo 與連結")
+    d = base("TrustForge Hermes 提案報告", "加密市場多源資訊的信任提煉 AI Agent", "解題方向｜AI 與資料應用｜AWS 架構｜Live Demo")
     callout(d, "一句話提案：在生成式 AI 寫出市場分析之前，先把每一條主張做來源評估、交叉佐證、時效檢查與反方保留，讓結論可回到原始證據。")
     d.add_heading("團隊基本資料", 1)
     table(d, ["欄位", "內容"], [("開發環境組別", "Team 11"), ("團隊名稱", "中再參與"), ("團隊／品牌", "HurricaneSoft"), ("隊長", "王英豪"), ("成員", "嵋婕、林子彤、王榆翔（Nicholas）"), ("命題類別", "智慧交易｜HOYA BIT"), ("作品名稱", "TrustForge Hermes（信源熔爐）")], [1.55, 5.25])
-    d.add_heading("提案大綱（可直接貼到繳交平台）", 1)
+    d.add_heading("提案摘要", 1)
     d.add_paragraph("TrustForge Hermes 是面向加密市場研究的多源資訊信任提煉 AI Agent。系統整合行情、新聞、社群與可回溯資料，先將內容拆成可驗證主張，再由 Trust Layer 計算來源聲譽、獨立佐證、時效與風險訊號，保留支持及反方證據，最後交由 Amazon Bedrock 產生附引用的分析報告。產品不預測價格、不提供投資建議；核心價值是讓研究者知道每個結論『憑什麼相信、何時應改變判斷』。現場可在 15 分鐘內由題目與指定幣種產出 Final Report、Evidence List、Execution Log、Source／Config 四項交付物。")
 
     page(d); d.add_heading("一、問題與命題連結", 1)
@@ -120,7 +120,7 @@ def proposal():
     bullets(d, ["Evidence 必填欄位完整率與來源可回溯率。", "報告 claim 與 evidence 對應率。", "15 分鐘內完成四項輸出的成功率與 P95 時間。", "失敗時的降級成功率、錯誤可診斷率與單次 Bedrock 成本。"])
 
     page(d); d.add_heading("六、提案繳交資訊", 1)
-    table(d, ["主辦要求", "提交內容／狀態"], [("團隊基本資料", "已收錄於本文件首頁"), ("提案大綱", "已收錄於本文件首頁，可直接貼入平台"), ("完整提案簡報", "outputs/TrustForge_決賽6分鐘簡報.pptx（提交前再開檔檢查）"), ("Live Demo 部署網址", "https://trustforge.hurricanesoft.com.tw/"), ("Live Demo 錄製影片", "【提交前填入影片網址】"), ("GitHub（完整原始碼）", "https://github.com/cancleeric/trustforge")], [2.0, 4.8])
+    table(d, ["繳交項目", "內容"], [("團隊基本資料", "參見本文件「團隊基本資料」"), ("提案摘要", "參見本文件「提案摘要」"), ("完整提案簡報", "TrustForge_決賽6分鐘簡報.pptx"), ("Live Demo 部署網址", "https://trustforge.hurricanesoft.com.tw/"), ("Live Demo 錄製影片", "尚待提供正式影片連結"), ("GitHub（完整原始碼）", "https://github.com/cancleeric/trustforge")], [2.0, 4.8])
     d.add_heading("提交前資安與完整性檢查", 2)
     bullets(d, ["不得提交 AWS Access Key、API Token、資料庫密碼、Workshop Access Code 或任何私密連結。", "機密一律由環境變數、IAM Instance Role 或 SSM 管理；提交前執行 secret scan。", "保留專案根目錄 .kiro 與其 specs、hooks、steering；不得整包加入 .gitignore。", "確認 README 含環境設定、執行範例、benchmark 重現及資料／模型／索引版本。", "確認依賴鎖定檔、架構與資料流程文件、Demo 網址、影片網址及 Repo 權限。"])
     d.add_heading("風險與應變", 2)
