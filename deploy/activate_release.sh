@@ -72,6 +72,17 @@ fi
 MODEL_RECONCILE_COMMAND="true"
 TRAINING_DATA_DIR="${TRUSTFORGE_TRAINING_DATA_DIR:-/opt/trustforge/data/training}"
 SKILL_CHANGE_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_changes.jsonl}"
+BEDROCK_RPS_BACKEND="${TRUSTFORGE_BEDROCK_RPS_BACKEND:-dynamodb}"
+BEDROCK_RPS_REGION="${TRUSTFORGE_BEDROCK_RPS_REGION:-us-east-1}"
+BEDROCK_RPS_TABLE="${TRUSTFORGE_BEDROCK_RPS_TABLE:-competition-trustforge-team11-budget}"
+if [[ "$BEDROCK_RPS_BACKEND" != "dynamodb" ]] ||
+   ! [[ "$BEDROCK_RPS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]] ||
+   ! [[ "$BEDROCK_RPS_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]]; then
+  echo "[activate] ERROR: invalid canonical Bedrock RPS gate configuration" >&2
+  exit 2
+fi
+BEDROCK_RPS_RECONCILE_COMMAND="TRUSTFORGE_BEDROCK_RPS_BACKEND=${BEDROCK_RPS_BACKEND} TRUSTFORGE_BEDROCK_RPS_REGION=${BEDROCK_RPS_REGION} TRUSTFORGE_BEDROCK_RPS_TABLE=${BEDROCK_RPS_TABLE} bash deploy/reconcile_bedrock_rps_service_env.sh"
+BEDROCK_RPS_SCHEDULER_COMMAND="TRUSTFORGE_BEDROCK_RPS_BACKEND=${BEDROCK_RPS_BACKEND} TRUSTFORGE_BEDROCK_RPS_REGION=${BEDROCK_RPS_REGION} TRUSTFORGE_BEDROCK_RPS_TABLE=${BEDROCK_RPS_TABLE} bash deploy/install_hermes_scheduler.sh"
 if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
   echo "[activate] ERROR: TRUSTFORGE_TRAINING_DATA_DIR must be an absolute safe path" >&2
   exit 2
@@ -327,7 +338,7 @@ ROLLBACK() {
   # history. First activations may not have an active digest yet.
   if [ "$UNIT_BACKUP_CAPTURED" -eq 1 ]; then
     URCMD=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-      --document-name AWS-RunShellScript --parameters commands='["set -e","cp -p /opt/trustforge/.activation-trustforge.service.bak /etc/systemd/system/trustforge.service","for unit in trustforge.service hermes-cycle.service trustforge-analysis-flow.service; do target=/etc/systemd/system/$unit.d/20-skill-change-log.conf; backup=/opt/trustforge/.activation-skill-log-dropins.bak/$unit; if [ -f \"$backup\" ]; then install -d -m 0755 \"$(dirname \"$target\")\"; cp -p \"$backup\" \"$target\"; else rm -f \"$target\"; rmdir \"$(dirname \"$target\")\" 2>/dev/null || true; fi; done","systemctl daemon-reload","systemctl restart trustforge","systemctl try-restart trustforge-analysis-flow.service"]' \
+      --document-name AWS-RunShellScript --parameters commands='["set -e","cp -p /opt/trustforge/.activation-trustforge.service.bak /etc/systemd/system/trustforge.service","for unit in hermes-cycle.service trustforge-analysis-flow.service; do backup=/opt/trustforge/.activation-bedrock-rps-units.bak/$unit; target=/etc/systemd/system/$unit; if [ -f \"$backup\" ]; then cp -p \"$backup\" \"$target\"; else rm -f \"$target\"; fi; done","for unit in trustforge.service hermes-cycle.service trustforge-analysis-flow.service; do target=/etc/systemd/system/$unit.d/20-skill-change-log.conf; backup=/opt/trustforge/.activation-skill-log-dropins.bak/$unit; if [ -f \"$backup\" ]; then install -d -m 0755 \"$(dirname \"$target\")\"; cp -p \"$backup\" \"$target\"; else rm -f \"$target\"; rmdir \"$(dirname \"$target\")\" 2>/dev/null || true; fi; done","systemctl daemon-reload","systemctl restart trustforge","systemctl try-restart trustforge-analysis-flow.service"]' \
       --query 'Command.CommandId' --output text 2>/dev/null || echo "")
     if [ -n "$URCMD" ] && [ "$URCMD" != "None" ]; then
       urstatus=$(poll_ssm_terminal_status "$URCMD" "$TARGET" 120 5) || true
@@ -347,7 +358,7 @@ ROLLBACK() {
   if [ -n "$ACTIVE_DIGEST" ] && [ "$ACTIVE_DIGEST" != "unknown" ]; then
     echo "[activate] rollback: restoring previous active ($ACTIVE_DIGEST)"
     RBCMD=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-      --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","rm -f /opt/trustforge/.activation-trustforge.service.bak; rm -rf /opt/trustforge/.activation-skill-log-dropins.bak","echo \"[activate] rollback restore completed\""]' \
+      --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$ACTIVE_DIGEST"'/manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","rm -f /opt/trustforge/.activation-trustforge.service.bak; rm -rf /opt/trustforge/.activation-skill-log-dropins.bak /opt/trustforge/.activation-bedrock-rps-units.bak","echo \"[activate] rollback restore completed\""]' \
       --query 'Command.CommandId' --output text 2>/dev/null || echo "")
     if [ -n "$RBCMD" ] && [ "$RBCMD" != "None" ]; then
       rbstatus=$(poll_ssm_terminal_status "$RBCMD" "$TARGET" 120 5) || true
@@ -515,7 +526,7 @@ trap 'ROLLBACK $?' ERR
 # Step 3: Download candidate to target
 echo "[activate] Step 3: downloading candidate artifact to target..."
 CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","cp -p /etc/systemd/system/trustforge.service /opt/trustforge/.activation-trustforge.service.bak","rm -rf /opt/trustforge/.activation-skill-log-dropins.bak","mkdir -p /opt/trustforge/.activation-skill-log-dropins.bak","for unit in trustforge.service hermes-cycle.service trustforge-analysis-flow.service; do source=/etc/systemd/system/$unit.d/20-skill-change-log.conf; backup=/opt/trustforge/.activation-skill-log-dropins.bak/$unit; if [ -f \"$source\" ]; then cp -p \"$source\" \"$backup\"; else : > \"$backup.absent\"; fi; done","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'manifest.json ./manifest.json --region '"$REGION"'","echo \"[activate] candidate artifact downloaded\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","cp -p /etc/systemd/system/trustforge.service /opt/trustforge/.activation-trustforge.service.bak","rm -rf /opt/trustforge/.activation-skill-log-dropins.bak /opt/trustforge/.activation-bedrock-rps-units.bak","mkdir -p /opt/trustforge/.activation-skill-log-dropins.bak /opt/trustforge/.activation-bedrock-rps-units.bak","for unit in hermes-cycle.service trustforge-analysis-flow.service; do source=/etc/systemd/system/$unit; backup=/opt/trustforge/.activation-bedrock-rps-units.bak/$unit; if [ -f \"$source\" ]; then cp -p \"$source\" \"$backup\"; else : > \"$backup.absent\"; fi; done","for unit in trustforge.service hermes-cycle.service trustforge-analysis-flow.service; do source=/etc/systemd/system/$unit.d/20-skill-change-log.conf; backup=/opt/trustforge/.activation-skill-log-dropins.bak/$unit; if [ -f \"$source\" ]; then cp -p \"$source\" \"$backup\"; else : > \"$backup.absent\"; fi; done","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/'"${CANDIDATE_PREFIX}"'manifest.json ./manifest.json --region '"$REGION"'","echo \"[activate] candidate artifact downloaded\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
   echo "[activate] ERROR: download send-command failed" >&2
@@ -552,7 +563,7 @@ echo "[activate] artifact verified"
 # Step 5: Restart service (zero-downtime)
 echo "[activate] Step 5: restarting service..."
 RCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","'"$TRAINING_RECONCILE_COMMAND"'","'"$PREVIEW_RECONCILE_COMMAND"'","TRUSTFORGE_SKILL_CHANGE_LOG='"$SKILL_CHANGE_LOG_PATH"' bash deploy/reconcile_skill_change_log.sh","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","'"$TRAINING_RECONCILE_COMMAND"'","'"$PREVIEW_RECONCILE_COMMAND"'","'"$BEDROCK_RPS_RECONCILE_COMMAND"'","'"$BEDROCK_RPS_SCHEDULER_COMMAND"'","TRUSTFORGE_SKILL_CHANGE_LOG='"$SKILL_CHANGE_LOG_PATH"' bash deploy/reconcile_skill_change_log.sh","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$RCMDID" ] || [ "$RCMDID" = "None" ]; then
   echo "[activate] ERROR: restart send-command failed" >&2
@@ -596,7 +607,7 @@ trap - ERR
 # Remove the transaction-only unit backup after commit. Cleanup is best-effort:
 # activation and its receipt are already complete.
 CCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","rm -f /opt/trustforge/.activation-trustforge.service.bak; rm -rf /opt/trustforge/.activation-skill-log-dropins.bak"]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","rm -f /opt/trustforge/.activation-trustforge.service.bak; rm -rf /opt/trustforge/.activation-skill-log-dropins.bak /opt/trustforge/.activation-bedrock-rps-units.bak"]' \
   --query 'Command.CommandId' --output text 2>/dev/null || echo "")
 if [ -z "$CCMDID" ] || [ "$CCMDID" = "None" ]; then
   echo "[activate] WARNING: unit backup cleanup send-command failed" >&2

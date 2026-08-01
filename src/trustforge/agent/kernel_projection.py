@@ -65,6 +65,7 @@ def _kernel_scored_to_evidence(
         related_claim=related,
         source_url=doc.url,
         kind=doc.kind,
+        direction=sc.claim.direction,
         trust=round(sc.trust, 3),
         trust_components=trust_components,
         flags=list(sc.manip_flags),

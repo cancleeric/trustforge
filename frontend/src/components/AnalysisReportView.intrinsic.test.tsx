@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
@@ -38,14 +38,14 @@ function renderReport(assessment?: unknown) {
 }
 
 // N71（CEO：「手動分析的報告要在那裡下載？執行過程的 LOG 要在那裡下載、在那裡看」）：
-// 三顆下載鈕原本只長在 `HermesExecutionPanel`，而它被包在 `<details
-// id="technical-analysis">`（預設收合）裡——跑完分析根本看不到。這條測試守的是
+// 三顆下載鈕原本只長在 `HermesExecutionPanel`，而它現在位於 L4 原始證據
+// details（預設收合）裡——跑完分析根本看不到。這條測試守的是
 // 「不展開 details 也要看得見下載」。負向對照：把報告抬頭那排 `<ReportDownloads>`
 // 拿掉再跑，下面的 expect 會 fail（見對話紀錄的 RED）。
 describe('AnalysisReportView 報告下載可及性', () => {
   it('不用展開技術細節就看得到三個下載動作', () => {
     const { container } = renderReport()
-    const details = container.querySelector('#technical-analysis') as HTMLDetailsElement
+    const details = container.querySelector('#evidence-list') as HTMLDetailsElement
     expect(details.open).toBe(false)
     const row = container.querySelector("[aria-label='報告下載與執行紀錄']")
     expect(row).not.toBeNull()
@@ -53,9 +53,9 @@ describe('AnalysisReportView 報告下載可及性', () => {
     expect(labels).toEqual(['下載報告', '下載證據', '下載執行紀錄', '看執行過程'])
   })
 
-  it('看執行過程會展開技術細節', () => {
+  it('看執行過程會展開 L4 原始證據', () => {
     const { container } = renderReport()
-    const details = container.querySelector('#technical-analysis') as HTMLDetailsElement
+    const details = container.querySelector('#evidence-list') as HTMLDetailsElement
     details.scrollIntoView = () => {}
     const row = container.querySelector("[aria-label='報告下載與執行紀錄']")!
     const btn = Array.from(row.querySelectorAll('button')).find((b) => b.textContent === '看執行過程')!
@@ -71,8 +71,11 @@ describe('AnalysisReportView intrinsic shadow integration', () => {
   })
 
   it('contains malformed optional payload and keeps the official report visible', () => {
-    renderReport({ mode: 'shadow', affects_official_score: true })
+    const { container } = renderReport({ mode: 'shadow', affects_official_score: true })
     expect(screen.getByText('BTC')).toBeInTheDocument()
+    const details = container.querySelector('#technical-analysis') as HTMLDetailsElement
+    details.open = true
+    fireEvent.click(screen.getByRole('tab', { name: '限制與反轉' }))
     expect(screen.getByText(/資產結構資料格式不相容/)).toBeInTheDocument()
     expect(screen.queryByText('已驗證')).not.toBeInTheDocument()
   })
