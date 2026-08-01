@@ -17,9 +17,6 @@ const O_NOFOLLOW: u64 = 0o400000;
 const O_NONBLOCK: u64 = 0o4000;
 #[allow(dead_code)] // 附屬於 append_witness（NF3 #1089）；musl target 下尚未接線，保留供後續交易見證使用
 const O_APPEND: u64 = 0o2000;
-const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-const RESOLVE_BENEATH: u64 = 0x08;
 const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 const RENAME_NOREPLACE: u32 = 1;
 
@@ -679,6 +676,7 @@ fn write_loop(fd: &OwnedFd, mut bytes: &[u8]) -> Result<(), Error> {
 mod sys {
     use super::*;
     use std::ffi::{c_int, c_long};
+    use trustforge_native_sys::{OpenHow, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, SYS_OPENAT2};
 
     const SYS_READ: c_long = 0;
     const SYS_WRITE: c_long = 1;
@@ -697,13 +695,6 @@ mod sys {
     const SYS_MKDIRAT: c_long = 258;
     const SYS_NEWFSTATAT: c_long = 262;
     const SYS_RENAMEAT2: c_long = 316;
-    const SYS_OPENAT2: c_long = 437;
-    #[repr(C)]
-    struct OpenHow {
-        flags: u64,
-        mode: u64,
-        resolve: u64,
-    }
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct Stat {

@@ -7,9 +7,9 @@ expected_helper="${3:?missing commit-bound helper SHA-256}"
 parent="${4:-/root}"
 evidence_dir="${5:?missing root-owned evidence directory}"
 expected_rlib=bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b
-expected_source=bca11fbc73abc251f9df903e0112a070fcc4a6c5b33a6ae71f5acd5426b78ef9
+expected_source=2c948fcca2c9194fce13e212e449739e5ecaa2b35256e7709b929b7822c85983
 expected_profile_receipt=7f53b287a6944a5978b02dfcd35e50b5955be28107ac457369a70d22115f79a5
-expected_foundation=63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548
+expected_foundation=d4d080f116e5967e2dd7c8cca02e471f754484ca529b48f22c2106ed8c819568
 blocked=77
 
 block() { echo "BLOCKED_EXTERNAL_LINUX: $*" >&2; exit "$blocked"; }
