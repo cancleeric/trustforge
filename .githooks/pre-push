@@ -100,6 +100,10 @@ case "$PYTEST_WORKERS" in
 esac
 run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
 run_gate "YAML duplicate keys" "$PYTHON" scripts/check_yaml_duplicate_keys.py
+run_gate \
+  "security gate" \
+  env PYTHONPATH=src "$PYTHON" -m trustforge.cli security-gate \
+    --out out/pre-push
 run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json
 run_gate \
   "NF2 zero-capability host tests" \

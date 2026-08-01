@@ -163,3 +163,13 @@ class TestReportOutput:
         import json
         data = json.loads(report_path.read_text())
         assert data["summary"]["pass"] is True
+
+
+def test_pre_push_runs_security_gate_fail_closed() -> None:
+    hook = (Path(__file__).resolve().parent.parent / ".githooks" / "pre-push").read_text(
+        encoding="utf-8",
+    )
+
+    assert '"security gate"' in hook
+    assert "-m trustforge.cli security-gate" in hook
+    assert "--out out/pre-push" in hook
