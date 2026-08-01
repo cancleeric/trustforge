@@ -110,7 +110,7 @@ refresh_sources → build_snapshots → measure_quality
 - `automatic_apply: false`、`requires_human_approval: true`
 - 支援 ModelHub / AWS SageMaker 雙後端
 
-### 3-4 系統護城河五特色
+### 3-4 系統護城河六特色
 
 | # | 特色 | 一句話 |
 |---|------|--------|
@@ -119,6 +119,32 @@ refresh_sources → build_snapshots → measure_quality
 | ③ | 外框自動檢測升級 | diagnose → 對抗審查 → 人工批准；fail-closed |
 | ④ | 核心可拔插 | Trust Kernel 零 IO、<1 秒；模組各自獨立可抽換 |
 | ⑤ | 稽核軌跡合規 | Execution Log + 溯源鏈，對齊 ISO 42001/27001/EN 18286 |
+| ⑥ | 鯨魚動態即時追蹤 | 串接 Whale Alert + Arkham + Etherscan + CoinMarketCap，大額鏈上異動即時納入信任評估 |
+| ⑦ | 碳盤查與算力節省 | 記錄每次 Bedrock 呼叫的 token/算力消耗，量化碳足跡；Trust Kernel 本地計算 <1 秒免 GPU，從架構層面減碳 |
+
+### 3-5 鯨魚動態功能說明
+
+已串接四大鏈上/市場平台 API：
+
+| 平台 | 用途 |
+|------|------|
+| **Whale Alert** | 大額跨鏈/交易所轉帳即時偵測（巨鯨進出交易所） |
+| **Arkham** | 實體標籤歸因——辨識錢包背後是機構、交易所還是個人 |
+| **Etherscan** | 鏈上交易明細驗證、合約互動追蹤 |
+| **CoinMarketCap** | 市值/流動性/排名基礎面數據補充 |
+
+> 鯨魚動態整合進 Layer 1 Ingestion，大額異動會觸發 Layer 2 信任評分中的操縱懲罰項（ManipulationPenalty），當巨鯨集中轉入交易所時自動提升對應 claim 的風險旗標。
+
+### 3-6 碳盤查與算力節省
+
+| 層面 | 做法 | 效果 |
+|------|------|------|
+| **架構減碳** | Trust Kernel 純本地計算（零 GPU），LLM 僅在最後行文才呼叫 | 相較全程 LLM 推理，Bedrock 呼叫次數減少 ~70% |
+| **消耗記錄** | Execution Log 逐筆記錄每次 Bedrock 的 input/output token 數 | 可換算為碳排當量，對齊 ISO 14064 / GHG Protocol |
+| **預算護欄** | `budget_guard.py` 設每日 USD 上限，超標自動停止 LLM 呼叫 | 既控成本也控算力消耗 |
+| **快取策略** | DynamoDB 90 天快取 + 本地 SQLite，重複查詢不重跑 LLM | 避免冗餘推理，節省算力 |
+
+> 「信任評分不需要 GPU——這不只是技術選擇，也是碳管理決策。」
 
 > 三句話總結：「能進化但人類有否決權。核心不綁外部服務。每個判斷都能被事後審計。」
 
