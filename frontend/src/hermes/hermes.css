@@ -2650,11 +2650,11 @@
   display: none !important;
 }
 
-/* FPS / adaptive-quality HUD: anchored to top-right corner to stay clear of
-   the chat input and energy deck at bottom-left. */
+/* FPS / adaptive-quality HUD: anchored to the content area's top-right to
+   stay clear of both the bottom-left chat input and the topbar controls. */
 .hermes-fps-meter {
   position: fixed;
-  top: 12px;
+  top: calc(var(--hermes-top) + 12px);
   right: 12px;
   z-index: 12;
   display: flex;
@@ -2918,11 +2918,10 @@
     --hermes-tagline: calc(var(--hermes-topbar-wrapped) + var(--hermes-rail-strip));
   }
 
-  /* The mobile left rail is absent, so collapse the HUD into a status badge.
-     Keep it above both the energy deck and the mobile divergence card. */
+  /* Collapse the HUD into a compact status badge on mobile while preserving
+     the inherited content-area top-right anchor. Reintroducing bottom/left
+     here would set all four fixed-position insets and stretch the HUD. */
   .hermes-fps-meter {
-    bottom: calc(var(--hermes-bottom) + 112px);
-    left: max(6px, env(safe-area-inset-left));
     gap: 4px;
     min-width: 0;
     padding: 3px 6px;
