@@ -90,7 +90,7 @@ export default function HermesDashboard() {
   const [shipOpen, setShipOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [diandianOnboardingOpen, setDiandianOnboardingOpen] = useState(() => {
-    try { return !localStorage.getItem('diandian_onboarding_done') } catch { return true }
+    try { return !document.cookie.split('; ').some(c => c.startsWith('diandian_onboarding_done=1')) } catch { return true }
   })
   const [firstRunOpen, setFirstRunOpen] = useState(() => !qaMode && shouldShowHermesOnboarding() && searchParams.get('tour') !== '1')
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
@@ -779,8 +779,8 @@ export default function HermesDashboard() {
         )}
 
         {/* FPS 與自適應品質是使用者判斷動態是否被降級的即時狀態，常駐顯示。
-            定位完全交由 hermes.css：桌面在 energy deck 上方左側，≤560px
-            收成小 badge，避免重演 inline bottom:8 壓住 deck 站點的問題。 */}
+            定位完全交由 hermes.css：桌面固定於右上角空白區域，≤560px
+            收成小 badge。 */}
         <FpsMeter
           fps={fps}
           quality={quality}

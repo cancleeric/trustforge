@@ -284,3 +284,27 @@
   border-color: rgba(134, 239, 172, 0.4) !important;
   box-shadow: 0 0 8px rgba(134, 239, 172, 0.15) !important;
 }
+
+
+/* ============================================
+   #1215 Stage Arrow Separators
+   ============================================ */
+.hermes-stage-with-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+.hermes-stage-arrow {
+  color: rgba(77, 216, 224, 0.5);
+  font-size: 1.2em;
+  margin: 0 4px;
+  user-select: none;
+  animation: arrow-pulse 2s ease-in-out infinite;
+}
+@keyframes arrow-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+@media (max-width: 600px) {
+  .hermes-stage-arrow { font-size: 0.9em; margin: 0 2px; }
+}

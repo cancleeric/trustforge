@@ -65,25 +65,27 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
           const stageSelectionId = mode ? workspaceStageId(mode, index) : stage.id
           const selected = selectedStage === stageSelectionId
           return (
-            <button
-              type="button"
-              key={stage.id}
-              aria-pressed={selected}
-              aria-label={stage.label}
-              onClick={() => onSelectStage(stageSelectionId)}
-              className={`hermes-energy-station${selected ? ' is-selected' : ''}`}
-              style={{ '--station-color': stage.color } as React.CSSProperties}
-            >
-              <span className="hermes-energy-index">0{index + 1}</span>
-              <i className="hermes-energy-junction"><b /></i>
-              <span className="hermes-energy-copy">
-                <strong>{stage.label}</strong>
-                {/* N80：狀態串（「0 待命 · 排隊 5 · 重試 0」）在窄欄位會被截，
-                    CSS 已放寬成兩列，這裡再補 title 當最後保險——兩列還放不下時
-                    滑鼠停留仍能看到全文。 */}
-                <small title={`${stage.metric} ${stage.unit}`.trim()}><b>{stage.metric}</b> {stage.unit}</small>
-              </span>
-            </button>
+            <span key={stage.id} className="hermes-stage-with-arrow">
+              {index > 0 && <span className="hermes-stage-arrow" aria-hidden="true">→</span>}
+              <button
+                type="button"
+                aria-pressed={selected}
+                aria-label={stage.label}
+                onClick={() => onSelectStage(stageSelectionId)}
+                className={`hermes-energy-station${selected ? ' is-selected' : ''}`}
+                style={{ '--station-color': stage.color } as React.CSSProperties}
+              >
+                <span className="hermes-energy-index">0{index + 1}</span>
+                <i className="hermes-energy-junction"><b /></i>
+                <span className="hermes-energy-copy">
+                  <strong>{stage.label}</strong>
+                  {/* N80：狀態串（「0 待命 · 排隊 5 · 重試 0」）在窄欄位會被截，
+                      CSS 已放寬成兩列，這裡再補 title 當最後保險——兩列還放不下時
+                      滑鼠停留仍能看到全文。 */}
+                  <small title={`${stage.metric} ${stage.unit}`.trim()}><b>{stage.metric}</b> {stage.unit}</small>
+                </span>
+              </button>
+            </span>
           )
         })}
       </div>
