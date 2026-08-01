@@ -52,57 +52,56 @@ export default function HermesRightRail({
     <div
       className="hermes-glass hermes-right-rail"
       style={{
-        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-right-rail)',         /* N50：高度從 `calc(100% - top - bottom)` 改成 `calc(100% - top)`。
-           管線條右緣改成停在右軌左緣之後，右軌下方那條 `--hermes-bottom`
-           高的帶狀區域不再有東西填，就變成右下角一個空格（老闆原話
-           「右下空了一格」）。跟 N44 左軌的處理一致：軌道自己貼到畫面底緣。 */
-        height: 'calc(100% - var(--hermes-top))', zIndex: 5,
+        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-right-rail)',
+        height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
         borderLeft: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
         display: 'flex', flexDirection: 'column', gap: 12,
-        overflowY: 'auto',
+        overflow: 'hidden',
       }}
     >
-      <div style={{ fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx2)' }}>{t('focused')}: <b style={{ color: 'var(--color-hermes-cyan)' }}>{full}</b></div>
+      <div className="hermes-right-rail-fixed">
+        <div style={{ fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx2)' }}>{t('focused')}: <b style={{ color: 'var(--color-hermes-cyan)' }}>{full}</b></div>
 
-      {/* gauge */}
-      <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-        <div style={{ alignSelf: 'flex-start', fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx3)', marginBottom: 6 }}><GlossaryTerm term="trustScore" label={t('trustScore')} compact /></div>
-        <div style={{ position: 'relative', width: 140, height: 140 }}>
-          <svg viewBox="0 0 200 200" width="140" height="140">
-            <circle cx="100" cy="100" r="80" fill="none" style={{ stroke: 'var(--color-hermes-bd2)' } as React.CSSProperties} strokeWidth="16" strokeLinecap="round" strokeDasharray={arcTrack} transform="rotate(135 100 100)" />
-            <circle cx="100" cy="100" r="80" fill="none" style={{ stroke: scoreColor } as React.CSSProperties} strokeWidth="16" strokeLinecap="round" strokeDasharray={arcVal} transform="rotate(135 100 100)" />
-          </svg>
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-            <div data-testid="right-rail-score" style={{ fontWeight: 700, fontSize: 32, lineHeight: 1, color: scoreColor }}>{gaugeScore}</div>
-            <div style={{ fontSize: 10, color: 'var(--color-hermes-tx3)', marginTop: 2 }}>/ 100</div>
+        {/* gauge */}
+        <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div style={{ alignSelf: 'flex-start', fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx3)', marginBottom: 6 }}><GlossaryTerm term="trustScore" label={t('trustScore')} compact /></div>
+          <div style={{ position: 'relative', width: 140, height: 140 }}>
+            <svg viewBox="0 0 200 200" width="140" height="140">
+              <circle cx="100" cy="100" r="80" fill="none" style={{ stroke: 'var(--color-hermes-bd2)' } as React.CSSProperties} strokeWidth="16" strokeLinecap="round" strokeDasharray={arcTrack} transform="rotate(135 100 100)" />
+              <circle cx="100" cy="100" r="80" fill="none" style={{ stroke: scoreColor } as React.CSSProperties} strokeWidth="16" strokeLinecap="round" strokeDasharray={arcVal} transform="rotate(135 100 100)" />
+            </svg>
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+              <div data-testid="right-rail-score" style={{ fontWeight: 700, fontSize: 32, lineHeight: 1, color: scoreColor }}>{gaugeScore}</div>
+              <div style={{ fontSize: 10, color: 'var(--color-hermes-tx3)', marginTop: 2 }}>/ 100</div>
+            </div>
+          </div>
+          <div style={{ marginTop: 6, fontSize: 11, fontWeight: 600, letterSpacing: '.5px', color: scoreColor, background: scoreDim, border: `1px solid ${scoreColor}`, borderRadius: 4, padding: '3px 10px' }}>{scoreLabel}</div>
+        </div>
+
+        <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '9px 12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginBottom: 7 }}>
+            <span>{t('continuousEngineLabel')}</span><b style={{ color: activeStages.length ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-amber)' }}>{activeStages.length} {t('runningLabel')}</b>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 4 }}>
+            {(flow?.stages ?? []).map((stage, index) => <div key={stage.id} title={stage.current ? `${stage.current.coin} · ${stage.current.question}` : `${stage.queued} queued`}
+              style={{ height: 5, borderRadius: 3, background: stage.current ? 'var(--color-hermes-cyan)' : stage.queued ? 'var(--color-hermes-amber)' : 'var(--color-hermes-bd2)', boxShadow: stage.current ? '0 0 8px var(--color-hermes-cyan)' : undefined }} aria-label={`stage ${index + 1}`} />)}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: 'var(--color-hermes-tx2)', fontSize: 9.5 }}>
+            <span>{t('queued')} {queued}</span><span>{latestJob ? `${modeLabel(latestJob.mode, t)} · ${jobStateLabel(latestJob.state, t)}` : t('waitingSnapshot')}</span>
           </div>
         </div>
-        <div style={{ marginTop: 6, fontSize: 11, fontWeight: 600, letterSpacing: '.5px', color: scoreColor, background: scoreDim, border: `1px solid ${scoreColor}`, borderRadius: 4, padding: '3px 10px' }}>{scoreLabel}</div>
       </div>
 
-      <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '9px 12px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginBottom: 7 }}>
-          <span>{t('continuousEngineLabel')}</span><b style={{ color: activeStages.length ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-amber)' }}>{activeStages.length} {t('runningLabel')}</b>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 4 }}>
-          {(flow?.stages ?? []).map((stage, index) => <div key={stage.id} title={stage.current ? `${stage.current.coin} · ${stage.current.question}` : `${stage.queued} queued`}
-            style={{ height: 5, borderRadius: 3, background: stage.current ? 'var(--color-hermes-cyan)' : stage.queued ? 'var(--color-hermes-amber)' : 'var(--color-hermes-bd2)', boxShadow: stage.current ? '0 0 8px var(--color-hermes-cyan)' : undefined }} aria-label={`stage ${index + 1}`} />)}
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: 'var(--color-hermes-tx2)', fontSize: 9.5 }}>
-          <span>{t('queued')} {queued}</span><span>{latestJob ? `${modeLabel(latestJob.mode, t)} · ${jobStateLabel(latestJob.state, t)}` : t('waitingSnapshot')}</span>
-        </div>
-      </div>
-
-      {/* breakdown */}
-      {/* N36: 原本是 `flex: 1, minHeight: 0`——minHeight:0 明確允許這塊被壓到比內容還矮，
-          而 .hermes-clip 只有 clip-path、overflow 是 visible，壓縮後小孩不會滾、直接溢出盒外。
-          實測本盒高度：1920x1080=254px（正常）→ 1440x900=74px → 1280x800=26px，但 4 條
-          因子列＋「查看完整拆解與推理」CTA 仍畫在 y=454~610 的原尺寸位置，跑到下一個
-          兄弟（.hermes-training-status-slot，y=445~630）的地盤上，被它較晚繪製的文字蓋住：
-          1280x800 有 7 顆控件 elementFromPoint 打不到自己，1440x900 有 5 顆。
-          改 `flex: 1 0 auto`（可長不可縮）＋拿掉 minHeight:0：右軌自己已經是 overflow-y:auto
-          （實測 clientHeight 647 / scrollHeight 686 本來就在滾），空間不夠時讓右軌滾，
-          而不是把面板壓扁讓內容逃出去。 */}
+      <div className="hermes-right-rail-scroll">
+        {/* breakdown */}
+        {/* N36: 原本是 `flex: 1, minHeight: 0`——minHeight:0 明確允許這塊被壓到比內容還矮，
+            而 .hermes-clip 只有 clip-path、overflow 是 visible，壓縮後小孩不會滾、直接溢出盒外。
+            實測本盒高度：1920x1080=254px（正常）→ 1440x900=74px → 1280x800=26px，但 4 條
+            因子列＋「查看完整拆解與推理」CTA 仍畫在 y=454~610 的原尺寸位置，跑到下一個
+            兄弟（.hermes-training-status-slot，y=445~630）的地盤上，被它較晚繪製的文字蓋住：
+            1280x800 有 7 顆控件 elementFromPoint 打不到自己，1440x900 有 5 顆。
+            改 `flex: 1 0 auto`（可長不可縮）＋拿掉 minHeight:0：空間不夠時由
+            `.hermes-right-rail-scroll` 捲動，而不是把面板壓扁讓內容逃出去。 */}
       <div className="hermes-clip" style={{ flex: '1 0 auto', background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '12px 14px', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 10 }}>
           {t('trustBreakdown')}
@@ -170,6 +169,7 @@ export default function HermesRightRail({
         >
           {divergenceSummary}
         </button>
+      </div>
       </div>
     </div>
   )
