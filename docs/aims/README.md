@@ -28,6 +28,7 @@
 - [文件控制與 evidence manifest](02-policy/document-control.md)：最低 metadata、狀態及證據欄位。
 - [AI 系統／資產清冊](02-policy/ai-system-inventory.md)：最低欄位與 TrustForge 初始登錄。
 - [EU AI Act／EN 18286 overlay](03-eu-ai-act/README.md)：適用性、分類與四向矩陣；EN bibliographic／publication／official status、合法全文、產品／契約／部署事實及合規核准均待 authoritative evidence。#1265／PR-A 不代表父 issue #1264 全部完成。
+- [支援控制](05-support/README.md)：能力、訓練、文件生命週期與內外溝通控制草案。
 
 ## 共通狀態語意
 
