@@ -1,7 +1,9 @@
 # Competency and training register
 
-Status: **draft / unapproved / non-effective**  
-Owner: CEO (assignment pending)  
+Status: **draft / unapproved / non-effective**
+
+Owner: CEO (assignment pending)
+
 Review date: TBD
 
 No row below is evidence of completed training. Evidence URIs must identify a
