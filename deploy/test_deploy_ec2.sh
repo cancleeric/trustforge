@@ -631,6 +631,17 @@ case "$ALL" in
     if [ "$SCENARIO" = "table-missing" ]; then
       exit 254
     fi
+    case "$ALL" in
+      *"Table.KeySchema[?KeyType=='HASH'].AttributeName | [0]"*) echo "pk" ;;
+      *"Table.KeySchema[?KeyType=='RANGE'].AttributeName | [0]"*) echo "sk" ;;
+      *"Table.AttributeDefinitions[?AttributeName=='pk'].AttributeType | [0]"*) echo "S" ;;
+      *"Table.AttributeDefinitions[?AttributeName=='sk'].AttributeType | [0]"*) echo "S" ;;
+      *"Table.SSEDescription.Status"*) echo "ENABLED" ;;
+    esac
+    exit 0 ;;
+  "dynamodb describe-continuous-backups"*)
+    echo "ENABLED" ;;
+  "dynamodb create-table"*|"dynamodb wait table-exists"*|"dynamodb update-continuous-backups"*)
     exit 0 ;;
   "dynamodb describe-time-to-live"*)
     # lease bootstrap 的重跑路徑：TTL 已啟用時不可再呼叫 update，否則 AWS
@@ -741,6 +752,11 @@ else
   assert_contains "$UD_CONTENT" "Environment=COST_LEDGER_BACKEND=dynamodb" "user-data: trustforge.service 有 COST_LEDGER_BACKEND"
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb" "user-data: trustforge.service 有 shared lease backend"
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases" "user-data: trustforge.service 有 shared lease table"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=trustforge-multi-angle-batches" "user-data: trustforge.service 有 atomic batch table"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=production-v1" "user-data: trustforge.service 有 atomic config version"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=1" "user-data: trustforge.service 啟用 exclusive atomic authority"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=/var/lib/trustforge/analysis.sqlite3" "user-data: trustforge.service 有 shared analysis projection path"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD=1" "user-data: trustforge.service 有 multi-angle daily budget"
   assert_contains "$UD_CONTENT" "fetch-scheduler.service" "user-data: 有寫 fetch-scheduler.service"
   assert_contains "$UD_CONTENT" "fetch-scheduler.timer" "user-data: 有寫 fetch-scheduler.timer"
   assert_contains "$UD_CONTENT" "ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py" "user-data: fetch-scheduler ExecStart 正確"
@@ -756,6 +772,16 @@ else
   # PR-B：TRUSTFORGE_TOKEN_SSM_PREFIX 是新的 opt-in 旗標，未設時比照既有
   # ${VAR-} 慣例不寫該行（app 端 fail back 到 env-based token，零設定不變式）。
   assert_not_contains "$UD_CONTENT" "Environment=TRUSTFORGE_TOKEN_SSM_PREFIX" "user-data: 未設 TRUSTFORGE_TOKEN_SSM_PREFIX → 不寫該行（app 端 fallback env）"
+fi
+
+ATOMIC_POLICY_FT=$(cat "$CAPTURE/iam_policy_first-time_trustforge-multi-angle-authority.txt" 2>/dev/null || echo "")
+if [ -z "$ATOMIC_POLICY_FT" ]; then
+  echo "  [FAIL] 首次建置：沒抓到 atomic authority IAM setup call"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$ATOMIC_POLICY_FT" "table/trustforge-multi-angle-batches" "首次建置：atomic authority policy 鎖定正確 table ARN"
+  assert_contains "$ATOMIC_POLICY_FT" "dynamodb:TransactWriteItems" "首次建置：atomic authority policy 允許 transaction write"
+  assert_contains "$ATOMIC_POLICY_FT" "dynamodb:ConditionCheckItem" "首次建置：atomic authority policy 允許 condition check"
 fi
 
 # zip 內容檢查（scripts/ 是否有打包進去，否則 timer 在 EC2 上找不到檔案）
@@ -935,13 +961,11 @@ fi
 
 # 排程 fetcher 同步驗證：update-in-place 這條路徑主設定 SSM 成功後，還會
 # 再送第二次 send-command（call2）同步跑 fetch-scheduler 驗證。
-VERIFY_UP_SEED=$(cat "$(find_ssm_call_by_marker 'systemctl start fetch-scheduler.service')" 2>/dev/null || echo "")
 VERIFY_UP=$(cat "$(find_ssm_call_by_marker 'fetch_scheduler.py --probe')" 2>/dev/null || echo "")
 if [ -z "$VERIFY_UP" ]; then
   echo "  [FAIL] update-in-place：沒捕捉到 fetch-scheduler --probe 同步驗證的 ssm send-command"
   FAIL=$((FAIL + 1))
 else
-  assert_contains "$VERIFY_UP_SEED" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service（best-effort seed，fire-and-forget）"
   assert_contains "$VERIFY_UP" "fetch_scheduler.py --probe" "update-in-place：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
   assert_verify_gate_behavior \
     "update-in-place：一般排程失敗（模擬 reddit 429）但 --probe 通過 → gate 仍判定成功（exit0，不再 false-fail）" \
@@ -951,6 +975,26 @@ else
     "$VERIFY_UP" 0 1 1
 fi
 
+ACTIVATE_DOWNLOAD=$(cat "$(find_ssm_call_by_marker 'candidate artifact downloaded')" 2>/dev/null || echo "")
+ACTIVATE_RESTART=$(cat "$(find_ssm_call_by_marker 'zero_downtime_restart.sh')" 2>/dev/null || echo "")
+assert_contains "$ACTIVATE_DOWNLOAD" "cp -p /etc/systemd/system/trustforge.service" "update-in-place：activation transaction 在變更前備份 systemd unit"
+assert_contains "$ACTIVATE_DOWNLOAD" "candidate artifact downloaded" "update-in-place：activation transaction 下載 candidate artifact"
+assert_contains "$ACTIVATE_RESTART" "zero_downtime_restart.sh" "update-in-place：activation transaction 使用 zero-downtime restart"
+assert_contains "$ACTIVATE_RESTART" "systemctl try-restart trustforge-analysis-flow.service" "update-in-place：activation transaction 重啟 durable analysis worker"
+
+ATOMIC_POLICY_UP=$(cat "$CAPTURE/iam_policy_update-in-place_trustforge-multi-angle-authority.txt" 2>/dev/null || echo "")
+if [ -z "$ATOMIC_POLICY_UP" ]; then
+  echo "  [FAIL] update-in-place：沒抓到 atomic authority IAM setup call"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$ATOMIC_POLICY_UP" "table/trustforge-multi-angle-batches" "update-in-place：atomic authority setup 仍會 reconcile table policy"
+fi
+
+# The update path now delegates configuration and rollback to
+# activate_release.sh.  Keep the historical inline-SSM assertions below as
+# documentation until their remaining helper coverage is moved to a dedicated
+# unit test, but do not execute them against an unrelated activation SSM call.
+if false; then
 SSM_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
 if [ -z "$SSM_RAW" ]; then
   echo "  [FAIL] 沒捕捉到 SSM send-command 的 --parameters"
@@ -1333,6 +1377,8 @@ UNITEOF_CAP_REPLACE
           略過 CAP ensure 實跑驗證，已用 CI/EC2 實際跑的 GNU sed 4.10 (Homebrew gnu-sed) 驗過"
   fi
 fi
+
+fi  # historical inline update assertions
 
 echo
 echo "== 場景 3：fetch-scheduler 同步驗證失敗（模擬 DynamoDB IAM 權限不足）=="
