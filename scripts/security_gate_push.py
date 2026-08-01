@@ -9,6 +9,7 @@ new commit before the push is allowed to continue.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tarfile
@@ -44,13 +45,58 @@ def parse_updates(lines: Iterable[str]) -> list[PushUpdate]:
 
 
 def _git(repo: Path, *args: str) -> str:
+    env = _isolated_git_env()
     completed = subprocess.run(
         ["git", "-C", str(repo), *args],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
     return completed.stdout.strip()
+
+
+def _isolated_git_env() -> dict[str, str]:
+    parent_env = dict(os.environ)
+    local_env_vars = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=parent_env,
+    ).stdout.splitlines()
+    for key in local_env_vars:
+        parent_env.pop(key, None)
+    return parent_env
+
+
+def _local_advertised_commits(repo: Path, advertised: Iterable[str]) -> list[str]:
+    """Return unique advertised tips that locally peel to commits.
+
+    ``cat-file --batch-check`` reports an unknown or non-commit ``^{commit}``
+    expression as ``missing`` without turning that expected probe result into a
+    Git command failure.  A failure of the batch command itself still raises.
+    """
+    unique = list(dict.fromkeys(advertised))
+    if not unique:
+        return []
+    expressions = [f"{tip}^{{commit}}" for tip in unique]
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        input="\n".join(expressions) + "\n",
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_isolated_git_env(),
+    )
+    resolved: list[str] = []
+    for tip, line in zip(unique, completed.stdout.splitlines(), strict=True):
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == "commit":
+            resolved.append(tip)
+        elif fields[-1:] != ["missing"]:
+            raise ValueError(f"unexpected git cat-file response: {line!r}")
+    return resolved
 
 
 def commits_for_updates(
@@ -69,7 +115,8 @@ def commits_for_updates(
             if remote_location:
                 if advertised is None:
                     output = _git(repo, "ls-remote", "--refs", remote_location)
-                    advertised = [line.split()[0] for line in output.splitlines() if line]
+                    remote_tips = [line.split()[0] for line in output.splitlines() if line]
+                    advertised = _local_advertised_commits(repo, remote_tips)
                 if advertised:
                     args.extend(["--not", *advertised])
         else:
@@ -113,6 +160,7 @@ def scan_commit(repo: Path, commit: str, out_dir: Path) -> ScanResult:
                 ["git", "-C", str(repo), "archive", "--format=tar", commit],
                 check=True,
                 stdout=archive_file,
+                env=_isolated_git_env(),
             )
         tree = tmp / "tree"
         tree.mkdir()
