@@ -1309,6 +1309,7 @@ wheels = [
 
 [[package]]
 name = "trustforge"
+version = "0.27.51"
 source = { editable = "." }
 dependencies = [
     { name = "bedrock-agentcore" },
