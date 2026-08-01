@@ -1,14 +1,990 @@
 <!doctype html>
-<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TrustForge Hermes｜商業化 AI Agent 產品提案</title>
-<style>
-:root{--bg:#07121f;--bg2:#10294a;--ink:#f8fbff;--muted:#b7c9dc;--cyan:#41d9e8;--gold:#ffc85a;--violet:#9b8cff;--line:rgba(255,255,255,.18);--panel:rgba(13,34,57,.82);--good:#62e6a7}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:"Microsoft JhengHei","Noto Sans TC",system-ui,sans-serif}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 82% 12%,rgba(65,217,232,.18),transparent 30%),radial-gradient(circle at 8% 90%,rgba(155,140,255,.18),transparent 28%),linear-gradient(135deg,var(--bg),var(--bg2));pointer-events:none}.deck{position:relative;width:100%;height:100%}.slide{position:absolute;inset:0;display:none;padding:5.2vh 6vw 4.5vh;overflow:hidden}.slide.active{display:flex;flex-direction:column;animation:enter .35s ease both}@keyframes enter{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}.top,.content,.footer{position:relative;z-index:1}.top,.footer{display:flex;justify-content:space-between;align-items:center}.index,.brand{font-size:clamp(11px,1vw,15px);font-weight:900;letter-spacing:.14em}.index{color:var(--cyan)}.brand{color:var(--muted)}.content{flex:1;display:flex;flex-direction:column;justify-content:center}h1,h2,h3,p{margin:0}h1{font-size:clamp(45px,5.1vw,82px);line-height:1.08;letter-spacing:-.045em;max-width:1200px}h2{font-size:clamp(31px,3.25vw,53px);line-height:1.12;letter-spacing:-.035em;max-width:1240px}h3{font-size:clamp(17px,1.45vw,25px)}p,li{font-size:clamp(14px,1.16vw,20px);line-height:1.5}.accent{color:var(--cyan)}.gold{color:var(--gold)}.violet{color:var(--violet)}.muted{color:var(--muted)}.eyebrow{color:var(--cyan);font-size:clamp(12px,1vw,16px);font-weight:900;letter-spacing:.16em;margin-bottom:2.4vh}.sub{margin-top:2.4vh;max-width:1050px;color:var(--muted);font-size:clamp(17px,1.55vw,26px)}.footer{color:var(--muted);font-size:12px}.grid2,.grid3,.grid4{display:grid;gap:1.25vw;margin-top:2.8vh}.grid2{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:repeat(3,1fr)}.grid4{grid-template-columns:repeat(4,1fr)}.card{padding:1.45vw;border:1px solid var(--line);border-radius:16px;background:var(--panel);min-height:125px;box-shadow:0 14px 34px rgba(0,0,0,.18)}.card.em{border-color:rgba(65,217,232,.7);background:linear-gradient(145deg,rgba(65,217,232,.16),rgba(155,140,255,.12))}.card .num{font-size:12px;color:var(--cyan);font-weight:900;letter-spacing:.12em}.card h3{margin:9px 0 7px;color:var(--cyan)}.card p{font-size:clamp(12px,1vw,16px);color:var(--muted)}.list{list-style:none;padding:0;margin:0}.list li{position:relative;padding:.85vh 0 .85vh 23px;border-bottom:1px solid rgba(255,255,255,.07)}.list li:before{content:"";position:absolute;left:0;top:1.55em;width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 12px var(--cyan)}.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:stretch;gap:.8vw;margin-top:3vh}.flow .step{padding:1.45vw;border:1px solid var(--line);border-radius:16px;background:var(--panel);text-align:center}.flow .step strong{display:block;color:var(--cyan);font-size:clamp(16px,1.35vw,24px);margin-bottom:8px}.flow .step span{color:var(--muted);font-size:clamp(12px,.95vw,16px);line-height:1.4}.arrow{align-self:center;color:var(--gold);font-size:26px;font-weight:900}.band{display:flex;flex-wrap:wrap;gap:9px;justify-content:center;margin-top:2.3vh}.band span{padding:8px 12px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.08);font-weight:800;font-size:clamp(11px,.9vw,15px)}.callout{margin-top:2.3vh;padding:1.25vh 1.35vw;border-left:4px solid var(--cyan);background:rgba(65,217,232,.1);font-size:clamp(16px,1.35vw,23px);font-weight:800}.compare{display:grid;grid-template-columns:1fr 1fr;gap:3vw;margin-top:3vh}.compare h3{margin-bottom:1.2vh}.arch{display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:1vw;margin-top:2.6vh;align-items:stretch}.arch .node{padding:1.2vw;border:1px solid var(--line);border-radius:14px;background:var(--panel)}.arch .node strong{display:block;color:var(--cyan);font-size:clamp(15px,1.25vw,22px);margin-bottom:6px}.arch .node span{color:var(--muted);font-size:clamp(12px,.92vw,16px);line-height:1.4}.arch .arrow{display:flex;align-items:center;justify-content:center}.pipeline{display:grid;grid-template-columns:repeat(4,1fr);gap:1vw;margin-top:2.7vh}.pipeline .pstep{padding:1.25vw;border-top:3px solid var(--cyan);background:rgba(255,255,255,.08)}.pipeline b{display:block;color:var(--cyan);font-size:clamp(14px,1.15vw,20px);margin-bottom:6px}.pipeline span{color:var(--muted);font-size:clamp(11px,.9vw,15px);line-height:1.35}.notes{display:none}.progress{position:fixed;left:0;bottom:0;height:4px;background:linear-gradient(90deg,var(--violet),var(--cyan));z-index:10;transition:width .3s}.hint{position:fixed;right:22px;bottom:14px;color:rgba(255,255,255,.35);font-size:11px;z-index:10}@media(max-width:800px){.slide{padding:4vh 5vw}.grid4,.grid3{grid-template-columns:1fr 1fr}.flow,.arch,.pipeline{grid-template-columns:1fr}.flow .arrow{transform:rotate(90deg);justify-self:center}.compare{grid-template-columns:1fr;gap:2vh}}@media print{html,body{overflow:visible;background:#07121f}@page{size:13.333in 7.5in;margin:0}.deck{width:auto;height:auto}.slide,.slide.active{position:relative;inset:auto;display:flex!important;flex-direction:column;width:13.333in;height:7.5in;padding:.39in .8in .34in;page-break-after:always;break-after:page;overflow:hidden;background:radial-gradient(circle at 82% 12%,rgba(65,217,232,.18),transparent 30%),radial-gradient(circle at 8% 90%,rgba(155,140,255,.18),transparent 28%),linear-gradient(135deg,#07121f,#10294a);animation:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}body:before{display:none}.hint,.progress{display:none}}
-</style><style>.commercial-mini{display:grid;grid-template-columns:repeat(3,1fr);gap:1vw;margin-top:1.8vh}.commercial-mini div{padding:1vw;border:1px solid rgba(65,217,232,.55);border-radius:12px;background:rgba(65,217,232,.09)}.commercial-mini b{display:block;color:#41d9e8;font-size:clamp(12px,1vw,16px);margin-bottom:5px}.commercial-mini span{color:#b7c9dc;font-size:clamp(11px,.85vw,14px);line-height:1.35}</style></head><body><main class="deck">
-<section class="slide active"><div class="top"><span class="index">01</span><span class="brand">PRODUCT THESIS</span></div><div class="content"><div class="eyebrow">TRUSTFORGE HERMES｜EVIDENCE-NATIVE DECISION INTELLIGENCE</div><h1>把 AI Agent 從「會回答」<br>升級成<span class="accent">能被治理的判斷系統</span></h1><p class="sub">TrustForge Hermes 是面向金融資訊場景的 evidence-native AI Agent：它把多源資料、可驗證主張、確定性信任計算、模型協作與完整 audit trail 組成一個可部署、可觀測、可持續改善的產品。</p><div class="callout">我們不提供黑箱答案；我們交付可追問、可重播、可回滾的 decision intelligence。</div></div><div class="footer"><span>Team 11 中再參與｜HurricaneSoft</span><span>1 / 8</span></div><aside class="notes">0:00–0:40。先定位產品，不從比賽評分開始。核心訊息是：Hermes 是 evidence-native、可治理、可商業部署的 AI Agent，而不是單次摘要工具。</aside></section>
-<section class="slide"><div class="top"><span class="index">02</span><span class="brand">PRODUCT SURFACE</span></div><div class="content"><h2>同一套信任核心，支援研究、營運與<span class="accent">企業整合</span></h2><div class="grid3"><article class="card em"><div class="num">RESEARCH WORKSPACE</div><h3>Hermes Workspace</h3><p>Analyze、Compare、History、Source Status、Whale Activity 與 Evidence Trail，讓研究者從問題到報告完成一條閉環。</p></article><article class="card"><div class="num">OPERATIONS CONSOLE</div><h3>Governance &amp; Operations</h3><p>Training Status、Budget、Carbon、Module Telemetry、Upgrade Queue、Memory 與 AgentCore 狀態集中觀測。</p></article><article class="card"><div class="num">INTEGRATION SURFACE</div><h3>API &amp; Artifacts</h3><p>REST API、comparison snapshot、analysis journey、Final Report、Evidence List 與 Execution Log 可被下游系統消費。</p></article></div><div class="band"><span>Decision support—not trading</span><span>run_id / claim_id</span><span>Human-in-the-loop</span><span>Offline / Live / Degraded</span></div></div><div class="footer"><span>一個核心，三種企業使用方式</span><span>2 / 8</span></div><aside class="notes">0:40–1:15。讓企業客戶看到產品面：研究者用 workspace，營運與治理人員用 console，外部產品透過 API 與 artifacts 整合。</aside></section>
-<section class="slide"><div class="top"><span class="index">03</span><span class="brand">RUNTIME ARCHITECTURE</span></div><div class="content"><h2>Hermes 是一條有界的<span class="accent">可觀測 Agent Runtime</span></h2><div class="flow"><div class="step"><strong>Ingestion</strong><span>OHLCV、新聞、社群、監管、鏈上、Whale、HOYA BIT 與生態資料</span></div><div class="arrow">→</div><div class="step"><strong>Reasoning Pipeline</strong><span>Claim extraction、stance、dedup、corroboration、Trust Kernel、uncertainty</span></div><div class="arrow">→</div><div class="step"><strong>Evidence Delivery</strong><span>Report、Evidence、Execution Log、Snapshot、API 與 UI 呈現</span></div></div><div class="pipeline"><div class="pstep"><b>Bounded tools</b><span>固定工具目錄、來源範圍與預算，不允許無界網路探索。</span></div><div class="pstep"><b>Policy plane</b><span>source、analysis、report、evaluation、improvement policy 逐一記錄。</span></div><div class="pstep"><b>Memory plane</b><span>run、artifact、evidence、learning event 與可重播歷史分離保存。</span></div><div class="pstep"><b>Fail-closed</b><span>逾時、資料缺口、權限或模型異常時降級、棄權或阻擋。</span></div></div></div><div class="footer"><span>Agent autonomy is bounded, observable and reversible</span><span>3 / 8</span></div><aside class="notes">1:15–2:00。說清楚 Agent 不是一個 prompt，而是 runtime：工具、policy、memory、budget、execution log 都是產品的一部分。</aside></section>
-<section class="slide"><div class="top"><span class="index">04</span><span class="brand">TRUST DOMAIN</span></div><div class="content"><h2>Trust Kernel 把「資訊」轉成<span class="accent">可計算、可驗證的判斷</span></h2><div class="arch"><div class="node"><strong>Evidence contract</strong><span>source、fetched_at、content_reference、related_claim 與 source_url 組成可追溯資料單位。</span></div><div class="arrow">→</div><div class="node"><strong>Deterministic reasoning</strong><span>source reputation、freshness half-life、independent corroboration、stance 與 manipulation risk。</span></div><div class="arrow">→</div><div class="node"><strong>Decision state</strong><span>direction、trust score、calibrated confidence、reason codes、abstain 與 could_flip。</span></div></div><div class="grid3"><article class="card"><h3>去重與獨立性</h3><p>canonical source identity、claim grouping 與 union-find 避免同稿轉載被誤算多源支持。</p></article><article class="card"><h3>反方與矛盾</h3><p>contrarian evidence、Conflict Ledger 與 stance pair 保留分歧，不用平均值掩蓋風險。</p></article><article class="card"><h3>資產與市場脈絡</h3><p>Asset Intrinsic、Peer Metrics、multi-angle 與 Whale history 把單一分數放回可解釋脈絡。</p></article></div></div><div class="footer"><span>Kernel 是 domain moat；LLM 不直接決定信任分數</span><span>4 / 8</span></div><aside class="notes">2:00–2:45。這是金融企業最關心的核心：分數不是模型幻覺，而是由可追溯 evidence 與 deterministic rules 組成，並且允許 abstain。</aside></section>
-<section class="slide"><div class="top"><span class="index">05</span><span class="brand">LEARNING SYSTEM</span></div><div class="content"><h2>我們訓練的不是另一個聊天模型，而是<span class="accent">信心校準與來源可靠度模型</span></h2><div class="flow"><div class="step"><strong>每次 analysis run</strong><span>report、evidence、execution log、raw confidence 與 learning event 留存</span></div><div class="arrow">→</div><div class="step"><strong>Delayed outcomes</strong><span>T+1 / T+7 / T+14 OHLCV 與 direction label 成熟後，才成為 ground truth</span></div><div class="arrow">→</div><div class="step"><strong>Candidate training</strong><span>Isotonic / logistic calibrator、ECE、holdout、artifact hash 與 proposal</span></div></div><div class="grid2"><article class="card em"><h3>ModelHub</h3><p>模型版本、training request、metrics、artifact provenance 與 candidate lifecycle 的治理介面。</p></article><article class="card"><h3>Amazon SageMaker AI</h3><p>AWS training job、S3 dataset／artifact 與執行資源後端；正式 AWS 路徑可獨立驗證。</p></article></div><div class="callout">目前正確邊界：每次 run 都會沉澱學習資料，但訓練觸發仍是顯式流程；candidate 永遠 automatic_apply=false，必須人工批准。</div></div><div class="footer"><span>Learning loop ≠ uncontrolled self-modification</span><span>5 / 8</span></div><aside class="notes">2:45–3:35。這頁要主動說清楚：我們不用現成模型直接給信心，因為模型不知道企業的 evidence contract 與市場延遲結果。每次 run 先沉澱，等 outcome 成熟再訓練；不是每次立即重訓，也不是自動上線。</aside></section>
-<section class="slide"><div class="top"><span class="index">06</span><span class="brand">CONTROL PLANE</span></div><div class="content"><h2>能升級，不代表能自行改寫生產系統</h2><div class="grid3"><article class="card em"><div class="num">UPGRADE CONTROL</div><h3>Candidate → Review → Activate</h3><p>Provider、policy、model、calibrator 與 RAG/reranker 都先在 sandbox 量測，經 reviewer gate 才能進入 release。</p></article><article class="card"><div class="num">RELIABILITY</div><h3>Idempotency &amp; Recovery</h3><p>formal run、multi-angle batch、Dynamo/SQLite lease、atomic reconcile、retry 與 rollback receipt 防止重複或半完成狀態。</p></article><article class="card"><div class="num">SECURITY &amp; COST</div><h3>Zero-trust Operations</h3><p>IAM least privilege、SSM、token gate、rate limit、budget reservation、CloudWatch、carbon ledger 與 secret scan。</p></article></div><div class="band"><span>AgentCore runtime</span><span>Policy compiler / executor</span><span>Memory &amp; lineage</span><span>Module telemetry</span><span>Release gates</span></div><div class="callout">真正的企業級 Agent，不只會做事，也要能證明誰讓它做、用什麼資料、花多少成本，以及如何安全回復。</div></div><div class="footer"><span>Governance is a product capability, not a slide disclaimer</span><span>6 / 8</span></div><aside class="notes">3:35–4:20。這一頁講商業化差異：upgrade queue、policy、memory、idempotency、security、budget、release 都是獨立模組，不是把全部責任丟給 LLM。</aside></section>
-<section class="slide"><div class="top"><span class="index">07</span><span class="brand">DEPLOYMENT &amp; INTEGRATION</span></div><div class="content"><h2>以現有 AWS 生產拓樸承載<span class="accent">可替換的產品邊界</span></h2><div class="arch"><div class="node"><strong>React / Hermes UI</strong><span>Vite build、responsive workspace、analysis、compare、history、admin 與 operational pages。</span></div><div class="arrow">→</div><div class="node"><strong>nginx → Python API</strong><span>EC2 t3.micro；nginx :80/:443；Python 僅聽 127.0.0.1:8080；API 與 SSR 共存但新功能走 API。</span></div><div class="arrow">→</div><div class="node"><strong>AWS &amp; data plane</strong><span>Amazon Bedrock、S3、IAM、SSM、CloudWatch；Lambda/AgentCore 為可替換整合路徑。</span></div></div><div class="grid3"><article class="card"><h3>Live / Sample / Degraded</h3><p>同一份 contract 支援實時資料、離線示範與來源降級，狀態會在 UI 與 log 中揭露。</p></article><article class="card"><h3>API-first</h3><p>health、status、analyze、comparison、training、upgrade、whale、carbon、delivery 與 telemetry。</p></article><article class="card"><h3>Artifact-first</h3><p>Report、Evidence、Execution Log、Source/Config、manifest 與 SHA-256 可交付、可重播。</p></article></div></div><div class="footer"><span>從競賽 Live Demo 到企業 workflow 的最短路徑</span><span>7 / 8</span></div><aside class="notes">4:20–5:05。明確說實際部署是 EC2 + nginx，不是未採用的 App Runner。產品邊界可替換：Bedrock、AgentCore、ModelHub/SageMaker、儲存與前端都透過 contract 接合。</aside></section>
-<section class="slide"><div class="top"><span class="index">08</span><span class="brand">COMMERCIAL OUTCOME</span></div><div class="content"><h2>TrustForge 的商業價值，是把<span class="accent">信任與治理變成可整合能力</span></h2><div class="compare"><div><h3 class="gold">對金融與資料團隊</h3><ul class="list"><li>把分散市場訊號轉成可查證的 decision record。</li><li>以 confidence、limits、could_flip 與 contrarian evidence 支援風險溝通。</li><li>用 API、artifact 與 telemetry 接入研究、客服、風控與稽核流程。</li></ul></div><div><h3 class="accent">對產品與平台團隊</h3><ul class="list"><li>不綁單一模型：provider、policy、memory、retrieval 與 calibrator 可替換。</li><li>不怕模型升級：candidate、review、rollback、audit 全部有明確邊界。</li><li>不把 Agent 當黑箱：每一次執行都能重播、量測與追責。</li></ul></div></div><div class="callout">OpenClaw 讓 Agent 具備行動能力；TrustForge 讓高風險資訊工作具備 evidence、治理與可回復性。</div><div class="commercial-mini"><div><b>首個買方</b><span>交易所研究、風控與合規團隊</span></div><div><b>4 週 PoC</b><span>5 幣＋4 類外部來源＋Evidence 抽查</span></div><div><b>成功 KPI</b><span>查核時間、可溯源率、報告完成時間</span></div></div><p class="quote" style="text-align:center;margin-top:2.2vh;font-size:clamp(20px,2vw,33px);font-weight:900;color:var(--cyan)">從會回答的 AI，走向值得託付的 AI Agent。</p></div><div class="footer"><span>TrustForge Hermes｜Evidence-native AI Agent platform</span><span>8 / 8</span></div><aside class="notes">5:05–6:00。收束到商業化：研究、風控、客服、稽核都需要同一種能力——可追溯、可治理、可回復的 AI 執行。最後一句停頓。</aside></section>
-</main><div class="progress"></div><div class="hint">← → / Space 切換 · F 全螢幕 · N 講者備註</div><script>const slides=[...document.querySelectorAll('.slide')],bar=document.querySelector('.progress');let i=0,notes=false;function show(n){slides[i].classList.remove('active');i=(n+slides.length)%slides.length;slides[i].classList.add('active');bar.style.width=((i+1)/slides.length*100)+'%';if(notes){console.clear();console.log(slides[i].querySelector('.notes')?.textContent)}}document.addEventListener('keydown',e=>{if(['ArrowRight',' ','PageDown'].includes(e.key)){e.preventDefault();show(i+1)}if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1)}if(e.key.toLowerCase()==='f'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}if(e.key.toLowerCase()==='n'){notes=!notes;console.clear();if(notes)console.log(slides[i].querySelector('.notes')?.textContent)}});document.addEventListener('click',e=>show(i+(e.clientX>innerWidth/2?1:-1)));bar.style.width=(100/slides.length)+'%';</script></body></html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>TrustForge Hermes｜商業化 AI Agent 產品提案</title>
+    <style>
+      :root {
+        --bg: #07121f;
+        --bg2: #10294a;
+        --ink: #f8fbff;
+        --muted: #b7c9dc;
+        --cyan: #41d9e8;
+        --gold: #ffc85a;
+        --violet: #9b8cff;
+        --line: rgba(255, 255, 255, 0.18);
+        --panel: rgba(13, 34, 57, 0.82);
+        --good: #62e6a7;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          "Microsoft JhengHei", "Noto Sans TC", system-ui, sans-serif;
+      }
+      body:before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background:
+          radial-gradient(
+            circle at 82% 12%,
+            rgba(65, 217, 232, 0.18),
+            transparent 30%
+          ),
+          radial-gradient(
+            circle at 8% 90%,
+            rgba(155, 140, 255, 0.18),
+            transparent 28%
+          ),
+          linear-gradient(135deg, var(--bg), var(--bg2));
+        pointer-events: none;
+      }
+      .deck {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+      .slide {
+        position: absolute;
+        inset: 0;
+        display: none;
+        padding: 5.2vh 6vw 4.5vh;
+        overflow: hidden;
+      }
+      .slide.active {
+        display: flex;
+        flex-direction: column;
+        animation: enter 0.35s ease both;
+      }
+      @keyframes enter {
+        from {
+          opacity: 0;
+          transform: translateX(14px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      .top,
+      .content,
+      .footer {
+        position: relative;
+        z-index: 1;
+      }
+      .top,
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .index,
+      .brand {
+        font-size: clamp(11px, 1vw, 15px);
+        font-weight: 900;
+        letter-spacing: 0.14em;
+      }
+      .index {
+        color: var(--cyan);
+      }
+      .brand {
+        color: var(--muted);
+      }
+      .content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      h1 {
+        font-size: clamp(45px, 5.1vw, 82px);
+        line-height: 1.08;
+        letter-spacing: -0.045em;
+        max-width: 1200px;
+      }
+      h2 {
+        font-size: clamp(31px, 3.25vw, 53px);
+        line-height: 1.12;
+        letter-spacing: -0.035em;
+        max-width: 1240px;
+      }
+      h3 {
+        font-size: clamp(17px, 1.45vw, 25px);
+      }
+      p,
+      li {
+        font-size: clamp(14px, 1.16vw, 20px);
+        line-height: 1.5;
+      }
+      .accent {
+        color: var(--cyan);
+      }
+      .gold {
+        color: var(--gold);
+      }
+      .violet {
+        color: var(--violet);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .eyebrow {
+        color: var(--cyan);
+        font-size: clamp(12px, 1vw, 16px);
+        font-weight: 900;
+        letter-spacing: 0.16em;
+        margin-bottom: 2.4vh;
+      }
+      .sub {
+        margin-top: 2.4vh;
+        max-width: 1050px;
+        color: var(--muted);
+        font-size: clamp(17px, 1.55vw, 26px);
+      }
+      .footer {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .grid2,
+      .grid3,
+      .grid4 {
+        display: grid;
+        gap: 1.25vw;
+        margin-top: 2.8vh;
+      }
+      .grid2 {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .grid3 {
+        grid-template-columns: repeat(3, 1fr);
+      }
+      .grid4 {
+        grid-template-columns: repeat(4, 1fr);
+      }
+      .card {
+        padding: 1.45vw;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--panel);
+        min-height: 125px;
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.18);
+      }
+      .card.em {
+        border-color: rgba(65, 217, 232, 0.7);
+        background: linear-gradient(
+          145deg,
+          rgba(65, 217, 232, 0.16),
+          rgba(155, 140, 255, 0.12)
+        );
+      }
+      .card .num {
+        font-size: 12px;
+        color: var(--cyan);
+        font-weight: 900;
+        letter-spacing: 0.12em;
+      }
+      .card h3 {
+        margin: 9px 0 7px;
+        color: var(--cyan);
+      }
+      .card p {
+        font-size: clamp(12px, 1vw, 16px);
+        color: var(--muted);
+      }
+      .list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      .list li {
+        position: relative;
+        padding: 0.85vh 0 0.85vh 23px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      }
+      .list li:before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 1.55em;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--cyan);
+        box-shadow: 0 0 12px var(--cyan);
+      }
+      .flow {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr auto 1fr;
+        align-items: stretch;
+        gap: 0.8vw;
+        margin-top: 3vh;
+      }
+      .flow .step {
+        padding: 1.45vw;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--panel);
+        text-align: center;
+      }
+      .flow .step strong {
+        display: block;
+        color: var(--cyan);
+        font-size: clamp(16px, 1.35vw, 24px);
+        margin-bottom: 8px;
+      }
+      .flow .step span {
+        color: var(--muted);
+        font-size: clamp(12px, 0.95vw, 16px);
+        line-height: 1.4;
+      }
+      .arrow {
+        align-self: center;
+        color: var(--gold);
+        font-size: 26px;
+        font-weight: 900;
+      }
+      .band {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        justify-content: center;
+        margin-top: 2.3vh;
+      }
+      .band span {
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        font-weight: 800;
+        font-size: clamp(11px, 0.9vw, 15px);
+      }
+      .callout {
+        margin-top: 2.3vh;
+        padding: 1.25vh 1.35vw;
+        border-left: 4px solid var(--cyan);
+        background: rgba(65, 217, 232, 0.1);
+        font-size: clamp(16px, 1.35vw, 23px);
+        font-weight: 800;
+      }
+      .compare {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 3vw;
+        margin-top: 3vh;
+      }
+      .compare h3 {
+        margin-bottom: 1.2vh;
+      }
+      .arch {
+        display: grid;
+        grid-template-columns: 1.1fr 1fr 1fr;
+        gap: 1vw;
+        margin-top: 2.6vh;
+        align-items: stretch;
+      }
+      .arch .node {
+        padding: 1.2vw;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+      }
+      .arch .node strong {
+        display: block;
+        color: var(--cyan);
+        font-size: clamp(15px, 1.25vw, 22px);
+        margin-bottom: 6px;
+      }
+      .arch .node span {
+        color: var(--muted);
+        font-size: clamp(12px, 0.92vw, 16px);
+        line-height: 1.4;
+      }
+      .arch .arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .pipeline {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1vw;
+        margin-top: 2.7vh;
+      }
+      .pipeline .pstep {
+        padding: 1.25vw;
+        border-top: 3px solid var(--cyan);
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .pipeline b {
+        display: block;
+        color: var(--cyan);
+        font-size: clamp(14px, 1.15vw, 20px);
+        margin-bottom: 6px;
+      }
+      .pipeline span {
+        color: var(--muted);
+        font-size: clamp(11px, 0.9vw, 15px);
+        line-height: 1.35;
+      }
+      .notes {
+        display: none;
+      }
+      .progress {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        height: 4px;
+        background: linear-gradient(90deg, var(--violet), var(--cyan));
+        z-index: 10;
+        transition: width 0.3s;
+      }
+      .hint {
+        position: fixed;
+        right: 22px;
+        bottom: 14px;
+        color: rgba(255, 255, 255, 0.35);
+        font-size: 11px;
+        z-index: 10;
+      }
+      @media (max-width: 800px) {
+        .slide {
+          padding: 4vh 5vw;
+        }
+        .grid4,
+        .grid3 {
+          grid-template-columns: 1fr 1fr;
+        }
+        .flow,
+        .arch,
+        .pipeline {
+          grid-template-columns: 1fr;
+        }
+        .flow .arrow {
+          transform: rotate(90deg);
+          justify-self: center;
+        }
+        .compare {
+          grid-template-columns: 1fr;
+          gap: 2vh;
+        }
+      }
+      @media print {
+        html,
+        body {
+          overflow: visible;
+          background: #07121f;
+        }
+        @page {
+          size: 13.333in 7.5in;
+          margin: 0;
+        }
+        .deck {
+          width: auto;
+          height: auto;
+        }
+        .slide,
+        .slide.active {
+          position: relative;
+          inset: auto;
+          display: flex !important;
+          flex-direction: column;
+          width: 13.333in;
+          height: 7.5in;
+          padding: 0.39in 0.8in 0.34in;
+          page-break-after: always;
+          break-after: page;
+          overflow: hidden;
+          background:
+            radial-gradient(
+              circle at 82% 12%,
+              rgba(65, 217, 232, 0.18),
+              transparent 30%
+            ),
+            radial-gradient(
+              circle at 8% 90%,
+              rgba(155, 140, 255, 0.18),
+              transparent 28%
+            ),
+            linear-gradient(135deg, #07121f, #10294a);
+          animation: none;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
+        body:before {
+          display: none;
+        }
+        .hint,
+        .progress {
+          display: none;
+        }
+      }
+    </style>
+    <style>
+      .commercial-mini {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1vw;
+        margin-top: 1.8vh;
+      }
+      .commercial-mini div {
+        padding: 1vw;
+        border: 1px solid rgba(65, 217, 232, 0.55);
+        border-radius: 12px;
+        background: rgba(65, 217, 232, 0.09);
+      }
+      .commercial-mini b {
+        display: block;
+        color: #41d9e8;
+        font-size: clamp(12px, 1vw, 16px);
+        margin-bottom: 5px;
+      }
+      .commercial-mini span {
+        color: #b7c9dc;
+        font-size: clamp(11px, 0.85vw, 14px);
+        line-height: 1.35;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="deck">
+      <section class="slide active">
+        <div class="top">
+          <span class="index">01</span><span class="brand">PRODUCT THESIS</span>
+        </div>
+        <div class="content">
+          <div class="eyebrow">
+            TRUSTFORGE HERMES｜EVIDENCE-NATIVE DECISION INTELLIGENCE
+          </div>
+          <h1>
+            把 AI Agent 從「會回答」<br />升級成<span class="accent"
+              >能被治理的判斷系統</span
+            >
+          </h1>
+          <p class="sub">
+            TrustForge Hermes 是面向金融資訊場景的 evidence-native AI
+            Agent：它把多源資料、可驗證主張、確定性信任計算、模型協作與完整
+            audit trail 組成一個可部署、可觀測、可持續改善的產品。
+          </p>
+          <div class="callout">
+            我們不提供黑箱答案；我們交付可追問、可重播、可回滾的 decision
+            intelligence。
+          </div>
+        </div>
+        <div class="footer">
+          <span>Team 11 中再參與｜HurricaneSoft</span><span>1 / 8</span>
+        </div>
+        <aside class="notes">
+          0:00–0:40。先定位產品，不從比賽評分開始。核心訊息是：Hermes 是
+          evidence-native、可治理、可商業部署的 AI Agent，而不是單次摘要工具。
+        </aside>
+      </section>
+      <section class="slide">
+        <div class="top">
+          <span class="index">02</span
+          ><span class="brand">PRODUCT SURFACE</span>
+        </div>
+        <div class="content">
+          <h2>
+            同一套信任核心，支援研究、營運與<span class="accent">企業整合</span>
+          </h2>
+          <div class="grid3">
+            <article class="card em">
+              <div class="num">RESEARCH WORKSPACE</div>
+              <h3>Hermes Workspace</h3>
+              <p>
+                Analyze、Compare、History、Source Status、Whale Activity 與
+                Evidence Trail，讓研究者從問題到報告完成一條閉環。
+              </p>
+            </article>
+            <article class="card">
+              <div class="num">OPERATIONS CONSOLE</div>
+              <h3>Governance &amp; Operations</h3>
+              <p>
+                Training Status、Budget、Carbon、Module Telemetry、Upgrade
+                Queue、Memory 與 AgentCore 狀態集中觀測。
+              </p>
+            </article>
+            <article class="card">
+              <div class="num">INTEGRATION SURFACE</div>
+              <h3>API &amp; Artifacts</h3>
+              <p>
+                REST API、comparison snapshot、analysis journey、Final
+                Report、Evidence List 與 Execution Log 可被下游系統消費。
+              </p>
+            </article>
+          </div>
+          <div class="band">
+            <span>Decision support—not trading</span
+            ><span>run_id / claim_id</span><span>Human-in-the-loop</span
+            ><span>Offline / Live / Degraded</span>
+          </div>
+        </div>
+        <div class="footer">
+          <span>一個核心，三種企業使用方式</span><span>2 / 8</span>
+        </div>
+        <aside class="notes">
+          0:40–1:15。讓企業客戶看到產品面：研究者用 workspace，營運與治理人員用
+          console，外部產品透過 API 與 artifacts 整合。
+        </aside>
+      </section>
+      <section class="slide">
+        <div class="top">
+          <span class="index">03</span
+          ><span class="brand">RUNTIME ARCHITECTURE</span>
+        </div>
+        <div class="content">
+          <h2>
+            Hermes 是一條有界的<span class="accent">可觀測 Agent Runtime</span>
+          </h2>
+          <div class="flow">
+            <div class="step">
+              <strong>Ingestion</strong
+              ><span
+                >OHLCV、新聞、社群、監管、鏈上、Whale、HOYA BIT 與生態資料</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="step">
+              <strong>Reasoning Pipeline</strong
+              ><span
+                >Claim extraction、stance、dedup、corroboration、Trust
+                Kernel、uncertainty</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="step">
+              <strong>Evidence Delivery</strong
+              ><span
+                >Report、Evidence、Execution Log、Snapshot、API 與 UI 呈現</span
+              >
+            </div>
+          </div>
+          <div class="pipeline">
+            <div class="pstep">
+              <b>Bounded tools</b
+              ><span>固定工具目錄、來源範圍與預算，不允許無界網路探索。</span>
+            </div>
+            <div class="pstep">
+              <b>Policy plane</b
+              ><span
+                >source、analysis、report、evaluation、improvement policy
+                逐一記錄。</span
+              >
+            </div>
+            <div class="pstep">
+              <b>Memory plane</b
+              ><span
+                >run、artifact、evidence、learning event
+                與可重播歷史分離保存。</span
+              >
+            </div>
+            <div class="pstep">
+              <b>Fail-closed</b
+              ><span>逾時、資料缺口、權限或模型異常時降級、棄權或阻擋。</span>
+            </div>
+          </div>
+        </div>
+        <div class="footer">
+          <span>Agent autonomy is bounded, observable and reversible</span
+          ><span>3 / 8</span>
+        </div>
+        <aside class="notes">
+          1:15–2:00。說清楚 Agent 不是一個 prompt，而是
+          runtime：工具、policy、memory、budget、execution log
+          都是產品的一部分。
+        </aside>
+      </section>
+      <section class="slide">
+        <div class="top">
+          <span class="index">04</span><span class="brand">TRUST DOMAIN</span>
+        </div>
+        <div class="content">
+          <h2>
+            Trust Kernel 把「資訊」轉成<span class="accent"
+              >可計算、可驗證的判斷</span
+            >
+          </h2>
+          <div class="arch">
+            <div class="node">
+              <strong>Evidence contract</strong
+              ><span
+                >source、fetched_at、content_reference、related_claim 與
+                source_url 組成可追溯資料單位。</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="node">
+              <strong>Deterministic reasoning</strong
+              ><span
+                >source reputation、freshness half-life、independent
+                corroboration、stance 與 manipulation risk。</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="node">
+              <strong>Decision state</strong
+              ><span
+                >direction、trust score、calibrated confidence、reason
+                codes、abstain 與 could_flip。</span
+              >
+            </div>
+          </div>
+          <div class="grid3">
+            <article class="card">
+              <h3>去重與獨立性</h3>
+              <p>
+                canonical source identity、claim grouping 與 union-find
+                避免同稿轉載被誤算多源支持。
+              </p>
+            </article>
+            <article class="card">
+              <h3>反方與矛盾</h3>
+              <p>
+                contrarian evidence、Conflict Ledger 與 stance pair
+                保留分歧，不用平均值掩蓋風險。
+              </p>
+            </article>
+            <article class="card">
+              <h3>資產與市場脈絡</h3>
+              <p>
+                Asset Intrinsic、Peer Metrics、multi-angle 與 Whale history
+                把單一分數放回可解釋脈絡。
+              </p>
+            </article>
+          </div>
+        </div>
+        <div class="footer">
+          <span>Kernel 是 domain moat；LLM 不直接決定信任分數</span
+          ><span>4 / 8</span>
+        </div>
+        <aside class="notes">
+          2:00–2:45。這是金融企業最關心的核心：分數不是模型幻覺，而是由可追溯
+          evidence 與 deterministic rules 組成，並且允許 abstain。
+        </aside>
+      </section>
+      <section class="slide">
+        <div class="top">
+          <span class="index">05</span
+          ><span class="brand">LEARNING SYSTEM</span>
+        </div>
+        <div class="content">
+          <h2>
+            我們訓練的不是另一個聊天模型，而是<span class="accent"
+              >信心校準與來源可靠度模型</span
+            >
+          </h2>
+          <div class="flow">
+            <div class="step">
+              <strong>每次 analysis run</strong
+              ><span
+                >report、evidence、execution log、raw confidence 與 learning
+                event 留存</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="step">
+              <strong>Delayed outcomes</strong
+              ><span
+                >T+1 / T+7 / T+14 OHLCV 與 direction label 成熟後，才成為 ground
+                truth</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="step">
+              <strong>Candidate training</strong
+              ><span
+                >Isotonic / logistic calibrator、ECE、holdout、artifact hash 與
+                proposal</span
+              >
+            </div>
+          </div>
+          <div class="grid2">
+            <article class="card em">
+              <h3>ModelHub</h3>
+              <p>
+                模型版本、training request、metrics、artifact provenance 與
+                candidate lifecycle 的治理介面。
+              </p>
+            </article>
+            <article class="card">
+              <h3>Amazon SageMaker AI</h3>
+              <p>
+                AWS training job、S3 dataset／artifact 與執行資源後端；正式 AWS
+                路徑可獨立驗證。
+              </p>
+            </article>
+          </div>
+          <div class="callout">
+            目前正確邊界：每次 run
+            都會沉澱學習資料，但訓練觸發仍是顯式流程；candidate 永遠
+            automatic_apply=false，必須人工批准。
+          </div>
+        </div>
+        <div class="footer">
+          <span>Learning loop ≠ uncontrolled self-modification</span
+          ><span>5 / 8</span>
+        </div>
+        <aside class="notes">
+          2:45–3:35。這頁要主動說清楚：我們不用現成模型直接給信心，因為模型不知道企業的
+          evidence contract 與市場延遲結果。每次 run 先沉澱，等 outcome
+          成熟再訓練；不是每次立即重訓，也不是自動上線。
+        </aside>
+      </section>
+      <section class="slide">
+        <div class="top">
+          <span class="index">06</span><span class="brand">CONTROL PLANE</span>
+        </div>
+        <div class="content">
+          <h2>能升級，不代表能自行改寫生產系統</h2>
+          <div class="grid3">
+            <article class="card em">
+              <div class="num">UPGRADE CONTROL</div>
+              <h3>Candidate → Review → Activate</h3>
+              <p>
+                Provider、policy、model、calibrator 與 RAG/reranker 都先在
+                sandbox 量測，經 reviewer gate 才能進入 release。
+              </p>
+            </article>
+            <article class="card">
+              <div class="num">RELIABILITY</div>
+              <h3>Idempotency &amp; Recovery</h3>
+              <p>
+                formal run、multi-angle batch、Dynamo/SQLite lease、atomic
+                reconcile、retry 與 rollback receipt 防止重複或半完成狀態。
+              </p>
+            </article>
+            <article class="card">
+              <div class="num">SECURITY &amp; COST</div>
+              <h3>Zero-trust Operations</h3>
+              <p>
+                IAM least privilege、SSM、token gate、rate limit、budget
+                reservation、CloudWatch、carbon ledger 與 secret scan。
+              </p>
+            </article>
+          </div>
+          <div class="band">
+            <span>AgentCore runtime</span><span>Policy compiler / executor</span
+            ><span>Memory &amp; lineage</span><span>Module telemetry</span
+            ><span>Release gates</span>
+          </div>
+          <div class="callout">
+            真正的企業級
+            Agent，不只會做事，也要能證明誰讓它做、用什麼資料、花多少成本，以及如何安全回復。
+          </div>
+        </div>
+        <div class="footer">
+          <span>Governance is a product capability, not a slide disclaimer</span
+          ><span>6 / 8</span>
+        </div>
+        <aside class="notes">
+          3:35–4:20。這一頁講商業化差異：upgrade
+          queue、policy、memory、idempotency、security、budget、release
+          都是獨立模組，不是把全部責任丟給 LLM。
+        </aside>
+      </section>
+      <section class="slide">
+        <div class="top">
+          <span class="index">07</span
+          ><span class="brand">DEPLOYMENT &amp; INTEGRATION</span>
+        </div>
+        <div class="content">
+          <h2>
+            以現有 AWS 生產拓樸承載<span class="accent">可替換的產品邊界</span>
+          </h2>
+          <div class="arch">
+            <div class="node">
+              <strong>React / Hermes UI</strong
+              ><span
+                >Vite build、responsive
+                workspace、analysis、compare、history、admin 與 operational
+                pages。</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="node">
+              <strong>nginx → Python API</strong
+              ><span
+                >EC2 t3.micro；nginx :80/:443；Python 僅聽 127.0.0.1:8080；API
+                與 SSR 共存但新功能走 API。</span
+              >
+            </div>
+            <div class="arrow">→</div>
+            <div class="node">
+              <strong>AWS &amp; data plane</strong
+              ><span
+                >Amazon Bedrock、S3、IAM、SSM、CloudWatch；Lambda/AgentCore
+                為可替換整合路徑。</span
+              >
+            </div>
+          </div>
+          <div class="grid3">
+            <article class="card">
+              <h3>Live / Sample / Degraded</h3>
+              <p>
+                同一份 contract 支援實時資料、離線示範與來源降級，狀態會在 UI 與
+                log 中揭露。
+              </p>
+            </article>
+            <article class="card">
+              <h3>API-first</h3>
+              <p>
+                health、status、analyze、comparison、training、upgrade、whale、carbon、delivery
+                與 telemetry。
+              </p>
+            </article>
+            <article class="card">
+              <h3>Artifact-first</h3>
+              <p>
+                Report、Evidence、Execution Log、Source/Config、manifest 與
+                SHA-256 可交付、可重播。
+              </p>
+            </article>
+          </div>
+        </div>
+        <div class="footer">
+          <span>從競賽 Live Demo 到企業 workflow 的最短路徑</span
+          ><span>7 / 8</span>
+        </div>
+        <aside class="notes">
+          4:20–5:05。明確說實際部署是 EC2 + nginx，不是未採用的 App
+          Runner。產品邊界可替換：Bedrock、AgentCore、ModelHub/SageMaker、儲存與前端都透過
+          contract 接合。
+        </aside>
+      </section>
+      <section class="slide">
+        <div class="top">
+          <span class="index">08</span
+          ><span class="brand">COMMERCIAL OUTCOME</span>
+        </div>
+        <div class="content">
+          <h2>
+            TrustForge 的商業價值，是把<span class="accent"
+              >信任與治理變成可整合能力</span
+            >
+          </h2>
+          <div class="compare">
+            <div>
+              <h3 class="gold">對金融與資料團隊</h3>
+              <ul class="list">
+                <li>把分散市場訊號轉成可查證的 decision record。</li>
+                <li>
+                  以 confidence、limits、could_flip 與 contrarian evidence
+                  支援風險溝通。
+                </li>
+                <li>
+                  用 API、artifact 與 telemetry 接入研究、客服、風控與稽核流程。
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 class="accent">對產品與平台團隊</h3>
+              <ul class="list">
+                <li>
+                  不綁單一模型：provider、policy、memory、retrieval 與
+                  calibrator 可替換。
+                </li>
+                <li>
+                  不怕模型升級：candidate、review、rollback、audit
+                  全部有明確邊界。
+                </li>
+                <li>不把 Agent 當黑箱：每一次執行都能重播、量測與追責。</li>
+              </ul>
+            </div>
+          </div>
+          <div class="callout">
+            OpenClaw 讓 Agent 具備行動能力；TrustForge 讓高風險資訊工作具備
+            evidence、治理與可回復性。
+          </div>
+          <div class="commercial-mini">
+            <div><b>首個買方</b><span>交易所研究、風控與合規團隊</span></div>
+            <div>
+              <b>4 週 PoC</b><span>5 幣＋4 類外部來源＋Evidence 抽查</span>
+            </div>
+            <div>
+              <b>成功 KPI</b><span>查核時間、可溯源率、報告完成時間</span>
+            </div>
+          </div>
+          <p
+            class="quote"
+            style="
+              text-align: center;
+              margin-top: 2.2vh;
+              font-size: clamp(20px, 2vw, 33px);
+              font-weight: 900;
+              color: var(--cyan);
+            "
+          >
+            從會回答的 AI，走向值得託付的 AI Agent。
+          </p>
+        </div>
+        <div class="footer">
+          <span>TrustForge Hermes｜Evidence-native AI Agent platform</span
+          ><span>8 / 8</span>
+        </div>
+        <aside class="notes">
+          5:05–6:00。收束到商業化：研究、風控、客服、稽核都需要同一種能力——可追溯、可治理、可回復的
+          AI 執行。最後一句停頓。
+        </aside>
+      </section>
+    </main>
+    <div class="progress"></div>
+    <div class="hint">← → / Space 切換 · F 全螢幕 · N 講者備註</div>
+    <script>
+      const slides = [...document.querySelectorAll(".slide")],
+        bar = document.querySelector(".progress");
+      let i = 0,
+        notes = false;
+      function show(n) {
+        slides[i].classList.remove("active");
+        i = (n + slides.length) % slides.length;
+        slides[i].classList.add("active");
+        bar.style.width = ((i + 1) / slides.length) * 100 + "%";
+        if (notes) {
+          console.clear();
+          console.log(slides[i].querySelector(".notes")?.textContent);
+        }
+      }
+      document.addEventListener("keydown", (e) => {
+        if (["ArrowRight", " ", "PageDown"].includes(e.key)) {
+          e.preventDefault();
+          show(i + 1);
+        }
+        if (["ArrowLeft", "PageUp"].includes(e.key)) {
+          e.preventDefault();
+          show(i - 1);
+        }
+        if (e.key.toLowerCase() === "f") {
+          document.fullscreenElement
+            ? document.exitFullscreen()
+            : document.documentElement.requestFullscreen();
+        }
+        if (e.key.toLowerCase() === "n") {
+          notes = !notes;
+          console.clear();
+          if (notes)
+            console.log(slides[i].querySelector(".notes")?.textContent);
+        }
+      });
+      document.addEventListener("click", (e) =>
+        show(i + (e.clientX > innerWidth / 2 ? 1 : -1)),
+      );
+      bar.style.width = 100 / slides.length + "%";
+    </script>
+  </body>
+</html>
