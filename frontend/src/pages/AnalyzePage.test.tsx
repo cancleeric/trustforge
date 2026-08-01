@@ -47,6 +47,18 @@ function renderAnalyze(path: string, embedded = false) {
   )
 }
 
+// #1186: a fresh mount whose URL already carries an explicit, non-sample
+// `?q=` with no reconnectable job (no `?job=`, nothing matching in
+// sessionStorage) is now gated behind the same FormalRunConfirmDialog as
+// every other formal-run entry point (see AnalyzePage.tsx's `deeplink`
+// pending kind). Tests that use a `renderAnalyze('/analyze?...q=...')`
+// (or an equivalent raw `render`) purely as setup for otherwise-unrelated
+// polling/dedup/idempotency behavior call this right after render to get
+// past that gate exactly like a real user confirming the dialog once.
+function confirmDeepLinkRun() {
+  fireEvent.click(screen.getByRole('button', { name: /^(確認執行|Confirm run)$/ }))
+}
+
 function HistoryControls() {
   const navigate = useNavigate()
   return <><button onClick={() => navigate('/analyze?coin=ETH&type=multi_source&mode=risk&q=second')}>second</button><button onClick={() => navigate(-1)}>back</button><button onClick={() => navigate(1)}>forward</button></>
@@ -105,6 +117,7 @@ describe('AnalyzePage manual execution', () => {
 
   it('creates a high-priority durable manual job instead of calling the inline endpoint', async () => {
     renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+    confirmDeepLinkRun()
 
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledWith(
       'BTC', 'risk', '分析BTC近期市場狀況',
@@ -183,6 +196,7 @@ describe('AnalyzePage manual execution', () => {
       })
 
       renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+      confirmDeepLinkRun()
 
       await act(async () => { await vi.runAllTimersAsync() })
 
@@ -207,6 +221,7 @@ describe('AnalyzePage manual execution', () => {
       vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: false, error: { code: 'server_busy', message: '伺服器忙碌' } })
 
       renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+      confirmDeepLinkRun()
 
       await act(async () => { await vi.runAllTimersAsync() })
 
@@ -258,6 +273,7 @@ describe('AnalyzePage manual execution', () => {
   it('registers exactly once when explicitly resubmitting the same URL', async () => {
     vi.mocked(getAnalysisJob).mockResolvedValueOnce({ ok: true, data: { job_id: 'flow-1', state: 'failed', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: 'same', error: 'test', origin: 'manual', priority: 0, queue_position: null, result: null } })
     renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=same')
+    confirmDeepLinkRun()
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
     const submit = screen.getByRole('button', { name: /立即重新分析/ })
     await waitFor(() => expect(submit).not.toBeDisabled())
@@ -280,6 +296,7 @@ describe('AnalyzePage manual execution', () => {
         .mockResolvedValueOnce({ ok: true, data: formalReceipt() })
 
       renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=retry-key')
+      confirmDeepLinkRun()
       await act(async () => { await vi.advanceTimersByTimeAsync(2100) })
 
       expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2)
@@ -292,7 +309,12 @@ describe('AnalyzePage manual execution', () => {
     }
   })
 
-  it('resumes an unresolved explicit fresh intent after reload with the same key and fresh flag', async () => {
+  it('resumes an unresolved explicit fresh intent after reload with the same key and fresh flag, once each reload is confirmed', async () => {
+    // #1186: this used to auto-run on every mount with no confirmation at
+    // all (the exact deep-link/reload bypass fixed by PR #1186). Every one
+    // of these mounts now requires its own explicit confirm before the
+    // idempotency-resume machinery below (same key, same fresh flag) even
+    // gets a chance to run.
     try {
       const path = '/analyze?coin=BTC&type=multi_source&mode=risk&q=fresh-reload'
       vi.mocked(registerAnalysisQuestion)
@@ -304,6 +326,9 @@ describe('AnalyzePage manual execution', () => {
       })
 
       const firstView = renderAnalyze(path)
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+      confirmDeepLinkRun()
       await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
       fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
       fireEvent.click(screen.getByRole('button', { name: '確認執行' }))
@@ -313,6 +338,9 @@ describe('AnalyzePage manual execution', () => {
       firstView.unmount()
 
       renderAnalyze(path)
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2)
+      confirmDeepLinkRun()
       await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(3))
       const resumed = vi.mocked(registerAnalysisQuestion).mock.calls[2]
       expect(resumed[3]).toBe(freshCall[3])
@@ -336,14 +364,20 @@ describe('AnalyzePage manual execution', () => {
         </MemoryRouter>
       </HermesI18nProvider>,
     )
+    confirmDeepLinkRun()
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: 'second' }))
+    // #1186: navigating to a different, not-yet-confirmed q re-opens the gate.
+    confirmDeepLinkRun()
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
     fireEvent.click(screen.getByRole('button', { name: 'back' }))
     await waitFor(() => expect(screen.getByLabelText('問題')).toHaveValue('first'))
+    // back navigates to an already-confirmed, already-processed q — no dialog, no re-registration.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2)
     fireEvent.click(screen.getByRole('button', { name: 'forward' }))
     await waitFor(() => expect(screen.getByLabelText('問題')).toHaveValue('second'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2)
   })
 
@@ -435,6 +469,7 @@ describe('AnalyzePage manual execution', () => {
       removeListener: vi.fn(),
     })))
     renderAnalyze('/analyze?q=URL問題', true)
+    confirmDeepLinkRun()
     mediaMatches = true
     act(() => listener?.())
 
@@ -457,6 +492,7 @@ describe('AnalyzePage manual execution', () => {
         </MemoryRouter>
       </HermesI18nProvider>,
     )
+    confirmDeepLinkRun()
 
     expect(screen.getByRole('heading', { name: /Analysis workspace/ })).toBeInTheDocument()
     expect(screen.getByText(/Each run is a single, fixed execution/)).toBeInTheDocument()
@@ -485,6 +521,7 @@ describe('AnalyzePage manual execution', () => {
       })
 
       renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+      confirmDeepLinkRun()
 
       // Push well past the old 120_000ms cliff (poll interval is 1200ms).
       await act(async () => { await vi.advanceTimersByTimeAsync(150_000) })
@@ -529,6 +566,7 @@ describe('AnalyzePage manual execution', () => {
       vi.mocked(getAnalysisJob).mockResolvedValue({ ok: false, error: { code: 'network_error', message: 'network down' } })
 
       renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+      confirmDeepLinkRun()
 
       await act(async () => { await vi.runAllTimersAsync() })
       await act(async () => {})
@@ -555,6 +593,7 @@ describe('AnalyzePage manual execution', () => {
     // job that had actually already completed.
     const path = '/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況'
     const first = renderAnalyze(path)
+    confirmDeepLinkRun()
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal)))
     first.unmount()
@@ -598,6 +637,7 @@ describe('AnalyzePage manual execution', () => {
         </MemoryRouter>
       </HermesI18nProvider>,
     )
+    confirmDeepLinkRun()
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal)))
 
@@ -639,6 +679,7 @@ describe('AnalyzePage manual execution', () => {
         </MemoryRouter>
       </HermesI18nProvider>,
     )
+    confirmDeepLinkRun()
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal)))
     first.unmount()
@@ -827,6 +868,7 @@ describe('AnalyzePage manual execution', () => {
           </MemoryRouter>
         </HermesI18nProvider>,
       )
+      confirmDeepLinkRun()
       await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
       expect(vi.mocked(registerAnalysisQuestion).mock.calls[0][0]).toBe('BTC')
 
@@ -880,6 +922,7 @@ describe('AnalyzePage manual execution', () => {
           </MemoryRouter>
         </HermesI18nProvider>,
       )
+      confirmDeepLinkRun()
       // first-question runs exactly once and lands.
       await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
       await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
@@ -917,6 +960,65 @@ describe('AnalyzePage manual execution', () => {
       renderAnalyze('/analyze?coin=BTC&type=multi_source&q=demo&sample=1')
       // sample is the local demo path — it must NOT raise the formal-run dialog.
       await waitFor(() => expect(getAnalyze).toHaveBeenCalled())
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+    })
+
+    it('#1186: a deep link/reload with no reconnectable job shows the confirm dialog and does not auto-run', async () => {
+      // #1186 (HIGH, adversarial review of PR #940): navigating or
+      // reloading directly to a URL that already carries `?q=...` with no
+      // `?job=` to reconnect to used to fall straight through to
+      // `registerAnalysisQuestion` with zero confirmation — the exact
+      // bypass this fix closes. It must now be held behind the same
+      // FormalRunConfirmDialog as every other formal-run entry point.
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=deep-link-question')
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+      expect(getAnalysisJob).not.toHaveBeenCalled()
+    })
+
+    it('#1186: confirming a deep link/reload run submits it exactly once', async () => {
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=deep-link-confirm')
+      confirmDeepLinkRun()
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[0][0]).toBe('BTC')
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[0][1]).toBe('risk')
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[0][2]).toBe('deep-link-confirm')
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    it('#1186: cancelling a deep link/reload run does not submit and does not loop back into the same prompt on the next reload', async () => {
+      function UrlProbe() {
+        const [search] = useSearchParams()
+        return <div data-testid="url-probe">{search.toString()}</div>
+      }
+      const view = render(
+        <HermesI18nProvider>
+          <MemoryRouter initialEntries={['/analyze?coin=BTC&type=multi_source&mode=risk&q=deep-link-cancel']}>
+            <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+              <AnalyzePage />
+              <UrlProbe />
+            </BridgeHologramProvider>
+          </MemoryRouter>
+        </HermesI18nProvider>,
+      )
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '取消' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+
+      // nothing was ever registered for the cancelled request, so there is
+      // no existing job to pin/reconnect to — cancel must simply drop the
+      // unconfirmed `q` from the URL.
+      const probe = screen.getByTestId('url-probe').textContent ?? ''
+      expect(probe).not.toContain('deep-link-cancel')
+      view.unmount()
+
+      // Simulate a real page reload with the URL exactly as cancel left it:
+      // a brand-new mount must NOT re-show the same confirm prompt or
+      // auto-run — i.e. cancelling must not create an infinite reload loop
+      // back into the same dialog.
+      renderAnalyze('/analyze?' + probe)
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
       expect(registerAnalysisQuestion).not.toHaveBeenCalled()
     })

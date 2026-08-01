@@ -27,6 +27,11 @@ type PendingFormalRun =
   // 取消時必須把 URL 還原成「這次重送前」的狀態，否則 reload/remount 會讀
   // 到殘留的未確認請求而不經確認自動執行。prevSearch 快照那一拍之前的 URL。
   | { kind: 'resubmit'; values: QueryValues; prevSearch: string | null }
+  // #1186（PR #940 補強）：deep link／bookmark／reload 直接帶著 ?q=... 進站、
+  // 且沒有既有 job 可以 reconnect 時，URL 本身早已含未確認請求，不是使用者
+  // 這次操作寫進去的——commit 時不需要（也不可）重寫 q，取消時反而要清掉它，
+  // 否則同一個網址會無限迴圈跳回同一個確認框。
+  | { kind: 'deeplink'; values: QueryValues }
 
 function defaultQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
@@ -117,6 +122,19 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
   const [requestNonce, setRequestNonce] = useState(0)
   const [freshIntentNonce, setFreshIntentNonce] = useState<number | null>(null)
   const [transportRetryNonce, setTransportRetryNonce] = useState(0)
+  // #1186：deep link／reload（requestNonce 仍是初始值 0）帶著未經確認的 ?q=
+  // 且沒有既有 job 可接回時，用這個 nonce 純粹當「使用者剛確認過，effect 該
+  // 重跑一次」的觸發器（refs 改變不會觸發 effect 重跑）。實際「這個 coin/
+  // mode/question 是否已經確認過」的判斷交給下面的
+  // confirmedDeepLinkKeysRef，這樣同一個 mount 內用 SPA 導覽換到另一個還沒
+  // 確認過的 q（例如點了別的連結）時仍會重新跳出確認框，而不是被這個 nonce
+  // 一次性放行到底；瀏覽器 back/forward 回到已確認過的 q 則不會重複跳框。
+  // 刻意不沿用 requestNonce／freshIntentNonce 本身記這件事——這兩個從一開始
+  // 就是「resume=true, fresh=false」語意的來源（見下面 beginFormalRunIntent
+  // 呼叫），bump 它們會把這個請求誤標成一個全新的 fresh intent，而不是
+  // 「resume 這個可能之前就已經發過的未解決意圖」。
+  const [deepLinkConfirmNonce, setDeepLinkConfirmNonce] = useState(0)
+  const confirmedDeepLinkKeysRef = useRef(new Set<string>())
   // #940：正式送出前的確認對話框 pending 意圖（null=未開）；確認後才真正 commit。
   const [pendingSubmit, setPendingSubmit] = useState<PendingFormalRun | null>(null)
   // #940：embedded host（HermesDashboard.onSubmit）在 bump resubmitSignal 的
@@ -323,6 +341,37 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
       setLoading(false)
       return () => { controller.abort(); timers.forEach(window.clearTimeout) }
     }
+    // #1186（HIGH，PR #940 補強）：requestNonce 只有 commitSubmit／resubmit 確認
+    // 之後才會被 bump 到 >= 1——換句話說，會跑到這裡且 requestNonce 仍是初始值
+    // 0，代表這個 explicit 請求不是使用者在本次 mount 期間「送出並確認」的，
+    // 而是 URL 上本來就帶著 ?q=（deep link、書籤、或直接重新整理），且上面
+    // reconnectJobId 也已經確認找不到既有 job 可以接回。這種未經確認的正式
+    // run 一樣要走 FormalRunConfirmDialog，不能直接 submit，否則整個 #940 的
+    // 把關形同虛設（deep link / reload 就能繞過）。用 coin/mode/question 記
+    // 這個 mount 期間「哪些請求已經確認過」，確認後 bump deepLinkConfirmNonce
+    // 讓這個 effect 重跑一次——此時 requestNonce/freshIntentNonce 完全沒動
+    // 過，下面 submit 分支仍會用原本「resume=true, fresh=false」的語意送
+    // 出，不受這次補強影響。
+    //
+    // 例外：resubmitSignal 這個 prop 完全由 host（HermesDashboard）自己的
+    // in-memory state 控制，不受 URL 影響、也不可能被書籤/深連結偽造。它
+    // >0 就代表 host 這次 mount 之前已經真的發生過一次使用者點擊（見上面
+    // resubmitSignal effect 的註解）——最常見的情況是「左軌第一次點『立即
+    // 重新分析』同一拍打開這個 module」：host 把 params 寫進 URL 的同時把
+    // resubmitSignal 從初始值 bump 上去，AnalyzePage 是這一拍才第一次掛
+    // 載，所以上面那個 effect（宣告在前）量到的「初始值＝目前值」不算變化，
+    // 不會走它自己的 confirm 分支。這不是深連結／書籤／重新整理能重現的
+    // 路徑，所以不算 #1186 要擋的那個洞，維持原本（#940 之前就有的）直送
+    // 行為，不重複跳一次確認框。
+    const alreadyConfirmedByHostSignal = (resubmitSignal ?? 0) > 0
+    if (requestNonce === 0 && !params.sample && !alreadyConfirmedByHostSignal) {
+      const deepLinkKey = `${params.coin}\n${mode}\n${params.q}`
+      if (!confirmedDeepLinkKeysRef.current.has(deepLinkKey)) {
+        setLoading(false)
+        setPendingSubmit({ kind: 'deeplink', values: { coin: params.coin, type: params.type, q: params.q, mode } })
+        return () => { controller.abort(); timers.forEach(window.clearTimeout) }
+      }
+    }
     const requestKey = `${params.coin}\n${mode}\n${params.q}\n${params.sample ?? ''}\n${requestNonce}\n${transportRetryNonce}`
     if (requestNonce === 0 && processedRequestKeys.current.has(requestKey)) {
       setLoading(false)
@@ -398,7 +447,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     // re-running it on a locale switch would resubmit an in-flight request. `t()`
     // above is only used to build a one-off error message, never part of the request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [freshIntentNonce, hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, transportRetryNonce, urlJobId])
+  }, [deepLinkConfirmNonce, freshIntentNonce, hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, resubmitSignal, transportRetryNonce, urlJobId])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return
@@ -471,6 +520,18 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
       setRequestNonce(nextNonce)
       return
     }
+    if (pending.kind === 'deeplink') {
+      // #1186：URL 已經是這次要送出的那個請求（q/coin/mode 都對），不必也不能
+      // 重寫一次 q，也不能像 resubmit 一樣 bump requestNonce——那會把這個請求
+      // 誤標成一個全新的 fresh intent。記住這個 coin/mode/question 已經確認
+      // 過，再 bump 專用的 deepLinkConfirmNonce 讓輪詢 effect 重跑一次——此時
+      // requestNonce/freshIntentNonce 完全沒動過，會用原本 requestNonce === 0
+      // （resume=true, fresh=false）的語意送出，和修這個 bug 之前「mount 直
+      // 接自動送出」的 idempotency 行為完全一致，只是現在多了一次使用者確認。
+      confirmedDeepLinkKeysRef.current.add(`${pending.values.coin}\n${pending.values.mode}\n${pending.values.q}`)
+      setDeepLinkConfirmNonce((value) => value + 1)
+      return
+    }
     commitSubmit(pending.values, pending.kind === 'focus')
   }
 
@@ -478,6 +539,21 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     const pending = pendingSubmit
     setPendingSubmit(null)
     resubmitPendingRef.current = false
+    // #1186：deeplink 的 pending 從一開始就是「URL 本來就帶著」的未確認請求
+    // ——取消時必須把這個 q 從 URL 上清掉（或釘回既有 job 走 reconnect），
+    // 否則同一個網址一 reload 就會重新讀到同一個 q 又跳出同一個確認框，
+    // 使用者永遠取消不掉、也永遠不會真的送出，形成無限迴圈。
+    if (pending?.kind === 'deeplink') {
+      const next = new URLSearchParams(searchParams)
+      const storedJob = readStoredJobId(manualJobStorageKey(pending.values.coin, pending.values.mode, pending.values.q))
+      if (storedJob) {
+        next.set('job', storedJob)
+      } else {
+        next.delete('q')
+      }
+      setSearchParams(next, { replace: true })
+      return
+    }
     // #940 修1：query/focus 的 pending 在 commit 前還沒寫進 URL，取消時不必還原。
     // 唯獨 resubmit：host 早已把未確認請求寫進 URL，取消時必須把 URL 還原成
     // 「這次重送前」的狀態，否則 reload/remount 會讀到殘留的未確認 q 而自動執行
