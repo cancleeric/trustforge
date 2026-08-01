@@ -450,7 +450,7 @@ describe('N80 窄螢幕頂欄不得把語言切換鈕擠出視窗', () => {
     expect(bar).toContain("aria-label={t('telemetry')}")
   })
 
-  it('FPS/畫質 HUD 常駐，且定位由 energy-deck 變數與 mobile compact contract 控制', () => {
+  it('FPS/畫質 HUD 常駐，且桌機與手機都維持右上定位', () => {
     const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
 
     expect(dashboard).toContain('<FpsMeter')
@@ -458,10 +458,14 @@ describe('N80 窄螢幕頂欄不得把語言切換鈕擠出視窗', () => {
     expect(dashboard).toContain('quality={quality}')
     expect(dashboard).toContain('measuring={measuring}')
     expect(dashboard).not.toMatch(/searchParams\.get\('fps'\).*FpsMeter/)
-    expect(css).toMatch(/\.hermes-fps-meter\s*\{[^}]*bottom:\s*calc\(var\(--hermes-bottom\) \+ 12px\)/s)
-    expect(css).toMatch(/\.hermes-fps-meter\s*\{[^}]*left:\s*max\(calc\(var\(--hermes-rail\) \+ 12px\),\s*env\(safe-area-inset-left\)\)/s)
-    expect(css).toMatch(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{[^}]*bottom:\s*calc\(var\(--hermes-bottom\) \+ 112px\)/)
-    expect(css).toMatch(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{[^}]*left:\s*max\(6px,\s*env\(safe-area-inset-left\)\)/)
+    const baseMeterBlock = css.slice(css.indexOf('.hermes-fps-meter {'))
+    const baseMeter = baseMeterBlock.slice(0, baseMeterBlock.indexOf('}')).replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(baseMeter).toMatch(/top:\s*calc\(var\(--hermes-top\) \+ 12px\)/)
+    expect(baseMeter).toMatch(/right:\s*12px/)
+    expect(baseMeter).not.toMatch(/\b(?:bottom|left)\s*:/)
+    const mobileMeter = css.match(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{([^}]*)\}/)?.[1]
+    expect(mobileMeter).toBeDefined()
+    expect(mobileMeter).not.toMatch(/\b(?:bottom|left)\s*:/)
     expect(css).toMatch(/\.hermes-fps-quality::after\s*\{[^}]*content:\s*attr\(data-short\)/s)
   })
 
