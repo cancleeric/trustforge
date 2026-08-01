@@ -298,6 +298,7 @@ def test_run_daily_cap_not_hit_but_switch_off_stays_fully_offline_no_note(monkey
 
 
 def test_run_retains_shared_reservation_when_durable_ledger_commit_fails(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
     monkeypatch.setenv("BEDROCK_MODEL_ID", "anthropic.claude-haiku-4-5-20251001-v1:0")
     monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
     monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
@@ -325,6 +326,7 @@ def test_run_retains_shared_reservation_when_durable_ledger_commit_fails(monkeyp
 
 
 def test_run_retains_reservation_when_pipeline_raises_before_ledger_receipt(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
     monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
     monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
     monkeypatch.setattr(pl, "collect", _fake_collect)

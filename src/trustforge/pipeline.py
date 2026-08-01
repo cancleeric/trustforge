@@ -16,6 +16,7 @@ from .budget_guard import (
     online_stance_requested,
     release_request_budget,
     mark_reservation_accounting_uncertain,
+    budget_reservation_backend,
     stance_model_priced,
     try_reserve_request_budget,
 )
@@ -379,7 +380,11 @@ def run(coin: str, query: str, qtype: QuestionType,
                 origin=_runtime_policy_origins.get("report"),
             )
     finally:
-        if _reservation is not None and not _durable_ledger_commit:
+        if (
+            _reservation is not None
+            and not _durable_ledger_commit
+            and budget_reservation_backend() == "dynamodb"
+        ):
             # A real Bedrock cost with no durable ledger receipt must retain its
             # shared reservation.  Releasing here would let a subsequent cold
             # start forget the process-local uncertainty and re-spend the same
