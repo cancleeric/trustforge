@@ -5,10 +5,19 @@ import pytest
 
 from trustforge.ingestion.whale_trades import (
     ArkhamIntelSource,
+    _arkham_transfer_limit,
     _extract_entity_name,
     _has_arkham_attribution,
     _parse_iso_timestamp,
+    _reset_arkham_throttle_for_tests,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_arkham_throttle():
+    _reset_arkham_throttle_for_tests()
+    yield
+    _reset_arkham_throttle_for_tests()
 
 
 @pytest.mark.parametrize(
@@ -55,9 +64,10 @@ def test_arkham_fetch_uses_v1_endpoint_header_and_schema(monkeypatch):
         "transfers": [
             {
                 "tokenSymbol": "BTC",
+                "chain": "bitcoin",
                 "historicalUSD": 1_500_000,
                 "blockTimestamp": "2026-07-29T01:02:03Z",
-                "transactionHash": "0xabc",
+                "transactionHash": "0xabc0000000000000",
                 "fromAddress": {"address": "bc1from"},
                 "toAddress": {
                     "address": "bc1to",
@@ -90,12 +100,213 @@ def test_arkham_fetch_uses_v1_endpoint_header_and_schema(monkeypatch):
     assert "test-key" not in captured["url"]
     assert len(docs) == 1
     assert docs[0].meta["coin"] == "BTC"
+    assert docs[0].meta["chain"] == "bitcoin"
+    assert docs[0].meta["asset_symbol"] == "BTC"
     assert docs[0].meta["amount_usd"] == 1_500_000
     assert docs[0].meta["entity"] == "Known Fund"
-    assert docs[0].meta["action"] == "buy"
+    assert docs[0].meta["action"] == "transfer"
+    assert docs[0].meta["direction"] == "neutral"
     assert docs[0].meta["verified_onchain"] is True
 
 
 def test_arkham_fetch_without_key_is_offline(monkeypatch):
     monkeypatch.delenv("ARKHAM_API_KEY", raising=False)
     assert ArkhamIntelSource().fetch("", coin="BTC") == []
+
+
+def test_arkham_parses_live_shaped_bitcoin_utxo_transfer():
+    transfer = {
+        "chain": "bitcoin",
+        "historicalUSD": 1_750_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "redacted-btc-transaction",
+        "fromAddresses": [
+            {
+                "address": "redacted-btc-source",
+                "arkhamEntity": {"name": "Known Treasury"},
+            }
+        ],
+        "toAddress": {"address": "redacted-btc-destination"},
+        "fromValue": 12.5,
+        "unitValue": 140_000,
+    }
+
+    doc = ArkhamIntelSource()._parse_transfer(transfer, "BTC")
+
+    assert doc is not None
+    assert doc.meta["coin"] == "BTC"
+    assert doc.meta["chain"] == "bitcoin"
+    assert doc.meta["asset_symbol"] == "BTC"
+    assert doc.meta["action"] == "transfer"
+    assert doc.meta["entity"] == "Known Treasury"
+
+
+def test_arkham_preserves_actual_asset_on_target_chain():
+    transfer = {
+        "chain": "ethereum",
+        "tokenSymbol": "WETH",
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "redacted-eth-transaction",
+        "fromAddress": {"address": "redacted-eth-source"},
+        "toAddress": {
+            "address": "redacted-eth-destination",
+            "arkhamEntity": {"name": "Known Wallet"},
+        },
+    }
+
+    doc = ArkhamIntelSource()._parse_transfer(transfer, "ETH")
+
+    assert doc is not None
+    assert doc.meta["coin"] == "ETH"
+    assert doc.meta["asset_symbol"] == "WETH"
+    assert "WETH" in doc.text
+    assert doc.meta["action"] == "transfer"
+    assert doc.meta["direction"] == "neutral"
+    assert "不代表買賣" in doc.text
+
+
+def test_arkham_rejects_unattributed_or_wrong_chain_transfer():
+    transfer = {
+        "chain": "ethereum",
+        "tokenSymbol": "USDC",
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "redacted-transaction",
+        "fromAddress": {"address": "redacted-source"},
+        "toAddress": {"address": "redacted-destination"},
+    }
+
+    assert ArkhamIntelSource()._parse_transfer(transfer, "ETH") is None
+    transfer["toAddress"]["arkhamEntity"] = {"name": "Known Wallet"}
+    assert ArkhamIntelSource()._parse_transfer(transfer, "BTC") is None
+
+
+def test_arkham_label_alone_is_not_entity_attribution():
+    transfer = {
+        "chain": "ethereum",
+        "tokenSymbol": "USDC",
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "0xabc0000000000000",
+        "fromAddress": {"address": "redacted-source"},
+        "toAddress": {
+            "address": "redacted-destination",
+            "arkhamLabel": {"name": "Deposit Wallet"},
+        },
+    }
+
+    assert ArkhamIntelSource()._parse_transfer(transfer, "ETH") is None
+
+
+def test_arkham_rejects_missing_timestamp_or_transaction_identity():
+    transfer = {
+        "chain": "bitcoin",
+        "historicalUSD": 2_000_000,
+        "fromAddresses": [
+            {"address": "redacted-source", "arkhamEntity": {"name": "Known"}}
+        ],
+        "toAddress": {"address": "redacted-destination"},
+    }
+
+    assert ArkhamIntelSource()._parse_transfer(transfer, "BTC") is None
+    transfer["blockTimestamp"] = "2026-08-01T01:02:03Z"
+    assert ArkhamIntelSource()._parse_transfer(transfer, "BTC") is None
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, 20), ("1", 1), ("0", 1), ("999", 20), ("invalid", 20)],
+)
+def test_arkham_transfer_limit_is_bounded(monkeypatch, configured, expected):
+    if configured is None:
+        monkeypatch.delenv("TRUSTFORGE_ARKHAM_TRANSFER_LIMIT", raising=False)
+    else:
+        monkeypatch.setenv("TRUSTFORGE_ARKHAM_TRANSFER_LIMIT", configured)
+    assert _arkham_transfer_limit() == expected
+
+
+def test_arkham_fetch_reports_safe_aggregate_parse_counts(monkeypatch, caplog):
+    monkeypatch.setenv("ARKHAM_API_KEY", "test-key")
+    payload = {
+        "transfers": [
+            {"chain": "bitcoin", "historicalUSD": 2_000_000},
+            "not-an-object",
+        ]
+    }
+    monkeypatch.setattr(
+        "trustforge.ingestion.whale_trades._fetch_url",
+        lambda *_args, **_kwargs: json.dumps(payload).encode(),
+    )
+
+    with caplog.at_level("INFO"):
+        assert ArkhamIntelSource().fetch("", coin="BTC") == []
+
+    assert "returned=2 accepted=0 rejected=2" in caplog.text
+    assert "test-key" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tokenSymbol", "ETH\nforged"),
+        ("transactionHash", "short"),
+        ("transactionHash", "x" * 129),
+    ],
+)
+def test_arkham_rejects_unsafe_provider_text(field, value):
+    transfer = {
+        "chain": "ethereum",
+        "tokenSymbol": "ETH",
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "0xabc0000000000000",
+        "fromAddress": {
+            "address": "redacted-source",
+            "arkhamEntity": {"name": "Known Entity"},
+        },
+        "toAddress": {"address": "redacted-destination"},
+    }
+    transfer[field] = value
+
+    assert ArkhamIntelSource()._parse_transfer(transfer, "ETH") is None
+
+
+@pytest.mark.parametrize(
+    "entity",
+    [
+        {"name": "Known\nForged"},
+        "Known\nForged",
+        "x" * 121,
+    ],
+)
+def test_arkham_rejects_unsafe_entity_name(entity):
+    transfer = {
+        "chain": "bitcoin",
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "redacted-btc-transaction",
+        "fromAddresses": [
+            {
+                "address": "redacted-source",
+                "arkhamEntity": entity,
+            }
+        ],
+        "toAddress": {"address": "redacted-destination"},
+    }
+
+    assert ArkhamIntelSource()._parse_transfer(transfer, "BTC") is None
+
+
+def test_arkham_throttle_enforces_provider_interval(monkeypatch):
+    clock = iter([10.0, 10.2, 11.0])
+    sleeps = []
+    monkeypatch.setattr("trustforge.ingestion.whale_trades.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("trustforge.ingestion.whale_trades.time.sleep", sleeps.append)
+
+    from trustforge.ingestion.whale_trades import _throttle_arkham_request
+
+    _throttle_arkham_request()
+    _throttle_arkham_request()
+
+    assert sleeps == [pytest.approx(0.8)]

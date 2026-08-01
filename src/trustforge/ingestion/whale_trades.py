@@ -24,8 +24,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
+import re
+import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
@@ -67,6 +70,16 @@ _ARKHAM_COIN_CHAINS: dict[str, str] = {
 # API key 環境變數名稱
 _WHALE_ALERT_KEY_ENV = "WHALE_ALERT_API_KEY"
 _ARKHAM_KEY_ENV = "ARKHAM_API_KEY"
+_ARKHAM_LIMIT_ENV = "TRUSTFORGE_ARKHAM_TRANSFER_LIMIT"
+_ARKHAM_DEFAULT_LIMIT = 20
+_ARKHAM_MAX_LIMIT = 20
+_ARKHAM_MIN_INTERVAL_SECONDS = 1.0
+_ARKHAM_TX_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_ARKHAM_SYMBOL_RE = re.compile(r"^[A-Z0-9._-]{1,24}$")
+
+_log = logging.getLogger(__name__)
+_arkham_throttle_lock = threading.Lock()
+_arkham_last_request_monotonic: float | None = None
 
 
 def _finite_num(v: object, lo: float | None = None, hi: float | None = None) -> float | None:
@@ -134,15 +147,27 @@ def _parse_iso_timestamp(value: object) -> float | None:
     return timestamp if math.isfinite(timestamp) and timestamp >= 1_577_836_800 else None
 
 
-def _attribution_name(value: object) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if not isinstance(value, dict):
+def _safe_attribution_text(value: object) -> str:
+    if not isinstance(value, str):
         return ""
+    candidate = value.strip()
+    if (
+        candidate
+        and len(candidate) <= 120
+        and all(character.isprintable() for character in candidate)
+    ):
+        return candidate
+    return ""
+
+
+def _attribution_name(value: object) -> str:
+    direct = _safe_attribution_text(value)
+    if direct or not isinstance(value, dict):
+        return direct
     for key in ("name", "label"):
-        candidate = value.get(key)
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+        candidate = _safe_attribution_text(value.get(key))
+        if candidate:
+            return candidate
     return ""
 
 
@@ -168,6 +193,64 @@ def _has_arkham_attribution(address: object) -> bool:
         bool(_attribution_name(address.get(key)))
         for key in ("arkhamEntity", "entity", "arkhamLabel", "label")
     )
+
+
+def _has_arkham_entity(address: object) -> bool:
+    """Labels describe wallets; only entity attribution supports this source kind."""
+    if not isinstance(address, dict):
+        return False
+    return any(
+        bool(_attribution_name(address.get(key)))
+        for key in ("arkhamEntity", "entity")
+    )
+
+
+def _arkham_transfer_limit() -> int:
+    """Return a bounded result limit so live probes can control credit usage."""
+    raw = os.environ.get(_ARKHAM_LIMIT_ENV, "").strip()
+    if not raw:
+        return _ARKHAM_DEFAULT_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _ARKHAM_DEFAULT_LIMIT
+    return min(max(value, 1), _ARKHAM_MAX_LIMIT)
+
+
+def _arkham_parties(transfer: dict, singular: str, plural: str) -> list[dict]:
+    """Normalize account-based and UTXO party fields without retaining junk."""
+    one = transfer.get(singular)
+    if isinstance(one, dict):
+        return [one]
+    many = transfer.get(plural)
+    if not isinstance(many, list):
+        return []
+    return [party for party in many if isinstance(party, dict)]
+
+
+def _first_attributed_party(parties: list[dict]) -> dict | None:
+    return next((party for party in parties if _has_arkham_entity(party)), None)
+
+
+def _reset_arkham_throttle_for_tests() -> None:
+    global _arkham_last_request_monotonic
+    with _arkham_throttle_lock:
+        _arkham_last_request_monotonic = None
+
+
+def _throttle_arkham_request() -> None:
+    """Enforce Arkham's documented one-request-per-second endpoint limit."""
+    global _arkham_last_request_monotonic
+    with _arkham_throttle_lock:
+        now = time.monotonic()
+        if _arkham_last_request_monotonic is not None:
+            wait = _ARKHAM_MIN_INTERVAL_SECONDS - (
+                now - _arkham_last_request_monotonic
+            )
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+        _arkham_last_request_monotonic = now
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +417,13 @@ class ArkhamIntelSource(Source):
         params: dict[str, str | int] = {
             "usdGte": _MIN_VALUE_USD,
             "timeLast": "1h",
-            "limit": 20,
+            "limit": _arkham_transfer_limit(),
         }
         if coin:
             params["chains"] = _ARKHAM_COIN_CHAINS[coin.upper()]
 
         url = "https://api.arkm.com/transfers?" + urlencode(params)
+        _throttle_arkham_request()
         raw = _fetch_url(url, extra_headers={"API-Key": api_key})
         data = json.loads(raw)
 
@@ -351,23 +435,51 @@ class ArkhamIntelSource(Source):
             return []
 
         docs: list[Document] = []
+        rejected = 0
         for transfer in transfers:
             if not isinstance(transfer, dict):
+                rejected += 1
                 continue
             doc = self._parse_transfer(transfer, coin)
             if doc is not None:
                 docs.append(doc)
+            else:
+                rejected += 1
+
+        _log.info(
+            "Arkham transfer parse summary: returned=%d accepted=%d rejected=%d",
+            len(transfers), len(docs), rejected,
+        )
 
         return docs
 
     def _parse_transfer(self, transfer: dict, target_coin: str) -> Document | None:
         """解析單筆 Arkham 轉帳為 Document。"""
-        # 幣種
-        symbol = str(transfer.get("tokenSymbol", "")).upper()
-        if symbol not in _SUPPORTED_COINS:
+        # `chains=` scopes the network, not the asset.  Keep the requested
+        # TrustForge coin as the chain scope and preserve the provider's actual
+        # token symbol separately (e.g. WETH on Ethereum).  UTXO transfers such
+        # as Bitcoin have no tokenSymbol at all.
+        target = target_coin.upper() if target_coin else ""
+        chain = transfer.get("chain")
+        if not isinstance(chain, str) or not chain.strip():
             return None
-        if target_coin and symbol != target_coin.upper():
+        chain = chain.strip().lower()
+        if target and _ARKHAM_COIN_CHAINS.get(target) != chain:
             return None
+
+        raw_symbol = transfer.get("tokenSymbol")
+        asset_symbol = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
+        if asset_symbol and not _ARKHAM_SYMBOL_RE.fullmatch(asset_symbol):
+            return None
+        coin_scope = target or next(
+            (coin for coin, provider_chain in _ARKHAM_COIN_CHAINS.items()
+             if provider_chain == chain),
+            "",
+        )
+        if coin_scope not in _SUPPORTED_COINS:
+            return None
+        if not asset_symbol:
+            asset_symbol = coin_scope
 
         # 金額
         amount_usd = _finite_num(transfer.get("historicalUSD"), lo=_MIN_VALUE_USD)
@@ -377,48 +489,54 @@ class ArkhamIntelSource(Source):
         # 時間戳
         ts = _parse_iso_timestamp(transfer.get("blockTimestamp"))
         if ts is None:
-            ts = time.time()
+            return None
 
-        # 實體標記（名人/機構名稱）
-        from_entity = transfer.get("fromAddress", {})
-        to_entity = transfer.get("toAddress", {})
-        from_label = _extract_entity_name(from_entity)
-        to_label = _extract_entity_name(to_entity)
+        # Account-based chains use singular fields; UTXO chains use lists.
+        from_parties = _arkham_parties(transfer, "fromAddress", "fromAddresses")
+        to_parties = _arkham_parties(transfer, "toAddress", "toAddresses")
+        if not from_parties or not to_parties:
+            return None
 
-        # 判斷是否鏈上驗證（有 Arkham 標記 = 已驗證）
-        verified = bool(
-            _has_arkham_attribution(from_entity)
-            or _has_arkham_attribution(to_entity)
-        )
+        from_attributed = _first_attributed_party(from_parties)
+        to_attributed = _first_attributed_party(to_parties)
+        if from_attributed is None and to_attributed is None:
+            # This source represents attributed-wallet activity.  An ordinary
+            # large transfer is not evidence of a celebrity/institution trade.
+            return None
 
-        # 判斷買/賣方向
-        # 如果「已標記實體」是 toAddress → 買入；是 fromAddress → 賣出
-        entity_name = to_label if _has_arkham_attribution(to_entity) else from_label
-        if _has_arkham_attribution(to_entity):
-            action = "buy"
-            action_desc = "買入"
+        if to_attributed is not None and from_attributed is None:
+            entity_name = _extract_entity_name(to_attributed)
+            relation_desc = "轉入"
+        elif from_attributed is not None and to_attributed is None:
+            entity_name = _extract_entity_name(from_attributed)
+            relation_desc = "轉出"
         else:
-            action = "sell"
-            action_desc = "賣出"
+            entity_name = (
+                f"{_extract_entity_name(from_attributed)} → "
+                f"{_extract_entity_name(to_attributed)}"
+            )
+            relation_desc = "實體間轉移"
 
-        # 方向詞（供 _infer_direction 推斷）
-        if action == "buy":
-            direction_word = f"（看漲訊號：名人{action_desc}）"
-        else:
-            direction_word = f"（看跌訊號：名人{action_desc}）"
+        # `/transfers` proves movement, not a trade.  Custody shuffles,
+        # wrapping, bridges and staking must never become buy/sell evidence.
+        action = "transfer"
+        direction_word = "（中性鏈上活動，不代表買賣）"
 
         usd_str = f"{amount_usd:,.0f}"
-        verified_str = "鏈上已驗證" if verified else "未經鏈上驗證"
-
         text = (
-            f"已標記錢包（{entity_name}）{action_desc} {symbol}"
-            f"（約 {usd_str} USD），{verified_str}"
+            f"Arkham 實體（{entity_name}）{relation_desc} {asset_symbol}"
+            f"（{chain} 鏈，約 {usd_str} USD），鏈上已驗證"
             f"{direction_word}"
         )
 
-        tx_hash = transfer.get("transactionHash", "")
+        tx_hash = transfer.get("transactionHash") or transfer.get("txid")
+        if not isinstance(tx_hash, str) or not tx_hash.strip():
+            return None
+        tx_hash = tx_hash.strip()
+        if not _ARKHAM_TX_ID_RE.fullmatch(tx_hash):
+            return None
         doc_id = "arkham-" + hashlib.md5(
-            f"{tx_hash}-{symbol}-{ts}".encode()
+            f"{tx_hash}-{chain}-{asset_symbol}-{ts}".encode()
         ).hexdigest()[:12]
 
         return Document(
@@ -429,9 +547,14 @@ class ArkhamIntelSource(Source):
             url=f"https://platform.arkhamintelligence.com/explorer/tx/{tx_hash}",
             ts=ts,
             meta={
-                "coin": symbol,
+                "coin": coin_scope,
+                "chain": chain,
+                "asset_symbol": asset_symbol,
                 "amount_usd": amount_usd,
-                "verified_onchain": verified,
+                "verified_onchain": True,
+                "attributed": True,
+                "attribution_type": "entity",
+                "direction": "neutral",
                 "entity": entity_name,
                 "action": action,
                 "content_reference": text[:120],
