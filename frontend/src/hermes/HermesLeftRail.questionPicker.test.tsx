@@ -75,10 +75,28 @@ describe('#1355 project goals modal', () => {
 
   it('closes when Escape is pressed', () => {
     renderRail()
-    fireEvent.click(screen.getByRole('button', { name: '🎯 專案目標' }))
+    const trigger = screen.getByRole('button', { name: '🎯 專案目標' })
+    fireEvent.click(trigger)
 
     fireEvent.keyDown(window, { key: 'Escape' })
 
     expect(screen.queryByRole('dialog', { name: '專案目標' })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+  })
+
+  it('keeps keyboard focus inside the modal and restores it after close', () => {
+    renderRail()
+    const trigger = screen.getByRole('button', { name: '🎯 專案目標' })
+    fireEvent.click(trigger)
+    const close = screen.getByRole('button', { name: '關閉專案目標' })
+    expect(close).toHaveFocus()
+
+    fireEvent.keyDown(window, { key: 'Tab' })
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    expect(close).toHaveFocus()
+
+    fireEvent.click(close)
+    expect(trigger).toHaveFocus()
   })
 })

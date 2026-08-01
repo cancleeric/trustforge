@@ -70,6 +70,8 @@ export default function HermesLeftRail({
 }: HermesLeftRailProps) {
   const { t, locale } = useHermesI18n()
   const [goalsOpen, setGoalsOpen] = useState(false)
+  const goalsTriggerRef = useRef<HTMLButtonElement>(null)
+  const goalsDialogRef = useRef<HTMLElement>(null)
   // N70：從 HermesTopBar 原封搬過來（含 description，nav 的 tooltip/無障礙說明
   // 都靠它），只換了容器。
   const navItems = [
@@ -100,11 +102,55 @@ export default function HermesLeftRail({
   }, [transcriptDeps])
   useEffect(() => {
     if (!goalsOpen) return
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setGoalsOpen(false)
+    const overlay = goalsDialogRef.current?.parentElement
+    const trigger = goalsTriggerRef.current
+    const background = [...document.body.children].filter((element) => element !== overlay)
+    const previousBodyOverflow = document.body.style.overflow
+    const previousBackgroundState = background.map((element) => ({
+      element,
+      ariaHidden: element.getAttribute('aria-hidden'),
+      inert: (element as HTMLElement).inert,
+    }))
+    document.body.style.overflow = 'hidden'
+    for (const element of background) {
+      element.setAttribute('aria-hidden', 'true')
+      ;(element as HTMLElement).inert = true
     }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setGoalsOpen(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = [...(goalsDialogRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [])].filter((element) => !element.hidden)
+      if (focusable.length === 0) {
+        event.preventDefault()
+        goalsDialogRef.current?.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      document.body.style.overflow = previousBodyOverflow
+      for (const { element, ariaHidden, inert } of previousBackgroundState) {
+        if (ariaHidden === null) element.removeAttribute('aria-hidden')
+        else element.setAttribute('aria-hidden', ariaHidden)
+        ;(element as HTMLElement).inert = inert
+      }
+      if (trigger?.isConnected) trigger.focus()
+    }
   }, [goalsOpen])
   return (
     <>
@@ -172,7 +218,7 @@ export default function HermesLeftRail({
         ))}
         <div className="hermes-rail-controls-sep" role="separator" />
         <p className="hermes-rail-group">{t('railGroupSettings')}</p>
-        <button type="button" className="hermes-nav-item" onClick={() => setGoalsOpen(true)}>
+        <button ref={goalsTriggerRef} type="button" className="hermes-nav-item" onClick={() => setGoalsOpen(true)}>
           {locale === 'zh-TW' ? '🎯 專案目標' : '🎯 Goals'}
         </button>
         <a href="/carbon" className="hermes-nav-item" style={{ textDecoration: 'none' }} target="_blank" rel="noopener noreferrer">
@@ -463,16 +509,19 @@ export default function HermesLeftRail({
     {goalsOpen && createPortal(
       <div
         className="hermes-goals-modal-overlay"
+        data-hermes-goals-overlay
         role="presentation"
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) setGoalsOpen(false)
         }}
       >
         <section
+          ref={goalsDialogRef}
           className="hermes-goals-modal"
           role="dialog"
           aria-modal="true"
           aria-label={locale === 'zh-TW' ? '專案目標' : 'Project goals'}
+          tabIndex={-1}
         >
           <button
             type="button"
