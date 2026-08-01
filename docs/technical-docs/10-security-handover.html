@@ -1,0 +1,18 @@
+<!doctype html><html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>10 — 安全與交接邊界 | TrustForge 技術文件</title>
+<meta name="description" content="Security Handover · 機敏資料、IAM、網路、LLM 安全與客戶接手檢查">
+<link rel="stylesheet" href="../style.css?v=20260726-evidence-grade">
+</head><body><div class="wrap">
+<div class="nav-bar"><a href="09-frontend.html">← 09 前端架構</a><a href="index.html">文件首頁</a><a href="11-testing-qa.html">11 測試、QA  →</a></div>
+<article><h2>10 — 安全與交接邊界</h2><p style="color:var(--mut)">Security Handover · secret、IAM、LLM、網路與客戶接手檢查</p>
+<details class="toc" open><summary>目錄</summary><ol><li><a href="#boundaries">安全邊界</a></li><li><a href="#secrets">機敏資料處理</a></li><li><a href="#auth">認證與管理面</a></li><li><a href="#network">網路與 AWS 權限</a></li><li><a href="#llm">LLM 安全與輸出邊界</a></li><li><a href="#handover">客戶接手檢查</a></li></ol></details>
+<h3 id="boundaries">1. 安全邊界</h3><div class="doc-callout warn"><strong>交接原則：</strong>公開文件只描述安全設計與操作位置，不放 token、AWS 帳號、私鑰、實際 Parameter 值或內部憑證。</div>
+<div class="table-scroll"><table><tr><th>邊界</th><th>設計</th><th>客戶接手重點</th></tr><tr><td>Public Web</td><td>nginx TLS 終端；React 靜態資源與 /api/* 同域</td><td>確認 HSTS、CSP、憑證續期</td></tr><tr><td>Backend</td><td>Python server 僅聽 127.0.0.1:8080，由 nginx proxy</td><td>不直接開 8080 到 Internet</td></tr><tr><td>AWS Bedrock</td><td>唯一 LLM 入口；IAM 最小權限</td><td>模型 ID 與 inference profile 需在目標 region 可用</td></tr><tr><td>DynamoDB</td><td>cache、成本帳本、rate limit、idempotency lease</td><td>確認 table ARN 與 IAM policy scope</td></tr></table></div>
+<h3 id="secrets">2. 機敏資料處理</h3><ul><li><code>TRUSTFORGE_LIVE_TOKEN</code> 不寫入 repo，不經 deployment command line 傳遞。</li><li>production token 放 SSM Parameter Store；app 啟動時依 <code>TRUSTFORGE_TOKEN_SSM_PREFIX</code> 讀取。</li><li>GitHub token、AWS access key、Webhook secret 不出現在公開 GitHub Pages、日誌與 HTML。</li><li>交接時用客戶自己的 AWS/GitHub credential 重新設定，不沿用開發者個人 credential。</li></ul>
+<h3 id="auth">3. 認證與管理面</h3><div class="table-scroll"><table><tr><th>入口</th><th>保護方式</th><th>失敗行為</th></tr><tr><td><code>/api/analyze</code></td><td>Live token / rate limit / budget guard</td><td>無 token 或超額回 401/429</td></tr><tr><td><code>/api/admin/*</code></td><td>Admin token + fail-closed</td><td>未設定即關閉管理操作</td></tr><tr><td>Lambda Function URL</td><td>403 gated，不作公開入口</td><td>拒絕匿名流量</td></tr></table></div>
+<h3 id="network">4. 網路與 AWS 權限</h3><ul><li>Security Group 公開只需 80/443；SSH 走 SSM Session Manager，不開 22。</li><li>EC2 instance role 限縮 Bedrock InvokeModel、SSM GetParameter、S3 GetObject、必要 DynamoDB 表。</li><li>CloudWatch 只上報指標與服務日誌，不輸出 token。</li></ul>
+<h3 id="llm">5. LLM 安全與輸出邊界</h3><ul><li>所有 Bedrock 呼叫集中在 <code>bedrock.py</code>，方便審計。</li><li>報告輸出要求引用 claim_id，避免無來源結論。</li><li>資訊完整度不足時標示為 low/insufficient，不假裝確定。</li><li>Budget Guard 在呼叫前預留成本，避免高併發 TOCTOU 超支。</li></ul>
+<h3 id="handover">6. 客戶接手檢查</h3><ol class="handoff-checklist"><li><input type="checkbox" disabled> 客戶 AWS 帳號已建立 Bedrock model access。</li><li><input type="checkbox" disabled> SSM Parameter Store 已寫入 production token。</li><li><input type="checkbox" disabled> Security Group 只公開 80/443。</li><li><input type="checkbox" disabled> DynamoDB 表與 IAM policy 已套用最小權限。</li><li><input type="checkbox" disabled> 日花費上限已符合客戶預算。</li><li><input type="checkbox" disabled> 交接包未包含任何明文 secret。</li></ol><div class="next-steps"><a href="03-deployment.html">部署指南</a><a href="04-configuration.html">環境變數</a><a href="07-operations.html">運維手冊</a><a href="12-customer-handover.html">交接總表</a></div></article>
+<footer>TrustForge by HurricaneSoft（颶風軟體）· 技術文件區 · 客戶交接版<br>文件版本：v0.18.5 · 最後更新：2026-07-26</footer>
+</div></body></html>

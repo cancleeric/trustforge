@@ -1,0 +1,228 @@
+<!doctype html><html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>03 — 部署指南 | TrustForge 技術文件</title>
+<meta name="description" content="TrustForge 部署指南：App Runner、EC2+nginx、Lambda 三條路徑完整步驟。">
+<link rel="stylesheet" href="../style.css?v=20260726-evidence-grade">
+<style>
+.toc { margin:1rem 0 1.2rem; border:1px solid var(--bd); border-radius:10px; background:var(--card); padding:.6rem .9rem; }
+.toc summary { cursor:pointer; color:var(--acc); font-size:.9rem; }
+.toc ol { margin:.5rem 0 0; padding-left:1.2rem; }
+.toc li { margin:.2rem 0; }
+.toc a { color:var(--mut); font-size:.88rem; }
+.toc a:hover { color:var(--fg); }
+.nav-bar { display:flex; gap:.6rem; margin-bottom:1.2rem; flex-wrap:wrap; }
+.nav-bar a { font-size:.9rem; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+.nav-bar a:hover { text-decoration:none; border-color:var(--acc); }
+.warn-box { background:rgba(210,153,34,.08); border:1px solid var(--warn); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.warn-box strong { color:var(--warn); }
+.info-box { background:rgba(88,166,255,.06); border:1px solid var(--acc); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.danger-box { background:rgba(248,81,73,.08); border:1px solid #f85149; border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.danger-box strong { color:#f85149; }
+.step { counter-increment:step; }
+.step::before { content:"Step " counter(step)": "; color:var(--acc); font-weight:600; }
+</style>
+</head><body><div class="wrap">
+
+<div class="nav-bar"><a href="02-architecture.html">← 02 系統架構總覽</a><a href="index.html">文件首頁</a><a href="04-configuration.html">04 環境變數參考 →</a></div>
+
+<article>
+<h2>03 — 部署指南</h2>
+<p style="color:var(--mut)">Deployment Guide · App Runner / EC2+nginx / Lambda 三路徑完整步驟</p>
+
+<details class="toc" open>
+<summary>目錄</summary>
+<ol>
+  <li><a href="#paths">三條部署路徑總覽</a></li>
+  <li><a href="#ec2">路徑 A：EC2 + nginx（Production 推薦）</a></li>
+  <li><a href="#apprunner">路徑 B：AWS App Runner</a></li>
+  <li><a href="#lambda">路徑 C：AWS Lambda Function URL</a></li>
+  <li><a href="#env-vars">各環境變數部署注意事項</a></li>
+  <li><a href="#tls">TLS / HTTPS 設定</a></li>
+  <li><a href="#cutover">Blue/Green 切換</a></li>
+  <li><a href="#iam">IAM 權限需求清單</a></li>
+  <li><a href="#checklist">部署檢查清單</a></li>
+</ol>
+</details>
+
+<h3 id="paths">1. 三條部署路徑總覽</h3>
+
+<table>
+<tr><th>路徑</th><th>適用場景</th><th>腳本</th><th>優缺點</th></tr>
+<tr><td><strong>EC2 + nginx</strong></td><td>Production、需要 TLS、需要 SPA + API 同域</td><td><code>deploy/deploy_ec2.sh</code><br><code>deploy/deploy_frontend_nginx.sh</code></td><td>完全控制、無冷啟動、需管理 EC2</td></tr>
+<tr><td><strong>AWS App Runner</strong></td><td>快速部署、無需管理主機、自動 scale</td><td><code>apprunner.yaml</code>（原始碼模式，從 GitHub 讀取）</td><td>免維運、自動 TLS；容器建置需額外時間</td></tr>
+<tr><td><strong>AWS Lambda</strong></td><td>事件驅動、低流量、備援入口</td><td><code>deploy/deploy_lambda.sh</code></td><td>按呼叫計費、冷啟動延遲；Function URL 403 gated</td></tr>
+</table>
+
+<h3 id="ec2">2. 路徑 A：EC2 + nginx（Production 推薦）</h3>
+
+<div class="info-box">
+<strong>部署目標：</strong>EC2 t3.micro @ ap-southeast-2（雪梨），公開 IP<br>
+<strong>對外拓樸：</strong>nginx 監聽 :80 和 :443，Python 只監聽 <code>127.0.0.1:8080</code>
+</div>
+
+<h4>2.1 後端部署（deploy_ec2.sh）</h4>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+# 基本部署（離線模式，$0）
+REGION=ap-southeast-2 BEDROCK_MODEL_ID="" ./deploy/deploy_ec2.sh
+
+# 含 Bedrock 啟用 + 日花費上限 $1
+BEDROCK_MODEL_ID="au.anthropic.claude-sonnet-4-6" \
+  TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1 ./deploy/deploy_ec2.sh
+
+# 含 DynamoDB cost ledger（多實例部署）
+CACHE_BACKEND=dynamodb ./deploy/deploy_ec2.sh
+</pre>
+
+<p>腳本為冪等設計，會自動完成：</p>
+<ol>
+  <li>建立 / 驗證 Security Group（tcp/80 + tcp/443 公開）</li>
+  <li>建立 / 附加 IAM Instance Role（<code>trustforge-ec2</code>）</li>
+  <li><code>run-instances</code>（帶 <code>--client-token</code> 防重複）</li>
+  <li>寫入 user-data（systemd unit + 環境變數 + 設時區 + 排程）</li>
+  <li>SSM Run Command：<code>unzip</code> → <code>systemctl restart trustforge</code></li>
+</ol>
+
+<h4>2.2 前端部署（deploy_frontend_nginx.sh）</h4>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+# 在前端 build 後部署
+cd frontend && npm run build
+cd .. && ./deploy/deploy_frontend_nginx.sh
+</pre>
+
+<p>前端部署腳本會：</p>
+<ol>
+  <li>安裝 / 設定 nginx（<code>deploy/nginx.conf</code>）</li>
+  <li>上傳 React build（Vite <code>dist/</code>）到 EC2</li>
+  <li>設定 Let's Encrypt TLS / HSTS / CSP</li>
+  <li>執行 cutover 切換（<code>deploy/cutover_switch.sh react</code>）</li>
+</ol>
+
+<h4>2.3 nginx 對外監聽埠（現況）</h4>
+
+<table>
+<tr><th>Port</th><th>用途</th><th>流量語意</th></tr>
+<tr><td><code>:80</code></td><td>健康檢查 + ACME challenge</td><td>/healthz 明碼直通 → 127.0.0.1:8080<br>/.well-known/acme-challenge/ → 本機檔案<br>其餘 → 301 redirect → :443</td></tr>
+<tr><td><code>:443</code></td><td>主要入口（TLS + HSTS + CSP）</td><td>/assets/*、/、/analyze → React 靜態 build（SPA fallback）<br>/api/*、/healthz → proxy_pass 127.0.0.1:8080</td></tr>
+</table>
+
+<div class="warn-box">
+<strong>注意：</strong>:80 不能用 301 強制轉 :443 /healthz——負載平衡器健康檢查若只支援 HTTP 明碼，301 會讓檢查誤判服務掛掉。
+</div>
+
+<h3 id="apprunner">3. 路徑 B：AWS App Runner</h3>
+
+<p>App Runner 使用原始碼模式，直接從 GitHub 讀取：</p>
+
+<table>
+<tr><th>檔案</th><th>內容</th></tr>
+<tr><td><code>apprunner.yaml</code></td><td>定義 runtime（Python 3.12）、build command、start command、port（8080）</td></tr>
+<tr><td><code>Dockerfile</code></td><td>備用容器建置（App Runner 原始碼模式優先使用 <code>apprunner.yaml</code>）</td></tr>
+</table>
+
+<p>App Runner 會自動：
+- 從 GitHub 拉取原始碼
+- 執行 <code>pip install</code>（依 <code>pyproject.toml</code>）
+- 綁定 <code>PORT=8080</code> 啟動 Python HTTP server
+- 提供自動 TLS 終端（*.awsapprunner.com 或自訂域名）
+- 自動 scale（依並發請求數）</p>
+
+<div class="warn-box">
+<strong>限制：</strong>App Runner 不支援 DynamoDB 本機路徑。若需要 DynamoDB backend（cache/cost-ledger/rate-limit），App Runner 的 instance 必須有 IAM role 允許對應 DynamoDB table 操作。
+</div>
+
+<h3 id="lambda">4. 路徑 C：AWS Lambda Function URL</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+# 部署 Lambda
+./deploy/deploy_lambda.sh
+</pre>
+
+<p><code>lambda_handler.py</code> 是 Lambda Function URL 入口點：</p>
+<ul>
+  <li>接收 Lambda event → 轉換為類 HTTP request object</li>
+  <li>重用 <code>web.py</code> 管線（不另寫 API handler）</li>
+  <li>回傳 {statusCode, body, headers} 格式的 Lambda 回應</li>
+</ul>
+
+<div class="danger-box">
+<strong>目前：Function URL 為 403 gated（免費方案限制），<em>不是</em>公開入口。</strong>公開入口請用 EC2+nginx。
+</div>
+
+<h3 id="env-vars">5. 各環境變數部署注意事項</h3>
+
+<p>詳細環境變數清單見 <a href="04-configuration.html">03 配置參考</a>。部署時特別注意：</p>
+
+<table>
+<tr><th>變數</th><th>部署方式</th><th>注意</th></tr>
+<tr><td><code>BEDROCK_MODEL_ID</code></td><td>user-data / systemd Environment</td><td>空白 = 離線模式（不燒 credit）</td></tr>
+<tr><td><code>TRUSTFORGE_LIVE_TOKEN</code></td><td><strong>SSM Parameter Store</strong>（不經 deploy 傳遞）</td><td>機敏值，deploy_ec2.sh 不含此變數傳遞</td></tr>
+<tr><td><code>TRUSTFORGE_TOKEN_SSM_PREFIX</code></td><td>deploy_ec2.sh 傳遞非機敏前綴字串</td><td>app 啟動期自行從 SSM 取 token 值</td></tr>
+<tr><td><code>CACHE_BACKEND</code></td><td>systemd Environment</td><td><code>dynamodb</code>（預設）/ <code>json</code> / <code>sqlite</code></td></tr>
+<tr><td><code>TRUSTFORGE_BEDROCK_DAILY_USD_CAP</code></td><td>systemd Environment</td><td>DynamoDB config store 有值時優先</td></tr>
+</table>
+
+<h3 id="tls">6. TLS / HTTPS 設定</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+# 設定 TLS（Let's Encrypt certbot）
+./deploy/setup_tls.sh
+
+# 自動續簽在 systemd timer：
+# certbot renew --no-random-sleep-on-renew --quiet
+</pre>
+
+<p>詳細見 <code>deploy/TLS-SETUP.md</code>。nginx conf（<code>deploy/nginx.conf</code>）已設定 HSTS（max-age=63072000 includeSubDomains preload）與 CSP（限制資源來源）。</p>
+
+<h3 id="cutover">7. Blue/Green 切換</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+# 切換到 React 前端（當前 production）
+./deploy/cutover_switch.sh react
+
+# 切回舊版 SSR 前後端一體（緊急回滾）
+./deploy/cutover_switch.sh legacy
+</pre>
+
+<p><code>cutover_switch.sh</code> 支援三態：<code>react</code> / <code>react-http</code> / <code>legacy</code>，秒切回滾。nginx symlink 原子替換，無停機時間。</p>
+
+<h3 id="iam">8. IAM 權限需求清單</h3>
+
+<table>
+<tr><th>服務</th><th>Action</th><th>資源</th><th>說明</th></tr>
+<tr><td>Bedrock</td><td><code>bedrock:InvokeModel</code></td><td><code>arn:aws:bedrock:*::foundation-model/anthropic.*</code><br><code>arn:aws:bedrock:*:*:inference-profile/*anthropic*</code></td><td>唯一 LLM 呼叫</td></tr>
+<tr><td>S3</td><td><code>s3:GetObject</code></td><td><code>arn:aws:s3:::trustforge-deploy-*/*</code></td><td>拉取部署 zip</td></tr>
+<tr><td>SSM</td><td><code>ssm:GetParameter</code></td><td><code>arn:aws:ssm:ap-southeast-2:*:parameter/trustforge/runtime/*</code></td><td>讀取 runtime tokens</td></tr>
+<tr><td>DynamoDB</td><td>讀寫 connector-cache / cost-ledger / rate-limit-leases / budget-guard 表</td><td>各表 ARN</td><td>需建表腳本（如 <code>setup_budget_guard_dynamodb.sh</code>）</td></tr>
+<tr><td>CloudWatch</td><td><code>cloudwatch:PutMetricData</code></td><td>*</td><td>自訂指標上報</td></tr>
+</table>
+
+<h3 id="checklist">9. 部署檢查清單</h3>
+
+<ol>
+  <li><input type="checkbox" disabled> EC2 Security Group 已開 tcp/80 + tcp/443</li>
+  <li><input type="checkbox" disabled> 驗收確認：IAM Instance Role 已附加（<code>trustforge-ec2</code>）</li>
+  <li><input type="checkbox" disabled> 驗收確認：<code>BEDROCK_MODEL_ID</code> 已設定；若空白則明確標示為離線模式</li>
+  <li><input type="checkbox" disabled> 驗收確認：<code>TRUSTFORGE_LIVE_TOKEN</code> 已寫入 SSM Parameter Store，且文件不輸出 token 值</li>
+  <li><input type="checkbox" disabled> 驗收確認：nginx 已安裝且 <code>deploy/nginx.conf</code> 已套用</li>
+  <li><input type="checkbox" disabled> 驗收確認：TLS 憑證已安裝（Let's Encrypt certbot）</li>
+  <li><input type="checkbox" disabled> 驗收確認：systemd unit <code>trustforge.service</code> 已啟用</li>
+  <li><input type="checkbox" disabled> <code>scripts/trustforge_control.sh status</code> 回傳 running</li>
+  <li><input type="checkbox" disabled> <code>curl https://trustforge.hurricanesoft.com.tw/healthz</code> 回 <code>ok</code></li>
+  <li><input type="checkbox" disabled> <code>/api/health</code> 回 <code>{"ok":true,"data":{"status":"ok"}}</code></li>
+  <li><input type="checkbox" disabled> <code>/api/status</code> 回 cache freshness matrix</li>
+  <li><input type="checkbox" disabled> <code>/api/costs</code> 回 cost ledger；若是離線成本狀態需明確註記</li>
+</ol>
+
+</article>
+
+<footer>
+  <a href="02-architecture.html">← 02 架構總覽</a>
+  <span style="float:right"><a href="04-configuration.html">03 配置參考 →</a></span>
+  <div style="clear:both;margin-top:1rem;color:var(--mut);font-size:.8rem">
+    TrustForge 技術文件 · 03 部署指南 · v0.18.5
+  </div>
+</footer>
+
+</div></body></html>
