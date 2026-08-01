@@ -103,10 +103,8 @@ def _budgeted_complete(
     if not math.isfinite(reservation_value) or reservation_value <= 0:
         raise _ReviewBlocked("budget_denied", "budget_reservation_denied")
 
-    shared_reservation = (
-        budget_guard.reservation_is_durable_shared(reservation)
-        or reservation_backend == "dynamodb"
-    )
+    unified_reservation = budget_guard.reservation_is_durable_shared(reservation)
+    shared_reservation = unified_reservation or reservation_backend == "dynamodb"
     release_safe = False
     accounting_finalized = False
     try:
@@ -168,7 +166,10 @@ def _budgeted_complete(
                 }
             ],
             "total_cost_usd": cost_usd,
-            "accounting_authority": "legacy",
+            # Unified settlement owns this spend atomically. Excluding it from
+            # daily_nonformal_cost_usd avoids counting the same cost once in
+            # the ledger and again in the authority's settled_total.
+            "accounting_authority": "formal" if unified_reservation else "legacy",
             "accounting_outcome": "charged",
         }
         try:

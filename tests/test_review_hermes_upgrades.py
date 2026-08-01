@@ -142,6 +142,7 @@ def test_review_reserves_then_appends_dynamodb_ledger_before_release(monkeypatch
         }
     ]
     assert item["total_cost_usd"] == Decimal("0.0002")
+    assert item["accounting_authority"] == "legacy"
     assert item["run_id"]
 
 
@@ -177,6 +178,33 @@ def test_shared_counter_retains_capacity_when_atomic_settlement_is_unavailable(
     assert result["status"] == "reviewed"
     assert order == ["bedrock", "ledger_append"]
     assert released == []
+
+
+def test_unified_settlement_ledger_is_excluded_from_nonformal_spend(monkeypatch):
+    reviewer = _load_reviewer()
+    records: list[dict] = []
+
+    class UnifiedLedger(reviewer.ledger_module.DynamoDBLedger):
+        def append(self, record):
+            records.append(record)
+
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(reviewer.budget_guard, "budget_reservation_backend", lambda: "local")
+    monkeypatch.setattr(
+        reviewer.budget_guard, "try_reserve_request_budget", lambda **_kwargs: 0.05
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "reservation_is_durable_shared", lambda _r: True
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "settle_request_budget", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(reviewer.ledger_module, "get_ledger", UnifiedLedger)
+
+    result = reviewer._review_with_budget(_diagnostic(), _Client([]))
+
+    assert result["status"] == "reviewed"
+    assert records[0]["accounting_authority"] == "formal"
 
 
 def test_cap_zero_is_a_hard_kill_switch(monkeypatch):
