@@ -337,6 +337,9 @@ describe('HermesDashboard workspace navigation', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /^(確認執行|Confirm run)$/ }))
     expect(registerAnalysisQuestion).toHaveBeenCalled()
     expect(screen.getByRole('button', { name: 'Hermes 自動分析中…' })).toBeDisabled()
 

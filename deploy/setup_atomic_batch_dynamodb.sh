@@ -30,7 +30,8 @@ POLICY=$(cat <<JSON
   {"Effect":"Allow","Action":[
     "dynamodb:GetItem","dynamodb:BatchGetItem","dynamodb:PutItem",
     "dynamodb:UpdateItem","dynamodb:ConditionCheckItem",
-    "dynamodb:TransactWriteItems","dynamodb:Query","dynamodb:DescribeTable"
+    "dynamodb:TransactWriteItems","dynamodb:Query","dynamodb:Scan",
+    "dynamodb:DescribeTable"
   ],"Resource":"${TABLE_ARN}"}
 ]}
 JSON
@@ -46,6 +47,7 @@ if ! aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" >/dev/
     --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
     --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
     --billing-mode PAY_PER_REQUEST \
+    --sse-specification Enabled=true,SSEType=KMS \
     --tags Key=Project,Value=TrustForge Key=Environment,Value=production \
       Key=ManagedBy,Value=release-train \
       Key=Purpose,Value=multi-angle-atomic-authority >/dev/null
@@ -62,6 +64,13 @@ SK_TYPE="$(aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" 
   --query "Table.AttributeDefinitions[?AttributeName=='sk'].AttributeType | [0]" --output text)"
 if [[ "$HASH_KEY" != "pk" || "$RANGE_KEY" != "sk" || "$PK_TYPE" != "S" || "$SK_TYPE" != "S" ]]; then
   echo "existing atomic authority table has incompatible key schema: expected pk(HASH,S)+sk(RANGE,S)" >&2
+  exit 1
+fi
+
+SSE_STATUS="$(aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" \
+  --query 'Table.SSEDescription.Status' --output text)"
+if [[ "$SSE_STATUS" != "ENABLED" ]]; then
+  echo "atomic authority table encryption is not enabled" >&2
   exit 1
 fi
 
