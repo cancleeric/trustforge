@@ -30,6 +30,14 @@ from trustforge.asset_intrinsic_promotion_dataset import (
 from trustforge.asset_intrinsic_shadow import intrinsic_facts_hash
 
 
+TEST_CUTOFF = datetime(2100, 1, 1, tzinfo=timezone.utc)
+TEST_BASE = TEST_CUTOFF - timedelta(days=12, hours=12)
+
+
+def _iso(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
 def _identity() -> ShadowReleaseIdentity:
     policy = load_policy()
     return ShadowReleaseIdentity(
@@ -148,14 +156,14 @@ def _build(store: ShadowEvidenceStore, **kwargs):
         store,
         _identity(),
         load_policy(),
-        pit_cutoff="2026-08-01T00:00:00Z",
+        pit_cutoff=_iso(TEST_CUTOFF),
         stale_after_days=30,
         **kwargs,
     )
 
 
 def test_canonical_store_dataset_preserves_same_day_coverage_and_digest(tmp_path):
-    base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    base = TEST_BASE
     store = _store(
         tmp_path / "private" / "shadow.sqlite3",
         [
@@ -182,7 +190,7 @@ def test_canonical_store_dataset_preserves_same_day_coverage_and_digest(tmp_path
 
 
 def test_retry_is_idempotently_deduplicated_across_restart(tmp_path):
-    base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    base = TEST_BASE
     original = _observation("BTC", base, request="retry")
     retry = replace(original, elapsed_ms=25.0)
     path = tmp_path / "private" / "shadow.sqlite3"
@@ -197,7 +205,7 @@ def test_retry_is_idempotently_deduplicated_across_restart(tmp_path):
 
 @pytest.mark.parametrize("case", ["future", "stale", "conflicted"])
 def test_future_stale_and_conflicted_evidence_fail_closed(tmp_path, case):
-    cutoff = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    cutoff = TEST_CUTOFF
     observed = {
         "future": cutoff + timedelta(seconds=1),
         "stale": cutoff - timedelta(days=31),
@@ -212,7 +220,7 @@ def test_future_stale_and_conflicted_evidence_fail_closed(tmp_path, case):
 
 
 def test_conflicting_semantic_retry_fails_closed(tmp_path):
-    base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    base = TEST_BASE
     original = _observation("BTC", base, request="conflict")
     changed = replace(
         original,
@@ -230,7 +238,7 @@ def test_conflicting_semantic_retry_fails_closed(tmp_path):
 
 
 def test_tampering_invalidates_immutable_digest(tmp_path):
-    base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    base = TEST_BASE
     store = _store(
         tmp_path / "private" / "shadow.sqlite3",
         [_observation("BTC", base, request="one")],
@@ -242,7 +250,7 @@ def test_tampering_invalidates_immutable_digest(tmp_path):
 
 
 def test_intrinsic_asset_must_match_canonical_input(tmp_path):
-    base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    base = TEST_BASE
     original = _observation("BTC", base, request="asset-mismatch")
     mismatched = replace(
         original,
@@ -254,11 +262,11 @@ def test_intrinsic_asset_must_match_canonical_input(tmp_path):
 
 
 def test_completion_not_durable_at_cutoff_is_not_pit_visible():
-    base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    base = TEST_BASE
     item = CanonicalShadowObservation(
         event_id="sha256:" + "d" * 64,
-        recorded_at="2026-07-20T12:00:01Z",
-        completion_recorded_at="2026-08-01T00:00:01Z",
+        recorded_at=_iso(TEST_BASE + timedelta(seconds=1)),
+        completion_recorded_at=_iso(TEST_CUTOFF + timedelta(seconds=1)),
         observation=_observation("BTC", base, request="late-completion"),
     )
 
@@ -295,7 +303,7 @@ def test_completion_not_durable_at_cutoff_is_not_pit_visible():
     ],
 )
 def test_intrinsic_reconstruction_inconsistency_fails_closed(tmp_path, case):
-    base = datetime(2026, 7, 20, 12, tzinfo=timezone.utc)
+    base = TEST_BASE
     original = _observation("BTC", base, request=f"bad-{case}")
     intrinsic = copy.deepcopy(original.intrinsic_shadow)
     if case == "facts_hash":
