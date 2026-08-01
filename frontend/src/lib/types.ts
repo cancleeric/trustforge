@@ -675,7 +675,7 @@ export interface CostModelDetail {
  * 呼叫數，不逐筆驗證內容。 */
 export interface LedgerRunRecord {
   ts: string
-  coin?: string
+  coin?: string | null
   question_type?: string
   offline?: boolean
   total_cost_usd: number
