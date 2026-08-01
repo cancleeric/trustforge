@@ -67,7 +67,7 @@ export default function HermesRightRail({
       <div style={{ fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx2)' }}>{t('focused')}: <b style={{ color: 'var(--color-hermes-cyan)' }}>{full}</b></div>
 
       {/* gauge */}
-      <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+      <div data-testid="right-rail-trust-panel" style={{ background: 'transparent', padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
         <div style={{ alignSelf: 'flex-start', fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx3)', marginBottom: 6 }}><GlossaryTerm term="trustScore" label={t('trustScore')} compact /></div>
         <div style={{ position: 'relative', width: 140, height: 140 }}>
           <svg viewBox="0 0 200 200" width="140" height="140">
@@ -82,7 +82,7 @@ export default function HermesRightRail({
         <div style={{ marginTop: 6, fontSize: 11, fontWeight: 600, letterSpacing: '.5px', color: scoreColor, background: scoreDim, border: `1px solid ${scoreColor}`, borderRadius: 4, padding: '3px 10px' }}>{scoreLabel}</div>
       </div>
 
-      <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '9px 12px' }}>
+      <div data-testid="right-rail-engine-panel" style={{ background: 'transparent', padding: '9px 12px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginBottom: 7 }}>
           <span>{t('continuousEngineLabel')}</span><b style={{ color: activeStages.length ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-amber)' }}>{activeStages.length} {t('runningLabel')}</b>
         </div>
