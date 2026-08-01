@@ -446,9 +446,7 @@ export default function HermesLeftRail({
         </button>
         </div>
       </div>
-      <div style={{ position: 'absolute', top: 14, right: 14, zIndex: 55 }}>
-        <DiandianAvatar isAnalyzing={diandianAnalyzing} onClick={onDiandianClick} />
-      </div>
+      <DiandianAvatar isAnalyzing={diandianAnalyzing} onClick={onDiandianClick} />
     </div>
   )
 }
