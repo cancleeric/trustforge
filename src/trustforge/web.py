@@ -7695,6 +7695,56 @@ def _handle_api_costs(qs: dict | None = None, client_ip: str = "") -> tuple[int,
 # Whale Alert API（大額轉帳即時摘要 + 歷程）
 # ---------------------------------------------------------------------------
 
+def _handle_api_carbon(client_ip: str = "") -> tuple[int, str]:
+    """`/api/carbon`：碳足跡估算 JSON——從成本帳本的 LLM 呼叫紀錄換算碳排放。
+
+    回傳 shape：{total_tokens, total_estimated_kwh, total_estimated_co2e_g,
+    total_estimated_co2e_kg, call_count, breakdown_by_model, methodology,
+    is_estimate, disclaimer}。
+
+    所有數值均為 ESTIMATES（方法論見 data/carbon_intensity.json）。
+    """
+    try:
+        _check_status_rate_limit(client_ip, "carbon")
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+    try:
+        from .carbon import carbon_from_llm_events
+        from .ledger import get_ledger
+
+        records = get_ledger().read_all()
+        # Build synthetic llm.cost events from ledger records for carbon calc
+        llm_events = []
+        for record in records:
+            model = record.get("model") or record.get("model_id") or "unknown"
+            tokens_in = int(record.get("tokens_in", 0) or 0)
+            tokens_out = int(record.get("tokens_out", 0) or 0)
+            llm_events.append({
+                "tool": "llm.cost",
+                "params": {
+                    "model": model,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                },
+            })
+
+        summary = carbon_from_llm_events(llm_events)
+        return 200, _json_envelope_ok({
+            "total_tokens": summary.total_tokens,
+            "total_estimated_kwh": summary.total_estimated_kwh,
+            "total_estimated_co2e_g": summary.total_estimated_co2e_g,
+            "total_estimated_co2e_kg": summary.total_estimated_co2e_kg,
+            "call_count": summary.call_count,
+            "breakdown_by_model": summary.breakdown_by_model,
+            "methodology": "token-energy-grid-v1",
+            "is_estimate": True,
+            "disclaimer": "All values are estimates based on public grid emission factors and model energy profiles. Not suitable for regulatory reporting without independent verification.",
+        })
+    except Exception:
+        logging.exception("TrustForge /api/carbon error")
+        return 502, _json_envelope_err("upstream_error", "碳排放資料暫時無法計算，請稍後再試")
+
+
 def _handle_api_whale_summary(qs: dict) -> tuple[int, str]:
     """`/api/whale-summary`：從 cache 讀最新 whale-alert 資料，聚合為即時摘要。
 
@@ -9105,6 +9155,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/costs":
             code, body = _handle_api_costs(qs, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/carbon":
+            code, body = _handle_api_carbon(client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/overview":
             code, body = _handle_api_overview(client_ip)
