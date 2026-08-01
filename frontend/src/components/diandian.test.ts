@@ -49,13 +49,17 @@ function decodeRgbaPng(file: string) {
 }
 
 describe('Diandian dark-theme placement', () => {
-  it('anchors the avatar below the topbar and FPS HUD and opens the bubble inward', () => {
+  it('anchors the avatar inside the left rail and keeps its bubble visible', () => {
     const css = readFileSync(path.join(componentDir, 'diandian.css'), 'utf8')
+    const leftRail = readFileSync(path.join(componentDir, '..', 'hermes', 'HermesLeftRail.tsx'), 'utf8')
 
-    expect(css).toMatch(/\.diandian-container\s*\{[^}]*top:\s*calc\(var\(--hermes-top\) \+ 52px\);[^}]*right:\s*calc\(var\(--hermes-right-rail\) \+ 12px\);/s)
+    expect(css).toMatch(/\.hermes-glass\.hermes-rail-split\[data-region="left-rail"\]\s*\{[^}]*position:\s*relative !important;[^}]*overflow:\s*clip !important;/s)
+    expect(css).toMatch(/\.diandian-container\s*\{[^}]*position:\s*absolute;[^}]*top:\s*14px;[^}]*right:\s*14px;/s)
     expect(css).not.toMatch(/\.diandian-container\s*\{[^}]*bottom:/s)
-    expect(css).toMatch(/\.diandian-bubble\s*\{[^}]*top:\s*0;[^}]*right:\s*calc\(100% \+ 8px\);/s)
-    expect(css).toMatch(/\.diandian-bubble::after\s*\{[^}]*right:\s*-6px;[^}]*border-left:/s)
+    expect(css).toMatch(/\.diandian-bubble\s*\{[^}]*bottom:\s*calc\(100% \+ 8px\);[^}]*right:\s*0;/s)
+    expect(css).toMatch(/\.diandian-bubble::after\s*\{[^}]*bottom:\s*-6px;[^}]*right:\s*24px;/s)
+    expect(leftRail).toContain('<DiandianAvatar isAnalyzing={diandianAnalyzing} onClick={onDiandianClick} />')
+    expect(leftRail).not.toMatch(/<div style=\{\{[^}]*position:\s*'absolute'[^}]*\}\}>\s*<DiandianAvatar/s)
   })
 
   it('directs onboarding users to the new avatar location', () => {

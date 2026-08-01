@@ -1003,6 +1003,24 @@ describe('AnalyzePage manual execution', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
 
+    it('gates an initial host resubmit signal until explicit confirmation', async () => {
+      render(
+        <HermesI18nProvider>
+          <MemoryRouter initialEntries={['/analyze?coin=BTC&type=multi_source&mode=risk&q=initial-host-submit']}>
+            <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+              <AnalyzePage embedded resubmitSignal={1} />
+            </BridgeHologramProvider>
+          </MemoryRouter>
+        </HermesI18nProvider>,
+      )
+
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+      expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: /^(確認執行|Confirm run)$/ }))
+      await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+      expect(vi.mocked(registerAnalysisQuestion).mock.calls[0][2]).toBe('initial-host-submit')
+    })
+
     it('#1186: cancelling a deep link/reload run does not submit and does not loop back into the same prompt on the next reload', async () => {
       function UrlProbe() {
         const [search] = useSearchParams()

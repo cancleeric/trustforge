@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import tarfile
 import zipfile
+from xml.etree import ElementTree
 from pathlib import Path
 
 import pytest
 
 from scripts.package_finale_submission import package_submission, validate_live_artifacts
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write_live_artifacts(path: Path) -> None:
@@ -61,3 +65,48 @@ def test_packages_artifacts_and_repo_snapshot(tmp_path):
     assert "finale-submission/execution_log.jsonl" in names
     assert "finale-submission/repo.tar.gz" in names
     assert "finale-submission/manifest.json" in names
+
+
+def test_team_11_final_competition_artifacts_are_authentic_and_parseable():
+    expected = {
+        "TrustForge_賽前提案報告.docx",
+        "TrustForge_決賽6分鐘簡報.html",
+        "TrustForge_決賽4分鐘備詢.docx",
+    }
+    outputs = REPO_ROOT / "outputs"
+    assert expected <= {path.name for path in outputs.iterdir() if path.is_file()}
+
+    final_deck = outputs / "TrustForge_決賽6分鐘簡報.html"
+    canonical_deck = (
+        REPO_ROOT
+        / "docs/competition/slide-deck/TrustForge_正式提案簡報_6分鐘.html"
+    )
+    html = final_deck.read_text(encoding="utf-8")
+    assert final_deck.read_bytes() == canonical_deck.read_bytes()
+    assert "商業化 AI Agent 產品提案" in html
+    assert html.count('<section class="slide') == 8
+    assert "逐字講稿" not in html
+    assert "實際部署是 EC2 + nginx，不是未採用的 App Runner" in html
+    assert "EC2 + nginx" in html
+    assert "https://" not in html and "http://" not in html
+    assert "\ufffd" not in html and "\x00" not in html
+
+    for name in expected - {final_deck.name}:
+        with zipfile.ZipFile(outputs / name) as archive:
+            assert archive.testzip() is None
+            xml_names = [
+                member
+                for member in archive.namelist()
+                if member.endswith((".xml", ".rels"))
+            ]
+            assert xml_names
+            for member in xml_names:
+                xml_bytes = archive.read(member)
+                xml_text = xml_bytes.decode("utf-8")
+                assert "\ufffd" not in xml_text and "\x00" not in xml_text
+                ElementTree.fromstring(xml_bytes)
+
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+            if name == "TrustForge_賽前提案報告.docx":
+                assert "TrustForge_決賽6分鐘簡報.html" in document_xml
+                assert "TrustForge_決賽6分鐘簡報.pptx" not in document_xml
