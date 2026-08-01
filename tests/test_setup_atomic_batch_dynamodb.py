@@ -30,6 +30,7 @@ def test_atomic_authority_policy_covers_transaction_subactions():
         "dynamodb:ConditionCheckItem",
         "dynamodb:UpdateItem",
         "dynamodb:PutItem",
+        "dynamodb:Scan",
     }
 
     assert "Resource" in statement and isinstance(statement["Resource"], str)
@@ -53,3 +54,5 @@ def test_atomic_authority_enables_pitr_and_uses_composite_key():
     assert 'SK_TYPE" != "S"' in script
     assert "incompatible key schema" in script
     assert "PointInTimeRecoveryEnabled=true" in script
+    assert "--sse-specification Enabled=true,SSEType=KMS" in script
+    assert "atomic authority table encryption is not enabled" in script

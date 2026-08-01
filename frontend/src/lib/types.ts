@@ -696,6 +696,21 @@ export interface CostsData {
   limit?: number
 }
 
+// ── /api/carbon ──────────────────────────────────────────────────────────
+
+/** 碳足跡估算回應（所有數值均為 ESTIMATES）。 */
+export interface CarbonData {
+  total_tokens: number
+  total_estimated_kwh: number
+  total_estimated_co2e_g: number
+  total_estimated_co2e_kg: number
+  call_count: number
+  breakdown_by_model: Record<string, { tokens: number; kwh: number; co2e_g: number; calls: number }>
+  methodology: string
+  is_estimate: boolean
+  disclaimer: string
+}
+
 // ── /api/history ─────────────────────────────────────────────────────────
 
 /** 對應 `scripts/fetch_scheduler.py::_snapshot_dict()` 再補上
