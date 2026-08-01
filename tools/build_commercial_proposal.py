@@ -177,7 +177,7 @@ def build():
     h1(doc,'四、模型策略：Bedrock、校準模型與訓練閉環')
     h2(doc,'4.1 為什麼不只使用現成生成模型')
     add_p(doc,'Bedrock foundation model 擅長語言理解、資訊抽取與報告組裝，但它不應直接承擔企業對信任分數、校準、資料權重與升級批准的責任。生成模型的輸出具有機率性，且會受到 prompt、上下文與資料品質影響；金融資訊產品需要的是在固定資料、規則與版本下可重現、可比較、可稽核的信任訊號。')
-    for x in ['以本地 deterministic feature 與校準器保留可測試性，避免把治理責任藏在 prompt。','以自身資料與 delayed outcome 了解本產品的 confidence 是否過度自信，而不是只看通用模型 benchmark。','以 ModelHub governance 與 SageMaker execution backend 保持模型版本、artifact、指標與批准流程。','生成式 foundation model 仍只使用 Amazon Bedrock；自行訓練的是 TrustForge 的 task-specific calibrator，不是繞過競賽規則另訓第三方 foundation model。']: add_bullet(doc,x)
+    for x in ['以本地 deterministic feature 與校準器保留可測試性，避免把治理責任藏在 prompt。','以自身資料與 delayed outcome 了解本產品的 confidence 是否過度自信，而不是只看通用模型 benchmark。','以可替換的 ModelHub 或 SageMaker TrainingBackend 執行訓練，兩者都產出 artifact 與指標；候選版本仍由 TrustForge upgrade control 管理批准流程。','生成式 foundation model 仍只使用 Amazon Bedrock；自行訓練的是 TrustForge 的 task-specific calibrator，不是繞過競賽規則另訓第三方 foundation model。']: add_bullet(doc,x)
     h2(doc,'4.2 Learning Event 與延遲標籤')
     add_p(doc,'每次資料抓取、分析、評分與報告完成後，系統會沉澱 learning event：包含來源、Claims、Trust Score、raw confidence、模型版本、run_id、Execution Log 與後續可對照的決策狀態。這是建立訓練資料的第一步，不代表當下立即重訓。')
     add_p(doc,'市場結果必須等待 outcome 成熟：T+1、T+7、T+14 分別代表分析時間點後第 1、7、14 天的實際結果。延遲標籤可以用來檢查信心是否合理、是否過度自信與校準是否需要修正，並避免把未來資訊洩漏回訓練資料。')
@@ -185,13 +185,14 @@ def build():
     add_number(doc,'Run 完成後寫入 learning event 與 immutable evidence／execution metadata。')
     add_number(doc,'T+1/T+7/T+14 outcome label 成熟後，建立 training row，執行資料契約、版本與 label leakage 檢查。')
     add_number(doc,'以 Isotonic Regression 等校準方法產生 candidate，評估 ECE、Brier、holdout 與資料覆蓋範圍。')
-    add_number(doc,'由 SageMaker backend 執行 AWS 訓練任務，S3 保存輸入與 artifact；ModelHub 登記版本、指標、來源與狀態。')
+    add_number(doc,'依 TRAINING_BACKEND 選擇 ModelHub 或 SageMaker 執行訓練；兩者皆產生 artifact 與指標，並將候選交回 TrustForge upgrade control 進行治理。')
     add_number(doc,'candidate 進入 review、canary、人工批准與 activation；不合格則退回或淘汰，production 版本不自動被取代。')
     add_callout(doc,'實作現況','目前 training trigger 是顯式 CLI／受控流程；程式與報告尚未宣稱存在無人值守 scheduler、每次 run 立即自動重訓或自動 activation。自動排程是後續 enhancement，人工否決權永久保留。','FFF8E8',GOLD)
-    h2(doc,'4.4 ModelHub 與 SageMaker 的責任分工')
+    h2(doc,'4.4 ModelHub 與 SageMaker 的平行後端邊界')
     add_table(doc,['元件','角色','保存／執行內容'],[
-        ('ModelHub','Governance surface','model version、training request、metrics、artifact provenance、candidate status、approval lifecycle'),
-        ('SageMaker AI','Training execution backend','從 S3 讀取資料、建立 Training Job、產生模型 artifact、回傳訓練指標'),
+        ('ModelHub','TrainingBackend 選項','執行 fit、產生 model artifact 與 metrics，回傳候選結果'),
+        ('SageMaker AI','TrainingBackend 選項','從 S3 讀取資料、建立 Training Job、產生 model artifact 與 metrics'),
+        ('TrustForge upgrade control','共同治理平面','記錄 provenance、candidate status、review、approval、activation 與 rollback'),
         ('S3','Artifact storage','training dataset、calibrator artifact、manifest、版本與完整性雜湊')], [1900,2400,5060])
 
     h1(doc,'五、資料與證據治理')

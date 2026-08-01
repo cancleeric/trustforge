@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+proposal = [
+    "python-docx>=1.1,<2",
+]
 # #91 CI 品質閘：pytest-cov 讓 `[tool.pytest.ini_options].addopts` 的 --cov 生效。
 # CI（.github/workflows/ci.yml）以 `pip install -e ".[dev]"` 安裝後直接跑 `pytest`，
 # 若這裡沒帶 pytest-cov，addopts 的 --cov 會讓 pytest 報「unrecognized arguments」
