@@ -34,6 +34,7 @@ Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certificatio
 | [competition/COMPETITION-OFFICIAL.md](competition/COMPETITION-OFFICIAL.md) | 官方附件全文歸檔 + 官方文件間衝突標記（如 AWS 模型約束，待 7/13 向窗口 Mars Li 確認） |
 | [competition/COMPLIANCE-CHECK.md](competition/COMPLIANCE-CHECK.md) | 合規性對照（vs 官方命題文件）：5 能力/交付件/執行限制逐條核對 + 待決策 flag |
 | [competition/SUBMISSION-CHECKLIST.md](competition/SUBMISSION-CHECKLIST.md) | 決賽交付清單 |
+| [competition/AWS-LAMBDA-DEPLOYMENT.md](competition/AWS-LAMBDA-DEPLOYMENT.md) | 比賽帳號 Lambda 離線部署契約、Live 啟用門檻與 token rotation SOP |
 | [competition/PROPOSAL.md](competition/PROPOSAL.md) | 競賽企劃書：產品定位、Demo 敘事腳本、評審價值故事 |
 | [competition/TEAM.md](competition/TEAM.md) | 團隊/角色分工 |
 

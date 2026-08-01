@@ -2,6 +2,8 @@
  * Multi-angle analysis API endpoints and TypeScript interfaces (#810).
  */
 
+import { secureRandomUuid } from './uuid'
+
 export interface AngleResult {
   angle: string
   qtype: string
@@ -130,7 +132,7 @@ export async function submitMultiAngle(
   if (question) body.question = question
   if (locale) body.locale = locale
   const bodyJson = JSON.stringify(body)
-  const stableKey = idempotencyKey ?? crypto.randomUUID()
+  const stableKey = idempotencyKey ?? secureRandomUuid()
   let res: Response | undefined
   for (let attempt = 0; attempt < 10; attempt += 1) {
     res = await fetch('/api/multi-angle', {

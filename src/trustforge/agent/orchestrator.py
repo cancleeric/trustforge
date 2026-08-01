@@ -1675,6 +1675,7 @@ def run_agent_pipeline(
     client: BedrockClient | None = None,
     log: ExecutionLog | None = None,
     now_fn=time.time,
+    ledger_persistence_observer: Callable[[bool, float], None] | None = None,
     run_scope_id: str = "",
 ) -> tuple[Report, list[Evidence]]:
     """三步驟顯式推理鏈。
@@ -1923,6 +1924,8 @@ def run_agent_pipeline(
         "calls": _llm_calls,
         "total_cost_usd": _run_total_cost_usd,
     })
+    if ledger_persistence_observer is not None:
+        ledger_persistence_observer(_persisted, _run_total_cost_usd)
     # codex HIGH 追加（記帳完整性）：append_run() 的 primary+fallback 都失敗
     # 時（storage 唯讀/滿/不可用），這筆真的花掉的成本從未進到帳本——
     # daily_cost_usd() 讀不到，若不做點什麼，guard 會一直看到「未用預算」，

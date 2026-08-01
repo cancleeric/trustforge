@@ -1,0 +1,156 @@
+{
+  "status": "owner-authorized-pending-final-ciso-review",
+  "account_id": "850849012389",
+  "region": "us-east-1",
+  "function_name": "competition-trustforge-team11-live",
+  "deployment_alias": "live",
+  "qualified_function_arn": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live:live",
+  "runtime": "python3.12",
+  "handler": "trustforge.lambda_handler.handler",
+  "memory_mb": 512,
+  "timeout_seconds": 90,
+  "reserved_concurrency": 1,
+  "function_url_auth_type": "NONE",
+  "environment": {
+    "TRUSTFORGE_HOME": "/var/task",
+    "TRUSTFORGE_COMPETITION_MODE": "live",
+    "BEDROCK_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "BEDROCK_HAIKU_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "TRUSTFORGE_NARRATIVE_CONNECT_TIMEOUT_SEC": "3",
+    "TRUSTFORGE_NARRATIVE_READ_TIMEOUT_SEC": "20",
+    "TRUSTFORGE_BEDROCK_DAILY_USD_CAP": "10",
+    "TRUSTFORGE_BUDGET_GUARD_BACKEND": "dynamodb",
+    "TRUSTFORGE_BUDGET_COUNTER_TABLE": "competition-trustforge-team11-budget",
+    "COST_LEDGER_BACKEND": "dynamodb",
+    "TRUSTFORGE_COST_LEDGER_TABLE": "competition-trustforge-team11-cost-ledger",
+    "TRUSTFORGE_DISABLE_ADMIN_CONFIG": "true",
+    "CACHE_BACKEND": "json",
+    "TRUSTFORGE_CACHE_JSON_PATH": "/tmp/trustforge-connector-cache.json",
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/live-token-OOlkjq",
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID": "f004e6f6-42d6-48eb-94a0-175159442246",
+    "TRUSTFORGE_ARKHAM_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/arkham-JhZl7X",
+    "TRUSTFORGE_ARKHAM_SECRET_VERSION_ID": "339acf6c-4905-4a4b-a9cf-b0ed2c686cd8",
+    "TRUSTFORGE_CMC_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/coinmarketcap-XGN9vB",
+    "TRUSTFORGE_CMC_SECRET_VERSION_ID": "047ab698-43e7-48d9-a332-e9661c98359c",
+    "TRUSTFORGE_ETHERSCAN_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/etherscan-fYvuSo",
+    "TRUSTFORGE_ETHERSCAN_SECRET_VERSION_ID": "de752c03-e796-4d32-aba3-c4246c633118",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/whale-alert-b2Ddeo",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_VERSION_ID": "491c08f9-eeef-4051-82f8-0f26697ff7a1"
+  },
+  "secret_environment_inputs": [
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN",
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID",
+    "TRUSTFORGE_ARKHAM_SECRET_ARN",
+    "TRUSTFORGE_ARKHAM_SECRET_VERSION_ID",
+    "TRUSTFORGE_CMC_SECRET_ARN",
+    "TRUSTFORGE_CMC_SECRET_VERSION_ID",
+    "TRUSTFORGE_ETHERSCAN_SECRET_ARN",
+    "TRUSTFORGE_ETHERSCAN_SECRET_VERSION_ID",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_ARN",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_VERSION_ID"
+  ],
+  "forbidden_environment": [
+    "TRUSTFORGE_LIVE_TOKEN",
+    "ARKHAM_API_KEY",
+    "CMC_PRO_API_KEY",
+    "ETHERSCAN_API_KEY",
+    "WHALE_ALERT_API_KEY",
+    "TRUSTFORGE_ONLINE_STANCE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN"
+  ],
+  "execution_role": {
+    "trust_policy": {
+      "principal": "lambda.amazonaws.com",
+      "action": "sts:AssumeRole"
+    },
+    "statements": [
+      {
+        "actions": ["logs:CreateLogStream", "logs:PutLogEvents"],
+        "resources": ["arn:aws:logs:us-east-1:850849012389:log-group:/aws/lambda/competition-trustforge-team11-live:*"]
+      },
+      {
+        "actions": ["secretsmanager:GetSecretValue"],
+        "resources": [
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/live-token-OOlkjq",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/arkham-JhZl7X",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/coinmarketcap-XGN9vB",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/etherscan-fYvuSo",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/whale-alert-b2Ddeo"
+        ]
+      },
+      {
+        "actions": ["bedrock:InvokeModel"],
+        "resources": [
+          "arn:aws:bedrock:us-east-1:850849012389:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+        ]
+      },
+      {
+        "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+        "resources": ["arn:aws:dynamodb:us-east-1:850849012389:table/competition-trustforge-team11-budget"]
+      },
+      {
+        "actions": ["dynamodb:PutItem", "dynamodb:Scan"],
+        "resources": ["arn:aws:dynamodb:us-east-1:850849012389:table/competition-trustforge-team11-cost-ledger"]
+      }
+    ]
+  },
+  "function_url_policy": [
+    {
+      "statement_id": "FunctionURLAllowPublicAccess",
+      "action": "lambda:InvokeFunctionUrl",
+      "principal": "*",
+      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live:live",
+      "condition": {"lambda:FunctionUrlAuthType": "NONE"}
+    },
+    {
+      "statement_id": "FunctionURLAllowPublicInvoke",
+      "action": "lambda:InvokeFunction",
+      "principal": "*",
+      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live:live",
+      "condition": {"lambda:InvokedViaFunctionUrl": "true"}
+    }
+  ],
+  "public_requests": [
+    {"method": "GET", "path": "/"},
+    {"method": "GET", "path": "/healthz"}
+  ],
+  "token_protected_requests": [
+    {"method": "GET", "path": "/analyze", "requires": ["live=1", "X-Live-Token"], "provider_cache_refresh": "bounded-on-demand"},
+    {"method": "GET", "path": "/analyze.json", "requires": ["live=1", "X-Live-Token"], "provider_cache_refresh": "bounded-on-demand"}
+  ],
+  "bedrock": {
+    "actions": ["bedrock:InvokeModel"],
+    "resources": [
+      "arn:aws:bedrock:us-east-1:850849012389:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+    ]
+  },
+  "dynamodb": {
+    "budget_table": {
+      "name": "competition-trustforge-team11-budget",
+      "partition_key": "source_id",
+      "sort_key": "coin",
+      "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    },
+    "cost_ledger_table": {
+      "name": "competition-trustforge-team11-cost-ledger",
+      "partition_key": "run_id",
+      "sort_key": "ts",
+      "actions": ["dynamodb:PutItem", "dynamodb:Scan"]
+    }
+  },
+  "daily_usd_cap": 10,
+  "tags": {
+    "owner": "team11",
+    "purpose": "competition-live",
+    "cost-center": "hackathon-2026",
+    "expiry": "2026-08-03"
+  }
+}

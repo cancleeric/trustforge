@@ -24,8 +24,9 @@
 .diandian-avatar {
   width: 64px;
   height: 64px;
-  border-radius: 50%;
-  object-fit: cover;
+  border-radius: 0;
+  object-fit: contain;
+  background: transparent;
   filter: drop-shadow(0 4px 12px rgba(77, 216, 224, 0.3));
 }
 @media (max-width: 600px) {
@@ -118,6 +119,9 @@
 .diandian-onboarding-avatar img {
   width: 80px;
   height: 80px;
+  border-radius: 0;
+  object-fit: contain;
+  background: transparent;
 }
 
 .diandian-onboarding-bubble {
@@ -299,14 +303,42 @@
 .hermes-stage-arrow {
   color: rgba(77, 216, 224, 0.5);
   font-size: 1.2em;
-  margin: 0 4px;
+  margin: 0 6px;
   user-select: none;
+  flex-shrink: 0;
   animation: arrow-pulse 2s ease-in-out infinite;
 }
 @keyframes arrow-pulse {
   0%, 100% { opacity: 0.5; }
   50% { opacity: 1; }
 }
+
+/* 修復底部節點列文字被壓縮問題 */
+.hermes-energy-nodes {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  overflow-x: auto !important;
+  gap: 0 !important;
+  padding: 4px 8px !important;
+  scrollbar-width: thin;
+}
+.hermes-energy-station {
+  min-width: 120px !important;
+  flex-shrink: 0 !important;
+  white-space: nowrap !important;
+}
+.hermes-energy-station .hermes-energy-copy strong {
+  font-size: clamp(11px, 1vw, 14px) !important;
+  white-space: nowrap !important;
+  overflow: visible !important;
+  text-overflow: unset !important;
+}
+.hermes-energy-station .hermes-energy-copy small {
+  white-space: nowrap !important;
+  overflow: visible !important;
+}
+
 @media (max-width: 600px) {
-  .hermes-stage-arrow { font-size: 0.9em; margin: 0 2px; }
+  .hermes-stage-arrow { font-size: 0.9em; margin: 0 3px; }
+  .hermes-energy-station { min-width: 100px !important; }
 }

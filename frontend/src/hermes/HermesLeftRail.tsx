@@ -156,6 +156,9 @@ export default function HermesLeftRail({
         ))}
         <div className="hermes-rail-controls-sep" role="separator" />
         <p className="hermes-rail-group">{t('railGroupSettings')}</p>
+        <a href="/goals" className="hermes-nav-item" style={{ textDecoration: 'none' }}>
+          {locale === 'zh-TW' ? '🎯 專案目標' : '🎯 Goals'}
+        </a>
         <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
           {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
         </button>

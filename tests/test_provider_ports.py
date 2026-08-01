@@ -665,7 +665,13 @@ class TestPipelineProviderRuntimePath:
                 )
             ]
 
-        def fake_run_agent_pipeline(query, coin, qtype, docs, *, client, log, run_scope_id=""):
+        def fake_run_agent_pipeline(
+            query, coin, qtype, docs, *, client, log,
+            ledger_persistence_observer=None,
+            run_scope_id="",
+        ):
+            if ledger_persistence_observer is not None:
+                ledger_persistence_observer(True, 0.0)
             seen["client"] = client
             return (
                 Report(

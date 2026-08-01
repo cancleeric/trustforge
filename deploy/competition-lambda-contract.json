@@ -1,0 +1,51 @@
+{
+  "account_id": "850849012389",
+  "region": "us-east-1",
+  "function_name": "competition-trustforge-team11-offline",
+  "runtime": "python3.12",
+  "handler": "trustforge.lambda_handler.handler",
+  "memory_mb": 512,
+  "timeout_seconds": 30,
+  "reserved_concurrency": 1,
+  "function_url_auth_type": "NONE",
+  "environment": {
+    "TRUSTFORGE_HOME": "/var/task",
+    "TRUSTFORGE_COMPETITION_MODE": "offline"
+  },
+  "forbidden_environment_prefixes": [
+    "AWS_ACCESS_KEY",
+    "AWS_SECRET",
+    "AWS_SESSION_TOKEN",
+    "BEDROCK_",
+    "TRUSTFORGE_LIVE_TOKEN"
+  ],
+  "allowed_requests": [
+    {"method": "GET", "path": "/"},
+    {"method": "GET", "path": "/healthz"}
+  ],
+  "execution_role": {
+    "trust_principal": "lambda.amazonaws.com",
+    "allowed_actions": ["logs:CreateLogStream", "logs:PutLogEvents"],
+    "log_group": "/aws/lambda/competition-trustforge-team11-offline"
+  },
+  "tags": {
+    "owner": "team11",
+    "purpose": "competition",
+    "cost-center": "hackathon-2026",
+    "expiry": "2026-08-03"
+  },
+  "live_activation": {
+    "status": "owner-authorized-pending-final-ciso-review",
+    "contract": "deploy/competition-lambda-live-contract.json",
+    "region": "us-east-1",
+    "narrative_model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "stance_model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "daily_usd_cap": 10,
+    "required_inference_profile_arn": "arn:aws:bedrock:us-east-1:850849012389:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "required_foundation_model_arns": [
+      "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+    ]
+  }
+}

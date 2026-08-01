@@ -16,6 +16,7 @@ import EcoLinkPage from './pages/EcoLinkPage'
 import PeerMetricsPage from './pages/PeerMetricsPage'
 import NotificationsPage from './pages/NotificationsPage'
 import PlanningPage from './pages/PlanningPage'
+import GoalsPage from './pages/GoalsPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { HermesI18nProvider } from './hermes/hermesI18n'
 
@@ -63,6 +64,7 @@ function RoutedContent() {
             /asset-context 慣例，刻意不進 Header 主導覽 navItems。 */}
         <Route path="/peer-metrics" element={<PeerMetricsPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
+        <Route path="/goals" element={<GoalsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </ErrorBoundary>

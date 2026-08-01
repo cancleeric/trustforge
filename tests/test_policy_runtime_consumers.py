@@ -63,7 +63,13 @@ def test_pipeline_consumes_runtime_policies(monkeypatch):
             )
         ]
 
-    def fake_run_agent_pipeline(query, coin, qtype, docs, client=None, log=None, run_scope_id=""):
+    def fake_run_agent_pipeline(
+        query, coin, qtype, docs, client=None, log=None,
+        ledger_persistence_observer=None,
+        run_scope_id="",
+    ):
+        if ledger_persistence_observer is not None:
+            ledger_persistence_observer(True, 0.0)
         assert log is not None
         report = Report(
             coin=coin,
@@ -152,7 +158,13 @@ def test_baseline_report_policy_does_not_truncate_existing_output(monkeypatch):
             )
         ]
 
-    def fake_run_agent_pipeline(query, coin, qtype, docs, client=None, log=None, run_scope_id=""):
+    def fake_run_agent_pipeline(
+        query, coin, qtype, docs, client=None, log=None,
+        ledger_persistence_observer=None,
+        run_scope_id="",
+    ):
+        if ledger_persistence_observer is not None:
+            ledger_persistence_observer(True, 0.0)
         report = Report(
             coin=coin,
             question_type=qtype.value,

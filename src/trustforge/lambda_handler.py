@@ -11,10 +11,20 @@ live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶 `X-Live-Token` head
 from __future__ import annotations
 
 import json
+import hmac
+import importlib
 import logging
+import os
 from urllib.parse import urlencode
 
-from . import web
+from .lambda_secret import hydrate_lambda_secrets
+
+
+# Must run before importing ``web`` because it reads environment-backed
+# security defaults during module initialization.  A configured secret that
+# cannot be retrieved intentionally fails the Lambda cold start closed.
+hydrate_lambda_secrets()
+web = importlib.import_module(".web", __package__)
 from .ingestion.hoyabit import log_hoyabit_startup_status
 
 
@@ -46,10 +56,63 @@ def _resp(code, body, ctype):
     }
 
 
+def _competition_mode() -> str | None:
+    """Validate the deployment-bound mode for competition Lambda functions."""
+    function_name = os.getenv("AWS_LAMBDA_FUNCTION_NAME", "")
+    if not function_name.startswith("competition-trustforge-"):
+        return None
+    mode = os.getenv("TRUSTFORGE_COMPETITION_MODE", "").strip()
+    if mode not in {"offline", "live"}:
+        raise RuntimeError("competition Lambda requires an explicit offline/live mode")
+    return mode
+
+
+_COMPETITION_MODE = _competition_mode()
+
+_LIVE_ALLOWED_PATHS = frozenset({"/", "/healthz", "/analyze", "/analyze.json"})
+_LIVE_ANALYSIS_PATHS = frozenset({"/analyze", "/analyze.json"})
+
+
+def _offline_landing() -> str:
+    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrustForge — AWS 離線展示</title></head><body>
+<main><h1>TrustForge</h1><h2>AWS 離線唯讀展示</h2>
+<p>此競賽端點目前只驗證 AWS 部署與健康狀態，不提供分析執行。</p>
+<p>正式 Live 分析將在安全審查與現場題目確認後另行啟用。</p>
+<p><a href="/healthz">Health check</a></p></main></body></html>"""
+
+
 def handler(event, context=None):
     # Function URL（payload v2）：rawPath + queryStringParameters(dict[str,str])
     path = (event.get("rawPath")
             or event.get("requestContext", {}).get("http", {}).get("path", "/"))
+    method = (
+        event.get("requestContext", {}).get("http", {}).get("method", "GET")
+        or "GET"
+    ).upper()
+    if _COMPETITION_MODE == "live" and (
+        method != "GET" or path not in _LIVE_ALLOWED_PATHS
+    ):
+        return _resp(
+            404,
+            web.render_page(
+                web._render_error_card("找不到頁面", "此競賽 Live 端點未開放該路由。")
+            ),
+            "text/html; charset=utf-8",
+        )
+    if _COMPETITION_MODE == "offline" and (
+        method != "GET" or path not in ("/", "/healthz")
+    ):
+        return _resp(
+            404,
+            web.render_page(
+                web._render_error_card("找不到頁面", "此競賽離線展示端點未開放該路由。")
+            ),
+            "text/html; charset=utf-8",
+        )
+    if _COMPETITION_MODE == "offline" and path == "/":
+        return _resp(200, _offline_landing(), "text/html; charset=utf-8")
     raw_qs = event.get("queryStringParameters") or {}
     qs = {k: [v] for k, v in raw_qs.items()}  # 轉成 _do_analyze 期望的 list 形式
     # CISO hardening R3（#2a, issue #134）：Function URL headers 是
@@ -66,6 +129,21 @@ def handler(event, context=None):
     _lambda_headers_lower = {
         (k or "").lower(): v for k, v in _lambda_headers.items()
     }
+    if _COMPETITION_MODE == "live" and path in _LIVE_ANALYSIS_PATHS:
+        supplied_token = _lambda_headers_lower.get("x-live-token") or ""
+        expected_token = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+        if raw_qs.get("live") != "1" or not expected_token or not hmac.compare_digest(
+            supplied_token, expected_token
+        ):
+            return _resp(
+                401,
+                web.render_page(
+                    web._render_error_card(
+                        "未授權", "Live 分析需要有效的 X-Live-Token。"
+                    )
+                ),
+                "text/html; charset=utf-8",
+            )
     # PR #99 終審 LOW：`raw_qs`（Lambda 原生 queryStringParameters dict）本來
     # 就會保留空值 key（`?token=`／裸 `?token` 都會是 `{"token": ""}`），直接用
     # `"token" in raw_qs` 判斷「query 是否帶了 token」，不看轉出來的 qs 值是否
@@ -107,19 +185,57 @@ def handler(event, context=None):
             return _resp(200, "ok", "text/plain; charset=utf-8")
 
         if path in ("/analyze", "/analyze.json"):
-            # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
-            from .schema import QuestionType
-            qtype_raw = qs.get("type", ["multi_source"])[0]
             try:
-                qtype = QuestionType(qtype_raw)
-            except ValueError:
-                qtype = QuestionType.MULTI_SOURCE
+                # Question type is part of admission.  Reject it before caller
+                # rate limiting or any external provider refresh; never coerce
+                # an invalid value for admission and reject it only downstream.
+                from .schema import QuestionType
+                qtype_raw = qs.get("type", ["multi_source"])[0]
+                try:
+                    qtype = QuestionType(qtype_raw)
+                except ValueError as exc:
+                    raise ValueError(f"不支援的分析類型：{qtype_raw}") from exc
 
-            try:
+                # Competition Live 的 provider refresh 必須位於完整 admission
+                # gate 後：先驗 query/幣種，再對 caller 限流一次，才允許消耗
+                # 外部 provider quota。下游分析以 enforce_rate_limit=False 避免
+                # 同一請求被重複計數。非 competition Lambda 永不走此 refresh。
+                refresh_coins: tuple[str, ...] = ()
+                if _COMPETITION_MODE == "live":
+                    query = qs.get("q", [""])[0]
+                    if len(query) > 1000:
+                        raise ValueError(
+                            f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）"
+                        )
+                    coin_raw = qs.get("coin", ["BTC"])[0].strip()
+                    if qtype == QuestionType.COMPARISON:
+                        coin2_raw = qs.get("coin2", [""])[0].strip()
+                        if coin2_raw and "," not in coin_raw:
+                            coin_raw = f"{coin_raw},{coin2_raw}"
+                        pair = web._parse_comparison_coins(coin_raw, query)
+                        if pair is None:
+                            raise ValueError("比較分析需要選擇兩個可用且不同的幣種")
+                        refresh_coins = pair
+                    else:
+                        coin = coin_raw.upper()
+                        if coin not in web.COIN_POOL:
+                            raise ValueError(
+                                f"幣種須為以下其中之一：{'、'.join(web.COIN_POOL)}"
+                            )
+                        refresh_coins = (coin,)
+
+                    web._analyze_enforce_caller_rate_limit(qs, client_ip)
+                    from .lambda_provider_cache import refresh_provider_cache
+                    for refresh_coin in refresh_coins:
+                        refresh_provider_cache(refresh_coin)
+
                 if qtype == QuestionType.COMPARISON:
-                    result = web._do_comparison(
-                        qs, client_ip=client_ip
-                    )
+                    if _COMPETITION_MODE == "live":
+                        result = web._do_comparison(
+                            qs, client_ip=client_ip, enforce_rate_limit=False,
+                        )
+                    else:
+                        result = web._do_comparison(qs, client_ip=client_ip)
                     report_a, evidence_a, report_b, evidence_b, log = result
                     if path == "/analyze.json":
                         # codex vp-engineering 終審 H1（已實測證實 author 從此
@@ -139,7 +255,14 @@ def handler(event, context=None):
                         "text/html; charset=utf-8",
                     )
                 else:
-                    report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
+                    if _COMPETITION_MODE == "live":
+                        report, evidence, log = web._do_analyze(
+                            qs, client_ip=client_ip, enforce_rate_limit=False,
+                        )
+                    else:
+                        report, evidence, log = web._do_analyze(
+                            qs, client_ip=client_ip,
+                        )
                     if path == "/analyze.json":
                         # 同上：呼叫 web.py 共用函式，不再自己組 payload。
                         payload = web._build_analyze_json_payload(report, evidence, log)

@@ -10,9 +10,16 @@ import html
 import json
 from urllib.parse import urlencode
 
-from trustforge import lambda_handler, web
+import pytest
+
+from trustforge import lambda_handler, lambda_provider_cache, web
 from trustforge.comparison_contract import ComparisonReport, ComparisonRunResult
 from trustforge.schema import Evidence, QuestionType
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_provider_refresh(monkeypatch):
+    monkeypatch.setattr(lambda_provider_cache, "refresh_provider_cache", lambda coin: {})
 
 
 def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> dict:
@@ -26,6 +33,279 @@ def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> di
     if headers is not None:
         event["headers"] = headers
     return event
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("POST", "/"), ("GET", "/analyze"), ("POST", "/analyze.json"), ("GET", "/status")],
+)
+def test_competition_offline_hosted_rejects_non_allowlisted_routes(
+    monkeypatch, method, path
+):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "offline")
+    event = _event(path)
+    event["requestContext"]["http"].update({"method": method, "path": path})
+
+    response = lambda_handler.handler(event)
+
+    assert response["statusCode"] == 404
+    assert "未開放該路由" in response["body"]
+
+
+@pytest.mark.parametrize("path", ["/", "/healthz"])
+def test_competition_offline_hosted_allows_get_root_and_health(monkeypatch, path):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "offline")
+    event = _event(path)
+    event["requestContext"]["http"].update({"method": "GET", "path": path})
+
+    response = lambda_handler.handler(event)
+
+    assert response["statusCode"] == 200
+
+
+def test_competition_offline_landing_is_truthful_and_has_no_analysis_cta(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "offline")
+
+    response = lambda_handler.handler(_event("/"))
+
+    assert "AWS 離線唯讀展示" in response["body"]
+    assert "不提供分析執行" in response["body"]
+    assert "/analyze" not in response["body"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/"), ("POST", "/healthz"), ("POST", "/analyze"),
+        ("POST", "/analyze.json"), ("GET", "/status"), ("GET", "/admin"),
+        ("GET", "/unknown"),
+    ],
+)
+def test_competition_live_rejects_non_allowlisted_routes(monkeypatch, method, path):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    event = _event(path)
+    event["requestContext"]["http"].update({"method": method, "path": path})
+
+    response = lambda_handler.handler(event)
+
+    assert response["statusCode"] == 404
+    assert "Live 端點未開放" in response["body"]
+
+
+@pytest.mark.parametrize(
+    ("qs", "headers"),
+    [
+        ({"coin": "BTC"}, {"X-Live-Token": "correct-token"}),
+        ({"coin": "BTC", "live": "1"}, {}),
+        ({"coin": "BTC", "live": "1"}, {"X-Live-Token": "wrong-token"}),
+        ({"coin": "BTC", "live": "1", "token": "correct-token"}, {}),
+    ],
+)
+def test_competition_live_analysis_fails_closed_without_exact_header(
+    monkeypatch, qs, headers
+):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    monkeypatch.setattr(
+        web,
+        "_do_analyze",
+        lambda *args, **kwargs: pytest.fail("unauthorized request reached analysis"),
+    )
+
+    response = lambda_handler.handler(_event("/analyze", qs, headers))
+
+    assert response["statusCode"] == 401
+    assert "correct-token" not in response["body"]
+    assert "wrong-token" not in response["body"]
+
+
+@pytest.mark.parametrize("path", ["/analyze", "/analyze.json"])
+def test_competition_live_allows_exact_header_and_live_flag(monkeypatch, path):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    monkeypatch.setattr(web, "_do_analyze", lambda *args, **kwargs: (object(), [], []))
+    monkeypatch.setattr(web, "_render_report", lambda *args: "<html>live ok</html>")
+
+    monkeypatch.setattr(
+        web,
+        "_build_analyze_json_payload",
+        lambda *args: {"mode": "live", "report": {}, "evidence": []},
+    )
+    response = lambda_handler.handler(
+        _event(
+            path,
+            {"coin": "BTC", "live": "1"},
+            {"X-LIVE-TOKEN": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 200
+    if path == "/analyze":
+        assert "live ok" in response["body"]
+    else:
+        assert response["headers"]["Content-Type"] == "application/json; charset=utf-8"
+
+
+@pytest.mark.parametrize("path", ["/", "/healthz"])
+def test_competition_live_public_routes_are_get_only(monkeypatch, path):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    event = _event(path)
+    event["requestContext"]["http"].update({"method": "GET", "path": path})
+
+    assert lambda_handler.handler(event)["statusCode"] == 200
+
+
+def test_competition_function_requires_explicit_mode(monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "competition-trustforge-team11-offline")
+    monkeypatch.delenv("TRUSTFORGE_COMPETITION_MODE", raising=False)
+
+    with pytest.raises(RuntimeError, match="explicit offline/live mode"):
+        lambda_handler._competition_mode()
+
+
+def test_noncompetition_function_preserves_existing_routes(monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "trustforge-demo")
+    monkeypatch.delenv("TRUSTFORGE_COMPETITION_MODE", raising=False)
+
+    assert lambda_handler._competition_mode() is None
+
+
+def test_noncompetition_analysis_never_refreshes_providers(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", None)
+    monkeypatch.setattr(
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: pytest.fail(f"noncompetition refresh attempted for {coin}"),
+    )
+    monkeypatch.setattr(web, "_do_analyze", lambda *args, **kwargs: (object(), [], []))
+    monkeypatch.setattr(web, "_render_report", lambda *args: "ok")
+
+    assert lambda_handler.handler(_event("/analyze", {"coin": "BTC"}))["statusCode"] == 200
+
+
+@pytest.mark.parametrize("coin", ["", "DOGE", "X" * 2048])
+def test_live_invalid_coin_never_refreshes_provider(monkeypatch, coin):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": coin, "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_invalid_comparison_second_coin_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "comparison", "coin": "BTC", "coin2": "DOGE", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_invalid_question_type_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "bogus", "coin": "BTC", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_rate_limited_request_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        web,
+        "_analyze_enforce_caller_rate_limit",
+        lambda *_args: (_ for _ in ()).throw(web.TooManyRequests("limited")),
+    )
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": "BTC", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 429
+    assert calls == []
+
+
+def test_live_comparison_refreshes_both_coins_and_counts_rate_limit_once(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    refreshed = []
+    limited = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda coin: refreshed.append(coin)
+    )
+    monkeypatch.setattr(
+        web, "_analyze_enforce_caller_rate_limit", lambda qs, ip: limited.append(ip)
+    )
+
+    def _comparison(*args, **kwargs):
+        assert kwargs["client_ip"] == "9.9.9.9"
+        assert kwargs["enforce_rate_limit"] is False
+        raise ValueError("stop after admission")
+
+    monkeypatch.setattr(web, "_do_comparison", _comparison)
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "comparison", "coin": "BTC", "coin2": "ETH", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert refreshed == ["BTC", "ETH"]
+    assert limited == ["9.9.9.9"]
+
+
+def test_secret_hydration_precedes_delayed_web_import():
+    source = __import__("inspect").getsource(lambda_handler)
+
+    assert source.index("hydrate_lambda_secrets()") < source.index(
+        'importlib.import_module(".web", __package__)'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +417,7 @@ def test_lambda_live_token_header_case_insensitive_upper(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
     captured_qs = {}
 
-    def _fake_do_analyze(qs, client_ip=None):
+    def _fake_do_analyze(qs, client_ip=None, **kwargs):
         captured_qs.update(qs)
         return (object(), [], [])
 
