@@ -76,6 +76,7 @@ _ARKHAM_MAX_LIMIT = 20
 _ARKHAM_MIN_INTERVAL_SECONDS = 1.0
 _ARKHAM_TX_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _ARKHAM_SYMBOL_RE = re.compile(r"^[A-Z0-9._-]{1,24}$")
+_ARKHAM_SYMBOLLESS_NATIVE_CHAINS = {"bitcoin": "BTC"}
 
 _log = logging.getLogger(__name__)
 _arkham_throttle_lock = threading.Lock()
@@ -251,6 +252,19 @@ def _throttle_arkham_request() -> None:
                 time.sleep(wait)
                 now = time.monotonic()
         _arkham_last_request_monotonic = now
+
+
+def _arkham_transfer_identity(transfer: dict) -> str:
+    """Return Arkham's per-transfer identity, distinct within one transaction."""
+    provider_id = transfer.get("id")
+    if isinstance(provider_id, str):
+        provider_id = provider_id.strip()
+        if _ARKHAM_TX_ID_RE.fullmatch(provider_id):
+            return f"id:{provider_id}"
+    sequence = transfer.get("seq")
+    if isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0:
+        return f"seq:{sequence}"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +493,9 @@ class ArkhamIntelSource(Source):
         if coin_scope not in _SUPPORTED_COINS:
             return None
         if not asset_symbol:
-            asset_symbol = coin_scope
+            asset_symbol = _ARKHAM_SYMBOLLESS_NATIVE_CHAINS.get(chain, "")
+            if not asset_symbol:
+                return None
 
         # 金額
         amount_usd = _finite_num(transfer.get("historicalUSD"), lo=_MIN_VALUE_USD)
@@ -535,8 +551,11 @@ class ArkhamIntelSource(Source):
         tx_hash = tx_hash.strip()
         if not _ARKHAM_TX_ID_RE.fullmatch(tx_hash):
             return None
+        transfer_identity = _arkham_transfer_identity(transfer)
+        if not transfer_identity:
+            return None
         doc_id = "arkham-" + hashlib.md5(
-            f"{tx_hash}-{chain}-{asset_symbol}-{ts}".encode()
+            f"{tx_hash}-{transfer_identity}-{chain}-{asset_symbol}-{ts}".encode()
         ).hexdigest()[:12]
 
         return Document(

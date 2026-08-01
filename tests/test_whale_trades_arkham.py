@@ -68,6 +68,7 @@ def test_arkham_fetch_uses_v1_endpoint_header_and_schema(monkeypatch):
                 "historicalUSD": 1_500_000,
                 "blockTimestamp": "2026-07-29T01:02:03Z",
                 "transactionHash": "0xabc0000000000000",
+                "id": "0xabc0000000000000_1",
                 "fromAddress": {"address": "bc1from"},
                 "toAddress": {
                     "address": "bc1to",
@@ -120,6 +121,7 @@ def test_arkham_parses_live_shaped_bitcoin_utxo_transfer():
         "historicalUSD": 1_750_000,
         "blockTimestamp": "2026-08-01T01:02:03Z",
         "transactionHash": "redacted-btc-transaction",
+        "seq": 101,
         "fromAddresses": [
             {
                 "address": "redacted-btc-source",
@@ -148,6 +150,7 @@ def test_arkham_preserves_actual_asset_on_target_chain():
         "historicalUSD": 2_000_000,
         "blockTimestamp": "2026-08-01T01:02:03Z",
         "transactionHash": "redacted-eth-transaction",
+        "id": "redacted-eth-transfer-1",
         "fromAddress": {"address": "redacted-eth-source"},
         "toAddress": {
             "address": "redacted-eth-destination",
@@ -173,6 +176,7 @@ def test_arkham_rejects_unattributed_or_wrong_chain_transfer():
         "historicalUSD": 2_000_000,
         "blockTimestamp": "2026-08-01T01:02:03Z",
         "transactionHash": "redacted-transaction",
+        "id": "redacted-transfer-1",
         "fromAddress": {"address": "redacted-source"},
         "toAddress": {"address": "redacted-destination"},
     }
@@ -189,6 +193,7 @@ def test_arkham_label_alone_is_not_entity_attribution():
         "historicalUSD": 2_000_000,
         "blockTimestamp": "2026-08-01T01:02:03Z",
         "transactionHash": "0xabc0000000000000",
+        "id": "0xabc0000000000000_1",
         "fromAddress": {"address": "redacted-source"},
         "toAddress": {
             "address": "redacted-destination",
@@ -261,6 +266,7 @@ def test_arkham_rejects_unsafe_provider_text(field, value):
         "historicalUSD": 2_000_000,
         "blockTimestamp": "2026-08-01T01:02:03Z",
         "transactionHash": "0xabc0000000000000",
+        "id": "0xabc0000000000000_1",
         "fromAddress": {
             "address": "redacted-source",
             "arkhamEntity": {"name": "Known Entity"},
@@ -286,6 +292,7 @@ def test_arkham_rejects_unsafe_entity_name(entity):
         "historicalUSD": 2_000_000,
         "blockTimestamp": "2026-08-01T01:02:03Z",
         "transactionHash": "redacted-btc-transaction",
+        "seq": 102,
         "fromAddresses": [
             {
                 "address": "redacted-source",
@@ -310,3 +317,70 @@ def test_arkham_throttle_enforces_provider_interval(monkeypatch):
     _throttle_arkham_request()
 
     assert sleeps == [pytest.approx(0.8)]
+
+
+@pytest.mark.parametrize("chain", ["ethereum", "bsc", "arbitrum", "solana", "xrp"])
+def test_arkham_non_bitcoin_missing_symbol_fails_closed(chain):
+    target = {
+        "ethereum": "ETH",
+        "bsc": "BNB",
+        "arbitrum": "ARB",
+        "solana": "SOL",
+        "xrp": "XRP",
+    }[chain]
+    transfer = {
+        "chain": chain,
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "redacted-chain-transaction",
+        "id": "redacted-chain-transfer-1",
+        "fromAddress": {
+            "address": "redacted-source",
+            "arkhamEntity": {"name": "Known Entity"},
+        },
+        "toAddress": {"address": "redacted-destination"},
+    }
+
+    assert ArkhamIntelSource()._parse_transfer(transfer, target) is None
+
+
+def test_arkham_same_transaction_transfers_have_distinct_document_ids():
+    transfer = {
+        "chain": "ethereum",
+        "tokenSymbol": "USDC",
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "redacted-shared-transaction",
+        "id": "redacted-transfer-event-1",
+        "fromAddress": {
+            "address": "redacted-source",
+            "arkhamEntity": {"name": "Known Entity"},
+        },
+        "toAddress": {"address": "redacted-destination"},
+    }
+    second = {**transfer, "id": "redacted-transfer-event-2"}
+
+    first_doc = ArkhamIntelSource()._parse_transfer(transfer, "ETH")
+    second_doc = ArkhamIntelSource()._parse_transfer(second, "ETH")
+
+    assert first_doc is not None
+    assert second_doc is not None
+    assert first_doc.id != second_doc.id
+
+
+def test_arkham_missing_provider_transfer_identity_fails_closed():
+    transfer = {
+        "chain": "bitcoin",
+        "historicalUSD": 2_000_000,
+        "blockTimestamp": "2026-08-01T01:02:03Z",
+        "transactionHash": "redacted-btc-transaction",
+        "fromAddresses": [
+            {
+                "address": "redacted-source",
+                "arkhamEntity": {"name": "Known Entity"},
+            }
+        ],
+        "toAddress": {"address": "redacted-destination"},
+    }
+
+    assert ArkhamIntelSource()._parse_transfer(transfer, "BTC") is None
