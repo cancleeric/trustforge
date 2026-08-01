@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { modeLabel, useHermesI18n } from './hermesI18n'
 import DiandianAvatar from '../components/DiandianAvatar'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
@@ -7,6 +8,7 @@ import type { AnalysisFocusId } from '../lib/analysisTaxonomy'
 import type { HermesWorkspaceModule } from './HermesModuleDeck'
 import { pickCompetitionQuestion, type RandomSource } from '../lib/competitionQuestionPicker'
 import type { CoinSymbol } from '../lib/constants'
+import { GoalsContent } from '../pages/GoalsPage'
 
 /** N70（CEO：「把選單功能放到最左邊」「能按的都移到左邊欄」）：
  *  頂欄過去同時承載顯示與操作，一般使用者掃不出哪些能按。導覽與四個開關
@@ -67,6 +69,7 @@ export default function HermesLeftRail({
   random = Math.random,
 }: HermesLeftRailProps) {
   const { t, locale } = useHermesI18n()
+  const [goalsOpen, setGoalsOpen] = useState(false)
   // N70：從 HermesTopBar 原封搬過來（含 description，nav 的 tooltip/無障礙說明
   // 都靠它），只換了容器。
   const navItems = [
@@ -95,7 +98,16 @@ export default function HermesLeftRail({
     const el = transcriptRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [transcriptDeps])
+  useEffect(() => {
+    if (!goalsOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setGoalsOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [goalsOpen])
   return (
+    <>
     <div
       className="hermes-glass hermes-rail-split"
       data-region="left-rail"
@@ -160,9 +172,9 @@ export default function HermesLeftRail({
         ))}
         <div className="hermes-rail-controls-sep" role="separator" />
         <p className="hermes-rail-group">{t('railGroupSettings')}</p>
-        <a href="/goals" className="hermes-nav-item" style={{ textDecoration: 'none' }}>
+        <button type="button" className="hermes-nav-item" onClick={() => setGoalsOpen(true)}>
           {locale === 'zh-TW' ? '🎯 專案目標' : '🎯 Goals'}
-        </a>
+        </button>
         <a href="/carbon" className="hermes-nav-item" style={{ textDecoration: 'none' }} target="_blank" rel="noopener noreferrer">
           {locale === 'zh-TW' ? '🌱 碳足跡' : '🌱 Carbon'}
         </a>
@@ -448,5 +460,34 @@ export default function HermesLeftRail({
       </div>
       <DiandianAvatar isAnalyzing={diandianAnalyzing} onClick={onDiandianClick} />
     </div>
+    {goalsOpen && createPortal(
+      <div
+        className="hermes-goals-modal-overlay"
+        role="presentation"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setGoalsOpen(false)
+        }}
+      >
+        <section
+          className="hermes-goals-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={locale === 'zh-TW' ? '專案目標' : 'Project goals'}
+        >
+          <button
+            type="button"
+            className="hermes-goals-modal-close"
+            onClick={() => setGoalsOpen(false)}
+            aria-label={locale === 'zh-TW' ? '關閉專案目標' : 'Close project goals'}
+            autoFocus
+          >
+            ×
+          </button>
+          <GoalsContent embedded />
+        </section>
+      </div>,
+      document.body,
+    )}
+    </>
   )
 }
