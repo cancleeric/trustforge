@@ -175,16 +175,14 @@ class BedrockRpsLimiter:
         self._unsupported_lambda_runtime = (
             bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME")) and distributed_lock is None
         )
-        self._use_distributed_lock = (
-            bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME")) and distributed_lock is not None
-        )
+        self._use_distributed_lock = distributed_lock is not None
 
     @contextmanager
     def slot(self):
         """包住一次真正的 Bedrock invoke，離開前不釋放節流。
 
-        Lambda 走 DynamoDB 分散式 owner lock（cooldown 持續到 invoke 起始後
-        一秒）；其他部署沿用既有 host-local flock 行為，語意不變。
+        Production 走 DynamoDB 分散式 owner lock（cooldown 持續到 invoke
+        起始後一秒）；本機未選 distributed backend 時才使用 host-local flock。
         """
         if self._use_distributed_lock:
             with self._distributed_lock.slot():
@@ -231,13 +229,27 @@ class BedrockRpsLimiter:
 
 
 def _default_distributed_lock() -> Any | None:
-    """#1308: on Lambda, back the 1 RPS guard with the shared DynamoDB lock.
+    """Use one account-wide DynamoDB gate in every production runtime.
 
-    Non-Lambda deployments return ``None`` so the existing host-local flock
-    path stays byte-for-byte the same. Construction is cheap and lazy — the
-    boto3 resource is only built on first acquire.
+    EC2 production already declares ``TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb``
+    and uses the same table/IAM actions as the competition Lambda.  Local
+    development keeps the host-local flock unless it explicitly selects the
+    distributed backend.  Lambda can never fall back to flock.
     """
-    if not os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+    backend = os.getenv("TRUSTFORGE_BEDROCK_RPS_BACKEND", "").strip().lower()
+    if not backend:
+        backend = (
+            "dynamodb"
+            if os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+            or os.getenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "").strip().lower()
+            == "dynamodb"
+            else "flock"
+        )
+    if backend not in {"dynamodb", "flock"}:
+        raise RuntimeError("invalid TRUSTFORGE_BEDROCK_RPS_BACKEND")
+    if backend == "flock":
+        if os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+            raise RuntimeError("Lambda Bedrock calls require the DynamoDB limiter")
         return None
     from .bedrock_rps_lock import DynamoDBBedrockRpsLock
 
@@ -252,6 +264,18 @@ _DEFAULT_RPS_LIMITER = BedrockRpsLimiter(distributed_lock=_default_distributed_l
 def bedrock_invoke_slot():
     """Shared gate for the few Bedrock converse adapters outside BedrockClient."""
     return _DEFAULT_RPS_LIMITER.slot()
+
+
+def create_bedrock_runtime_client(*, region_name: str, config: Any):
+    """The sole audited factory for a real ``bedrock-runtime`` client.
+
+    Keeping construction here lets the architecture test reject new direct
+    boto3 clients elsewhere.  Every operation that can reach a model is still
+    wrapped by :func:`bedrock_invoke_slot` or ``BedrockClient._bedrock_slot``.
+    """
+    import boto3
+
+    return boto3.client("bedrock-runtime", region_name=region_name, config=config)
 
 
 @dataclass
@@ -331,11 +355,9 @@ class BedrockClient:
         取代機制的根因；`total_max_attempts=1` 理由同 `_stance_runtime()`。
         """
         if self._client is None:
-            import boto3  # 延遲匯入：離線模式不需安裝/設定 AWS
             from botocore.config import Config
 
-            self._client = boto3.client(
-                "bedrock-runtime",
+            self._client = create_bedrock_runtime_client(
                 region_name=self.config.region,
                 config=Config(
                     read_timeout=_NARRATIVE_READ_TIMEOUT_SEC,
@@ -360,11 +382,9 @@ class BedrockClient:
         15 分鐘官方執行窗口不被越界）。
         """
         if self._stance_client is None:
-            import boto3  # 延遲匯入：離線模式不需安裝/設定 AWS
             from botocore.config import Config
 
-            self._stance_client = boto3.client(
-                "bedrock-runtime",
+            self._stance_client = create_bedrock_runtime_client(
                 region_name=self.config.region,
                 config=Config(
                     read_timeout=_STANCE_READ_TIMEOUT_SEC,

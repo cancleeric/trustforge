@@ -127,10 +127,13 @@ class BedrockConverseTokenizer:
 
     def count(self, payload: bytes) -> int:
         messages = _converse_messages(payload)
-        response = self.runtime.count_tokens(
-            modelId=self.model_id,
-            input={"converse": {"messages": messages}},
-        )
+        from .bedrock import bedrock_invoke_slot
+
+        with bedrock_invoke_slot():
+            response = self.runtime.count_tokens(
+                modelId=self.model_id,
+                input={"converse": {"messages": messages}},
+            )
         if type(response) is not dict:
             raise ValueError("invalid CountTokens response")
         count = response.get("inputTokens")
@@ -526,11 +529,10 @@ def initialize_analysis_plan_runtime_from_env(
         **metadata,
     )
     if bedrock_runtime is None:
-        import boto3
         from botocore.config import Config
+        from .bedrock import create_bedrock_runtime_client
 
-        bedrock_runtime = boto3.client(
-            "bedrock-runtime",
+        bedrock_runtime = create_bedrock_runtime_client(
             region_name=values.get("AWS_REGION", "us-east-1"),
             config=Config(
                 connect_timeout=2,

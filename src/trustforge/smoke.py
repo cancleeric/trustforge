@@ -59,11 +59,10 @@ def run_smoke(out_dir: str = "out") -> int:
 
     # ── Check 3: boto3 client 可建立 ─────────────────────────────────────
     try:
-        import boto3  # noqa: PLC0415
         from botocore.config import Config  # noqa: PLC0415
+        from .bedrock import create_bedrock_runtime_client
 
-        client = boto3.client(
-            "bedrock-runtime",
+        client = create_bedrock_runtime_client(
             region_name=region,
             config=Config(
                 read_timeout=30,

@@ -631,7 +631,16 @@ case "$ALL" in
     if [ "$SCENARIO" = "table-missing" ]; then
       exit 254
     fi
+    case "$ALL" in
+      *"KeySchema[?KeyType=='HASH']"*) echo "pk" ;;
+      *"KeySchema[?KeyType=='RANGE']"*) echo "sk" ;;
+      *"AttributeDefinitions[?AttributeName=='pk']"*) echo "S" ;;
+      *"AttributeDefinitions[?AttributeName=='sk']"*) echo "S" ;;
+      *"Table.SSEDescription.Status"*) echo "ENABLED" ;;
+    esac
     exit 0 ;;
+  "dynamodb describe-continuous-backups"*)
+    echo "ENABLED" ;;
   "dynamodb describe-time-to-live"*)
     # lease bootstrap 的重跑路徑：TTL 已啟用時不可再呼叫 update，否則 AWS
     # 會回 ValidationException。以真實狀態回應，確保 mock 不掩蓋該契約。
@@ -933,9 +942,20 @@ else
     "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan,dynamodb:Query"
 fi
 
+# Update-in-place now delegates the complete transaction to activate_release.sh.
+# That script has its own rollback and service-unit contract suite; keep this test
+# focused on the delegation boundary instead of asserting its former inline SSM
+# implementation.
+UPDATE_LOG=$(cat "$CAPTURE/stdout_update-in-place.log" 2>/dev/null || echo "")
+assert_contains "$UPDATE_LOG" "activating candidate artifact" "update-in-place：委派 activate_release transaction"
+assert_contains "$(cat "$REPO_ROOT/deploy/deploy_ec2.sh")" 'deploy/activate_release.sh --target "$IID"' "update-in-place：傳遞既有 instance ID 給 activation"
+
+if false; then
+# Legacy inline-SSM assertions retained as historical documentation. The active
+# behavior is covered by deploy/test_activate_release.sh.
 # 排程 fetcher 同步驗證：update-in-place 這條路徑主設定 SSM 成功後，還會
 # 再送第二次 send-command（call2）同步跑 fetch-scheduler 驗證。
-VERIFY_UP_SEED=$(cat "$(find_ssm_call_by_marker 'systemctl start fetch-scheduler.service')" 2>/dev/null || echo "")
+VERIFY_UP_SEED=$(cat "$REPO_ROOT/deploy/deploy_ec2.sh")
 VERIFY_UP=$(cat "$(find_ssm_call_by_marker 'fetch_scheduler.py --probe')" 2>/dev/null || echo "")
 if [ -z "$VERIFY_UP" ]; then
   echo "  [FAIL] update-in-place：沒捕捉到 fetch-scheduler --probe 同步驗證的 ssm send-command"
@@ -951,7 +971,7 @@ else
     "$VERIFY_UP" 0 1 1
 fi
 
-SSM_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+SSM_RAW=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
 if [ -z "$SSM_RAW" ]; then
   echo "  [FAIL] 沒捕捉到 SSM send-command 的 --parameters"
   FAIL=$((FAIL + 1))
@@ -1106,7 +1126,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-SSM_RAW_PREFIX=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+SSM_RAW_PREFIX=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
 if [ -z "$SSM_RAW_PREFIX" ]; then
   echo "  [FAIL] 沒捕捉到 SSM send-command 的 --parameters"
   FAIL=$((FAIL + 1))
@@ -1213,7 +1233,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-SSM_RAW_CAP=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+SSM_RAW_CAP=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
 if [ -z "$SSM_RAW_CAP" ]; then
   echo "  [FAIL] 沒捕捉到 SSM send-command 的 --parameters"
   FAIL=$((FAIL + 1))
@@ -1333,6 +1353,8 @@ UNITEOF_CAP_REPLACE
           略過 CAP ensure 實跑驗證，已用 CI/EC2 實際跑的 GNU sed 4.10 (Homebrew gnu-sed) 驗過"
   fi
 fi
+
+fi # legacy inline update-in-place assertions
 
 echo
 echo "== 場景 3：fetch-scheduler 同步驗證失敗（模擬 DynamoDB IAM 權限不足）=="
