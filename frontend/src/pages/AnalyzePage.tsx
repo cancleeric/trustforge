@@ -5,15 +5,34 @@ import type { AnalyzeParams } from '../lib/endpoints'
 import type { AnalysisJobStatus } from '../lib/endpoints'
 import { beginFormalRunIntent, completeFormalRunIntent, formalRunIntent } from '../lib/formalRun'
 import type { AnalyzeData } from '../lib/types'
+import { normalizeDecisionState } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import { BEGINNER_INTENTS, beginnerQuestion, beginnerTypeForMode, type BeginnerIntent } from '../lib/beginnerExperience'
 import QueryConsole, { type QueryValues } from '../components/QueryConsole'
 import AnalysisReportView from '../components/AnalysisReportView'
+import { FormalRunConfirmDialog, PartialResultBanner, ReconnectingBanner } from '../components/FormalRunConfirm'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
 import { useHermesI18n } from '../hermes/hermesI18n'
 import MultiAngleOverview from '../hermes/MultiAngleOverview'
 import { ANALYSIS_FORMAL_WIP } from '../lib/analysisWip'
+
+// #940：每一個會觸發「非 sample 正式 run」的入口（composer 送出、初學者首次
+// 分析、embedded 重送）都先匯成同一個 pending 意圖，由唯一的
+// FormalRunConfirmDialog 把關；確認後再依 kind 走各自的 commit 路徑，避免
+// 任何一個入口繞過對話框。
+type PendingFormalRun =
+  | { kind: 'query'; values: QueryValues }
+  | { kind: 'focus'; values: QueryValues }
+  // #940 修1：host 在 bump resubmitSignal 同一拍就把未確認請求寫進 URL。
+  // 取消時必須把 URL 還原成「這次重送前」的狀態，否則 reload/remount 會讀
+  // 到殘留的未確認請求而不經確認自動執行。prevSearch 快照那一拍之前的 URL。
+  | { kind: 'resubmit'; values: QueryValues; prevSearch: string | null }
+  // #1186（PR #940 補強）：deep link／bookmark／reload 直接帶著 ?q=... 進站、
+  // 且沒有既有 job 可以 reconnect 時，URL 本身早已含未確認請求，不是使用者
+  // 這次操作寫進去的——commit 時不需要（也不可）重寫 q，取消時反而要清掉它，
+  // 否則同一個網址會無限迴圈跳回同一個確認框。
+  | { kind: 'deeplink'; values: QueryValues }
 
 function defaultQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
@@ -104,6 +123,33 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
   const [requestNonce, setRequestNonce] = useState(0)
   const [freshIntentNonce, setFreshIntentNonce] = useState<number | null>(null)
   const [transportRetryNonce, setTransportRetryNonce] = useState(0)
+  // #1186：deep link／reload（requestNonce 仍是初始值 0）帶著未經確認的 ?q=
+  // 且沒有既有 job 可接回時，用這個 nonce 純粹當「使用者剛確認過，effect 該
+  // 重跑一次」的觸發器（refs 改變不會觸發 effect 重跑）。實際「這個 coin/
+  // mode/question 是否已經確認過」的判斷交給下面的
+  // confirmedDeepLinkKeysRef，這樣同一個 mount 內用 SPA 導覽換到另一個還沒
+  // 確認過的 q（例如點了別的連結）時仍會重新跳出確認框，而不是被這個 nonce
+  // 一次性放行到底；瀏覽器 back/forward 回到已確認過的 q 則不會重複跳框。
+  // 刻意不沿用 requestNonce／freshIntentNonce 本身記這件事——這兩個從一開始
+  // 就是「resume=true, fresh=false」語意的來源（見下面 beginFormalRunIntent
+  // 呼叫），bump 它們會把這個請求誤標成一個全新的 fresh intent，而不是
+  // 「resume 這個可能之前就已經發過的未解決意圖」。
+  const [deepLinkConfirmNonce, setDeepLinkConfirmNonce] = useState(0)
+  const confirmedDeepLinkKeysRef = useRef(new Set<string>())
+  // #940：正式送出前的確認對話框 pending 意圖（null=未開）；確認後才真正 commit。
+  const [pendingSubmit, setPendingSubmit] = useState<PendingFormalRun | null>(null)
+  // #940：embedded host（HermesDashboard.onSubmit）在 bump resubmitSignal 的
+  // 同一拍就把新 params 寫進 URL，所以 URL 驅動的輪詢 effect 會在 confirm
+  // 之前就自己送出。這個 ref 在 signal effect（宣告在前、同一拍先執行）裡同步
+  // arm，讓隨後執行的輪詢 effect 能讀到並跳過，直到使用者確認／取消才清掉。
+  const resubmitPendingRef = useRef(false)
+  // #940 修1：追蹤「上一個 render」的 URL search 字串。host 把新 params 寫進
+  // URL 與 bump resubmitSignal 是同一拍批次更新，所以 resubmitSignal effect
+  // （宣告在前、同拍先執行）讀到的這個 ref 仍是被覆寫前的「重送前」URL。
+  // 更新 effect 宣告在 resubmitSignal effect 之後，確保同拍內 ref 最後才推進。
+  const prevSearchRef = useRef<string | null>(null)
+  // #940：reload/route change 接回既有 server job 時的顯式 reconnecting UI 態。
+  const [reconnecting, setReconnecting] = useState(false)
   // N13 fix: the embedded host (HermesDashboard's own left-rail "立即重新
   // 分析" button) doesn't go through `handleSubmit` below — it drives the
   // shared URL search params directly (see HermesModuleDeck/HermesDashboard).
@@ -121,11 +167,28 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
   useEffect(() => {
     if (resubmitSignal !== undefined && resubmitSignal !== prevResubmitSignal.current) {
       prevResubmitSignal.current = resubmitSignal
-      const nextNonce = requestNonce + 1
-      setFreshIntentNonce(nextNonce)
-      setRequestNonce(nextNonce)
+      // #940：embedded 重送是不可逆的正式 run——走與 composer 送出同一個 confirm
+      // 閘門。host 已在此拍把新 params 寫進 URL，所以同時 arm ref gate 擋住輪詢
+      // effect 的 URL 驅動送出，確認後才 bump nonce 真正觸發。sample demo 仍直送。
+      if (params.sample) {
+        const nextNonce = requestNonce + 1
+        setFreshIntentNonce(nextNonce)
+        setRequestNonce(nextNonce)
+        return
+      }
+      resubmitPendingRef.current = true
+      setPendingSubmit({ kind: 'resubmit', values: { coin: params.coin, type: params.type, q: params.q, mode }, prevSearch: prevSearchRef.current })
     }
+    // 這個 effect 只應在 resubmitSignal 變化時動作；params/mode 僅供組 dialog 顯示
+    // 值，刻意不放入 deps（放入會在每次 URL 變動時重觸發），與下方輪詢 effect 同風格。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestNonce, resubmitSignal])
+  // #940 修1：在每個 render 後把當前 URL 推進 prevSearchRef。因為它宣告在
+  // resubmitSignal effect 之後，同拍內會在後面才執行，所以重送那一拍裡
+  // resubmitSignal effect 讀到的仍是上一拍的舊 URL（見上方註解）。
+  useEffect(() => {
+    prevSearchRef.current = searchParams.toString()
+  })
   const processedRequestKeys = useRef(new Set<string>())
   const [focusCoin, setFocusCoin] = useState(params.coin)
   const [focusIntent, setFocusIntent] = useState<BeginnerIntent>('trust')
@@ -197,6 +260,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     setLoading(true)
     setError(null)
     setManualJob(null)
+    setReconnecting(false)
     // 後端 `_install_request_limit` 併發上限觸發時回 503 `server_busy`
     // （固定 `Retry-After: 2`）——這是暫時性壅塞，不是真的失敗，所以先做
     // 有限次數的指數退避重試，而不是立刻把使用者丟進錯誤態。
@@ -267,8 +331,47 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     const storageKey = manualJobStorageKey(params.coin, mode, params.q)
     const reconnectJobId = urlJobId || (requestNonce === 0 && !params.sample ? readStoredJobId(storageKey) : null)
     if (reconnectJobId) {
+      setReconnecting(true)
       poll(reconnectJobId, true)
       return () => { controller.abort(); timers.forEach(window.clearTimeout) }
+    }
+    // #940：embedded 重送正卡在 confirm 對話框（見 resubmitSignal effect）。確認
+    // 前不能消費這個 URL——直接 bail 且不認領 requestKey，這樣確認後 nonce 一
+    // bump、輪詢 effect 重新跑時就能正常送出；取消則維持不送。
+    if (resubmitPendingRef.current) {
+      setLoading(false)
+      return () => { controller.abort(); timers.forEach(window.clearTimeout) }
+    }
+    // #1186（HIGH，PR #940 補強）：requestNonce 只有 commitSubmit／resubmit 確認
+    // 之後才會被 bump 到 >= 1——換句話說，會跑到這裡且 requestNonce 仍是初始值
+    // 0，代表這個 explicit 請求不是使用者在本次 mount 期間「送出並確認」的，
+    // 而是 URL 上本來就帶著 ?q=（deep link、書籤、或直接重新整理），且上面
+    // reconnectJobId 也已經確認找不到既有 job 可以接回。這種未經確認的正式
+    // run 一樣要走 FormalRunConfirmDialog，不能直接 submit，否則整個 #940 的
+    // 把關形同虛設（deep link / reload 就能繞過）。用 coin/mode/question 記
+    // 這個 mount 期間「哪些請求已經確認過」，確認後 bump deepLinkConfirmNonce
+    // 讓這個 effect 重跑一次——此時 requestNonce/freshIntentNonce 完全沒動
+    // 過，下面 submit 分支仍會用原本「resume=true, fresh=false」的語意送
+    // 出，不受這次補強影響。
+    //
+    // 例外：resubmitSignal 這個 prop 完全由 host（HermesDashboard）自己的
+    // in-memory state 控制，不受 URL 影響、也不可能被書籤/深連結偽造。它
+    // >0 就代表 host 這次 mount 之前已經真的發生過一次使用者點擊（見上面
+    // resubmitSignal effect 的註解）——最常見的情況是「左軌第一次點『立即
+    // 重新分析』同一拍打開這個 module」：host 把 params 寫進 URL 的同時把
+    // resubmitSignal 從初始值 bump 上去，AnalyzePage 是這一拍才第一次掛
+    // 載，所以上面那個 effect（宣告在前）量到的「初始值＝目前值」不算變化，
+    // 不會走它自己的 confirm 分支。這不是深連結／書籤／重新整理能重現的
+    // 路徑，所以不算 #1186 要擋的那個洞，維持原本（#940 之前就有的）直送
+    // 行為，不重複跳一次確認框。
+    const alreadyConfirmedByHostSignal = (resubmitSignal ?? 0) > 0
+    if (requestNonce === 0 && !params.sample && !alreadyConfirmedByHostSignal) {
+      const deepLinkKey = `${params.coin}\n${mode}\n${params.q}`
+      if (!confirmedDeepLinkKeysRef.current.has(deepLinkKey)) {
+        setLoading(false)
+        setPendingSubmit({ kind: 'deeplink', values: { coin: params.coin, type: params.type, q: params.q, mode } })
+        return () => { controller.abort(); timers.forEach(window.clearTimeout) }
+      }
     }
     const requestKey = `${params.coin}\n${mode}\n${params.q}\n${params.sample ?? ''}\n${requestNonce}\n${transportRetryNonce}`
     if (requestNonce === 0 && processedRequestKeys.current.has(requestKey)) {
@@ -353,7 +456,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     // re-running it on a locale switch would resubmit an in-flight request. `t()`
     // above is only used to build a one-off error message, never part of the request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [freshIntentNonce, hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, transportRetryNonce, urlJobId])
+  }, [deepLinkConfirmNonce, freshIntentNonce, hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, resubmitSignal, transportRetryNonce, urlJobId])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return
@@ -375,8 +478,23 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
 
   const navigate = useNavigate()
 
-  const handleSubmit = (values: QueryValues) => {
+  const commitSubmit = (values: QueryValues, focus = false) => {
     const next = new URLSearchParams()
+    const workspace = searchParams.get('workspace')
+    if (workspace) next.set('workspace', workspace)
+    next.set('coin', values.coin)
+    next.set('type', values.type)
+    next.set('q', values.q)
+    next.set('mode', values.mode)
+    if (focus) next.set('focus', '1')
+    if (params.sample) next.set('sample', params.sample)
+    setSearchParams(next)
+    const nextNonce = requestNonce + 1
+    setFreshIntentNonce(focus ? null : (hasExplicitRequest ? nextNonce : null))
+    setRequestNonce(nextNonce)
+  }
+
+  const handleSubmit = (values: QueryValues) => {
     const workspace = searchParams.get('workspace')
     // PLAN §7：比較分析是雙幣題型，不能當單幣分析送出去。嵌在 HERMES 工作區
     // 時切 workspace，獨立頁時導到 /compare。
@@ -390,29 +508,99 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
       }
       return
     }
-    if (workspace) next.set('workspace', workspace)
-    next.set('coin', values.coin)
-    next.set('type', values.type)
-    next.set('q', values.q)
-    next.set('mode', values.mode)
-    if (params.sample) next.set('sample', params.sample)
-    setSearchParams(next)
-    const nextNonce = requestNonce + 1
-    setFreshIntentNonce(hasExplicitRequest ? nextNonce : null)
-    setRequestNonce(nextNonce)
+    // #940：正式執行（非 sample demo）不可撤回——送出前先以確認對話框攔下，
+    // 確認後才 commit。sample demo 立即送（無需確認）。
+    if (!params.sample) {
+      setPendingSubmit({ kind: 'query', values })
+      return
+    }
+    commitSubmit(values)
+  }
+
+  const handleConfirmSubmit = () => {
+    const pending = pendingSubmit
+    setPendingSubmit(null)
+    if (!pending) return
+    if (pending.kind === 'resubmit') {
+      // host 早已把 params 寫進 URL；確認後只需 bump nonce 觸發新一輪正式 run。
+      resubmitPendingRef.current = false
+      const nextNonce = requestNonce + 1
+      setFreshIntentNonce(nextNonce)
+      setRequestNonce(nextNonce)
+      return
+    }
+    if (pending.kind === 'deeplink') {
+      // #1186：URL 已經是這次要送出的那個請求（q/coin/mode 都對），不必也不能
+      // 重寫一次 q，也不能像 resubmit 一樣 bump requestNonce——那會把這個請求
+      // 誤標成一個全新的 fresh intent。記住這個 coin/mode/question 已經確認
+      // 過，再 bump 專用的 deepLinkConfirmNonce 讓輪詢 effect 重跑一次——此時
+      // requestNonce/freshIntentNonce 完全沒動過，會用原本 requestNonce === 0
+      // （resume=true, fresh=false）的語意送出，和修這個 bug 之前「mount 直
+      // 接自動送出」的 idempotency 行為完全一致，只是現在多了一次使用者確認。
+      confirmedDeepLinkKeysRef.current.add(`${pending.values.coin}\n${pending.values.mode}\n${pending.values.q}`)
+      setDeepLinkConfirmNonce((value) => value + 1)
+      return
+    }
+    commitSubmit(pending.values, pending.kind === 'focus')
+  }
+
+  const handleCancelSubmit = () => {
+    const pending = pendingSubmit
+    setPendingSubmit(null)
+    resubmitPendingRef.current = false
+    // #1186：deeplink 的 pending 從一開始就是「URL 本來就帶著」的未確認請求
+    // ——取消時必須把這個 q 從 URL 上清掉（或釘回既有 job 走 reconnect），
+    // 否則同一個網址一 reload 就會重新讀到同一個 q 又跳出同一個確認框，
+    // 使用者永遠取消不掉、也永遠不會真的送出，形成無限迴圈。
+    if (pending?.kind === 'deeplink') {
+      const next = new URLSearchParams(searchParams)
+      const storedJob = readStoredJobId(manualJobStorageKey(pending.values.coin, pending.values.mode, pending.values.q))
+      if (storedJob) {
+        next.set('job', storedJob)
+      } else {
+        next.delete('q')
+      }
+      setSearchParams(next, { replace: true })
+      return
+    }
+    // #940 修1：query/focus 的 pending 在 commit 前還沒寫進 URL，取消時不必還原。
+    // 唯獨 resubmit：host 早已把未確認請求寫進 URL，取消時必須把 URL 還原成
+    // 「這次重送前」的狀態，否則 reload/remount 會讀到殘留的未確認 q 而自動執行
+    // 不可逆的 formal run（見審計修2：mount 帶 ?q 會 auto-run）。
+    if (pending?.kind !== 'resubmit') return
+    // prevSearch 為這次重送前的 URL；無法取得時退回當前 searchParams 並只移除
+    // formal trigger（q），保證還原後的 URL 不含未確認請求。
+    const prev = pending.prevSearch ? new URLSearchParams(pending.prevSearch) : new URLSearchParams(searchParams)
+    const prevQ = prev.get('q')
+    const prevCoin = prev.get('coin') || params.coin
+    const prevType = (prev.get('type') as AnalyzeParams['type'] | null) || 'multi_source'
+    const prevMode = prev.get('mode') || (prevType === 'hypothesis' ? 'fundamentals' : 'risk')
+    // 還原後不能又觸發一次新 formal run：若前一個請求有既有 job（已在
+    // sessionStorage），把它釘回 URL 走 reconnect 路徑（只 poll、不註冊）；
+    // 若沒有既有 job 可接回，就移除 q 讓頁面退回未觸發的空狀態。
+    const storedJob = prevQ ? readStoredJobId(manualJobStorageKey(prevCoin, prevMode, prevQ)) : null
+    if (storedJob) {
+      prev.set('job', storedJob)
+    } else if (prevQ) {
+      prev.delete('q')
+    }
+    setSearchParams(prev, { replace: true })
   }
 
   const handleFocusStart = () => {
     const intent = BEGINNER_INTENTS.find((item) => item.id === focusIntent) ?? BEGINNER_INTENTS[0]
-    const next = new URLSearchParams()
-    next.set('coin', focusCoin)
-    next.set('type', beginnerTypeForMode(intent.mode))
-    next.set('q', beginnerQuestion(focusCoin, intent.id))
-    next.set('mode', intent.mode)
-    next.set('focus', '1')
-    setSearchParams(next)
-    setFreshIntentNonce(null)
-    setRequestNonce((value) => value + 1)
+    // #940：初學者「首次分析」是不可逆的正式 run（非 sample）——走與 composer 相
+    // 同的 confirm 閘門，確認後才 commit。commitSubmit 的 focus 旗標會把 focus=1
+    // 與 freshIntentNonce=null 一次帶上，等同原本直連的行為。
+    setPendingSubmit({
+      kind: 'focus',
+      values: {
+        coin: focusCoin,
+        type: beginnerTypeForMode(intent.mode),
+        q: beginnerQuestion(focusCoin, intent.id),
+        mode: intent.mode,
+      },
+    })
   }
 
   const showFullAnalysis = () => {
@@ -420,6 +608,10 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     next.delete('focus')
     setSearchParams(next)
   }
+
+  // #940：partial 態由 server 既有 decision_state 推導（abstain/low_confidence =
+  // 降級／部分完成）。server 無獨立 partial 欄位，這裡誠實標示為 best-effort。
+  const isPartialResult = !!data && normalizeDecisionState(data.report.decision_state) !== 'normal'
 
   return (
     <main
@@ -497,15 +689,18 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
           </aside>}
 
           <section className="flex flex-col gap-4">
-            {loading && !data && <LoadingState label={manualJob
-              ? `${t('manualPriorityPrefix')}${manualJob.current_stage}${manualJob.queue_position ? `${t('queuePositionPrefix')}${manualJob.queue_position}${t('queuePositionSuffix')}` : ''}`
-              : t('creatingManualJob', { coin: params.coin })} />}
+            {loading && !data && (reconnecting
+              ? <ReconnectingBanner />
+              : <LoadingState label={manualJob
+                ? `${t('manualPriorityPrefix')}${manualJob.current_stage}${manualJob.queue_position ? `${t('queuePositionPrefix')}${manualJob.queue_position}${t('queuePositionSuffix')}` : ''}`
+                : t('creatingManualJob', { coin: params.coin })} />)}
             {loading && data && (
               <div className="hermes-analysis-pending" role="status" aria-live="polite">
                 <i /> {t('analyzingNewSnapshot')}
               </div>
             )}
             {!loading && error && !data && <ErrorState code={error.code} message={error.message} onRetry={() => setTransportRetryNonce((value) => value + 1)} />}
+            {data && isPartialResult && <PartialResultBanner />}
             {data && focusMode && (
               <BeginnerResult data={data} onShowFullAnalysis={showFullAnalysis} />
             )}
@@ -533,6 +728,15 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
           </section>
         </div>}
       </div>
+      {pendingSubmit && (
+        <FormalRunConfirmDialog
+          coin={pendingSubmit.values.coin}
+          mode={pendingSubmit.values.mode}
+          question={pendingSubmit.values.q}
+          onConfirm={handleConfirmSubmit}
+          onCancel={handleCancelSubmit}
+        />
+      )}
     </main>
   )
 }
