@@ -399,6 +399,12 @@
   z-index: 20 !important;
 }
 
+/* 左欄稍微縮小，右欄稍微加大，總寬不超出螢幕 */
+:root {
+  --hermes-rail: clamp(190px, 16vw, 240px) !important;
+  --hermes-right-rail: clamp(220px, 22vw, 320px) !important;
+}
+
 @media (max-width: 900px) {
   .hermes-left-rail { width: auto !important; }
   .hermes-right-rail { width: auto !important; }
