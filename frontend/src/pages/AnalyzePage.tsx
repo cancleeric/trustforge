@@ -353,19 +353,10 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     // 讓這個 effect 重跑一次——此時 requestNonce/freshIntentNonce 完全沒動
     // 過，下面 submit 分支仍會用原本「resume=true, fresh=false」的語意送
     // 出，不受這次補強影響。
-    //
-    // 例外：resubmitSignal 這個 prop 完全由 host（HermesDashboard）自己的
-    // in-memory state 控制，不受 URL 影響、也不可能被書籤/深連結偽造。它
-    // >0 就代表 host 這次 mount 之前已經真的發生過一次使用者點擊（見上面
-    // resubmitSignal effect 的註解）——最常見的情況是「左軌第一次點『立即
-    // 重新分析』同一拍打開這個 module」：host 把 params 寫進 URL 的同時把
-    // resubmitSignal 從初始值 bump 上去，AnalyzePage 是這一拍才第一次掛
-    // 載，所以上面那個 effect（宣告在前）量到的「初始值＝目前值」不算變化，
-    // 不會走它自己的 confirm 分支。這不是深連結／書籤／重新整理能重現的
-    // 路徑，所以不算 #1186 要擋的那個洞，維持原本（#940 之前就有的）直送
-    // 行為，不重複跳一次確認框。
-    const alreadyConfirmedByHostSignal = (resubmitSignal ?? 0) > 0
-    if (requestNonce === 0 && !params.sample && !alreadyConfirmedByHostSignal) {
+    // A host signal is evidence of an intent, never evidence of confirmation.
+    // AnalyzePage may mount in the same render that first bumps the signal, so
+    // only this component's dialog confirmation may authorize the formal run.
+    if (requestNonce === 0 && !params.sample) {
       const deepLinkKey = `${params.coin}\n${mode}\n${params.q}`
       if (!confirmedDeepLinkKeysRef.current.has(deepLinkKey)) {
         setLoading(false)
