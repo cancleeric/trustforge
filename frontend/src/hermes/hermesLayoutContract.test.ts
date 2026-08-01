@@ -23,13 +23,18 @@ describe('Hermes responsive bridge layout contract', () => {
     const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
     const rightRail = readFileSync(path.join(__dirname, 'HermesRightRail.tsx'), 'utf8')
 
-    expect(rightRail).toContain('className="hermes-right-rail-fixed"')
-    expect(rightRail).toContain('className="hermes-right-rail-scroll"')
-    expect(rightRail).toContain("height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))'")
+    // 這條契約有兩個要求：固定頂部 + 獨立捲動的下半，以及底部節點列不被右軌蓋住。
+    // 原本斷言的是 #1299 的達成方式（右軌停在 `--hermes-bottom` 上方、管線 `right: 0`
+    // 延伸到畫面右緣）。main 的 N50 改用相反的機制達成同一件事：右軌貼到畫面底緣、
+    // 改由管線在右軌左緣收掉。兩種機制互斥（同時套用會湊出 N50 實測的 440px 重疊），
+    // 而 N50 是目前生產在跑的版本，所以 back-merge 時契約保留、斷言改寫成 N50 的機制。
+    expect(rightRail).toContain("height: 'calc(100% - var(--hermes-top))'")
     expect(rightRail).toContain("overflow: 'hidden'")
-    expect(css).toMatch(/\.hermes-right-rail-fixed\s*\{[^}]*flex:\s*0 0 auto;/s)
-    expect(css).toMatch(/\.hermes-right-rail-scroll\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/s)
-    expect(css).toMatch(/\.hermes-energy-deck\s*\{[^}]*right:\s*0;/s)
+    // 固定頂部不縮、下半獨立捲動——N50 改用 inline style 表達同一個結構。
+    expect(rightRail).toMatch(/flexShrink:\s*0/)
+    expect(rightRail).toMatch(/flex:\s*1,\s*overflowY:\s*'auto'/)
+    // 節點列讓位給右軌，而不是右軌讓位給節點列。
+    expect(css).toMatch(/\.hermes-energy-deck\s*\{[^}]*right:\s*var\(--hermes-right-rail\);/s)
   })
 
   it('uses the viewport without a fixed canvas or page scrolling', () => {
