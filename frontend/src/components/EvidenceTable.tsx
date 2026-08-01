@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { Evidence, EvidenceGroup } from '../lib/types'
 import { getRenderGroups, trendLabel } from '../lib/evidenceGrouping'
 import { sourceDisplayName } from '../lib/sourceBrand'
@@ -66,6 +66,7 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
           </div>
         </details>
       </td>
+      <td className="whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">{ev.fetched_at}</td>
       <td className="px-3 py-2 align-top">
         <div className="flex items-center gap-2">
           <div className="h-1.5 w-16 overflow-hidden rounded-full bg-tf-border">
@@ -130,6 +131,7 @@ function EvidenceGroupRow({ group, evidence }: { group: EvidenceGroup; evidence:
         <td className="tf-num whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">
           <span className="inline-block w-4 text-center">{expanded ? '\u25BC' : '\u25B6'}</span>
         </td>
+        <td className="whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">{rep.fetched_at}</td>
         <td className="px-3 py-2 align-top">
           <div className="flex flex-wrap items-center gap-1.5 text-sm">
             <span className="font-semibold text-tf-text">{sourceDisplayName(rep.source)}</span>
@@ -175,8 +177,22 @@ export default function EvidenceTable({
   evidence: Evidence[]
   evidenceGroups?: EvidenceGroup[] | null
 }) {
+  const [sort, setSort] = useState<'default' | 'source' | 'trust' | 'time'>('default')
+  const [descending, setDescending] = useState(true)
   const groups = getRenderGroups(evidenceGroups)
-  const useGrouped = groups.length > 0
+  const useGrouped = groups.length > 0 && sort === 'default'
+  const sortedEvidence = useMemo(() => evidence.map((ev, idx) => ({ ev, idx })).sort((a, b) => {
+    if (sort === 'default') return a.idx - b.idx
+    const direction = descending ? -1 : 1
+    if (sort === 'source') return direction * a.ev.source.localeCompare(b.ev.source)
+    if (sort === 'trust') return direction * (a.ev.trust - b.ev.trust)
+    return direction * (Date.parse(a.ev.fetched_at) - Date.parse(b.ev.fetched_at))
+  }), [descending, evidence, sort])
+  const chooseSort = (next: typeof sort) => {
+    if (sort === next) setDescending((value) => !value)
+    else { setSort(next); setDescending(next !== 'source') }
+  }
+  const sortLabel = (key: typeof sort) => sort === key ? (descending ? ' ▼' : ' ▲') : ''
 
   return (
     <div className="overflow-x-auto hermes-clip rounded-lg border border-tf-border bg-tf-card">
@@ -184,8 +200,9 @@ export default function EvidenceTable({
         <thead>
           <tr className="border-b border-tf-border text-xs text-tf-muted">
             <th className="px-3 py-2 font-medium">#</th>
-            <th className="px-3 py-2 font-medium">來源（點展開）</th>
-            <th className="px-3 py-2 font-medium">信任分</th>
+            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('source')}>來源{sortLabel('source')}</button></th>
+            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('time')}>時間{sortLabel('time')}</button></th>
+            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('trust')}>信任分{sortLabel('trust')}</button></th>
           </tr>
         </thead>
         <tbody className="divide-y divide-tf-border">
@@ -197,8 +214,8 @@ export default function EvidenceTable({
                 evidence={evidence}
               />
             ))
-            : evidence.map((ev, i) => (
-              <EvidenceRow key={i} ev={ev} idx={i} />
+            : sortedEvidence.map(({ ev, idx }) => (
+              <EvidenceRow key={idx} ev={ev} idx={idx} />
             ))}
         </tbody>
       </table>

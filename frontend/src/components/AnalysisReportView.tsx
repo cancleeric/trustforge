@@ -25,6 +25,7 @@ import AssetIntrinsicShadowPanel from './AssetIntrinsicShadowPanel'
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
 const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
+const EvidenceDistributionCharts = lazy(() => import('./EvidenceDistributionCharts'))
 
 /** 單份分析報告的完整渲染區塊——`AnalyzePage`（單幣）與 `ComparePage`
  * （雙幣並列，各自渲染一份 `report_a`/`report_b`）共用同一顆元件，兩邊
@@ -119,6 +120,9 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
         </div>
       </details>
 
+      <details className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
+        <summary>展開詳細分析（{data.report.facts.length + data.report.inferences.length} 項推理、{data.report.contrarian.length} 項反方訊號）</summary>
+        <div className="flex flex-col gap-4">
       <FactsInferenceLadder
         facts={data.report.facts}
         inferences={data.report.inferences}
@@ -158,22 +162,25 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
       )}
 
       {data.report.contrarian.length > 0 && (
-        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-          <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvContrarian')}</h3>
+        <details className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
+          <summary>{t('arvContrarian')}（{data.report.contrarian.length}）</summary>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.contrarian.map((l, i) => (
               <li key={i}><AnnotatedText text={l} /></li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
 
       <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
+        </div>
+      </details>
 
-      <div id="evidence-list">
-        <h3 className="mb-3 text-sm font-semibold text-tf-text">{t('arvEvidenceList')}</h3>
+      <details id="evidence-list" className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
+        <summary>{t('arvEvidenceList')}（{data.evidence.length}）</summary>
+        <Suspense fallback={<LoadingState label="圖表載入中" />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>
         <EvidenceTable evidence={data.evidence} evidenceGroups={data.report.evidence_groups} />
-      </div>
+      </details>
     </div>
   )
 }

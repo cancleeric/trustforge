@@ -106,4 +106,14 @@ describe('EvidenceTable', () => {
     fireEvent.click(groupRow) // collapse
     expect(screen.queryByText('E0')).not.toBeInTheDocument()
   })
+
+  it('sorts the flat table by trust without changing evidence identities', () => {
+    const { container } = render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })
+    fireEvent.click(screen.getByRole('button', { name: '信任分' }))
+    const rows = Array.from(container.querySelectorAll('tbody tr'))
+    expect(rows.map((row) => row.textContent?.match(/E\d/)?.[0])).toEqual(['E2', 'E1', 'E0', 'E3'])
+    fireEvent.click(screen.getByRole('button', { name: /信任分/ }))
+    const reversed = Array.from(container.querySelectorAll('tbody tr'))
+    expect(reversed.map((row) => row.textContent?.match(/E\d/)?.[0])).toEqual(['E3', 'E0', 'E1', 'E2'])
+  })
 })
