@@ -22,7 +22,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "out" / "release-train"
-PRODUCTION_ACCOUNT = "795930814369"
+PRODUCTION_ACCOUNT = "<ACCOUNT_ID>"
 PRODUCTION_REGION = "ap-southeast-2"
 PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
 VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)\Z")

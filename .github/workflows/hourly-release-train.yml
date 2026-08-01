@@ -54,14 +54,14 @@ jobs:
 
       - name: Verify AWS machine identity
         run: |
-          test "$(aws sts get-caller-identity --query Account --output text)" = "795930814369"
+          test "$(aws sts get-caller-identity --query Account --output text)" = "<ACCOUNT_ID>"
           test "${AWS_ACCESS_KEY_ID#ASIA}" != "${AWS_ACCESS_KEY_ID}"
 
       - name: Verify production SSM control plane
         run: |
           test "$(aws ssm describe-instance-information \
             --region ap-southeast-2 \
-            --filters Key=InstanceIds,Values=i-0152b70368358a81c \
+            --filters Key=InstanceIds,Values=<EC2_INSTANCE_ID> \
             --query 'InstanceInformationList[0].PingStatus' \
             --output text)" = "Online"
 

@@ -2,12 +2,12 @@
 
 Date: 2026-07-29  
 Region: `us-east-1`  
-Account: `795930814369`
+Account: `<ACCOUNT_ID>`
 
 ## Safety boundary
 
-- Caller: `arn:aws:iam::795930814369:user/trustforge-896-sandbox-runner`
-- Table: `arn:aws:dynamodb:us-east-1:795930814369:table/trustforge-issue896-sandbox-3`
+- Caller: `arn:aws:iam::<ACCOUNT_ID>:user/trustforge-896-sandbox-runner`
+- Table: `arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/trustforge-issue896-sandbox-3`
 - Table tags: `Environment=sandbox`, `Purpose=issue-896-proof`
 - Billing: on-demand
 - Encryption: enabled
@@ -54,7 +54,7 @@ delivered the actual adapter admission and the runner's competitor rejection in
 the same immutable object:
 
 - Object:
-  `AWSLogs/795930814369/CloudTrail/us-east-1/2026/07/29/795930814369_CloudTrail_us-east-1_20260729T0335Z_6IyXViCMmgFycgjf.json.gz`
+  `AWSLogs/<ACCOUNT_ID>/CloudTrail/us-east-1/2026/07/29/<ACCOUNT_ID>_CloudTrail_us-east-1_20260729T0335Z_6IyXViCMmgFycgjf.json.gz`
 - Object SHA-256:
   `5ede5c4a3a204f69fa98a9ce02b2e1a64da6ffd58ec03f19428af31c388f4bf3`
 - Admission: `2026-07-29T03:32:36Z`, `TransactWriteItems`,

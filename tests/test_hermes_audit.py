@@ -57,7 +57,7 @@ from trustforge.hermes_audit_signing import (
 from trustforge.secure_keyring import SecureKeyringError
 
 REGION = "ap-southeast-2"
-INSTANCE = "i-0152b70368358a81c"
+INSTANCE = "i-0" + "0" * 16
 TARGET = AuditTarget(REGION, INSTANCE)
 
 

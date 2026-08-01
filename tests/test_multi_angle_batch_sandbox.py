@@ -178,7 +178,7 @@ def test_committed_runner_policy_is_exact_table_except_sts_identity():
         "Resource": "*",
     }
     table_arn = (
-        "arn:aws:dynamodb:us-east-1:795930814369:"
+        "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:"
         "table/trustforge-issue896-sandbox-3"
     )
     assert statements["SandboxTableOnly"]["Resource"] == table_arn

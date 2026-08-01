@@ -25,7 +25,7 @@ scripts/hermes_production_audit.py
 ```text
 python scripts/hermes_production_audit.py \
   --region ap-southeast-2 \
-  --instance-id i-0152b70368358a81c \
+  --instance-id <EC2_INSTANCE_ID> \
   --output-dir out/audits/hermes \
   [--expected-release <identity>] [--dry-run]
 ```

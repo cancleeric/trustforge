@@ -38,7 +38,7 @@
 # 「真正切」的既有分工）。
 #
 # domain：trustforge.hurricanesoft.com.tw（DNS A record 已指到 EC2
-# 13.211.110.218，見 deploy/nginx.conf／deploy/TLS-SETUP.md）。
+# <EC2_PUBLIC_IP>，見 deploy/nginx.conf／deploy/TLS-SETUP.md）。
 #
 # ⛔ **certbot 是否真的執行是可選 step，預設不跑**（config-only 任務，禁真跑
 # AWS/certbot；CEO 真部署時才決定要不要跑）：本腳本預設只印出「會執行什麼」

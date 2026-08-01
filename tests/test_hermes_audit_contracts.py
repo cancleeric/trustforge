@@ -103,7 +103,7 @@ def _bundle() -> AuditBundle:
     return AuditBundle.build(
         audit_id="audit-20260730",
         captured_at="2026-07-30T08:00:00Z",
-        target=AuditTarget("ap-southeast-2", "i-0152b70368358a81c"),
+        target=AuditTarget("ap-southeast-2", "i-0" + "0" * 16),
         invoker_identity_hash=_digest("invoker"),
         limits=AuditLimits.defaults(),
         overall_status=AuditStatus.PARTIAL,
@@ -248,7 +248,7 @@ def test_audit_bundle_is_sealed_secret_free_and_rejects_tampering() -> None:
         AuditBundle.build(
             audit_id="audit-20260730",
             captured_at="2026-07-30T08:00:00Z",
-            target=AuditTarget("ap-southeast-2", "i-0152b70368358a81c"),
+            target=AuditTarget("ap-southeast-2", "i-0" + "0" * 16),
             invoker_identity_hash=_digest("invoker"),
             limits=AuditLimits.defaults(),
             overall_status=AuditStatus.PARTIAL,

@@ -6,7 +6,7 @@
 >
 > 依據：[`docs/HERMES-CAPABILITIES-REVIEW.md`](../HERMES-CAPABILITIES-REVIEW.md) 與 2026-07-30 公開 production API 實測
 >
-> 生產目標：AWS `ap-southeast-2`／EC2 `trustforge-demo`（`i-0152b70368358a81c`）
+> 生產目標：AWS `ap-southeast-2`／EC2 `trustforge-demo`（`<EC2_INSTANCE_ID>`）
 >
 > Baseline：production `v0.27.37`；工作分支 `chore/808-811-closeout`
 >

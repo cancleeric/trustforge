@@ -184,7 +184,7 @@ def test_classify_stance_request_uses_correct_model_and_min_max_tokens(monkeypat
     monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
     client.classify_stance("A", "B")
 
-    assert captured["modelId"] == "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert captured["modelId"] == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     assert captured["inferenceConfig"]["maxTokens"] >= 64
 
 
@@ -278,38 +278,24 @@ def test_classify_stance_strict_success_returns_label(monkeypatch):
     assert client.classify_stance_strict("A", "B") == "contradiction"
 
 
-# ── region/profile 相容性守門（codex 審查發現的 HIGH：預設 region us-east-1
-# 與預設 au. stance profile 不相容，沒設 AWS_REGION 時每次 stance 呼叫都會失敗）
+# ── region/profile 相容性守門：競賽預設 region 為 us-east-1/us-west-2，
+# 預設 stance profile 必須同步使用 us. profile，避免 zero-env production 失敗。
 
 
 def test_default_region_compatible_with_default_stance_model_profile():
-    """`BedrockConfig()` 的預設值必須自成一組可用組合：預設 `stance_model_id`
-    是 `au.` 地理 profile（僅能從 ap-southeast-2/4/6 呼叫），預設 `region` 必須
-    是其中之一，否則沒設 `AWS_REGION` 環境變數時每次 stance 呼叫都會失敗
-    （pipeline 悄悄降級 neutral、gen 腳本中止——先前那次驗證是因為手動帶了
-    `AWS_REGION=ap-southeast-2` 才成功，掩蓋了預設值本身不相容的事實）。
+    """`BedrockConfig()` 的預設值必須自成一組可用組合。
 
-    ⚠️ 注意：`region`/`stance_model_id` 都是 `os.getenv(...)` 當 dataclass 欄位
-    預設值，只在 `bedrock` 模組被匯入的當下算一次（非每次建立 `BedrockConfig()`
-    重新讀取），所以這裡驗證的是「這個 process 實際會用的預設值」——跟
-    production 行為一致（`AWS_REGION` 需在 process 啟動前、匯入這個模組前就
-    設好才會覆寫預設值）。這條測試鎖住「region 前綴 ↔ stance model profile
-    前綴」的相容性，擋住未來又不小心把兩者改成不相容組合（例如又改回
-    us-east-1，或换了不對應的模型 profile 前綴）。
+    競賽環境指定主要部署 region 為 us-east-1/us-west-2，因此預設 stance model
+    必須使用 `us.` cross-region inference profile；如果未來 region/profile 前綴
+    再度不相容，這條測試要直接變紅。
     """
     config = BedrockConfig()
 
-    # 目前唯一支援的地理 profile 前綴是 `au.`（雪梨），對應的合法呼叫 region
-    # 是 ap-southeast-2/4/6；這裡用「region 屬於雪梨系列」當相容性判準。
-    assert config.stance_model_id.startswith("au.")
-    assert config.region in {"ap-southeast-2", "ap-southeast-4", "ap-southeast-6"}
+    assert config.stance_model_id.startswith("us.")
+    assert config.region in {"us-east-1", "us-west-2"}
 
 
-def test_default_narrative_model_id_empty_not_region_locked():
-    """敘事模型（Sonnet）目前預設是空字串（`BEDROCK_MODEL_ID` 未設）——
-    競賽現場（8/1）公告正式模型 id 前才會填值，故不預先綁定任何 region
-    profile，也就不會有跟預設 region 不相容的風險。若未來改成在程式碼裡給
-    非空的預設值，必須比照 stance 一併確認 region 相容，別重蹈覆轍。
-    """
-    config = BedrockConfig(model_id="")
-    assert config.model_id == ""
+def test_default_narrative_model_id_uses_competition_us_profile():
+    """敘事模型預設也必須維持競賽 us.* profile；仍可由 BEDROCK_MODEL_ID 覆寫。"""
+    config = BedrockConfig()
+    assert config.model_id == "us.anthropic.claude-sonnet-4-6"

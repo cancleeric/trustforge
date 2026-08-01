@@ -4,6 +4,7 @@ import copy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -143,12 +144,17 @@ def _store(path: Path, observations: list[ShadowObservation]) -> ShadowEvidenceS
     return ShadowEvidenceStore(path, read_only=True)
 
 
-def _build(store: ShadowEvidenceStore, **kwargs):
+def _build(
+    store: Any,
+    *,
+    pit_cutoff: str = "2026-08-02T00:00:00Z",
+    **kwargs,
+):
     return build_promotion_evidence_dataset(
         store,
         _identity(),
         load_policy(),
-        pit_cutoff="2026-08-01T00:00:00Z",
+        pit_cutoff=pit_cutoff,
         stale_after_days=30,
         **kwargs,
     )
@@ -197,7 +203,7 @@ def test_retry_is_idempotently_deduplicated_across_restart(tmp_path):
 
 @pytest.mark.parametrize("case", ["future", "stale", "conflicted"])
 def test_future_stale_and_conflicted_evidence_fail_closed(tmp_path, case):
-    cutoff = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 8, 2, tzinfo=timezone.utc)
     observed = {
         "future": cutoff + timedelta(seconds=1),
         "stale": cutoff - timedelta(days=31),
@@ -269,7 +275,7 @@ def test_completion_not_durable_at_cutoff_is_not_pit_visible():
             return (item,)
 
     with pytest.raises(IntrinsicPromotionDatasetError, match="no PIT-visible"):
-        _build(Store())
+        _build(Store(), pit_cutoff="2026-08-01T00:00:00Z")
 
 
 @pytest.mark.parametrize(

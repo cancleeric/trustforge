@@ -54,7 +54,7 @@ budget_guard.py (_backend_unavailable_alert)
 ## 4. 部署指令
 
 ```bash
-export TRUSTFORGE_DEDUP_ALARM_SNS="arn:aws:sns:us-east-1:795930814369:trustforge-alerts"
+export TRUSTFORGE_DEDUP_ALARM_SNS="arn:aws:sns:us-east-1:<ACCOUNT_ID>:trustforge-alerts"
 bash deploy/put_dedup_alarm.sh
 ```
 

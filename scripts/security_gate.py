@@ -38,6 +38,7 @@ EXCLUDE_FILES = frozenset([
 # ── Secret scan 排除目錄（含 dummy token 的測試/deploy 腳本） ─────────
 SECRET_RELAXED_DIRS: list[re.Pattern[str]] = [
     re.compile(r"^tests/"),
+    re.compile(r".*\.test\.[jt]sx?$"),
     re.compile(r"^deploy/"),
     re.compile(r"^scripts/"),
     re.compile(r"^docs/"),
@@ -108,6 +109,18 @@ DEV_FILE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(^|/)apprunner\.yaml$", re.IGNORECASE),
     re.compile(r"(^|/)Dockerfile$", re.IGNORECASE),
 ]
+
+
+def _is_known_false_positive_secret(relpath: str, line: str, pattern_name: str) -> bool:
+    """Return True for UI labels / dummy test payloads that look like keys."""
+    normalized = relpath.replace("\\", "/")
+    if pattern_name != "hardcoded_secret":
+        return False
+    if normalized == "frontend/src/hermes/hermesI18n.tsx" and (
+        "Admin Token" in line or "Gas token" in line
+    ):
+        return True
+    return False
 
 
 @dataclass
@@ -242,6 +255,8 @@ def scan(root: Path | None = None) -> ScanResult:
             for pattern_name, pattern in SECRET_PATTERNS:
                 m = pattern.search(line)
                 if m:
+                    if _is_known_false_positive_secret(relpath, line, pattern_name):
+                        continue
                     severity = "P2" if is_secret_relaxed else "P0"
                     result.add(Finding(
                         severity=severity,
