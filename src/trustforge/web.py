@@ -467,6 +467,12 @@ def _bedrock_allowed(cfg=None) -> bool:
     return _bedrock_allowed_resolved(cfg)[0]
 
 
+# Composition root: the agent imports a callable port, never this web adapter.
+from .analysis_flow_ports import register_bedrock_allowed as _register_flow_bedrock_allowed
+
+_register_flow_bedrock_allowed(lambda: _bedrock_allowed())
+
+
 def _live_token_effective_layer(cfg=None) -> tuple[str, object]:
     """判斷 live token 當前生效層與其值（供比對/顯示共用，避免兩處各自
     重複實作三層優先序導致 source 標籤與實際生效層脫勾）。
@@ -5369,6 +5375,15 @@ def _public_evidence_dict(ev) -> dict:
     for field_name in _EVIDENCE_FILTERED_FIELDS:
         d.pop(field_name, None)
     return d
+
+
+# Keep the established private web names as compatibility aliases while the
+# implementation lives in the transport-neutral agent projection module.
+from .analysis_presentation import (
+    aggregate_trust_components as _aggregate_trust_components,
+    price_provenance_data as _price_provenance_data,
+    public_evidence_dict as _public_evidence_dict,
+)
 
 
 def _asset_context_repository() -> AssetContextRepository | None:
