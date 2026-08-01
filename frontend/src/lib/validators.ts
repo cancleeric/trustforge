@@ -28,6 +28,7 @@ import type {
   ComparisonReportData,
   CostModelDetail,
   CostsData,
+  CarbonData,
   LedgerRunRecord,
   CrossSourceSignal,
   Evidence,
@@ -490,6 +491,20 @@ export function isCostsData(value: unknown): value is CostsData {
   if (!Object.values(value.by_model_detail).every(isCostModelDetail)) return false
   if (!Array.isArray(value.runs)) return false
   if (!value.runs.every(isLedgerRunRecord)) return false
+  return true
+}
+
+// ── /api/carbon ──────────────────────────────────────────────────────────
+
+export function isCarbonData(value: unknown): value is CarbonData {
+  if (!isPlainObject(value)) return false
+  if (typeof value.total_tokens !== 'number') return false
+  if (typeof value.total_estimated_kwh !== 'number') return false
+  if (typeof value.total_estimated_co2e_g !== 'number') return false
+  if (typeof value.total_estimated_co2e_kg !== 'number') return false
+  if (typeof value.call_count !== 'number') return false
+  if (typeof value.methodology !== 'string') return false
+  if (typeof value.is_estimate !== 'boolean') return false
   return true
 }
 

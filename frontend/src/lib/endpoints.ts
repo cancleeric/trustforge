@@ -9,6 +9,7 @@ import {
   isEcoLinkResponseData,
   isComparisonAnalyzeData,
   isCostsData,
+  isCarbonData,
   isHealthData,
   isHistoryData,
   isOverviewData,
@@ -30,6 +31,7 @@ import type {
   BackendProviderKey,
   ComparisonAnalyzeData,
   CostsData,
+  CarbonData,
   HealthData,
   HistoryData,
   OverviewData,
@@ -406,6 +408,13 @@ export function getCosts(offsetOrSignal: number | AbortSignal = 0, signal?: Abor
   const requestSignal = typeof offsetOrSignal === 'number' ? signal : offsetOrSignal
   return apiFetch<CostsData>('/api/costs', { offset, limit: 50 }, isCostsData, {
     signal: requestSignal,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+  })
+}
+
+export function getCarbon(signal?: AbortSignal): Promise<ApiEnvelope<CarbonData>> {
+  return apiFetch<CarbonData>('/api/carbon', undefined, isCarbonData, {
+    signal,
     timeoutMs: DEFAULT_TIMEOUT_MS,
   })
 }
