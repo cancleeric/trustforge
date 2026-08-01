@@ -333,7 +333,7 @@ def test_missing_durable_receipt_retains_shared_reservation(monkeypatch):
     result = reviewer._review_with_budget(_diagnostic(), client)
 
     assert result["status"] == "accounting_failed"
-    assert unledgered == [0.0002]
+    assert unledgered == []
     assert released == []
 
 
@@ -443,7 +443,7 @@ def test_missing_usage_retains_or_conservatively_charges_reservation(
 
     assert result["status"] == "accounting_failed"
     assert result["reason"] == "bedrock_usage_metadata_ambiguous"
-    assert unledgered == [0.05]
+    assert unledgered == ([] if shared else [0.05])
     assert uncertain == ([0.05] if shared else [])
     assert released == ([] if shared else [0.05])
 

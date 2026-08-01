@@ -115,10 +115,10 @@ def _budgeted_complete(
             # Charge the conservative reservation before releasing local
             # capacity; shared capacity remains held for reconciliation.
             try:
-                budget_guard.record_unledgered_spend(float(reservation))
                 if shared_reservation:
                     budget_guard.mark_reservation_accounting_uncertain(reservation)
                 else:
+                    budget_guard.record_unledgered_spend(float(reservation))
                     release_safe = True
             except Exception:
                 _LOG.exception(
@@ -144,10 +144,10 @@ def _budgeted_complete(
             # The provider may have accepted work even when its accounting
             # metadata is absent or malformed. Conservatively charge local
             # capacity and retain shared capacity for reconciliation.
-            budget_guard.record_unledgered_spend(reservation_value)
             if shared_reservation:
                 budget_guard.mark_reservation_accounting_uncertain(reservation)
             else:
+                budget_guard.record_unledgered_spend(reservation_value)
                 release_safe = True
             raise _ReviewBlocked(
                 "accounting_failed", "bedrock_usage_metadata_ambiguous"
@@ -190,8 +190,10 @@ def _budgeted_complete(
             persisted = False
             _LOG.warning("Hermes reviewer ledger append raised unexpectedly", exc_info=True)
         if not persisted:
-            budget_guard.record_unledgered_spend(cost_usd)
-            if not shared_reservation:
+            if shared_reservation:
+                budget_guard.mark_reservation_accounting_uncertain(reservation)
+            else:
+                budget_guard.record_unledgered_spend(cost_usd)
                 release_safe = True
             raise _ReviewBlocked("accounting_failed", "durable_ledger_receipt_missing")
 
