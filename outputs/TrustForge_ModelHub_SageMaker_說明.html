@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TrustForge｜ModelHub 與 Amazon SageMaker</title>
+  <style>
+    :root{--ink:#172033;--blue:#3157c8;--cyan:#0e92aa;--pale:#eef6ff;--line:#d9e2ef;--muted:#596579;--white:#fff}
+    *{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:var(--ink);font-family:"Microsoft JhengHei","Noto Sans TC",system-ui,sans-serif;line-height:1.75}
+    main{width:min(1040px,calc(100% - 32px));margin:36px auto;padding:48px 56px;background:var(--white);border-radius:22px;box-shadow:0 18px 55px rgba(23,32,51,.1)}
+    .eyebrow{color:var(--blue);font-size:13px;font-weight:800;letter-spacing:.14em}h1{margin:8px 0 12px;font-size:clamp(32px,5vw,52px);line-height:1.18}h2{margin:44px 0 14px;font-size:26px;color:var(--blue)}p{margin:8px 0 16px}.lead{font-size:20px;color:var(--muted)}
+    .summary{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:30px 0}.card{padding:24px;border:1px solid var(--line);border-radius:16px;background:#fbfdff}.card strong{display:block;color:var(--blue);font-size:22px;margin-bottom:8px}
+    table{width:100%;border-collapse:collapse;margin:24px 0;font-size:16px}th,td{padding:15px 16px;border:1px solid var(--line);text-align:left;vertical-align:top}th{background:var(--blue);color:#fff}td:first-child{font-weight:800;background:var(--pale);width:18%}
+    .flow{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px;margin:24px 0;padding:28px;background:linear-gradient(135deg,#eef6ff,#f4f0ff);border-radius:18px}.step{padding:13px 16px;background:#fff;border:1px solid #cbd8ec;border-radius:12px;font-weight:800;text-align:center}.arrow{color:var(--cyan);font-size:24px;font-weight:900}
+    ul{padding-left:24px}.note{margin-top:28px;padding:20px 22px;border-left:5px solid #e59a13;background:#fff8e9;border-radius:8px}.note strong{color:#8a5900}.footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+    @media(max-width:720px){main{margin:0;width:100%;padding:28px 20px;border-radius:0}.summary{grid-template-columns:1fr}.flow{display:grid}.arrow{transform:rotate(90deg);text-align:center}table{font-size:14px}th,td{padding:10px}}
+    @media print{body{background:#fff}main{width:100%;margin:0;padding:22mm;box-shadow:none}.note,.card,.flow{break-inside:avoid}}
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">TRUSTFORGE · MODEL GOVERNANCE</div>
+  <h1>ModelHub 與 Amazon SageMaker</h1>
+  <p class="lead">TrustForge 不只使用 AWS 提供的基礎模型。我們另外建立自己的訓練、校準與治理流程，並可選擇 ModelHub 或 Amazon SageMaker 作為訓練後端。</p>
+
+  <section class="summary">
+    <article class="card"><strong>TrustForge 自有能力</strong>自行定義訓練資料、校準方法、品質門檻、候選版本及人工核准規則。</article>
+    <article class="card"><strong>兩種訓練後端</strong>ModelHub 是我們整合的訓練平台；Amazon SageMaker 是可替換的 AWS 管理式訓練服務。</article>
+  </section>
+
+  <table aria-label="ModelHub 與 SageMaker 比較">
+    <thead><tr><th>項目</th><th>ModelHub</th><th>Amazon SageMaker</th></tr></thead>
+    <tbody>
+      <tr><td>主要角色</td><td>接收 TrustForge 訓練資料、執行訓練並回傳模型產物</td><td>以 AWS Training Job 執行同一套校準訓練流程</td></tr>
+      <tr><td>識別方式</td><td>以 req_no 追蹤訓練工作與結果</td><td>以 Training Job Name 追蹤工作與 S3 產物</td></tr>
+      <tr><td>模型產物</td><td>回傳可驗證的 calibration model artifact</td><td>由 S3 交付 model.tar.gz／model.json</td></tr>
+      <tr><td>共同治理</td><td colspan="2">資料 Gate、時間切分、SHA-256、品質比較、automatic_apply: false、人工核准</td></tr>
+    </tbody>
+  </table>
+
+  <h2>我們自行訓練的是什麼？</h2>
+  <p>TrustForge 自行訓練的是<strong>信心校準模型</strong>，不是重新訓練 Amazon Bedrock 的大型語言模型。Bedrock 負責主張抽取與報告敘事；校準模型則把 raw confidence 修正為更接近歷史真實表現的 calibrated confidence。</p>
+
+  <h2>在 TrustForge 裡的運作方式</h2>
+  <div class="flow" aria-label="TrustForge 模型生命週期">
+    <div class="step">最新市場資料<br>＋時間點快照</div><div class="arrow">→</div>
+    <div class="step">接回後續<br>真實結果</div><div class="arrow">→</div>
+    <div class="step">資料 Gate<br>與時間切分</div><div class="arrow">→</div>
+    <div class="step">ModelHub<br>或 SageMaker</div><div class="arrow">→</div>
+    <div class="step">候選模型<br>品質比較</div><div class="arrow">→</div>
+    <div class="step">人工核准後<br>才可啟用</div>
+  </div>
+
+  <h2>為什麼要自己訓練模型？</h2>
+  <section class="summary">
+    <article class="card"><strong>更即時</strong>市場結構、消息來源與操縱手法持續改變，最新資料能讓校準基準跟上現在。</article>
+    <article class="card"><strong>更適合任務</strong>通用基礎模型不知道 TrustForge 的 Evidence、來源可靠度與信心定義；自有模型可針對任務最佳化。</article>
+    <article class="card"><strong>更可解釋</strong>每次訓練都有資料版本、時間範圍、指標、artifact 與 SHA-256，可追查信心如何改變。</article>
+    <article class="card"><strong>形成資料護城河</strong>累積「什麼來源在什麼情境下可靠」的時間序列經驗，這是單純呼叫外部模型無法取得的能力。</article>
+    <article class="card"><strong>降低平台綁定</strong>統一 TrainingBackend 介面可在 ModelHub 與 SageMaker 間切換，上層流程不必重寫。</article>
+    <article class="card"><strong>安全地持續改善</strong>新模型只會成為候選；未通過 holdout 比較與人工核准，就不能進入正式環境。</article>
+  </section>
+
+  <h2>與 AWS 基礎模型的關係</h2>
+  <p>競賽中的生成式 AI 推理仍使用 Amazon Bedrock 提供的 AWS 基礎模型。TrustForge 自行訓練的校準模型位於不同層級：它不生成市場文章，而是校正信心並支援信任治理。因此，使用 Bedrock 與自行訓練模型可以同時存在。</p>
+
+  <aside class="note"><strong>正確說法：</strong>TrustForge 擁有自己的模型訓練、校準與治理流程，並支援 ModelHub 與 Amazon SageMaker 兩種訓練後端。Amazon SageMaker 是 AWS 服務，不應稱為「我們自己的 SageMaker」；我們自己掌握的是資料、方法、品質 Gate、模型產物與啟用決策。</aside>
+  <div class="footer">TrustForge Hermes · ModelHub / SageMaker 說明</div>
+</main>
+</body>
+</html>
