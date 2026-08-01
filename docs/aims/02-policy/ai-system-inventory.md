@@ -15,7 +15,8 @@
 
 每項 AI 系統須記錄：穩定 ID、名稱／版本、owner、業務目的、預期／禁止用途、使用者與受影響者、
 生命週期狀態、implemented/enabled/observed 狀態、部署環境／地域、AI 技術與模型／供應商、輸入／輸出、
-資料來源與分類、關鍵依賴、human oversight、風險／影響評估 ID、控制／incident ID、監測指標、
+資料來源與分類、是否含客戶 PII、允許處理環境、去識別狀態、關鍵依賴、human oversight、
+風險／影響評估 ID、控制／incident ID、監測指標、
 變更／退役方式、evidence URI、last/next review、核准狀態。未知值不得猜測，須明寫 `待確認`。
 
 ## 初始登錄：AIMS-AIS-001
@@ -35,6 +36,7 @@
 | 生命週期狀態 | 部分實作；README 明載部分 three-track learning／AGOS 能力尚未在 production 啟用 |
 | 部署／地域 | repo 記載本機 runtime 與 AWS App Runner 建議路線；實際 production deployment／地域待確認 |
 | 資料分類／retention | 待資料清冊與合規評估，不由本草案推定 |
+| 客戶 PII／允許環境 | 是否實際含客戶 PII 待資料清冊確認；客戶 PII 不得離開經核准的 production，本機／測試僅准合成或不可回復識別資料 |
 | 風險／影響 | register 與 completed impact assessment 尚待後續工作軌建立 |
 | 監測／incident／退役 | 有 repo 所述品質、可靠性、budget 與停止能力；實際運作證據及退役程序待盤點 |
 | 可驗證 evidence URI | `README.md`、`pyproject.toml`、`docs/architecture/ARCHITECTURE.md`、`AGENTS.md` |

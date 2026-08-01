@@ -50,6 +50,8 @@ token、敏感內部識別碼、個資或敏感系統位置。可安全揭露的
 `control_or_requirement_id`）及 repo 相對路徑不受此限，但不得由其值反推出 secret 或受限資產。
 外部連結需保存必要 metadata；敏感 evidence target 必須位於
 核准 secure store，依 classification 授權、遮罩及記錄存取，且不得把敏感內容放入 manifest。
+客戶 PII 不得出現在 manifest、URI、repo、本機或測試 evidence copy；production evidence 的 reviewer
+須使用受控存取並只保存非敏感證明。遮罩若仍可回復識別，不得視為可離開 production 的去識別資料。
 文件、程式碼或測試存在只證明其存在，不自動證明控制設計適當、持續運作或有效。
 
 ## 控制流程（待核准）

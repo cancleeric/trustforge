@@ -40,15 +40,19 @@
 
 | 環境 | 暫定範圍判定 | 可驗證依據／限制 |
 |---|---|---|
-| 本 repository 內的本機開發、測試與文件流程 | 納入 | `AGENTS.md`、`pyproject.toml`；不推論任一人的私人裝置全機受 AIMS 管理 |
+| 本 repository 內的本機開發、測試與文件流程 | 納入 | `AGENTS.md`、`pyproject.toml`；不得帶入客戶 PII，只能使用合成或經核准且不可回復識別的資料；不推論任一人的私人裝置全機受 AIMS 管理 |
 | GitHub issue／branch／PR 與 repo-defined review gate | 納入可由 HurricaneSoft 控制的流程 | `AGENTS.md`；GitHub Actions 已停用，不能宣稱其為有效控制 |
 | AWS Bedrock 模型介面與供應商依賴 | 納入介面、資料交換及供應商治理 | `README.md`、`pyproject.toml`；帳號、region、實際啟用狀態待清冊確認 |
-| App Runner／其他 production runtime | 暫定納入 TrustForge 實際受控 deployment；環境身分待確認 | `README.md` 僅載建議路線，不證明目前 production 位置或啟用狀態 |
+| App Runner／其他 production runtime | 暫定納入 TrustForge 實際受控 deployment；環境身分待確認 | `README.md` 僅載建議路線，不證明目前 production 位置或啟用狀態；客戶 PII 若存在，只能留在經核准的 production 邊界 |
 | 第三方供應商內部訓練／基礎設施 | 排除直接控制；納入依賴風險 | HurricaneSoft 無直接控制權，仍須供應商評估 |
 | 使用者自行交易、私人錢包／交易所環境 | 排除 | TrustForge 不控制該環境；可預見誤用影響仍納入評估 |
 
 生命週期從構想到退役均納入；實際 production 身分、資料地域與 retention 是 scope 核准前的 blocker，
 不得因「暫定納入」推論已完成清冊、控制有效或已覆蓋未知環境。
+
+客戶 PII 禁止從 production 複製到 repo、本機、測試、tabletop 或稽核重演環境；需查證 production
+evidence 時只能使用受控存取與非敏感證明。任何例外均須另經合規、法務與 CEO 明確核准，本草案
+與其後續 merge／核准均不自動授權例外。
 
 ## 未決事項
 
