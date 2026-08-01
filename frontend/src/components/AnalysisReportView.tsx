@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import type { AnalyzeData } from '../lib/types'
 import ConfidenceGauge from './ConfidenceGauge'
 import TrustBreakdown from './TrustBreakdown'
@@ -36,6 +36,7 @@ const EvidenceDistributionCharts = lazy(() => import('./EvidenceDistributionChar
  * 在標題列顯示本次分析用的模式（呼應設計稿 R2 mode: multi_source 標籤）。 */
 export default function AnalysisReportView({ data, heading, mode, compact }: { data: AnalyzeData; heading?: string; mode?: string; compact?: boolean }) {
   const { t } = useHermesI18n()
+  const [evidenceOpen, setEvidenceOpen] = useState(false)
   // N71（CEO：「手動分析的報告要在哪裡下載？執行過程的 LOG 要在哪裡看」）：
   // 三顆下載鈕本來只在最底下那個預設收合的「技術細節」裡，跑完分析根本找不到。
   // 這裡在報告抬頭補一排永遠看得見的動作，外加一顆帶去執行過程面板的按鈕
@@ -108,15 +109,16 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
         </section>
       </div>
 
+      <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
+        <TrustRadarChart radar={data.trust_radar} />
+      </Suspense>
+
       <details id="technical-analysis" className="hermes-technical-details hermes-clip border border-tf-border bg-tf-card">
         <summary>{t('arvTechnicalDetailsSummary')} <span>{t('arvTechnicalDetailsHint')}</span></summary>
         <div className="flex flex-col gap-4 p-4">
           <HermesExecutionPanel execution={data.execution} events={data.execution_log} report={data.report} evidence={data.evidence} />
           <TrustBreakdown data={data.trust_components_aggregate} />
           <TrustTrendSection coin={data.report.coin} />
-          <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
-            <TrustRadarChart radar={data.trust_radar} />
-          </Suspense>
         </div>
       </details>
 
@@ -176,9 +178,9 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
         </div>
       </details>
 
-      <details id="evidence-list" className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
+      <details id="evidence-list" className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card" onToggle={(event) => setEvidenceOpen(event.currentTarget.open)}>
         <summary>{t('arvEvidenceList')}（{data.evidence.length}）</summary>
-        <Suspense fallback={<LoadingState label="圖表載入中" />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>
+        {evidenceOpen && <Suspense fallback={<LoadingState label="圖表載入中" />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>}
         <EvidenceTable evidence={data.evidence} evidenceGroups={data.report.evidence_groups} />
       </details>
     </div>
