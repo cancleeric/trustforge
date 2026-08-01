@@ -34,6 +34,7 @@ def _report_pipeline(enabled: bool) -> tuple[dict, list[dict]]:
             log=ExecutionLog(now_fn=lambda: 1000.0),
             now_fn=lambda: 1000.0,
             scored=scored,
+            run_scope_id="test-agos-e2e",
         )
     return asdict(report), [item.to_dict() for item in evidence]
 

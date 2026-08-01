@@ -68,8 +68,10 @@ def _protected_json(
             raise SystemExit(f"unsafe protected input: {path}")
         raw = os.read(descriptor, max_bytes + 1)
         after = os.fstat(descriptor)
+        reread = os.pread(descriptor, min(info.st_size, max_bytes + 1), 0)
         if (
             len(raw) != info.st_size
+            or reread != raw
             or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
             != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         ):

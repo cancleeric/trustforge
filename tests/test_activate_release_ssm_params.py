@@ -97,18 +97,18 @@ def test_escapes_embedded_double_quotes():
     assert data[1] == cmd
 
 
-def test_activate_release_fails_fast_when_jq_missing(tmp_path):
-    """codex P1 regression: if jq is missing on the activation host,
+def test_activate_release_fails_fast_when_json_encoder_missing(tmp_path):
+    """codex P1 regression: if jq/python3 are missing on the activation host,
     ``activate_release.sh`` must exit non-zero at startup (before any
     production mutation) with a clear message, never reaching
-    post-verify/rollback where a missing jq would mask a successful
+    post-verify/rollback where a missing encoder would mask a successful
     deployment as failed."""
     import shutil
 
     bin_dir = tmp_path / "nojq-bin"
     bin_dir.mkdir()
-    # Provide only what the script needs to reach the jq check: bash + dirname
-    # (used by `source "$(dirname "${BASH_SOURCE[0]}")/..."`). jq is absent.
+    # Provide only what the script needs to reach the encoder check: bash + dirname
+    # (used by `source "$(dirname "${BASH_SOURCE[0]}")/..."`). jq/python3 are absent.
     for tool in ("bash", "dirname"):
         src = shutil.which(tool)
         if src:
@@ -129,6 +129,6 @@ def test_activate_release_fails_fast_when_jq_missing(tmp_path):
         f"got {result.returncode}\nstdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
-    assert "jq is required" in result.stderr, (
-        f"expected clear 'jq is required' error; stderr was:\n{result.stderr}"
+    assert "jq or python3 is required" in result.stderr, (
+        f"expected clear 'jq or python3 is required' error; stderr was:\n{result.stderr}"
     )

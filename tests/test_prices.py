@@ -66,7 +66,7 @@ def test_final_report_exports_dataset_lineage_for_auditors():
     report, evidence = build_report(
         "分析 BTC", "BTC", QuestionType.MULTI_SOURCE, brief,
         client=BedrockClient(offline=True), log=ExecutionLog(now_fn=lambda: 1_000_000.0),
-        now_fn=lambda: 1_000_000.0,
+        now_fn=lambda: 1_000_000.0, run_scope_id="test-prices",
     )
     markdown = report.to_markdown(evidence)
 

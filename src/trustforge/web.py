@@ -467,6 +467,12 @@ def _bedrock_allowed(cfg=None) -> bool:
     return _bedrock_allowed_resolved(cfg)[0]
 
 
+# Composition root: the agent imports a callable port, never this web adapter.
+from .analysis_flow_ports import register_bedrock_allowed as _register_flow_bedrock_allowed
+
+_register_flow_bedrock_allowed(lambda: _bedrock_allowed())
+
+
 def _live_token_effective_layer(cfg=None) -> tuple[str, object]:
     """判斷 live token 當前生效層與其值（供比對/顯示共用，避免兩處各自
     重複實作三層優先序導致 source 標籤與實際生效層脫勾）。
@@ -4236,11 +4242,18 @@ def _do_analyze(
         )
         if _force_offline:
             _extra["force_stance_offline"] = True
+        # #960：web 非 formal analyze 路徑須提供 caller-scoped run id（契約 §2.2），
+        # 否則 build_report fail-closed。formal 路徑（analysis_flow job_id）才是權威來源。
+        _web_scope = f"web-{secrets.token_hex(8)}"
         report, evidence, log = run(
-            coin, query, qtype, data_mode="live", llm_mode="off", **_extra,
+            coin, query, qtype, data_mode="live", llm_mode="off",
+            run_scope_id=_web_scope, **_extra,
         )
     else:
-        report, evidence, log = run(coin, query, qtype, offline=not live)
+        report, evidence, log = run(
+            coin, query, qtype, offline=not live,
+            run_scope_id=f"web-{secrets.token_hex(8)}",
+        )
     # 成本會計階段3：只有 real/live（data_mode 最終落在 "live"，真的透過
     # CachedSource 讀連接器資料）才計入「真連接器」服務次數；純離線示範
     # （樣本資料，未觸碰任何連接器/cache）不計，見 `_record_analyze_service_calls`。
@@ -4313,12 +4326,15 @@ def _do_comparison(
         )
         if _force_offline:
             _extra["force_stance_offline"] = True
+        _cmp_scope = f"webcmp-{secrets.token_hex(8)}"
         result = run_comparison(
-            coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
+            coin_a, coin_b, query, data_mode="live", llm_mode="off",
+            run_scope_id=_cmp_scope, **_extra,
         )
     else:
         result = run_comparison(
-            coin_a, coin_b, query, offline=not live
+            coin_a, coin_b, query, offline=not live,
+            run_scope_id=f"webcmp-{secrets.token_hex(8)}",
         )
     # 成本會計階段3：comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，
     # 記 2 次（見 `_record_analyze_service_calls` docstring），理由同 `_do_analyze`。
@@ -5359,6 +5375,15 @@ def _public_evidence_dict(ev) -> dict:
     for field_name in _EVIDENCE_FILTERED_FIELDS:
         d.pop(field_name, None)
     return d
+
+
+# Keep the established private web names as compatibility aliases while the
+# implementation lives in the transport-neutral agent projection module.
+from .analysis_presentation import (
+    aggregate_trust_components as _aggregate_trust_components,
+    price_provenance_data as _price_provenance_data,
+    public_evidence_dict as _public_evidence_dict,
+)
 
 
 def _asset_context_repository() -> AssetContextRepository | None:

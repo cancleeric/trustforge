@@ -11,6 +11,7 @@ Bedrock 只負責把推理「行文」成可讀敘述，不得把第三方現成
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -32,6 +33,11 @@ from .authoritative_kernel_mapper import run_authoritative_judgment
 from .evidence_grouper import group_evidence
 from .kernel_mapper import to_kernel_claim
 from .kernel_projection import KernelJudgment
+
+# #960 canonical claim identity（見 docs/plans/ISSUE-959-...CONTRACT-2026-07-31.md §2.1）。
+# `canonical_source` 採用與 repo-wide 同一口徑（trustforge_core.source_identity），
+# 與 scoring._canonical_source / evidence_grouper._normalize_source 完全一致。
+from trustforge_core.source_identity import canonical_source as _core_canonical_source
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
 _STEP4_MIN_BUDGET_SEC = 60.0
@@ -133,6 +139,74 @@ def _sanitize_author(raw) -> str | None:
     if _AUTHOR_REJECT_RE.search(raw):
         return None
     return raw
+
+
+# --- #960 canonical claim identity — single mint helper ---------------------
+# 契約 docs/plans/ISSUE-959-CANONICAL-CLAIM-IDENTITY-CONTRACT-2026-07-31.md §2.1。
+# canonical claim_id = "clm1:" + run_scope_id + ":" + claim_local_fingerprint(16hex)。
+# 這是 **公開穩定識別碼**（非 HMAC、非密鑰、不帶簽章）：任何知曉 claim 公開屬性
+# 與 run_scope_id 的一方皆可重算同一 id（見契約 §1.1 non-goal）。因此不得作為授權、
+# 信任或防竄改訊號——run 的授權由 #957 的 transport/receipt authority 擁有。
+#
+# 命名刻意避開 `score`/`aggregate`：test_kernel_authoritative_boundary.py 會以 AST
+# 掃描 orchestrator.py 內所有 Call 的函式名，禁用 `score` 與 `aggregate`。
+_CLAIM_ID_SCHEME = "clm1"
+_CLAIM_ID_PURPOSE = "claim-identity/v1"
+_CLAIM_ID_FP_LEN = 16
+_RUN_SCOPE_ID_RE = re.compile(r"^[^:]+$")
+
+
+def _claim_fingerprint16(sc: ScoredClaim) -> str:
+    """claim_local_fingerprint：對 claim 穩定屬性的 **domain-separated、length-
+    prefixed** tuple 取 SHA-256 截 16 hex。length-prefix（`{decimal_len}:{bytes}`）
+    使欄位邊界無歧義、跨實作 collision-free（`(a,bc)` 與 `(ab,c)` 不可能同碼）。
+
+    屬性順序（契約 §2.1）：
+      1. purpose="claim-identity/v1"（domain separation）
+      2. claim_type（fact | inference | opinion）
+      3. direction（bullish | bearish | neutral）
+      4. canonical_source（trustforge_core.source_identity，與 repo 同口徑）
+      5. doc_id（來源文件識別）
+      6. source_claim_suffix：最後一個 `#` 之後、不含 `#` 的子字串
+         （`doc123#0`→`0`、`src#llm0`→`llm0`）；無 `#`（如 `price-BTC-ret`）則用完整指紋
+      7. text：**僅 trim**——不動內部空白、大小寫、Unicode code point，不做 NFC/NFKC/casefold
+         （改動會把不同 claim 靜默合併或把相同 claim 拆開）
+    """
+    claim = sc.claim
+    doc = claim.doc
+    raw_id = claim.id or ""
+    if "#" in raw_id:
+        suffix = raw_id.rsplit("#", 1)[-1]
+    else:
+        suffix = raw_id
+    text = (claim.text or "").strip()
+    parts = (
+        _CLAIM_ID_PURPOSE,
+        claim.claim_type,
+        claim.direction,
+        _core_canonical_source(doc.source),
+        doc.id,
+        suffix,
+        text,
+    )
+    hasher = hashlib.sha256()
+    for value in parts:
+        raw = str(value).encode("utf-8")
+        hasher.update(f"{len(raw)}:".encode("ascii"))
+        hasher.update(raw)
+    return hasher.hexdigest()[:_CLAIM_ID_FP_LEN]
+
+
+def _canonical_claim_id(sc: ScoredClaim, run_scope_id: str) -> str:
+    """mint 單一 canonical claim_id（`build_report` 的唯一鑄造入口呼叫此 helper）。
+
+    run_scope_id 必須是非空、無冒號的字串（冒號會與 `clm1:{run_scope}:{fp}` 的分隔
+    歧義）；不符即 raise ValueError（fail-closed，在發出任何 Evidence 之前）。
+    """
+    if (not isinstance(run_scope_id, str) or not run_scope_id
+            or _RUN_SCOPE_ID_RE.match(run_scope_id) is None):
+        raise ValueError("run_scope_id must be a non-empty, colon-free string")
+    return f"{_CLAIM_ID_SCHEME}:{run_scope_id}:{_claim_fingerprint16(sc)}"
 
 
 def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
@@ -996,7 +1070,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                  stance_fn: Callable[[str, str], str] | None = None,
                  scored: list[ScoredClaim] | None = None,
                  kernel_judgment: KernelJudgment | None = None,
-                 locale: str = _loc.DEFAULT_LOCALE) -> tuple[Report, list[Evidence]]:
+                 locale: str = _loc.DEFAULT_LOCALE,
+                 run_scope_id: str = "") -> tuple[Report, list[Evidence]]:
     """`stance_fn`：選填。供跨源 stance_pairs 偵測（Step 2.5）使用；未提供時
     （例如直接呼叫 `build_report` 的測試）會自建一份**有預算上限**的
     stance_fn（`build_stance_fn`，綁 `log.remaining()`），不會無上限直接打
@@ -1050,6 +1125,13 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     locale = _loc.normalize_locale(locale)
     _tele_t0 = time.perf_counter()
 
+    # #960 fail-closed：run_scope_id 是 canonical claim_id 的 run 邊界（契約 §2.2）。
+    # 空 / 非字串 / 帶冒號皆視為契約違反——在發出任何 Evidence 之前 raise，確保無
+    # run id 的路徑（如未傳 scope 的 pipeline.run）無法產出半成品的 canonical id。
+    if (not run_scope_id or not isinstance(run_scope_id, str)
+            or ":" in run_scope_id):
+        raise ValueError("run_scope_id must be a non-empty, colon-free string")
+
     # 1. 證據清單（支撐 + 反方）
     log.record(
         "evidence.build",
@@ -1060,6 +1142,11 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     key_basis: list[BasisItem] = []
     ev_index: dict[tuple, int] = {}   # (source, content_reference) → 去重,保留最高 trust
     judgment_tag = f"{coin} 市場判斷"
+    # #960：追蹤每個 admitted Evidence idx 的「存活」sc（dedup 後留最高 trust 者），
+    # 供 canonical claim_id 鑄造時對齊 survivor；以及所有 admitted（含被 dedup 丟棄者）
+    # 的 (sc, related, idx) 紀錄，供 source_fingerprint→canonical 別名表建立。
+    idx_sc: dict[int, ScoredClaim] = {}
+    admitted_records: list[tuple[ScoredClaim, str, int]] = []
 
     def _add_evidence(sc: ScoredClaim, related: str) -> int:
         ev = _scored_to_evidence(sc, related)
@@ -1070,15 +1157,18 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             if ev.trust > evidence[idx].trust:   # 同來源同引用 → 留最高信任那筆
                 evidence[idx] = ev
                 evidence_directions[idx] = sc.claim.direction
+                idx_sc[idx] = sc
             return idx
         idx = len(evidence)
         evidence.append(ev)
         evidence_directions.append(sc.claim.direction)
         ev_index[key] = idx
+        idx_sc[idx] = sc
         return idx
 
     for sc in brief.supporting:
         idx = _add_evidence(sc, judgment_tag)
+        admitted_records.append((sc, judgment_tag, idx))
         key_basis.append(BasisItem(
             claim=sc.claim.text,
             explanation=_loc.basis_explanation(
@@ -1087,7 +1177,50 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             evidence_idx=[idx],
         ))
     for sc in brief.contrarian:
-        _add_evidence(sc, "反方／低信任訊號")
+        idx = _add_evidence(sc, "反方／低信任訊號")
+        admitted_records.append((sc, "反方／低信任訊號", idx))
+
+    # --- #960：鑄造 canonical claim_id 並蓋章（單一鑄造點，契約 §2/§3）---
+    # registry 同時涵蓋 admitted（成為 Evidence 列）與 truncated（在 scored 中但被
+    # aggregate() 截斷、不成 Evidence，僅註冊供 cross_source/insight 引用）——契約 §2.3/§4.2.5。
+    # effective_scored 採 scored-list 順序，碰撞消歧（`.dN`）的唯一依據即此順序（§2.3.3）。
+    effective_scored: list[ScoredClaim] = (
+        scored if scored is not None else [*brief.supporting, *brief.contrarian]
+    )
+    _fp16_collisions: dict[str, int] = {}   # 16hex → 已見相異 source 指紋數（scored 順序）
+    _sp_fp16: dict[str, str] = {}           # source 指紋 → 16hex
+    _sp_disamb: dict[str, str] = {}         # source 指紋 → 消歧後綴（"" 或 ".dN"）
+    for _sc in effective_scored:
+        _sp = _sc.claim.id
+        if _sp in _sp_fp16:
+            continue                        # 同一 claim 已鑄造（admitted 同時也在 scored）
+        _fp16 = _claim_fingerprint16(_sc)
+        _seen = _fp16_collisions.get(_fp16, 0)
+        _fp16_collisions[_fp16] = _seen + 1
+        _sp_fp16[_sp] = _fp16
+        _sp_disamb[_sp] = "" if _seen == 0 else f".d{_seen + 1}"
+
+    def _canonical_of(sc: ScoredClaim) -> str:
+        return f"{_CLAIM_ID_SCHEME}:{run_scope_id}:{_sp_fp16[sc.claim.id]}{_sp_disamb[sc.claim.id]}"
+
+    # survivor-per-idx canonical + source 指紋→canonical 別名（被 dedup 丟棄者 alias survivor）
+    idx_to_canonical: dict[int, str] = {}
+    source_to_canonical: dict[str, str] = {}
+    for _sc, _related, _idx in admitted_records:
+        _canonical = _canonical_of(idx_sc[_idx])
+        idx_to_canonical[_idx] = _canonical
+        source_to_canonical[_sc.claim.id] = _canonical
+    # truncated：mint + 註冊但不成 Evidence 列（契約 §4.2.5）
+    canonical_registry: set[str] = set(idx_to_canonical.values())
+    for _sc in effective_scored:
+        if _sc.claim.id not in source_to_canonical:
+            _trunc_id = _canonical_of(_sc)
+            source_to_canonical[_sc.claim.id] = _trunc_id
+            canonical_registry.add(_trunc_id)
+    # 蓋章 Evidence.claim_id（1:1，每列恰好一個 canonical id）
+    for _idx, _ev in enumerate(evidence):
+        _ev.claim_id = idx_to_canonical[_idx]
+    # `source_to_canonical` 保留供 PR2b remap insight / cross_source_signal / narrative 引用。
 
     # 2. 我方判斷（pipeline 產生，非外部結論）
     # W4：校準信心三態 abstain（見上方 `_ABSTAIN_CALIBRATED_THRESHOLD` 常數
@@ -1475,6 +1608,11 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                 diverse.append(candidate)
         key_basis = [bi for bi, _ in (*diverse, *deferred)]
 
+    # #960：蓋章 BasisItem.claim_ids（與 evidence_idx 對齊；二者須一致——契約 §4.1）。
+    # 在最終 key_basis 定型後填入（diversity/group 重構會重建 BasisItem，故須在此處蓋章）。
+    for _bi in key_basis:
+        _bi.claim_ids = [idx_to_canonical[_i] for _i in _bi.evidence_idx]
+
     # 使用聚合後的 facts
     facts = aggregated_facts
 
@@ -1506,6 +1644,22 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                  metadata={"coin": coin, "evidence_count": len(evidence)})
     except Exception:
         pass
+    # #960 no-dangling（契約 §4.2.2）：緊鄰 return 前、telemetry 之後（此處與 return
+    # 之間不得再有其他程式）。任何被引用的 canonical id 必須存在於本 run 的 registry。
+    # PR2a 範圍僅涵蓋已 canonicalized 的欄位——BasisItem.claim_ids 與 Evidence.claim_id；
+    # insight / cross_source_signal / narrative 引用的 remap 與其 dangling 檢查留 PR2b
+    # （未 remap 前它們仍持 raw source 指紋，於此檢查會誤判，故暫不納入）。
+    for _bi in key_basis:
+        for _cid in _bi.claim_ids:
+            if _cid not in canonical_registry:
+                raise ValueError(
+                    f"dangling claim_id {_cid!r} in BasisItem is not in the canonical registry"
+                )
+    for _ev in evidence:
+        if _ev.claim_id and _ev.claim_id not in canonical_registry:
+            raise ValueError(
+                f"dangling Evidence.claim_id {_ev.claim_id!r} is not in the canonical registry"
+            )
     return report, evidence
 
 
@@ -1522,6 +1676,7 @@ def run_agent_pipeline(
     log: ExecutionLog | None = None,
     now_fn=time.time,
     ledger_persistence_observer: Callable[[bool, float], None] | None = None,
+    run_scope_id: str = "",
 ) -> tuple[Report, list[Evidence]]:
     """三步驟顯式推理鏈。
 
@@ -1681,6 +1836,7 @@ def run_agent_pipeline(
         # 配對擠出偵測範圍（見 build_report docstring）。
         scored=report_scored,
         kernel_judgment=kernel_judgment,
+        run_scope_id=run_scope_id,
     )
     # 防禦性再收割一次（demo 可靠性 #32 追加 cost-integrity HIGH 修正）：
     # build_report() 內部已在 Step2.5 偵測後自行收割一次，這裡屬於

@@ -31,13 +31,13 @@ set -euo pipefail
 # prerequisite, validated below before any production mutation.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ssm_commands.sh"
 
-# jq is required by build_ssm_commands_json (lib/ssm_commands.sh). Fail fast
-# at startup — never let a missing jq break post-verify/rollback mid-flow and
-# mask a successful deployment as a failed one.
-command -v jq >/dev/null 2>&1 || {
-  echo "[activate] ERROR: jq is required by deploy/lib/ssm_commands.sh but is not on PATH. Install jq on the activation host before deploying." >&2
+# build_ssm_commands_json needs a JSON encoder. Fail fast at startup — never
+# let a missing encoder break post-verify/rollback mid-flow and mask a
+# successful deployment as a failed one.
+if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  echo "[activate] ERROR: jq or python3 is required by deploy/lib/ssm_commands.sh but neither is on PATH. Install jq or python3 on the activation host before deploying." >&2
   exit 1
-}
+fi
 
 cd "$(dirname "$0")/.."
 

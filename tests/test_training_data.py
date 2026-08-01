@@ -102,7 +102,7 @@ def test_scan_detects_file_swap_between_enumeration_and_open(
 
     def swapped_open(target: str | bytes | os.PathLike[str] | os.PathLike[bytes], flags: int) -> int:
         path.unlink()
-        path.write_text('{"direction":"bearish"}\n', encoding="utf-8")
+        path.write_text('{"direction":"bearish","swapped":true}\n', encoding="utf-8")
         return real_open(target, flags)
 
     monkeypatch.setattr(os, "open", swapped_open)

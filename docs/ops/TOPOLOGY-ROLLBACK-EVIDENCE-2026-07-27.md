@@ -2,18 +2,18 @@
 
 **Date**: 2026-07-27
 **Investigation**: Issue #726 (P0 Epic #725: Core A/B Rollback & Single Source of Truth)
-**Scope**: Read-only production topology audit, ap-southeast-2, Account 795930814369
+**Scope**: Read-only production topology audit, ap-southeast-2, Account <ACCOUNT_ID>
 **Executor**: CTO (sonnet), executing CPO-approved plan
 
 ---
 
 ## 1. Topology Conclusion
 
-**Production topology**: **EC2 only** (instance i-0152b70368358a81c)
+**Production topology**: **EC2 only** (instance <EC2_INSTANCE_ID>)
 
 | Service | Status | Evidence |
 |---------|--------|----------|
-| EC2 (trustforge-demo) | **RUNNING** (t3.micro, 13.211.110.218) | Launched 2026-07-19T15:57:23Z |
+| EC2 (trustforge-demo) | **RUNNING** (t3.micro, <EC2_PUBLIC_IP>) | Launched 2026-07-19T15:57:23Z |
 | Lambda (trustforge-demo) | **Active but NOT serving traffic** | Last modified 2026-06-30, Function URL is open (AuthType NONE), no event invoke config |
 | App Runner | **Not subscribed** | SubscriptionRequiredException |
 
@@ -31,7 +31,7 @@
 | Attribute | Value |
 |-----------|-------|
 | VERSION | **v0.16.18** |
-| Instance ID | i-0152b70368358a81c |
+| Instance ID | <EC2_INSTANCE_ID> |
 | Launch Time | 2026-07-19T15:57:23Z (Jul 20 01:57 CST) |
 | git tag v0.16.18 | fde5a643 (2026-07-20 17:09 CST) |
 | git tag on branch | remotes/origin/release/v0.16.18 |
@@ -152,8 +152,8 @@ Full content captured (see SSM output). Key structure:
 
 | Resource | Identifier | State |
 |----------|-----------|-------|
-| EC2 instance | i-0152b70368358a81c | running (t3.micro) |
-| EC2 Security Group | sg-0263e810b018165a8 | ports 80/443 to 0.0.0.0/0 |
+| EC2 instance | <EC2_INSTANCE_ID> | running (t3.micro) |
+| EC2 Security Group | <SECURITY_GROUP_ID> | ports 80/443 to 0.0.0.0/0 |
 | Lambda Function | trustforge-demo | Active, Python 3.12, 512MB, Function URL AuthType NONE |
 | Lambda Role | trustforge-lambda-exec | Last used 2026-06-30 |
 | EC2 Role | trustforge-ec2 | Last used 2026-07-26 |
@@ -161,7 +161,7 @@ Full content captured (see SSM output). Key structure:
 | DynamoDB: cost-ledger | trustforge-cost-ledger | ACTIVE, 5,494 items, 947KB |
 | DynamoDB: budget-guard | trustforge-budget-guard | ACTIVE, 0 items |
 | DynamoDB: analyze-leases | trustforge-analyze-leases | ACTIVE, 0 items |
-| S3 bucket | trustforge-deploy-795930814369 | Versioning ENABLED, SSE-AES256 |
+| S3 bucket | trustforge-deploy-<ACCOUNT_ID> | Versioning ENABLED, SSE-AES256 |
 | SSM Parameter | /trustforge/runtime/admin-token | SecureString, v1 |
 | SSM Parameter | /trustforge/runtime/live-token | SecureString, v1 |
 | SSM Parameter | /trustforge/deploy | **Not found** |
@@ -262,21 +262,21 @@ sysstat-summary.timer   → sysstat-summary.service    (daily)
 
 ### A1 — sts get-caller-identity
 ```
-UserId: 795930814369
-Account: 795930814369
-Arn: arn:aws:iam::795930814369:root
+UserId: <ACCOUNT_ID>
+Account: <ACCOUNT_ID>
+Arn: arn:aws:iam::<ACCOUNT_ID>:root
 ```
 
 ### A2 — EC2 instances
 ```json
 [{
-  "InstanceId": "i-0152b70368358a81c",
+  "InstanceId": "<EC2_INSTANCE_ID>",
   "State": "running",
-  "PublicIp": "13.211.110.218",
-  "PrivateIp": "172.31.27.136",
+  "PublicIp": "<EC2_PUBLIC_IP>",
+  "PrivateIp": "<EC2_PRIVATE_IP>",
   "LaunchTime": "2026-07-19T15:57:23+00:00",
   "InstanceType": "t3.micro",
-  "IamInstanceProfile": "arn:aws:iam::795930814369:instance-profile/trustforge-ec2",
+  "IamInstanceProfile": "arn:aws:iam::<ACCOUNT_ID>:instance-profile/trustforge-ec2",
   "Tags": [{"Key": "Name", "Value": "trustforge-demo"}]
 }]
 ```
@@ -284,7 +284,7 @@ Arn: arn:aws:iam::795930814369:root
 ### A3 — Security Groups
 ```json
 [{
-  "GroupId": "sg-0263e810b018165a8",
+  "GroupId": "<SECURITY_GROUP_ID>",
   "GroupName": "trustforge-ec2-sg",
   "Description": "TrustForge demo 80",
   "IpPermissions": [
@@ -317,7 +317,7 @@ trustforge-analyze-leases:  ACTIVE, 0 items, PAY_PER_REQUEST
 
 ### A7 — S3 bucket
 ```
-Bucket: trustforge-deploy-795930814369
+Bucket: trustforge-deploy-<ACCOUNT_ID>
 Versioning: Enabled
 Encryption: AES256
 Contents:

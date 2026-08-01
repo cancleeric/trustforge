@@ -32,7 +32,7 @@ def _run(locale, coin="BTC", query="analyse BTC market state", qtype=QuestionTyp
     log = ExecutionLog(now_fn=lambda: 1000.0)
     return build_report(query, coin, qtype, brief,
                         client=client or BedrockClient(offline=True), log=log,
-                        now_fn=lambda: 1000.0, locale=locale)
+                        now_fn=lambda: 1000.0, locale=locale, run_scope_id="test-narrative-locale")
 
 
 # --- locale 收斂 -----------------------------------------------------------

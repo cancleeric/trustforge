@@ -1,9 +1,11 @@
-use crate::{manifest, sha256};
+use crate::manifest;
 use core::ffi::{c_char, c_int, c_long};
 use std::ffi::CString;
 use std::fs::{File, Metadata};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
+use trustforge_native_sys::sha256;
+use trustforge_native_sys::{OpenHow, RESOLVE_BENEATH, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS, SYS_OPENAT2};
 
 const INSTALL_ROOT: &str = "opt/trustforge/native-foundation/current";
 const MANIFEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -13,17 +15,6 @@ const O_CLOEXEC: c_int = 0o2000000;
 const O_NOFOLLOW: c_int = 0o400000;
 const O_DIRECTORY: c_int = 0o200000;
 const O_PATH: c_int = 0o10000000;
-const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-const RESOLVE_BENEATH: u64 = 0x08;
-const SYS_OPENAT2: c_long = 437;
-
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
 
 unsafe extern "C" {
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
@@ -100,7 +91,7 @@ impl SealedNf1 {
             return Err("runtime size differs from manifest");
         }
         let runtime_bytes = bounded_pread(&runtime, RUNTIME_MAX_BYTES, "runtime")?;
-        let digest = sha256::digest(&runtime_bytes);
+        let digest = sha256::digest(&runtime_bytes, RUNTIME_MAX_BYTES as usize)?;
         if digest != binding.sha256 {
             return Err("runtime digest differs from manifest");
         }
@@ -116,7 +107,7 @@ impl SealedNf1 {
             manifest: manifest_file,
             runtime,
             runtime_digest: digest,
-            manifest_digest: sha256::digest(&manifest_bytes),
+            manifest_digest: sha256::digest(&manifest_bytes, MANIFEST_MAX_BYTES as usize)?,
             binding,
         };
         sealed.reverify()?;
@@ -154,13 +145,13 @@ impl SealedNf1 {
         compare_identity(&self.manifest, self.manifest_identity, "manifest changed")?;
         compare_identity(&self.runtime, self.runtime_identity, "runtime changed")?;
         let manifest_bytes = bounded_pread(&self.manifest, MANIFEST_MAX_BYTES, "manifest")?;
-        if sha256::digest(&manifest_bytes) != self.manifest_digest
+        if sha256::digest(&manifest_bytes, MANIFEST_MAX_BYTES as usize)? != self.manifest_digest
             || manifest::validate_accepted(&manifest_bytes)? != self.binding
         {
             return Err("manifest content changed");
         }
         let bytes = bounded_pread(&self.runtime, RUNTIME_MAX_BYTES, "runtime")?;
-        if sha256::digest(&bytes) != self.runtime_digest {
+        if sha256::digest(&bytes, RUNTIME_MAX_BYTES as usize)? != self.runtime_digest {
             return Err("runtime content changed");
         }
         Ok(())

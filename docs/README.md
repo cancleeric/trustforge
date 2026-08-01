@@ -15,6 +15,9 @@ Governance index:
 開發、合併、release 與 production deployment 的權威門控規則見
 [RELEASE-DEPLOY-GOVERNANCE.md](RELEASE-DEPLOY-GOVERNANCE.md)。
 
+AIMS 改善治理草案見 [aims/README.md](aims/README.md)；該文件集未經核准，亦不代表
+ISO/IEC 42001 認證或符合性聲明。
+
 ---
 
 ## competition/ — 命題與交付規範

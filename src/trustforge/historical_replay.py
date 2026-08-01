@@ -1,6 +1,8 @@
 """Snapshot-only daily Hermes replay with an explicit no-future-data boundary."""
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 import math
@@ -55,7 +57,18 @@ def replay_snapshot(snapshot: dict[str, Any], *, query: str, qtype: QuestionType
         raise ValueError("historical replay snapshot has no eligible documents")
     log = ExecutionLog(now_fn=lambda: boundary)
     log.record("historical_replay.start", params={"snapshot_epoch": boundary, "archive_type": snapshot.get("archive_type", "scheduled_snapshot")})
-    report, evidence = run_agent_pipeline(query, coin, qtype, docs, client=BedrockClient(offline=True), log=log, now_fn=lambda: boundary)
+    # #960 run_scope_id（契約 §2.2）：snapshot-scoped，不是 invocation-scoped。
+    # 優先用快照穩定 id；缺 id 時用「canonical 快照內容」的 SHA-256 fallback——
+    # replay 同一 snapshot_id 重現相同 claim_ids（deterministic replay）；不同 snapshot
+    # 產出 disjoint ids。FORBIDDEN 用 `replay-{n}` process-local 計數器（跨 snapshot 會撞）。
+    snapshot_id = snapshot.get("snapshot_id")
+    if snapshot_id:
+        run_scope_id = str(snapshot_id).replace(":", "-")
+    else:
+        run_scope_id = "replay-" + hashlib.sha256(
+            json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    report, evidence = run_agent_pipeline(query, coin, qtype, docs, client=BedrockClient(offline=True), log=log, now_fn=lambda: boundary, run_scope_id=run_scope_id)
     log.record("historical_replay.done", params={"eligible_documents": len(docs), "evidence_count": len(evidence)})
     return {"coin": coin, "snapshot_at": snapshot.get("snapshot_at"), "snapshot_epoch": boundary, "archive_type": snapshot.get("archive_type", "scheduled_snapshot"), "report": asdict(report), "evidence": [item.to_dict() for item in evidence], "execution_log_jsonl": log.to_jsonl()}
 

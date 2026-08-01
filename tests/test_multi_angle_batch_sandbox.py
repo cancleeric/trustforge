@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -123,12 +124,9 @@ def test_versioned_allowlist_is_disabled_by_default(monkeypatch, tmp_path):
         json.dumps(
             {
                 "enabled": False,
-                "account_id": "123456789012",
-                "caller_arn": "arn:aws:sts::123456789012:assumed-role/sandbox/session",
-                "table_arn": (
-                    "arn:aws:dynamodb:us-east-1:123456789012:"
-                    "table/tf-sandbox"
-                ),
+                "account_id_sha256": "",
+                "caller_arn_sha256": "",
+                "table_arn_sha256": "",
                 "region": "us-east-1",
                 "config_version": "v1",
             }
@@ -137,6 +135,37 @@ def test_versioned_allowlist_is_disabled_by_default(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(runner, "_ALLOWLIST_PATH", allowlist)
     with pytest.raises(RuntimeError, match="disabled"):
+        _load_allowlist()
+
+
+def test_enabled_allowlist_resolves_only_commit_bound_identity(monkeypatch, tmp_path):
+    values = {
+        "account_id": "123456789012",
+        "caller_arn": (
+            "arn:aws:sts::123456789012:assumed-role/"
+            "trustforge-896-sandbox-runner/reviewed-session"
+        ),
+        "table_arn": (
+            "arn:aws:dynamodb:us-east-1:123456789012:"
+            "table/trustforge-issue896-sandbox-3"
+        ),
+    }
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(json.dumps({
+        "enabled": True,
+        "region": "us-east-1",
+        "config_version": "v1",
+        **{
+            f"{field}_sha256": hashlib.sha256(value.encode()).hexdigest()
+            for field, value in values.items()
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(runner, "_ALLOWLIST_PATH", allowlist)
+    for field, env_name in runner._IDENTITY_ENV.items():
+        monkeypatch.setenv(env_name, values[field])
+    assert _load_allowlist() == {**values, "region": "us-east-1", "config_version": "v1"}
+    monkeypatch.setenv("TRUSTFORGE_SANDBOX_ACCOUNT_ID", "999999999999")
+    with pytest.raises(RuntimeError, match="reviewed allowlist"):
         _load_allowlist()
 
 
@@ -178,7 +207,7 @@ def test_committed_runner_policy_is_exact_table_except_sts_identity():
         "Resource": "*",
     }
     table_arn = (
-        "arn:aws:dynamodb:us-east-1:795930814369:"
+        "arn:aws:dynamodb:us-east-1:${aws:PrincipalAccount}:"
         "table/trustforge-issue896-sandbox-3"
     )
     assert statements["SandboxTableOnly"]["Resource"] == table_arn

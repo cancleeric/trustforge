@@ -1,5 +1,5 @@
 use crate::Error;
-use crate::sha256::{digest, hex};
+use trustforge_native_sys::sha256::{digest, hex};
 use trustforge_nf2_zero_capability_broker::manifest::{
     ACCEPTED_ARCHIVE_SHA256, ACCEPTED_MANIFEST_SHA256, ACCEPTED_RUNTIME_SHA256,
 };
@@ -9,9 +9,11 @@ const DOMAIN: &[u8] = b"trustforge.native-foundation-binding.v1\0";
 const NF2_MERGE_SHA256: &str = "d049ced955afca1ea3e426bdc19be0b449a1ab5ba130ac9dce386123dba38bab";
 
 const NF2_SOURCE_TREE_RECEIPT_SHA256: &str =
-    "574440bd581c9d54d9e6c0321d4899d8f113eb7551ae637b8f3007774a48cd90";
+    "636361176b16b3d85ccce2db3789d69a193a984619df3a76617f34a1dac7700a";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_EVIDENCE_RLIB_SHA256: &str =
     "bada9d9e97d961c7660b55678c518e56d1b3867b36a489d18648e0b6f26aa22b";
+// interim: repin on .83 musl build (PR-B2/B3) — manifest.rs changed in PR-B1.
 const NF2_LINKED_RELEASE_RLIB_SHA256: &str =
     "ef9e4d796488d40fce33188505abfcc8c610cb74ccd2592a410bfc1d3812ec38";
 const NF2_FIXED_TOOLCHAIN_RECEIPT_SHA256: &str =
@@ -114,9 +116,12 @@ fn linked_nf2_build_sha256(identity: &BuildIdentity) -> String {
 
 pub(crate) fn linked_nf2_source_sha256() -> String {
     const SOURCES: [(&str, &[u8]); 12] = [
+        // The workspace-root Cargo.lock is the authoritative resolution for
+        // every member build (nf2/nf3/hermetic-package share it); per-crate
+        // locks are no longer maintained once the workspace exists.
         (
             "Cargo.lock",
-            include_bytes!("../../nf2-zero-capability-broker/Cargo.lock"),
+            include_bytes!("../../Cargo.lock"),
         ),
         (
             "Cargo.toml",
@@ -158,9 +163,11 @@ pub(crate) fn linked_nf2_source_sha256() -> String {
             "src/manifest.rs",
             include_bytes!("../../nf2-zero-capability-broker/src/manifest.rs"),
         ),
+        // The shared zero-dependency syscall crate (sha256 + openat2 ABI) that
+        // nf2 path-depends on; its bytes are part of the linked source binding.
         (
-            "src/sha256.rs",
-            include_bytes!("../../nf2-zero-capability-broker/src/sha256.rs"),
+            "src/native_sys.rs",
+            include_bytes!("../../trustforge-native-sys/src/lib.rs"),
         ),
     ];
     let mut canonical = b"trustforge.nf2.linked-source.v1\0".to_vec();
@@ -201,7 +208,7 @@ mod tests {
         assert!(valid_lower_hex(&first));
         assert_eq!(
             first,
-            "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
+            "d4d080f116e5967e2dd7c8cca02e471f754484ca529b48f22c2106ed8c819568"
         );
         assert_eq!(first, foundation_sha256(&identity));
     }
@@ -224,27 +231,27 @@ mod tests {
         };
         assert_eq!(
             foundation_sha256(&evidence),
-            "63e13c4189d32683133a4ab8b93cfbbea005e934bd1b1b7020e1548f05e6d548"
+            "d4d080f116e5967e2dd7c8cca02e471f754484ca529b48f22c2106ed8c819568"
         );
         assert_eq!(
             foundation_sha256(&release),
-            "cd3a0b280abfeef7ad5dc13295f398a07826f74a28a04bb3632278cd027ea63a"
+            "07a3a28ceb2ecfaed3f2ca334f60228bfbc8c500d67223aa9b4c0220e15e5005"
         );
         assert_ne!(foundation_sha256(&evidence), foundation_sha256(&release));
     }
 
     #[test]
     fn source_tree_receipt_is_platform_independent_framing() {
+        // linked_source is derived from the SOURCES binding (single source of
+        // truth); only the reviewed git tree OID is an inline input here.
+        let linked = linked_nf2_source_sha256();
         let mut canonical = b"trustforge.nf2.source-tree-receipt.v1\0".to_vec();
         for (name, value) in [
             (
                 "git_subtree_oid_sha1",
-                "ce3e20c5875e5fdc59e60472decbc256b9649484",
+                "c43e08d8ce5cded900282ca4ddda681fe148594a",
             ),
-            (
-                "linked_source_sha256",
-                "4bd3226e2338387bacab90ee03af07e8d94ada385bdd83515724c7e533324e14",
-            ),
+            ("linked_source_sha256", linked.as_str()),
         ] {
             frame(&mut canonical, name.as_bytes());
             frame(&mut canonical, value.as_bytes());

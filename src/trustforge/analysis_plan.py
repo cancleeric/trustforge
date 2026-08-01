@@ -528,7 +528,7 @@ def initialize_analysis_plan_runtime_from_env(
 
         bedrock_runtime = boto3.client(
             "bedrock-runtime",
-            region_name=values.get("AWS_REGION", "ap-southeast-2"),
+            region_name=values.get("AWS_REGION", "us-east-1"),
             config=Config(
                 connect_timeout=2,
                 read_timeout=5,

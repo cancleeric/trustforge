@@ -1,6 +1,6 @@
 # TrustForge — 世界第一開發計劃（重寫版，2026-07-02）
 
-> 作者：CPO（gray）｜ 觸發：老闆 Eric 親看 EC2 LIVE（http://3.106.220.68/）評語「**一點都不專、離世界第一差很遠**」
+> 作者：CPO（gray）｜ 觸發：老闆 Eric 親看 EC2 LIVE（公開位址已去識別）評語「**一點都不專、離世界第一差很遠**」
 > 依據：老闆親測第一印象 + CEO 兩路批判分析（真缺口 A 產品呈現層 / B 資料誠實層），已對照
 > `src/trustforge/web.py`、`src/trustforge/pipeline.py`、`src/trustforge/ingestion/*`、`docs/archive/plans/WORLD-FIRST-ANALYSIS.md` grounded 逐條核實（見各階段「證據」）。
 >

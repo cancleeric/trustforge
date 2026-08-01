@@ -3,12 +3,20 @@
 version = 4
 
 [[package]]
+name = "trustforge-native-sys"
+version = "0.1.0"
+
+[[package]]
 name = "trustforge-nf2-zero-capability-broker"
 version = "0.1.0"
+dependencies = [
+ "trustforge-native-sys",
+]
 
 [[package]]
 name = "trustforge-nf3-one-shot-transaction"
 version = "0.1.0"
 dependencies = [
+ "trustforge-native-sys",
  "trustforge-nf2-zero-capability-broker",
 ]

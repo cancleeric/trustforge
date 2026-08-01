@@ -224,6 +224,26 @@ def test_live_invalid_comparison_second_coin_never_refreshes_provider(monkeypatc
     assert calls == []
 
 
+def test_live_invalid_question_type_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "bogus", "coin": "BTC", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
 def test_live_rate_limited_request_never_refreshes_provider(monkeypatch):
     monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
@@ -262,7 +282,8 @@ def test_live_comparison_refreshes_both_coins_and_counts_rate_limit_once(monkeyp
     )
 
     def _comparison(*args, **kwargs):
-        assert kwargs["client_ip"] == ""
+        assert kwargs["client_ip"] == "9.9.9.9"
+        assert kwargs["enforce_rate_limit"] is False
         raise ValueError("stop after admission")
 
     monkeypatch.setattr(web, "_do_comparison", _comparison)
@@ -396,7 +417,7 @@ def test_lambda_live_token_header_case_insensitive_upper(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
     captured_qs = {}
 
-    def _fake_do_analyze(qs, client_ip=None):
+    def _fake_do_analyze(qs, client_ip=None, **kwargs):
         captured_qs.update(qs)
         return (object(), [], [])
 
@@ -464,7 +485,7 @@ def test_lambda_analyze_json_success_unaffected():
 def _authored_single(coin="BTC", query="lambda author leak test"):
     """真的跑一次 `web.run()`，尾端多附一筆帶 `author` 的 `Evidence`，
     模擬「連接器真的抓到來源平台公開 username」的情境。"""
-    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True)
+    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True, run_scope_id="test-lambda-authored")
     authored_ev = Evidence(
         source="reddit-bitcoin",
         fetched_at="2026-07-06T00:00:00Z",

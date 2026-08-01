@@ -6,8 +6,12 @@ import signal
 import time
 import logging
 from trustforge.analysis_flow import AnalysisFlow
+from trustforge.analysis_flow_ports import register_bedrock_allowed
 from trustforge.hermes import autonomy_enabled
 from trustforge.snapshot_writer import write_trust_snapshots
+import trustforge.web as web
+
+register_bedrock_allowed(lambda: web._bedrock_allowed())
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Hermes continuous pre-analysis flow")

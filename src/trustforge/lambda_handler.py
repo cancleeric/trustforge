@@ -188,9 +188,11 @@ def handler(event, context=None):
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
             from .schema import QuestionType
             qtype_raw = qs.get("type", ["multi_source"])[0]
+            qtype_invalid = False
             try:
                 qtype = QuestionType(qtype_raw)
             except ValueError:
+                qtype_invalid = True
                 qtype = QuestionType.MULTI_SOURCE
 
             try:
@@ -200,6 +202,8 @@ def handler(event, context=None):
                 # 同一請求被重複計數。非 competition Lambda 永不走此 refresh。
                 refresh_coins: tuple[str, ...] = ()
                 if _COMPETITION_MODE == "live":
+                    if qtype_invalid:
+                        raise ValueError("分析類型不在可選範圍內")
                     query = qs.get("q", [""])[0]
                     if len(query) > 1000:
                         raise ValueError(
@@ -228,11 +232,12 @@ def handler(event, context=None):
                         refresh_provider_cache(refresh_coin)
 
                 if qtype == QuestionType.COMPARISON:
-                    # Competition Live 已在 refresh 前對真實 caller IP 限流；
-                    # 下游用空 IP 使既有 parser 不再計第二次，同時保留既有
-                    # callable 介面（部署外的窄簽名 adapter 不會被新 kwarg 弄壞）。
-                    analysis_ip = "" if _COMPETITION_MODE == "live" else client_ip
-                    result = web._do_comparison(qs, client_ip=analysis_ip)
+                    if _COMPETITION_MODE == "live":
+                        result = web._do_comparison(
+                            qs, client_ip=client_ip, enforce_rate_limit=False,
+                        )
+                    else:
+                        result = web._do_comparison(qs, client_ip=client_ip)
                     report_a, evidence_a, report_b, evidence_b, log = result
                     if path == "/analyze.json":
                         # codex vp-engineering 終審 H1（已實測證實 author 從此
@@ -252,8 +257,14 @@ def handler(event, context=None):
                         "text/html; charset=utf-8",
                     )
                 else:
-                    analysis_ip = "" if _COMPETITION_MODE == "live" else client_ip
-                    report, evidence, log = web._do_analyze(qs, client_ip=analysis_ip)
+                    if _COMPETITION_MODE == "live":
+                        report, evidence, log = web._do_analyze(
+                            qs, client_ip=client_ip, enforce_rate_limit=False,
+                        )
+                    else:
+                        report, evidence, log = web._do_analyze(
+                            qs, client_ip=client_ip,
+                        )
                     if path == "/analyze.json":
                         # 同上：呼叫 web.py 共用函式，不再自己組 payload。
                         payload = web._build_analyze_json_payload(report, evidence, log)

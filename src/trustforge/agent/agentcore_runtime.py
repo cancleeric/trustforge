@@ -8,6 +8,7 @@ offline paths do not acquire a hard AgentCore dependency.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import asdict
 from typing import Any
 
@@ -52,6 +53,7 @@ def analyze_market(
         qtype,
         data_mode=data_mode,
         llm_mode=llm_mode,
+        run_scope_id=f"agentcore-{uuid.uuid4().hex}",
     )
     return {
         "report": asdict(report),

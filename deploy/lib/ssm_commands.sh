@@ -10,9 +10,9 @@
 #
 # This file is intended to be sourced, not executed.
 #
-# Requires: jq on PATH. activate_release.sh validates this at startup (before
-# any production mutation) so a missing jq fails fast rather than breaking
-# post-verify/rollback mid-activation.
+# Requires: jq or python3 on PATH. activate_release.sh validates this at
+# startup (before any production mutation) so a missing JSON encoder fails fast
+# rather than breaking post-verify/rollback mid-activation.
 
 # build_ssm_commands_json
 # Read shell commands from stdin (one command per line) and emit a compact
@@ -29,5 +29,9 @@
 #     | build_ssm_commands_json)
 #   aws ssm send-command ... --parameters "commands=${params}" ...
 build_ssm_commands_json() {
-  jq -R . | jq -s -c .
+  if command -v jq >/dev/null 2>&1; then
+    jq -R . | jq -s -c .
+    return
+  fi
+  python3 -c 'import json, sys; print(json.dumps([line.rstrip("\n") for line in sys.stdin], ensure_ascii=False, separators=(",", ":")))'
 }

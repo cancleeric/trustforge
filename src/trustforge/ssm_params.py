@@ -54,7 +54,7 @@ def _get_or_create_client() -> Any:
         import boto3  # 延遲匯入：離線模式不需安裝/設定 AWS
         from botocore.config import Config
 
-        region = os.getenv("AWS_REGION", "ap-southeast-2")
+        region = os.getenv("AWS_REGION", "us-east-1")
         config = Config(
             connect_timeout=3,
             read_timeout=5,

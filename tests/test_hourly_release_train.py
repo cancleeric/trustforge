@@ -553,6 +553,7 @@ def test_production_deploy_restores_both_layers_when_public_frontend_check_fails
 
 
 def test_restore_backend_reactivates_verified_previous_artifact(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_PRODUCTION_ACCOUNT_ID", "123456789012")
     expected_sha = "a" * 40
     expected_digest = "b" * 64
 
@@ -604,6 +605,7 @@ def test_restore_backend_reactivates_verified_previous_artifact(monkeypatch, tmp
 
 
 def test_capture_active_pointer_preserves_complete_legacy_pointer(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_PRODUCTION_ACCOUNT_ID", "123456789012")
     expected_digest = "b" * 64
     pointer = {
         "digest": expected_digest,
@@ -616,6 +618,7 @@ def test_capture_active_pointer_preserves_complete_legacy_pointer(monkeypatch):
 
 
 def test_capture_active_pointer_rejects_digest_drift(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_PRODUCTION_ACCOUNT_ID", "123456789012")
     monkeypatch.setattr(
         train,
         "run",
