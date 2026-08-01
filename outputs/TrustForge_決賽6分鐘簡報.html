@@ -1,223 +1,36 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
+<!doctype html>
+<html lang="zh-Hant">
 <head>
-<meta charset="UTF-8">
-<title>TrustForge — 六分鐘簡報逐字講稿</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrustForge Hermes｜正式提案簡報</title>
 <style>
-body{font-family:'Microsoft JhengHei','PingFang TC',sans-serif;background:#f8fafc;color:#1e293b;max-width:860px;margin:0 auto;padding:40px 32px 80px}
-h1{font-size:28px;font-weight:800;color:#1e40af;text-align:center;margin-bottom:4px}
-.sub{text-align:center;color:#64748b;font-size:14px;margin-bottom:8px}
-.team{text-align:center;color:#475569;font-size:13px;margin-bottom:32px}
-hr{border:none;border-top:2px solid #e2e8f0;margin:28px 0}
-/* 說明框 */
-.notice{background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px 20px;margin-bottom:28px}
-.notice p{margin:4px 0;font-size:13px;color:#0369a1}
-/* 段落標題 */
-.sec-title{font-size:17px;font-weight:800;color:#1d4ed8;margin:28px 0 4px;padding-bottom:6px;border-bottom:2px solid #bfdbfe}
-.timing{display:inline-block;background:#fff7ed;border:1px solid #fed7aa;border-radius:20px;padding:3px 14px;font-size:12px;font-weight:700;color:#ea580c;margin-bottom:12px}
-/* 逐字稿 */
-.speech{background:#fff;border-left:4px solid #3b82f6;border-radius:0 8px 8px 0;padding:14px 18px;margin:8px 0;font-size:16px;line-height:1.8;color:#1e293b;box-shadow:0 1px 3px rgba(0,0,0,.06)}
-.speech em{color:#1d4ed8;font-style:normal;font-weight:700}
-/* 備註 */
-.note{background:#f1f5f9;border-radius:6px;padding:8px 14px;font-size:13px;color:#64748b;margin:4px 0 10px}
-.note::before{content:"📌 "}
-/* 條列 */
-ul{margin:6px 0 10px 20px;padding:0}
-li{font-size:15px;line-height:1.7;color:#334155;margin:3px 0}
-li b{color:#1d4ed8}
-/* Q&A */
-.qa-block{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px;margin:10px 0;box-shadow:0 1px 3px rgba(0,0,0,.05)}
-.qa-q{font-size:15px;font-weight:700;color:#d97706;margin-bottom:8px}
-.qa-q::before{content:"Q："}
-.qa-a{font-size:15px;color:#334155;line-height:1.7}
-.qa-a::before{content:"A：";font-weight:700;color:#1d4ed8}
-/* 賽前提案 */
-.proposal{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px 20px;margin:10px 0}
-.proposal h3{color:#15803d;font-size:15px;font-weight:700;margin-bottom:8px}
-.proposal p,.proposal li{font-size:14px;color:#166534}
-/* print */
-@media print{body{max-width:100%;padding:20px}.note{background:#f8f8f8}}
+:root{--bg:#07121f;--bg2:#10294a;--ink:#f8fbff;--muted:#b7c9dc;--cyan:#41d9e8;--gold:#ffc85a;--violet:#9b8cff;--line:rgba(255,255,255,.18);--panel:rgba(13,34,57,.78);--good:#62e6a7}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:"Microsoft JhengHei","Noto Sans TC",system-ui,sans-serif}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 82% 12%,rgba(65,217,232,.18),transparent 30%),radial-gradient(circle at 8% 90%,rgba(155,140,255,.18),transparent 28%),linear-gradient(135deg,var(--bg),var(--bg2));pointer-events:none}.deck{position:relative;width:100%;height:100%}.slide{position:absolute;inset:0;display:none;padding:5.2vh 6vw 4.5vh;overflow:hidden}.slide.active{display:flex;flex-direction:column;animation:enter .35s ease both}@keyframes enter{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}.top,.content,.footer{position:relative;z-index:1}.top,.footer{display:flex;justify-content:space-between;align-items:center}.index,.brand{font-size:clamp(11px,1vw,15px);font-weight:900;letter-spacing:.14em}.index{color:var(--cyan)}.brand{color:var(--muted)}.content{flex:1;display:flex;flex-direction:column;justify-content:center}h1,h2,h3,p{margin:0}h1{font-size:clamp(46px,5.2vw,84px);line-height:1.08;letter-spacing:-.045em;max-width:1150px}h2{font-size:clamp(31px,3.3vw,54px);line-height:1.15;letter-spacing:-.035em;max-width:1200px}h3{font-size:clamp(18px,1.5vw,27px)}p,li{font-size:clamp(15px,1.2vw,21px);line-height:1.55}.accent{color:var(--cyan)}.gold{color:var(--gold)}.violet{color:var(--violet)}.muted{color:var(--muted)}.eyebrow{color:var(--cyan);font-size:clamp(12px,1.05vw,17px);font-weight:900;letter-spacing:.16em;margin-bottom:2.6vh}.sub{margin-top:2.6vh;max-width:1030px;color:var(--muted);font-size:clamp(17px,1.6vw,27px)}.footer{color:var(--muted);font-size:12px}.rule{height:1px;background:linear-gradient(90deg,var(--violet),var(--cyan),transparent);margin:3.5vh 0 2.6vh}.grid2,.grid3,.grid4{display:grid;gap:1.5vw;margin-top:3.3vh}.grid2{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:repeat(3,1fr)}.grid4{grid-template-columns:repeat(4,1fr)}.card{padding:1.7vw;border:1px solid var(--line);border-radius:18px;background:var(--panel);min-height:150px;box-shadow:0 16px 40px rgba(0,0,0,.18)}.card.em{border-color:rgba(65,217,232,.7);background:linear-gradient(145deg,rgba(65,217,232,.16),rgba(155,140,255,.12))}.card .num{font-size:13px;color:var(--cyan);font-weight:900;letter-spacing:.12em}.card h3{margin:12px 0 8px;color:var(--cyan)}.card p{font-size:clamp(13px,1vw,17px);color:var(--muted)}.compare{display:grid;grid-template-columns:1fr 1fr;gap:4vw;margin-top:4vh}.compare h3{margin-bottom:1.5vh}.list{list-style:none;padding:0;margin:0}.list li{position:relative;padding:1vh 0 1vh 26px;border-bottom:1px solid rgba(255,255,255,.07)}.list li:before{content:"";position:absolute;left:0;top:1.65em;width:8px;height:8px;border-radius:50%;background:var(--cyan);box-shadow:0 0 14px var(--cyan)}.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:stretch;gap:1vw;margin-top:4vh}.flow .step{padding:2vw;border:1px solid var(--line);border-radius:18px;background:var(--panel);text-align:center}.flow .step strong{display:block;color:var(--cyan);font-size:clamp(18px,1.55vw,27px);margin-bottom:10px}.flow .step span{color:var(--muted);font-size:clamp(13px,1vw,17px);line-height:1.45}.arrow{align-self:center;color:var(--gold);font-size:30px;font-weight:900}.band{display:flex;flex-wrap:wrap;gap:11px;justify-content:center;margin-top:3vh}.band span{padding:11px 15px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.08);font-weight:800;font-size:clamp(12px,.95vw,16px)}.callout{margin-top:3vh;padding:1.5vh 1.6vw;border-left:4px solid var(--cyan);background:rgba(65,217,232,.1);font-size:clamp(18px,1.5vw,25px);font-weight:800}.deliver{display:grid;grid-template-columns:.8fr 1.5fr;gap:3vw;align-items:center;margin-top:3vh}.input{padding:2.4vw;border-left:4px solid var(--cyan)}.input small{color:var(--cyan);font-weight:900;letter-spacing:.14em}.input p{font-size:clamp(19px,1.8vw,30px);font-weight:900;margin-top:12px}.quad{display:grid;grid-template-columns:1fr 1fr;gap:1.1vw}.quad .card{min-height:118px;padding:1.35vw}.quad h3{margin:0 0 8px}.security{display:grid;grid-template-columns:1.1fr .9fr;gap:3vw;margin-top:3vh}.stack{display:grid;gap:1.1vh}.row{display:grid;grid-template-columns:170px 1fr;gap:18px;padding:1.3vh 1.3vw;border:1px solid var(--line);border-radius:14px;background:var(--panel)}.row strong{color:var(--cyan)}.row span{color:var(--muted);font-size:clamp(13px,1vw,17px)}.scoreline{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:3vh}.scoreline div{text-align:center;padding:14px 8px;border-top:3px solid var(--cyan);background:rgba(255,255,255,.08)}.scoreline strong{display:block;color:var(--cyan);font-size:clamp(19px,1.7vw,28px)}.scoreline span{color:var(--muted);font-size:clamp(11px,.9vw,15px)}.quote{text-align:center;margin-top:3.2vh;font-size:clamp(20px,2vw,33px);font-weight:900;color:var(--cyan)}.progress{position:fixed;left:0;bottom:0;height:4px;background:linear-gradient(90deg,var(--violet),var(--cyan));z-index:10;transition:width .3s}.hint{position:fixed;right:22px;bottom:14px;color:rgba(255,255,255,.35);font-size:11px;z-index:10}.notes{display:none}@media(max-width:800px){.slide{padding:4vh 5vw}.grid4,.grid3{grid-template-columns:1fr 1fr}.flow{grid-template-columns:1fr}.flow .arrow{transform:rotate(90deg);justify-self:center}.compare,.deliver,.security{grid-template-columns:1fr;gap:2vh}.row{grid-template-columns:130px 1fr}.scoreline{grid-template-columns:repeat(3,1fr)}}@media print{html,body{overflow:visible;background:#07121f}.slide{position:relative;display:flex!important;width:13.333in;height:7.5in;page-break-after:always}.hint,.progress{display:none}}
+@page{size:13.333in 7.5in;margin:0}@media print{html,body{width:auto;height:auto;overflow:visible;background:#07121f}.deck{width:auto;height:auto}.slide,.slide.active{position:relative;inset:auto;display:flex!important;flex-direction:column;width:13.333in;height:7.5in;padding:.39in .8in .34in;page-break-after:always;break-after:page;overflow:hidden;background:radial-gradient(circle at 82% 12%,rgba(65,217,232,.18),transparent 30%),radial-gradient(circle at 8% 90%,rgba(155,140,255,.18),transparent 28%),linear-gradient(135deg,#07121f,#10294a);animation:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}body:before{display:none}.grid3{grid-template-columns:repeat(3,1fr)}.grid4{grid-template-columns:repeat(4,1fr)}.flow{grid-template-columns:1fr auto 1fr auto 1fr}.flow .arrow{transform:none}.compare,.deliver,.security{grid-template-columns:1fr 1fr}.slide:last-of-type{page-break-after:auto;break-after:auto}.hint,.progress{display:none}}
 </style>
 </head>
 <body>
+<main class="deck">
+<section class="slide active"><div class="top"><span class="index">01</span><span class="brand">PAIN &amp; DIRECTION</span></div><div class="content"><div class="eyebrow">HOYA BIT｜痛點與解題方向</div><h1>市場不缺 AI 答案，<br>缺的是<span class="accent">值得相信</span>的判斷。</h1><div class="compare"><div><h3 class="gold">市場現況</h3><ul class="list"><li>資訊快速、過時、矛盾</li><li>同稿轉載被當成多方支持</li><li>流暢答案不等於可驗證答案</li></ul></div><div><h3 class="accent">TrustForge 定位</h3><ul class="list"><li>結論附 Evidence 與完整溯源鏈</li><li>正反證據並列，不隱藏資料缺口</li><li>不預測價格，不取代人類決策</li></ul></div></div><div class="callout">我們做的不是幫你讀新聞，而是幫你驗新聞——不是資訊聚合，是信任量化。</div></div><div class="footer"><span>2026 雲湧智生 · Team 11 中再參與 · HurricaneSoft</span><span>1 / 6</span></div><aside class="notes">0:00–0:45｜一句話帶出痛點，快速建立定位。不要引用未附來源的幻覺率數字；把焦點放在重複來源、矛盾訊號與不可追溯。</aside></section>
 
-<h1>⚗️ TrustForge Hermes 信源熔爐</h1>
-<p class="sub">六分鐘簡報逐字講稿 ＋ 四分鐘備詢 Q&A ＋ 賽前提案要點</p>
-<p class="team">2026 雲湧智生黑客松 · HOYA BIT 智慧交易命題 · Team 11 中再參與<br>
-隊長：王英豪　成員：嵋婕　林子彤　王榆翔 Nicholas</p>
+<section class="slide"><div class="top"><span class="index">02</span><span class="brand">THREE-LAYER SOLUTION</span></div><div class="content"><h2>解決方案：三層管線把<span class="accent">信任評分放在報告生成之前</span></h2><div class="flow"><div class="step"><strong>Layer 1｜Ingestion＋Extraction</strong><span>彙整新聞／社群／鏈上／市場資料；Bedrock 抽取可驗證 Claim，離線時採規則 fallback</span></div><div class="arrow">→</div><div class="step"><strong>Layer 2｜Trust Kernel</strong><span>來源信譽、獨立佐證、時效衰減、操縱風險與信任評分</span></div><div class="arrow">→</div><div class="step"><strong>Layer 3｜Agent</strong><span>Bedrock 依既有評分行文，輸出溯源報告與反方證據</span></div></div><div class="callout">TrustScore = w_src × 來源信譽 ＋ w_corr × 交叉佐證 ＋ w_rec × 時效衰減 − w_manip × 操縱風險</div><div class="band"><span>Layer 2 是護城河</span><span>claim_id → URL＋時間戳</span><span>核心評分不呼叫外部 LLM</span><span>矛盾與棄權可見</span></div></div><div class="footer"><span>同樣輸入、同樣計算；每個結論都能回到原始證據</span><span>2 / 6</span></div><aside class="notes">0:45–2:15｜用一分半完整說明三層管線與信任公式。強調Bedrock先抽取Claim，Trust Kernel再完成信任計算，最後才由Bedrock行文；不要把尚未正式benchmark的低於一秒當作SLA。</aside></section>
 
-<div class="notice">
-  <p>🔵 <b>藍色引用框</b> = 對評審說的話（逐字稿）</p>
-  <p>⏱ <b>橘色時間標</b> = 時間控制點，自己心裡卡時間</p>
-  <p>📌 <b>灰色備註</b> = 操作提示，不說出口</p>
-  <p>📋 第一階段 15 分鐘 Live Demo 是在<b>跑系統</b>，不用這份稿；這份稿用於<b>第二階段 6 分鐘簡報</b></p>
-  <p>🟡 <b>黃底段落</b> = 時間不夠可以跳過，先背藍色的</p>
-</div>
+<section class="slide"><div class="top"><span class="index">03</span><span class="brand">AI &amp; DEFENSIBLE TECHNOLOGY</span></div><div class="content"><h2>AI 技術應用：讓系統能改善，<span class="accent">但不能自行失控</span></h2><div class="security"><div class="stack"><div class="row"><strong>Claim Extraction</strong><span>Bedrock 從非結構化證據抽出可驗證主張；不做信任判斷。</span></div><div class="row"><strong>Stance Classification</strong><span>判斷兩條主張支持、矛盾或中性；不做價格方向預測。</span></div><div class="row"><strong>Report Assembly</strong><span>把 pipeline 結果寫成報告；不得自行增加分析依據。</span></div><div class="row"><strong>Bounded Agent</strong><span>更新來源、保存快照、量測、回放、診斷、提出候選，再由人工批准。</span></div></div><div class="stack"><div class="row"><strong>自行訓練</strong><span>Isotonic Regression 校準 raw confidence；不是重訓大型語言模型。</span></div><div class="row"><strong>SageMaker／ModelHub</strong><span>共用訓練介面；正式競賽採 AWS 路徑，候選不得自動上線。</span></div><div class="row"><strong>核心可替換</strong><span>來源、模型、快取、監控與預算走標準介面，核心評分規則不綁外部服務。</span></div><div class="row"><strong>鯨魚＋算力護欄</strong><span>Whale Alert／Arkham／Etherscan／CMC；token、成本、預算與快取皆留痕。</span></div></div></div><div class="callout">三個原則：能進化但人類有否決權；核心不綁外部服務；每個判斷都能事後審計。</div></div><div class="footer"><span>automatic_apply=false · requires_human_approval=true</span><span>3 / 6</span></div><aside class="notes">2:15–4:15｜先講Bedrock三個精準用途，再講有界研究循環、自訓校準模型、可替換介面、鯨魚追蹤與算力護欄。不要宣稱碳盤查、70%減量、ISO合規或即時來源必然可用。</aside></section>
 
-<hr>
+<section class="slide"><div class="top"><span class="index">04</span><span class="brand">ENTERPRISE DATA</span></div><div class="content"><h2>數據資料應用：六類來源互證，<span class="accent">HOYA BIT 是事實錨點</span></h2><div class="grid3"><article class="card em"><div class="num">01</div><h3>HOYA BIT／OHLCV</h3><p>五幣行情、成交量、分析窗口與後續校準 ground truth。</p></article><article class="card"><div class="num">02</div><h3>新聞／RSS</h3><p>事件驅動；辨識原始報導、同稿轉載與時間。</p></article><article class="card"><div class="num">03</div><h3>社群</h3><p>情緒與協同發文風險；聲量不直接當成事實。</p></article><article class="card"><div class="num">04</div><h3>鏈上／鯨魚</h3><p>Whale Alert、Arkham、Etherscan；大額轉帳與實體歸因。</p></article><article class="card"><div class="num">05</div><h3>監管／官方</h3><p>政策風險、專案公告及第一方聲明。</p></article><article class="card"><div class="num">06</div><h3>市場／生態</h3><p>CoinGecko、DefiLlama、CMC；市值與流動性。</p></article></div><div class="band"><span>趨勢基準</span><span>T+7 校準</span><span>SHA-256 完整性</span><span>source＋time＋claim_id</span></div></div><div class="footer"><span>不是來源越多越好，而是每個來源都可識別、可驗證、可追溯</span><span>4 / 6</span></div><aside class="notes">4:15–5:00｜用45秒講六類來源與HOYA BIT資料三個用途：市場基準、後續校準、完整性與覆蓋記錄。鯨魚訊號是脈絡，不直接等於買賣方向。</aside></section>
 
-<!-- ══ PART A ══ -->
-<h1 style="font-size:22px;text-align:left;margin-bottom:4px">PART A — 六分鐘簡報逐字稿（完整擴寫版）</h1>
-<p style="font-size:13px;color:#64748b;margin-bottom:20px;font-style:italic">素材比六分鐘多，自己根據現場節奏剪掉灰色「可略」段落</p>
+<section class="slide"><div class="top"><span class="index">05</span><span class="brand">AWS ARCHITECTURE</span></div><div class="content"><h2>AWS 架構：五個服務支撐<span class="accent">15分鐘可稽核執行</span></h2><div class="security"><div class="stack"><div class="row"><strong>EC2 + nginx</strong><span>HTTPS入口與應用服務；Python API只監聽loopback。</span></div><div class="row"><strong>Amazon Bedrock</strong><span>Claim抽取、有限分類與行文；模型、token與成本留痕。</span></div><div class="row"><strong>DynamoDB</strong><span>狀態、冪等、快取與成本協調。</span></div><div class="row"><strong>S3</strong><span>四份交付物、模型產物、SHA-256與版本manifest。</span></div><div class="row"><strong>SageMaker AI</strong><span>信心校準模型的AWS訓練後端。</span></div></div><div class="quad"><article class="card em"><h3>FINAL REPORT</h3><p>判斷、依據、信心與限制。</p></article><article class="card"><h3>EVIDENCE LIST</h3><p>來源、時間、引用與claim_id。</p></article><article class="card"><h3>EXECUTION LOG</h3><p>工具、模型、成本與錯誤。</p></article><article class="card"><h3>SOURCE / CONFIG</h3><p>原始碼、設定與重現步驟。</p></article></div></div></div><div class="footer"><span>IAM＋SSM管理機密 · Secret不進Git · 失敗不冒充成功</span><span>5 / 6</span></div><aside class="notes">5:00–5:30｜用30秒由入口講到Bedrock、DynamoDB、S3與SageMaker，再指出四份交付以run_id及claim_id互相作證。</aside></section>
 
-<!-- 第一段 -->
-<div class="sec-title">【第一段】開場痛點　0:00 – 1:00（目標 1 分鐘）</div>
-<div class="timing">⏱ 開口第一句要有自信，不要急</div>
+<section class="slide"><div class="top"><span class="index">06</span><span class="brand">CLOSING</span></div><div class="content"><h2>TrustForge 不預測價格；它回答<span class="accent">這個判斷憑什麼相信</span></h2><div class="grid3"><article class="card em"><div class="num">WHAT</div><h3>該信幾分</h3><p>可拆解的來源、佐證、時效與風險，而不是黑箱信心。</p></article><article class="card"><div class="num">WHY</div><h3>依據什麼</h3><p>每個結論連回Evidence、原始來源、時間戳與執行紀錄。</p></article><article class="card"><div class="num">WHEN</div><h3>何時改變判斷</h3><p>矛盾、資料缺口與could_flip條件完整保留。</p></article></div><div class="callout">從HOYA BIT市場資訊頁開始，逐步累積來源可靠度與校準資料，最終形成可整合的Trust Layer API。</div><p class="quote">他們給你答案；我們給你答案背後的證據。</p></div><div class="footer"><span>Team 11 中再參與 · HurricaneSoft</span><span>6 / 6</span></div><aside class="notes">5:30–6:00｜收回開場：不預測價格、不替人決策，而是讓使用者知道該信幾分、依據什麼、什麼情況應改變判斷。最後金句放慢。</aside></section>
 
-<div class="speech">各位評審、各位好，我們是 Team 11，<em>中再參與</em>，出品 <em>TrustForge Hermes</em>，中文名叫「信源熔爐」。</div>
-
-<div class="speech">我先問大家一個問題：你上一次看到一篇加密市場分析，你怎麼判斷它可不可信？</div>
-<div class="note">停頓一下，讓評審想一秒，製造對話感</div>
-
-<div class="speech">現實是，大多數人沒有辦法判斷。因為加密市場每天產生的資訊量太龐大了——新聞、社群、鏈上數據、監管公告，同時從四面八方湧進來。問題從來不是<em>資訊太少</em>，而是<em>根本不知道哪條該信、各自該信多少</em>。</div>
-
-<div class="speech">更麻煩的是，現在大家都開始用 AI 來幫忙整理這些資訊。但 AI 本身也不可靠——一項對 <em>10 個商業 AI 系統、近七萬條引用</em>的學術實測顯示，LLM 的引用幻覺率高達 <em>11.4% 到 56.8%</em>。</div>
-
-<div class="note">停頓一秒，讓數字沉澱</div>
-
-<div class="speech">也就是說，超過一成、甚至近六成的引用，可能根本不存在。這是不能接受的——畢竟加密市場的決策往往是真金白銀，你依賴的那條「分析師引用」，搞不好根本是 AI 捏造的。你的判斷，建立在一個幻覺上。</div>
-
-<div class="speech">那現有工具怎麼解？一般 RAG 系統的作法，是把所有來源等重丟給 LLM 一起摘要。這沒有解決問題，只是讓問題更隱蔽——你看到的是一份看起來很完整的分析，但你不知道哪條消息可信、哪條是機器人洗版、哪條其實已經被三十個媒體抄來抄去只剩一個原始來源。</div>
-
-<!-- 第二段 -->
-<div class="sec-title">【第二段】TrustForge 是什麼　1:00 – 2:30</div>
-<div class="timing">⏱ 目標 1~1.5 分鐘，講清楚三層架構與核心差異</div>
-
-<div class="speech">TrustForge 是一個多源資訊<em>「信任提煉」Agent</em>。我們的解法不是換一個更強的 LLM，而是在 LLM 接觸資料之前，先做一層<em>信任評估</em>。</div>
-
-<div class="speech">架構分三層。第一層是資料抓取，我們平行抓取六類來源：價格數據、HOYA BIT 行情、鏈上數據、新聞、社群、監管公告。第二層，也是我們的核心——<em>Trust Layer 信任提煉層</em>。第三層才是 AWS Bedrock，負責把已經加權過的可信摘要行文成報告。</div>
-
-<div class="note">切換到架構圖投影片</div>
-
-<div class="speech">Trust Layer 做什麼？它對每一條從文件裡抽出來的主張，計算一個信任分數。這個分數由四個維度決定：<em>來源信譽</em>——鏈上數據跟監管公告的可信度遠高於匿名社群貼文；<em>交叉佐證</em>——這條主張有幾個真正獨立的來源支持；<em>時效衰減</em>——加密市場消息半衰期很短，三天前的訊號要打折；最後是<em>操縱懲罰</em>——如果偵測到拉盤喊單、bot 大量轉發相似文字，這條主張的分數直接被壓低。</div>
-
-<div class="speech">最關鍵的設計是：<em>Bedrock 在這個流程裡只負責行文</em>。它收到的不是原始新聞，而是已經被我們 pipeline 加權過的可信摘要。它只能引用我們給它的 claim ID，不能自己引入外部沒被驗證的結論。這就是反作弊設計的技術保障。</div>
-
-<!-- 第三段 -->
-<div class="sec-title">【第三段】四大技術亮點　2:30 – 4:30</div>
-<div class="timing">⏱ 目標 2 分鐘，每個亮點 30 秒，配合畫面說</div>
-
-<div class="speech">接下來我展示四個關鍵設計，這是讓我們跟一般 crypto AI 真正拉開差距的地方。</div>
-
-<b style="color:#1d4ed8;font-size:15px;display:block;margin:14px 0 6px">① 反事實 A/B 對照</b>
-<div class="speech">我們拿同一道題，同時跑「關掉信任層的 naive RAG」和「TrustForge 完整 pipeline」。你可以在這張截圖看到：naive 版被兩條機器人假新聞帶偏，給出了一個過度樂觀的判斷；TrustForge 的操縱旗標介入，把這兩條壓到 0.12 分，移進反方清單，最終輸出的判斷就不一樣了。</div>
-<div class="note">展示 A/B 對照截圖（賽前離線跑好存證，不佔 15 分鐘執行時間）</div>
-<div class="speech" style="background:#fffbeb;border-left-color:#f59e0b">【可略，時間不夠跳過】這個設計的意義是：Trust Layer 不只是「裝飾性功能」，它實際上在改變結論。這是我們能讓評審在 30 秒內看懂價值的最直接方式。</div>
-
-<b style="color:#1d4ed8;font-size:15px;display:block;margin:14px 0 6px">② 來源獨立性</b>
-<div class="speech">你看這個例子，表面上有 14 篇新聞在討論同一件事——但我們去重之後，<em>真正獨立的來源只有 3 個</em>。其他 11 篇，都是轉載或改寫同一個原始消息。我們的交叉佐證計的是獨立來源數，不是文章數。所以它不會被「14 篇報導」這個數字騙到，認為有很強的多方佐證。</div>
-
-<b style="color:#1d4ed8;font-size:15px;display:block;margin:14px 0 6px">③ 矛盾帳本</b>
-<div class="speech">當訊號互相矛盾的時候，一般系統要嘛硬給一個方向，要嘛迴避不說。TrustForge 不這樣做。你看這個例子：資金費率偏多，但鏈上同時出現大額流出。這兩個訊號方向相反。我們的<em>矛盾帳本</em>會把它們並列顯示，各自標明信任權重，讓分析師自己判斷哪個訊號更可靠。我們給你完整的資訊，不代替你做決定。</div>
-
-<b style="color:#1d4ed8;font-size:15px;display:block;margin:14px 0 6px">④ 負空間情報</b>
-<div class="speech">最後這個比較特別——這次跑下來，監管面<em>沒有</em>任何新事件，巨鯨鏈上活動也<em>異常平靜</em>。一般系統看到空集合，會直接跳過這個維度，好像這個維度不存在。我們不會。我們標記：<em>「本次分析窗口內，未觀察到監管面新訊號」</em>。這個「沒有訊號」本身就是情報。在重大決策前，知道監管面目前無動作，是很有價值的訊息。</div>
-<div class="note">配合 Evidence Panel 畫面，指給評審看「監管 0 事件」的標記</div>
-
-<!-- 第四段 -->
-<div class="sec-title">【第四段】Live Demo 結果走讀　4:30 – 5:30</div>
-<div class="timing">⏱ 目標 1 分鐘，帶評審親眼看溯源鏈，不要自己一直說，讓他們看畫面</div>
-
-<div class="speech">現在看報告本身。大家注意到每一個結論旁邊都有一個 <em>Evidence ID</em>，比如 [E3]、[E7]。這不是裝飾，是真正的溯源索引。</div>
-
-<div class="speech">我點開 E3——你可以看到：來源是 CoinGlass API，抓取時間是今天上午 09 點 23 分，引用的是 SOL 過去 24 小時交易所淨流出數據，對應的主張是「鏈上出現潛在賣壓轉弱訊號」。這條是真的，可以去 CoinGlass 查證。</div>
-<div class="note">點開 evidence.json 給評審看，停留幾秒讓他們讀</div>
-
-<div class="speech">再看執行紀錄：總共跑了 <em>11 分 42 秒</em>，使用了 78% 的 15 分鐘預算，三次 Bedrock 呼叫——claim 抽取、判斷整合、敘事行文。每一步都有時戳，都可以審計。這份報告的每一個字，都有來歷。</div>
-<div class="note">展示 execution_log.jsonl，指一下時間戳欄位</div>
-
-<!-- 第五段 -->
-<div class="sec-title">【第五段】誠實定位與結尾　5:30 – 6:00</div>
-<div class="timing">⏱ 目標 30 秒，語速放慢，最後一句要有力</div>
-
-<div class="speech">最後，我們誠實說一件事：TrustForge <em>不預測幣價，不保證勝率</em>。我們自己的驗證數據顯示，純價格方向預測的準確度接近隨機。</div>
-
-<div class="speech" style="background:#fffbeb;border-left-color:#f59e0b">【可略】這不是缺點，這是我們的設計選擇。加密市場的價格走勢受太多不可預測因素影響，任何聲稱能穩定預測的系統，你都應該更加懷疑它。</div>
-
-<div class="speech">我們解決的是更根本的問題：<em>讓你看到資訊從哪來、有多完整、有無來源互相矛盾。</em> 讓你在做決策之前，知道自己站在什麼樣的資訊基礎上。</div>
-
-<div class="speech">Nansen、LunarCrush、Arkham 都會給你一個分數——但它們沒有給你這一層：<em>可溯源、可審計、讓你能查證的信任鏈</em>。這就是 TrustForge。謝謝。</div>
-
-<hr>
-
-<!-- ══ PART B ══ -->
-<h1 style="font-size:22px;text-align:left;margin-bottom:4px">PART B — 四分鐘備詢 Q&A</h1>
-<p style="font-size:13px;color:#64748b;margin-bottom:20px;font-style:italic">熟記核心邏輯即可，不需照唸</p>
-
-<div class="qa-block">
-  <div class="qa-q">Trust Score 準嗎？能預測漲跌嗎？</div>
-  <div class="qa-a">我們的定位是「資訊完整度＋可溯源」，不是價格預測。內部驗證純預測 AUC 約 0.49，接近隨機，我們誠實自曝。TrustForge 解決的是「哪條資訊該信」，不是「幣價往哪走」。</div>
-</div>
-
-<div class="qa-block">
-  <div class="qa-q">競品 Nansen / LunarCrush 也有分數，你們差在哪？</div>
-  <div class="qa-a">他們有分數，但沒有可溯源的證據鏈。LunarCrush Galaxy Score 是黑箱，你不知道哪條消息支撐了哪個判斷。TrustForge 補上的是每個結論 → claim_id → 原始來源 URL＋時間戳，全程可審計。</div>
-</div>
-
-<div class="qa-block">
-  <div class="qa-q">如果所有來源都是機器人造假怎麼辦？</div>
-  <div class="qa-a">ManipulationPenalty 的設計：Bot 協同轉發被模板相似聚類偵測（Jaccard ≥ 0.8 × 3 個來源觸發），分數壓低並移入反方列表，不靜默丟棄。讓評審看到「有大量可疑訊號」這個事實本身，就是有價值的情報。</div>
-</div>
-
-<div class="qa-block">
-  <div class="qa-q">為什麼不給明確買賣建議？</div>
-  <div class="qa-a">HOYA BIT 合規要求，也是命題精神。我們輸出「可查證的判斷依據」，不代替你決策。與 HOYA BIT「AI 輔助決策、不代替決策」的理念完全對齊。</div>
-</div>
-
-<div class="qa-block">
-  <div class="qa-q">模型合規嗎？有沒有用到 OpenAI？</div>
-  <div class="qa-a">全程只用 AWS Bedrock（Claude Haiku 4.5）。所有 LLM 呼叫集中在 bedrock.py，競賽帳號直連 bedrock-runtime，沒有任何第三方 LLM 閘道。</div>
-</div>
-
-<div class="qa-block">
-  <div class="qa-q">HOYA BIT 企業數據怎麼用？</div>
-  <div class="qa-a">HOYA BIT 行情是 Trust Layer 裡最高信任來源之一，信譽分 0.85。5 幣 × 5 年 Daily OHLCV 作為價格事實錨點，每個價格主張都帶 SHA-256 校驗。</div>
-</div>
-
-<div class="qa-block">
-  <div class="qa-q">為什麼用 AWS Kiro？</div>
-  <div class="qa-a">Kiro 的 Steering 管理競賽規範、Hooks 自動化品質控管、Spec 生成連接器規格。整個開發過程有完整紀錄，.kiro 資料夾已包含 specs/hooks/steering，上傳 GitHub 可驗證，爭取 +10% 加分。</div>
-</div>
-
-<hr>
-
-<!-- ══ PART C ══ -->
-<h1 style="font-size:22px;text-align:left;margin-bottom:4px">PART C — 賽前提案交流要點</h1>
-<p style="font-size:13px;color:#64748b;margin-bottom:20px;font-style:italic">8/1（六）10:00–12:00 與業師及評審提案交流，非正式，說清楚你們在做什麼就好</p>
-
-<div class="proposal">
-  <h3>一句話定位（開場就說）</h3>
-  <p>我們做的是加密市場資訊的信任提煉——把多源雜訊先評可信度、做交叉佐證，讓每一個結論都可以溯源到原始資料。</p>
-</div>
-
-<div class="proposal">
-  <h3>三層架構（30 秒說完）</h3>
-  <ul>
-    <li><b>Layer 1：</b>平行抓取 6 類資料（價格/鏈上/新聞/社群/HOYA BIT/監管）</li>
-    <li><b>Layer 2：</b>Trust Layer — 逐條評信任分（核心差異化）</li>
-    <li><b>Layer 3：</b>AWS Bedrock 行文，只引用已加權的可信摘要</li>
-  </ul>
-</div>
-
-<div class="proposal">
-  <h3>跟 HOYA BIT 的連結</h3>
-  <ul>
-    <li>HOYA BIT 行情是最高信任來源之一（信譽分 0.85）</li>
-    <li>輸出是「輔助決策工具」，不給投資建議，符合合規要求</li>
-    <li>商業路徑：Trust Layer API 可白標給其他交易所</li>
-  </ul>
-</div>
-
-<div class="proposal">
-  <h3>8/2 計畫</h3>
-  <ul>
-    <li>下午抽題後 15 分鐘內跑完，上傳 4 份交付件</li>
-    <li>第二階段 6 分鐘簡報＋4 分鐘問答</li>
-  </ul>
-</div>
-
-<hr>
-<p style="text-align:center;font-size:12px;color:#94a3b8">TrustForge Hermes · HurricaneSoft 颶風軟體 · 2026 雲湧智生黑客松</p>
-
+</main>
+<div class="progress"></div><div class="hint">← → / Space 切頁 · F 全螢幕 · N 講者備註</div>
+<script>
+const slides=[...document.querySelectorAll('.slide')],bar=document.querySelector('.progress');let i=0,notes=false;
+function show(n){slides[i].classList.remove('active');i=(n+slides.length)%slides.length;slides[i].classList.add('active');bar.style.width=((i+1)/slides.length*100)+'%';if(notes){console.clear();console.log(slides[i].querySelector('.notes')?.textContent)}}
+document.addEventListener('keydown',e=>{if(['ArrowRight',' ','PageDown'].includes(e.key)){e.preventDefault();show(i+1)}if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1)}if(e.key.toLowerCase()==='f'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}if(e.key.toLowerCase()==='n'){notes=!notes;console.clear();if(notes)console.log(slides[i].querySelector('.notes')?.textContent)}});
+document.addEventListener('click',e=>show(i+(e.clientX>innerWidth/2?1:-1)));bar.style.width=(100/slides.length)+'%';
+</script>
 </body>
 </html>
