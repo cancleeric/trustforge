@@ -48,7 +48,8 @@ fail-closed 三條路（規範要求）：
     3. release 失敗（條件不成立或後端錯誤）→ raise；此時 `available_at` 仍停在
        guard，後續呼叫者被擋到 guard 過期為止，節流不會被放寬。
 
-非 Lambda 部署完全不走本模組，`bedrock.BedrockRpsLimiter` 的 flock 行為原封不動。
+EC2 production 與 Lambda 共用本模組及同一 table/item；只有明確未選用
+production DynamoDB backend 的本機開發環境保留 host-local flock。
 """
 from __future__ import annotations
 
@@ -97,7 +98,7 @@ class BedrockLockContentionError(BedrockLockError):
 
 
 class DynamoDBBedrockRpsLock:
-    """跨 Lambda 執行環境共享的 Bedrock 1 RPS 全域鎖。"""
+    """跨 EC2 process、worker 與 Lambda 執行環境共享的 1 RPS 全域鎖。"""
 
     def __init__(
         self,
@@ -159,6 +160,11 @@ class DynamoDBBedrockRpsLock:
         # 不可重用 UpdateItem 前的時間，否則取鎖 latency 會吃掉 1s 間隔。
         invoke_start_monotonic = self._monotonic()
         invoke_start = self._now()
+        _log.info(
+            "[bedrock_rps_gate] acquired backend=dynamodb table=%s start_epoch=%.6f",
+            self.table_name,
+            invoke_start,
+        )
         body_failed = False
         try:
             yield invoke_start
@@ -271,6 +277,11 @@ class DynamoDBBedrockRpsLock:
                 UpdateExpression="SET available_at = :next",
                 ConditionExpression=Attr("lock_owner").eq(owner),
                 ExpressionAttributeValues={":next": _decimal(released_at)},
+            )
+            _log.info(
+                "[bedrock_rps_gate] released backend=dynamodb table=%s elapsed_monotonic=%.6f",
+                self.table_name,
+                self._monotonic() - invoke_start_monotonic,
             )
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code")

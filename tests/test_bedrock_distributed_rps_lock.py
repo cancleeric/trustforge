@@ -388,7 +388,7 @@ def test_lambda_without_distributed_lock_still_fails_closed(monkeypatch, tmp_pat
             pytest.fail("must not reach the Bedrock invoke")
 
 
-def test_non_lambda_still_uses_host_local_flock(monkeypatch, tmp_path) -> None:
+def test_non_lambda_explicit_distributed_lock_uses_shared_backend(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
     spy = _SpyLock()
     limiter = BedrockRpsLimiter(lock_path=tmp_path / "rps.lock", distributed_lock=spy)
@@ -396,11 +396,13 @@ def test_non_lambda_still_uses_host_local_flock(monkeypatch, tmp_path) -> None:
     with limiter.slot():
         pass
 
-    assert spy.events == []  # 非 Lambda 一律不碰分散式鎖
-    assert (tmp_path / "rps.lock").exists()
+    assert spy.events == ["acquire", "release"]
+    assert not (tmp_path / "rps.lock").exists()
 
 
 def test_default_limiter_gets_a_distributed_lock_only_on_lambda(monkeypatch) -> None:
+    monkeypatch.delenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_BEDROCK_RPS_BACKEND", raising=False)
     monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
     assert bedrock_module._default_distributed_lock() is None
 
@@ -408,6 +410,25 @@ def test_default_limiter_gets_a_distributed_lock_only_on_lambda(monkeypatch) -> 
     lock = bedrock_module._default_distributed_lock()
     assert isinstance(lock, DynamoDBBedrockRpsLock)
     assert lock.min_interval == 1.0
+
+
+def test_ec2_production_uses_the_same_distributed_lock(monkeypatch) -> None:
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
+    monkeypatch.delenv("TRUSTFORGE_BEDROCK_RPS_BACKEND", raising=False)
+
+    lock = bedrock_module._default_distributed_lock()
+
+    assert isinstance(lock, DynamoDBBedrockRpsLock)
+    assert lock.min_interval == 1.0
+
+
+def test_lambda_cannot_select_host_local_flock(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "competition-live")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_RPS_BACKEND", "flock")
+
+    with pytest.raises(RuntimeError, match="DynamoDB limiter"):
+        bedrock_module._default_distributed_lock()
 
 
 # --- contract：不得偷加 IAM/資源 -------------------------------------------
