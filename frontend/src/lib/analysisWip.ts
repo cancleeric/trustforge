@@ -6,4 +6,5 @@
 // formal-run submit→enqueue integration is complete. Tests mock this module
 // to false to exercise the submit flow. Flip to false once formal-run is
 // production-ready.
-export const ANALYSIS_FORMAL_WIP = true
+// The durable production flow is now enabled and verified end to end.
+export const ANALYSIS_FORMAL_WIP = false

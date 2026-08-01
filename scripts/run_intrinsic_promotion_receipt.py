@@ -68,9 +68,23 @@ def _protected_json(
             raise SystemExit(f"unsafe protected input: {path}")
         raw = os.read(descriptor, max_bytes + 1)
         after = os.fstat(descriptor)
+        try:
+            verify_descriptor = os.open(
+                path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+            )
+        except OSError as exc:
+            raise SystemExit(f"protected input changed during read: {path}") from exc
+        try:
+            path_after = os.fstat(verify_descriptor)
+            verified_raw = os.read(verify_descriptor, max_bytes + 1)
+        finally:
+            os.close(verify_descriptor)
         if (
             len(raw) != info.st_size
+            or verified_raw != raw
             or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            or (path_after.st_dev, path_after.st_ino, path_after.st_size, path_after.st_mtime_ns, path_after.st_ctime_ns)
             != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         ):
             raise SystemExit(f"protected input changed during read: {path}")
