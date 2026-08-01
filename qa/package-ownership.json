@@ -56,10 +56,7 @@
     {"importer": "trustforge.trust.insights", "imported": "trustforge.ingestion.base", "issue": "#419"},
     {"importer": "trustforge.trust.insights", "imported": "trustforge.schema", "issue": "#420"},
     {"importer": "trustforge.ports", "imported": "trustforge.bedrock", "issue": "#407"},
-    {"importer": "trustforge.ports", "imported": "trustforge.ingestion.cache", "issue": "#408"},
-    {"importer": "trustforge.analysis_flow", "imported": "trustforge.web", "issue": "#1254"},
-    {"importer": "trustforge.training_backend", "imported": "trustforge.sagemaker_client", "issue": "#1254"},
-    {"importer": "trustforge.training_backend", "imported": "trustforge.modelhub_backend", "issue": "#1254"}
+    {"importer": "trustforge.ports", "imported": "trustforge.ingestion.cache", "issue": "#408"}
   ],
   "explicit_ignore_globs": [
     ".eye-cache/**",
@@ -114,6 +111,7 @@
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/intrinsic_official_contract.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/runtime_control.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/training_backend.py"},
+    {"owner": "platform", "priority": 90, "glob": "src/trustforge/training_backend_contracts.py"},
 
     {"owner": "connectors", "priority": 70, "glob": "src/trustforge/ingestion/**/*.py"},
     {"owner": "connectors", "priority": 70, "glob": "src/trustforge/*connector*.py"},
@@ -124,6 +122,8 @@
     {"owner": "connectors", "priority": 75, "glob": "src/trustforge/cloudwatch_metrics.py"},
     {"owner": "connectors", "priority": 75, "glob": "src/trustforge/ssm_params.py"},
     {"owner": "connectors", "priority": 75, "glob": "src/trustforge/modelhub_backend.py"},
+    {"owner": "connectors", "priority": 90, "glob": "src/trustforge/training_backend_resolver.py"},
+    {"owner": "connectors", "priority": 95, "glob": "src/trustforge/training_backend.py"},
 
     {"owner": "agent", "priority": 60, "glob": "src/trustforge/agent/**/*.py"},
     {"owner": "agent", "priority": 60, "glob": "src/trustforge/analysis_*.py"},
