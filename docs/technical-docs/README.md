@@ -15,6 +15,7 @@
 | 資料流與來源 | [06-data-flow.md](06-data-flow.md) | [html/06-data-flow.html](html/06-data-flow.html) | 4 個台灣監管來源 + 4 條外部資料來源主線 |
 | 信任演算法 | [08-trust-algorithm.md](08-trust-algorithm.md) | [html/08-trust-algorithm.html](html/08-trust-algorithm.html) | 新增來源 tier、客觀/主觀訊號與不造假規則 |
 | 競賽交付 | [16-competition-submission.md](16-competition-submission.md) | [html/16-competition-submission.html](html/16-competition-submission.html) | Final Report / Evidence List / Execution Log / Source & Config 對齊 |
+| 本機開發狀態 | [07-operations.md](07-operations.md#11-本機開發) | [html/07-operations.html](html/07-operations.html) | 5173 / 8799 / PID 只能當下驗證，不寫成永久狀態 |
 
 ### 已接資料來源快照
 
