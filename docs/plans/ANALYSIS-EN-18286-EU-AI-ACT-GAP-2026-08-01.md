@@ -8,6 +8,8 @@
 >
 > PR-A／本文件 slice：#1265
 >
+> Actor-boundary follow-up：#1286／F1
+>
 > 決策界線：本文件不是法律意見、合格評定、CE 標誌授權、ISO/EN 認證或符合性聲明。
 
 ## 1. 目的
@@ -67,6 +69,8 @@ ISO/IEC 42001 AIMS 與 EU AI Act QMS 可能共用管理系統元件，但是否�
 
 Article 25 的 provider transition 限於 high-risk AI system 的法定情境，須逐一判定以自己名稱／商標上市或投入使用、substantial modification，以及 Article 25(1)(c) 所述改變 intended purpose 而使原本非 high-risk 的系統成為 high-risk；它不是所有 AI system 的一般轉換規則，也不得與 off-label actual misuse 或 reasonably foreseeable misuse 混為一談。Articles 17／72 是 high-risk provider 的條件式義務；Article 26 deployer monitoring／escalation 與 Article 73 provider reporting 應分開建模。Article 50 另作 feature、output 與 deployer transparency assessment，不是 risk-classification limb。
 
+Article 17(3) 是獨立的 sectoral Union-law incorporation route：另一套相關 Union-law QMS 或 equivalent function 是否適用、Article 17(1) aspects 是否納入其中，均待 exact-version 驗證。Article 17(4) 則是 financial institution 的條件式 deemed-fulfilment mechanism，actor 必須受 Union financial-services-law internal-governance／arrangement／process requirements 約束；符合該等要求時 QMS obligation deemed fulfilled，但 Article 17(1)(g)、(h)、(i) 仍須履行，且須 take into account Article 40 harmonised standards。它不是一般金融機構豁免。Article 25(3) 與 Article 25(1) 分立且限於 Annex I Section A product manufacturer：其一是 high-risk AI system 與 product 一同以 manufacturer own name／trademark placed on market；其二是 product placed on market 後，該 system 再以 manufacturer name／trademark put into service。Trigger facts 與 applicability 維持 pending；一旦 exact-version review 確認適用且 trigger 成立，manufacturer SHALL／is to be considered provider，並 IS subject to Article 16 obligations。所有待決 actor／applicability facts、exact-version evidence 與日期均待 Compliance Counsel 核准，狀態為 `Not assessed`；不因 actual／foreseeable misuse 自動成立。
+
 ## 4. Unverified governance observations
 
 Repository 中觀察到下列 AIMS 文件主張，但 artifact 是否存在於 exact commit、內容是否符合描述、owner、activation、核准與 effectiveness 均未驗證：
@@ -90,6 +94,9 @@ Repository 中觀察到下列 AIMS 文件主張，但 artifact 是否存在於 e
 | Operator role | EU operator register existence 未驗證 | provider／deployer／representative 等角色未核准 | 建立 operator-role assessment |
 | Risk classification | classification record existence 未驗證 | Article 6、Annex I／III 待評估；Article 50 另案 | 建立法律審查與變更觸發條件 |
 | Article 17 QMS | ISO 42001 文件路徑 observed only | high-risk provider applicability 與 evidence 待核准；不先評 maturity | 條款級映射待合法全文與角色判定 |
+| Article 17(3) sectoral Union-law incorporation route | relevant sectoral QMS／equivalent function 與 Article 17(1) aspects incorporation 未驗證 | legal basis、actor、applicability、exact-version evidence 均 pending | Compliance Counsel 驗證適用性與納入證據；維持 `Not assessed` |
+| Article 17(4) financial-institution deemed-fulfilment route | financial-institution status、Union financial-services-law requirements 與 compliance evidence 未驗證 | applicability pending；若適用，Article 17(1)(g)(h)(i) 仍須履行並考量 Article 40 standards，不得推論一般豁免 | Compliance Counsel 驗證 actor、適用法、保留義務與 exact-version evidence；維持 `Not assessed` |
+| Article 25(3) Annex I Section A product-manufacturer route | product／high-risk system、manufacturer identity、own-name／trademark 及 placed-on-market／put-into-service sequence 未驗證 | Trigger facts 與 applicability pending；一旦 exact-version 確認適用且 trigger 成立，manufacturer SHALL be considered provider and IS subject to Article 16 obligations；不得與 Article 25(1) 或 misuse 混用 | Compliance Counsel 驗證適用性與事實；驗證前維持 `Not assessed` |
 | Risk management | #1244 僅為引用，狀態／內容未驗證 | Article 9 high-risk provider applicability 與 evidence 待核准 | 分開記錄風險、可合理預見誤用與殘餘風險 |
 | Data governance | production-only PII 邊界是未驗證主張 | Article 10 僅在適用條件成立時評估，且須區分採用模型訓練技術與未採用者；PII 邊界不等於 Article 10 compliance | 先確認分類、技術與 actor，再建立資料治理證據 |
 | Technical documentation | 架構、QA、證據文件是未驗證 observation | Article 11／Annex IV applicability、exact artifact 與 release binding 待證 | 建立版本化 technical file index |
