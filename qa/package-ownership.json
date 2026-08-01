@@ -43,6 +43,11 @@
   "owned_over_global_globs": [
     "tests/**/test_*.py"
   ],
+  "always_run_test_globs": [
+    "tests/test_architecture_import_boundaries.py",
+    "tests/test_package_inventory.py",
+    "tests/test_package_test_selection.py"
+  ],
   "temporary_bridges": [
     {"importer": "trustforge.trust.scoring", "imported": "trustforge.bedrock", "issue": "#407"},
     {"importer": "trustforge.trust.scoring", "imported": "trustforge.ingestion.base", "issue": "#419"},
