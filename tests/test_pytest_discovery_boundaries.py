@@ -26,7 +26,10 @@ def test_agent_worktree_directories_are_not_collected(tmp_path: Path) -> None:
     )
     for metadata_dir in (".Codex", ".codex", ".scratch", "node_modules"):
         duplicate_tests = tmp_path / metadata_dir / "worktree" / "tests"
-        duplicate_tests.mkdir(parents=True)
+        # macOS default filesystems are case-insensitive, so `.Codex` and
+        # `.codex` can resolve to the same directory.  Reusing it preserves
+        # the collection-boundary assertion on both case models.
+        duplicate_tests.mkdir(parents=True, exist_ok=True)
         (duplicate_tests / f"test_duplicate_{metadata_dir[1:]}.py").write_text(
             "def test_duplicate_collection():\n    pass\n",
             encoding="utf-8",
