@@ -686,6 +686,10 @@ export default function HermesDashboard() {
             onHelp={() => setOnboardingOpen(true)}
             onToggleShip={toggleShip}
           />
+          <DiandianAvatar
+            isAnalyzing={phase === 'loading'}
+            onClick={() => setDiandianOnboardingOpen(true)}
+          />
         </div>
 
         <div
@@ -767,11 +771,8 @@ export default function HermesDashboard() {
 
         <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
 
-        {/* 點點助手 — 右下角頭像 (#1198) */}
-        <DiandianAvatar
-          isAnalyzing={phase === 'loading'}
-          onClick={() => setDiandianOnboardingOpen(true)}
-        />
+        {/* 點點助手 — 在左欄面板內部右上角 (#1198) */}
+        {/* DiandianAvatar moved into left rail below */}
 
         {/* 點點新手引導 (#1199) */}
         {diandianOnboardingOpen && (

@@ -4,16 +4,19 @@
 
 /* --- Avatar Container --- */
 /* 放在左欄 (.hermes-glass.hermes-rail-split) 的內部右上角 */
+.hermes-glass.hermes-rail-split {
+  position: relative !important;
+}
 .diandian-container {
   position: absolute;
-  top: calc(var(--hermes-top, 44px) + 8px);
-  left: calc(var(--hermes-rail, 240px) - 56px);
-  z-index: 50;
+  top: 14px;
+  right: 14px;
+  z-index: 55;
   cursor: pointer;
   transition: transform 0.2s ease;
 }
 @media (max-width: 900px) {
-  .diandian-container { left: auto; right: 12px; top: calc(var(--hermes-top, 44px) + 8px); }
+  .diandian-container { top: 8px; right: 8px; }
 }
 .diandian-container:hover {
   transform: scale(1.1);
