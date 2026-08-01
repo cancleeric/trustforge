@@ -454,6 +454,7 @@ def test_scrub_summary_handles_escaped_quotes_and_composite_secret_keys():
         r"client_secret='prefix\'SINGLE_SECRET' "
         "refresh_token=REFRESH_SECRET "
         "url=https://host/?service_access_token=QUERY_SECRET "
+        "callback=https://host/?code=OAUTH_CODE_SECRET "
         "client.secret: COLON_SECRET"
     )
 
@@ -464,7 +465,11 @@ def test_scrub_summary_handles_escaped_quotes_and_composite_secret_keys():
         "SINGLE_SECRET",
         "REFRESH_SECRET",
         "QUERY_SECRET",
+        "OAUTH_CODE_SECRET",
         "COLON_SECRET",
     ):
         assert secret not in scrubbed
-    assert scrubbed.count(REDACTED) == 5
+    assert scrubbed.count(REDACTED) == 6
+
+    # ``code`` is URL-specific: ordinary diagnostics must remain readable.
+    assert _scrub_summary("status code=200") == "status code=200"

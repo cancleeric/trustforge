@@ -220,10 +220,14 @@ _STRUCTURED_SECRET_KEY = (
     rf"(?:[A-Za-z0-9]+[._-])*(?:{_COLON_SECRET_KEY_ALT})"
     r"(?:[._-][A-Za-z0-9]+)*"
 )
+_URL_STRUCTURED_SECRET_KEY = (
+    rf"(?:[A-Za-z0-9]+[._-])*(?:{_COLON_SECRET_KEY_ALT}|code)"
+    r"(?:[._-][A-Za-z0-9]+)*"
+)
 _TOKEN_LIKE_PATTERNS = (
     # URL query param：?token=... / &api_key=... / ?access_token=... —— 保留前綴只遮值。
     re.compile(
-        rf"([?&]{_STRUCTURED_SECRET_KEY}=)[^&#\s]+",
+        rf"([?&]{_URL_STRUCTURED_SECRET_KEY}=)[^&#\s]+",
         re.IGNORECASE,
     ),
     # ``bearer <token>``
