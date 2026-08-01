@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+from decimal import Decimal
+from pathlib import Path
+
+from trustforge import ledger as ledger_module
+from trustforge.bedrock import LLMResult
+
+MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def _load_reviewer():
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "review_hermes_upgrades.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "review_hermes_upgrades_budget_test", script
+    )
+    assert spec and spec.loader
+    reviewer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reviewer)
+    return reviewer
+
+
+def _diagnostic() -> dict:
+    return {
+        "proposals": [
+            {
+                "id": "p1",
+                "area": "reviewer",
+                "severity": "high",
+                "evidence": {"missed_budget_gate": 1},
+                "proposed_experiment": "reuse atomic reservation",
+                "success_metric": "zero unreserved calls",
+            }
+        ]
+    }
+
+
+class _FakeTable:
+    def __init__(self, order: list[str]):
+        self.order = order
+        self.items: list[dict] = []
+
+    def put_item(self, *, Item):
+        self.order.append("ledger_append")
+        self.items.append(Item)
+        return {}
+
+
+class _Client:
+    def __init__(self, order: list[str]):
+        self.order = order
+        self.calls = 0
+
+    def complete(self, *, system: str, prompt: str) -> LLMResult:
+        self.calls += 1
+        self.order.append("bedrock")
+        assert "hostile change reviewer" in system
+        assert "missed_budget_gate" in prompt
+        return LLMResult(
+            text=json.dumps(
+                {
+                    "reviews": [
+                        {
+                            "proposal_id": "p1",
+                            "verdict": "sandbox_ready",
+                            "reasons": ["guard is measurable"],
+                            "required_checks": ["cap zero"],
+                        }
+                    ]
+                }
+            ),
+            input_tokens=100,
+            output_tokens=20,
+            model_id=MODEL_ID,
+        )
+
+
+def test_review_reserves_then_appends_dynamodb_ledger_before_release(monkeypatch):
+    reviewer = _load_reviewer()
+    order: list[str] = []
+    table = _FakeTable(order)
+    dynamodb_ledger = ledger_module.DynamoDBLedger()
+    dynamodb_ledger._table = table
+
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "budget_reservation_backend",
+        lambda: "dynamodb",
+    )
+
+    def reserve(*, backend):
+        assert backend == "dynamodb"
+        order.append("reserve")
+        return 0.05
+
+    monkeypatch.setattr(reviewer.budget_guard, "try_reserve_request_budget", reserve)
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "release_request_budget",
+        lambda amount, *, backend: order.append(f"release:{backend}:{amount}"),
+    )
+    monkeypatch.setattr(ledger_module, "get_ledger", lambda: dynamodb_ledger)
+
+    client = _Client(order)
+    result = reviewer._review_with_budget(
+        _diagnostic(), client, now_fn=lambda: 1_700_000_000
+    )
+
+    assert result["status"] == "reviewed"
+    assert client.calls == 1
+    assert order == [
+        "reserve",
+        "bedrock",
+        "ledger_append",
+        "release:dynamodb:0.05",
+    ]
+    assert len(table.items) == 1
+    item = table.items[0]
+    assert item["question_type"] == "hermes_upgrade_review"
+    assert item["calls"] == [
+        {
+            "model": MODEL_ID,
+            "tokens_in": 100,
+            "tokens_out": 20,
+            "cost_usd": Decimal("0.0002"),
+        }
+    ]
+    assert item["total_cost_usd"] == Decimal("0.0002")
+    assert item["run_id"]
+
+
+def test_cap_zero_is_a_hard_kill_switch(monkeypatch):
+    reviewer = _load_reviewer()
+    monkeypatch.setenv("BEDROCK_MODEL_ID", MODEL_ID)
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "0")
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "local")
+    client = _Client([])
+
+    result = reviewer._review_with_budget(_diagnostic(), client)
+
+    assert result == {
+        "status": "budget_denied",
+        "reason": "budget_reservation_denied",
+        "reviews": [],
+        "can_activate": False,
+    }
+    assert client.calls == 0
+
+
+def test_denied_reservation_never_calls_bedrock(monkeypatch):
+    reviewer = _load_reviewer()
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard, "budget_reservation_backend", lambda: "local"
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "try_reserve_request_budget",
+        lambda **_kwargs: None,
+    )
+    client = _Client([])
+
+    result = reviewer._review_with_budget(_diagnostic(), client)
+
+    assert result["status"] == "budget_denied"
+    assert client.calls == 0
+
+
+def test_reservation_failure_is_fail_closed(monkeypatch):
+    reviewer = _load_reviewer()
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard, "budget_reservation_backend", lambda: "local"
+    )
+
+    def fail_reservation(**_kwargs):
+        raise RuntimeError("counter unavailable")
+
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "try_reserve_request_budget",
+        fail_reservation,
+    )
+    client = _Client([])
+
+    result = reviewer._review_with_budget(_diagnostic(), client)
+
+    assert result["status"] == "budget_unavailable"
+    assert result["reason"] == "budget_reservation_failed"
+    assert client.calls == 0
+
+
+def test_missing_durable_receipt_retains_shared_reservation(monkeypatch):
+    reviewer = _load_reviewer()
+    released: list[float] = []
+    unledgered: list[float] = []
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "budget_reservation_backend",
+        lambda: "dynamodb",
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "try_reserve_request_budget",
+        lambda **_kwargs: 0.05,
+    )
+    monkeypatch.setattr(reviewer, "append_run", lambda _record: False)
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "record_unledgered_spend",
+        unledgered.append,
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+    client = _Client([])
+
+    result = reviewer._review_with_budget(_diagnostic(), client)
+
+    assert result["status"] == "accounting_failed"
+    assert unledgered == [0.0002]
+    assert released == []
