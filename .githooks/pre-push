@@ -100,7 +100,8 @@ case "$PYTEST_WORKERS" in
     echo "[pre-push] pytest workers: ${PYTEST_WORKERS} (isolated per-file batches)"
     run_gate \
       "backend tests (isolated batches)" \
-      env PYTHONPATH=src "$PYTHON" scripts/run_batched_pytest.py --chunk-size 1
+      env PYTHONPATH=src "$PYTHON" scripts/run_batched_pytest.py \
+      --chunk-size 1 --workers "$PYTEST_WORKERS"
     run_gate \
       "backend coverage" \
       "$PYTHON" -m coverage report --show-missing --fail-under=75
