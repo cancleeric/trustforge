@@ -159,26 +159,26 @@ class TestComparisonToMarkdown:
 
         注意：內嵌的 supporting Report.to_markdown() 可能自帶「已知限制」文字，
         那是各幣報告的資訊完整度說明，非 ComparisonReport 層級的限制章節。
-        本測試驗證的是 ComparisonReport-level 的 `## 已知限制` 不存在。
+        本測試驗證的是 ComparisonReport-level 的 `### 已知限制` 不存在。
         """
         btc_eth_comparison.limits = []
         btc_eth_comparison.could_flip = []
         md = btc_eth_comparison.to_markdown()
-        # ComparisonReport 層級的已知限制章節開頭是 `## 已知限制`
-        assert "## 已知限制" not in md
-        assert "## 可能推翻條件" not in md
+        # ComparisonReport 層級的已知限制章節開頭是 `### 已知限制`（#1224: h3）
+        assert "### 已知限制" not in md
+        assert "### 可能推翻條件" not in md
 
     def test_to_markdown_empty_limits_no_section(self, btc_eth_comparison):
         """空 limits 清單不會產生 ComparisonReport-level 的章節。"""
         btc_eth_comparison.limits = []
         md = btc_eth_comparison.to_markdown()
-        assert "## 已知限制" not in md
+        assert "### 已知限制" not in md
 
     def test_to_markdown_empty_could_flip_no_section(self, btc_eth_comparison):
         """空 could_flip 清單不會產生 ComparisonReport-level 的章節。"""
         btc_eth_comparison.could_flip = []
         md = btc_eth_comparison.to_markdown()
-        assert "## 可能推翻條件" not in md
+        assert "### 可能推翻條件" not in md
 
     def test_to_markdown_has_confidence_section(self, btc_eth_comparison):
         """整體比較信心出現在綜合結論區。"""
@@ -196,7 +196,7 @@ class TestCLIComparisonMarkdown:
     """CA-08: CLI 的 report.md / comparison_report.md 輸出驗證。"""
 
     def test_cli_writes_report_md_and_comparison_report_md(self, monkeypatch):
-        """CLI comparison 產生 report.md 與 comparison_report.md。"""
+        """#1224: CLI comparison 產生單一整合 report.md（三段式格式）。"""
         def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
             return _make_fixture_docs(coin)
 
@@ -222,17 +222,12 @@ class TestCLIComparisonMarkdown:
             report_content = report_path.read_text(encoding="utf-8")
             assert "BTC" in report_content
             assert "ETH" in report_content
-            assert "相對強弱比較" in report_content
-
-            # CA-08: comparison_report.md 也應存在
-            cmp_path = pathlib.Path(tmpdir) / "comparison_report.md"
-            assert cmp_path.exists(), "comparison_report.md 應存在（CA-08 unified format）"
-
-            cmp_content = cmp_path.read_text(encoding="utf-8")
-            assert "比較分析報告" in cmp_content
-            assert "綜合結論" in cmp_content
-            assert "比較面向分析" in cmp_content
-            assert "各幣詳細分析" in cmp_content
+            # #1224: 新格式三段式結構
+            assert "各幣詳細分析" in report_content
+            assert "整合比較總結" in report_content
+            assert "合併證據清單" in report_content
+            assert "綜合結論" in report_content
+            assert "比較面向分析" in report_content
 
 
 # ---------------------------------------------------------------------------

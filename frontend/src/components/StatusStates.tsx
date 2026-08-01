@@ -20,13 +20,15 @@ export function LoadingState({ label = '載入中…' }: { label?: string }) {
 export function ErrorState({ code, message, note, onRetry }: { code: string; message: string; note?: string; onRetry?: () => void }) {
   const { t } = useHermesI18n()
   const isAutomationPaused = code === 'automation_disabled'
-  const tone = isAutomationPaused ? 'var(--color-tf-warn)' : 'var(--color-tf-bad)'
+  const isWip = code === 'analysis_wip'
+  const tone = (isAutomationPaused || isWip) ? 'var(--color-tf-warn)' : 'var(--color-tf-bad)'
   const style = {
     '--tf-state-color': tone,
     borderColor: tone,
     backgroundColor: `color-mix(in srgb, ${tone} 8%, transparent)`,
   } as CSSProperties
   const title = isAutomationPaused ? t('errorTitleAutomationPaused')
+    : isWip ? t('errorTitleAnalysisWip')
     : code === 'network_error' ? t('errorTitleNetwork')
       : code === 'timeout' ? t('errorTitleTimeout')
         : code === 'parse_error' ? t('errorTitleParse')
@@ -34,6 +36,7 @@ export function ErrorState({ code, message, note, onRetry }: { code: string; mes
             : code === 'analysis_timeout' ? t('errorTitleAnalysisTimeout')
               : t('errorTitleGeneric')
   const description = isAutomationPaused ? t('errorDescAutomationPaused')
+    : isWip ? t('errorDescAnalysisWip')
     : code === 'network_error' ? t('errorDescNetwork')
       : code === 'timeout' ? t('errorDescTimeout')
         : code === 'parse_error' ? t('errorDescParse')

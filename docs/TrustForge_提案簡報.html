@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrustForge Hermes — 提案簡報</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; font-family: 'Microsoft JhengHei','Noto Sans TC',sans-serif; }
+.slide { width: 100vw; height: 100vh; display: none; flex-direction: column; justify-content: center; align-items: center; padding: 60px 80px; position: relative; }
+.slide.active { display: flex; }
+.slide-dark { background: linear-gradient(135deg, #0a0e1a, #1a1a3e); color: #f0f0f0; }
+.slide-light { background: #ffffff; color: #1a1a2e; }
+.slide-accent { background: linear-gradient(135deg, #302b63, #4a3f8a); color: #f0f0f0; }
+h1 { font-size: 3em; margin-bottom: 20px; text-align: center; }
+h2 { font-size: 2.2em; margin-bottom: 24px; }
+h3 { font-size: 1.5em; margin-bottom: 16px; color: #4dd8e0; }
+p, li { font-size: 1.3em; line-height: 1.8; }
+ul { list-style: none; padding: 0; }
+ul li { padding: 8px 0; padding-left: 24px; position: relative; }
+ul li::before { content: "▸"; position: absolute; left: 0; color: #4dd8e0; }
+.slide-dark ul li::before { color: #4dd8e0; }
+.slide-light ul li::before { color: #4a3f8a; }
+table { border-collapse: collapse; font-size: 1.1em; margin: 16px 0; }
+th, td { padding: 12px 20px; text-align: left; border: 1px solid rgba(255,255,255,0.2); }
+.slide-dark th { background: rgba(77,216,224,0.2); }
+.slide-light th { background: #4a3f8a; color: white; }
+.slide-light td { border-color: #e0e0e0; }
+.formula { font-family: Consolas, monospace; background: rgba(0,0,0,0.3); padding: 20px 30px; border-radius: 12px; font-size: 1.2em; line-height: 2; margin: 16px 0; color: #4dd8e0; }
+.slide-num { position: absolute; bottom: 20px; right: 30px; font-size: 0.8em; opacity: 0.5; }
+.team-info { position: absolute; bottom: 20px; left: 30px; font-size: 0.75em; opacity: 0.5; }
+.highlight { color: #4dd8e0; font-weight: 700; }
+.slide-light .highlight { color: #4a3f8a; }
+.big-quote { font-size: 1.8em; font-style: italic; text-align: center; max-width: 800px; line-height: 1.6; margin: 20px 0; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; width: 100%; max-width: 1000px; }
+.arch-box { background: rgba(0,0,0,0.3); border: 1px solid rgba(77,216,224,0.3); border-radius: 12px; padding: 24px; }
+.nav-hint { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); font-size: 0.7em; opacity: 0.4; color: white; z-index: 999; }
+@media (max-width: 800px) { .slide { padding: 30px 20px; } h1 { font-size: 2em; } h2 { font-size: 1.6em; } p, li { font-size: 1em; } .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<!-- Slide 1: Title -->
+<div class="slide slide-dark active" id="s1">
+<h1>TrustForge Hermes</h1>
+<p style="font-size:1.5em;color:#4dd8e0;margin-bottom:30px">加密市場分析 AI Agent：多源資訊的信任提煉</p>
+<p style="font-size:1.1em;opacity:0.7">隊伍：中再參與 ｜ HurricaneSoft（颶風軟體）</p>
+<p style="font-size:1em;opacity:0.5;margin-top:10px">2026 雲湧智生：臺灣生成式 AI 應用黑客松 ｜ 智慧交易：HOYA BIT</p>
+<span class="slide-num">1/10</span>
+</div>
+
+<!-- Slide 2: Problem -->
+<div class="slide slide-dark" id="s2">
+<h2>問題：幣圈資訊真假難辨</h2>
+<ul>
+<li>喊單帶貨 — KOL 先買好再喊你買</li>
+<li>機器人洗版 — 500 個帳號轉發同一條假消息</li>
+<li>來源不分等級 — 鏈上事實 vs 匿名推文同等對待</li>
+<li>結論無法查證 — AI 給你一句話，你無法驗證</li>
+</ul>
+<p style="margin-top:30px;font-size:1.4em">一般人分不清<span class="highlight">哪條消息該信</span></p>
+<span class="slide-num">2/10</span>
+</div>
+
+<!-- Slide 3: Our Answer -->
+<div class="slide slide-accent" id="s3">
+<div class="big-quote">
+「我們交付的不是一個答案，<br>而是一個<span class="highlight">你能查證的答案</span>。」
+</div>
+<p style="margin-top:30px;font-size:1.2em">TrustForge 不預測漲跌。<br>我們幫你分辨<span class="highlight">哪條消息值得信</span>——每個結論都可追溯到原始來源。</p>
+<span class="slide-num">3/10</span>
+</div>
+
+<!-- Slide 4: Comparison -->
+<div class="slide slide-dark" id="s4">
+<h2>跟一般做法有什麼不同？</h2>
+<table>
+<tr><th>一般 Crypto AI</th><th>TrustForge</th></tr>
+<tr><td>多源 → 直接丟 LLM 摘要</td><td>多源 → <span class="highlight">逐條評分</span> → 信任加權後才進 LLM</td></tr>
+<tr><td>來源不分等級</td><td><span class="highlight">信譽 + 佐證 + 時效</span> 三維評分</td></tr>
+<tr><td>結論無溯源</td><td>每個結論帶 <span class="highlight">溯源鏈</span></td></tr>
+<tr><td>一句話結論</td><td>信任分 + 反方證據 + 資訊完整度分級</td></tr>
+</table>
+<span class="slide-num">4/10</span>
+</div>
+
+<!-- Slide 5: Trust Formula -->
+<div class="slide slide-dark" id="s5">
+<h2>信任評分公式</h2>
+<div class="formula">
+TrustScore = 來源信譽 × 0.50<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ 交叉佐證 × 0.25<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ 資料時效 × 0.15<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;− 操縱懲罰 × 0.40
+</div>
+<div class="two-col" style="margin-top:20px">
+<div>
+<h3>四個問題</h3>
+<ul>
+<li>這來源過去靠譜嗎？</li>
+<li>有別人也這樣說嗎？</li>
+<li>資料多新？</li>
+<li>有沒有被灌水？</li>
+</ul>
+</div>
+<div>
+<h3>判斷不是 AI 生成的</h3>
+<ul>
+<li>確定性公式計算</li>
+<li>LLM 只負責行文</li>
+<li>反作弊合規 ✓</li>
+</ul>
+</div>
+</div>
+<span class="slide-num">5/10</span>
+</div>
+
+<!-- Slide 6: Architecture -->
+<div class="slide slide-dark" id="s6">
+<h2>系統架構（三層管線）</h2>
+<div class="two-col">
+<div class="arch-box">
+<h3>Layer 1 — 多源輸入</h3>
+<p style="font-size:1em">14 個連接器同時抓取：<br>價格 / 新聞(11源) / 社群 / 鏈上 / 監管 / 鯨魚 / 情緒</p>
+</div>
+<div class="arch-box">
+<h3>Layer 2 — 信任提煉 ★</h3>
+<p style="font-size:1em">逐條主張評分<br>交叉佐證去回音室<br>操縱偵測<br>信任加權聚合</p>
+</div>
+</div>
+<div class="arch-box" style="margin-top:20px;max-width:1000px;width:100%">
+<h3>Layer 3 — Bedrock 行文 + 溯源生成</h3>
+<p style="font-size:1em">結論 → 關鍵依據 → 校準信心 → 限制條件 → 反方證據 → 每筆可追溯</p>
+</div>
+<span class="slide-num">6/10</span>
+</div>
+
+<!-- Slide 7: AWS Architecture -->
+<div class="slide slide-dark" id="s7">
+<h2>AWS 雲端架構</h2>
+<div class="two-col">
+<div>
+<h3>運算與部署</h3>
+<ul>
+<li>Amazon Bedrock — LLM 推理</li>
+<li>EC2 — 後端 + Hermes Agent</li>
+<li>App Runner — 備選部署</li>
+</ul>
+</div>
+<div>
+<h3>資料與治理</h3>
+<ul>
+<li>DynamoDB — 快取/限流/成本帳</li>
+<li>SSM Parameter Store — 機密</li>
+<li>EventBridge — 排程</li>
+</ul>
+</div>
+</div>
+<p style="margin-top:30px;font-size:1.1em"><span class="highlight">Kiro</span> — steering 規範 + hooks 品質控管 + specs 功能規格（爭取 +10%）</p>
+<span class="slide-num">7/10</span>
+</div>
+
+<!-- Slide 8: Demo -->
+<div class="slide slide-dark" id="s8">
+<h2>Live Demo 流程</h2>
+<ul>
+<li><span class="highlight">選幣種</span> → 選題型 → 輸入問題 → 送出</li>
+<li>14 個來源 <span class="highlight">平行抓取</span>（< 2 分鐘）</li>
+<li>信任公式 <span class="highlight">逐條評分</span>（< 1 秒）</li>
+<li>Bedrock <span class="highlight">帶溯源行文</span>（< 3 分鐘）</li>
+<li>產出 <span class="highlight">4 交付件</span>：報告 + 證據 + 執行紀錄 + 程式碼</li>
+</ul>
+<p style="margin-top:24px;font-size:1.2em">全程 < 15 分鐘｜預算追蹤可見｜每步有時戳</p>
+<span class="slide-num">8/10</span>
+</div>
+
+<!-- Slide 9: Deliverables -->
+<div class="slide slide-dark" id="s9">
+<h2>交付件與亮點</h2>
+<table>
+<tr><th>交付件</th><th>亮點</th></tr>
+<tr><td>分析報告</td><td>結論→依據→信心→限制→反方｜白話可讀</td></tr>
+<tr><td>證據清單</td><td>每筆含 source / trust / fetched_at / SHA-256</td></tr>
+<tr><td>執行紀錄</td><td>五節點時戳 + 預算追蹤 + 工具呼叫</td></tr>
+<tr><td>程式碼</td><td>220 模組 / 250+ 測試 / 86% 覆蓋率</td></tr>
+</table>
+<p style="margin-top:20px;font-size:1.1em">評審可抽查任一筆 Evidence → 追溯到原始來源 URL</p>
+<span class="slide-num">9/10</span>
+</div>
+
+<!-- Slide 10: Closing -->
+<div class="slide slide-accent" id="s10">
+<div class="big-quote">
+「別人給你答案，<br>我們給你<span class="highlight">證據</span>。」
+</div>
+<p style="margin-top:30px;font-size:1.3em">TrustForge Hermes — 多源資訊的信任提煉</p>
+<p style="margin-top:20px;font-size:1em;opacity:0.7">隊伍：中再參與 ｜ HurricaneSoft</p>
+<p style="margin-top:10px;font-size:0.9em;opacity:0.5">GitHub: github.com/cancleeric/trustforge</p>
+<span class="slide-num">10/10</span>
+</div>
+
+<div class="nav-hint">← → 鍵切換頁面 ｜ F 全螢幕</div>
+
+<script>
+const slides = document.querySelectorAll('.slide');
+let current = 0;
+
+function show(n) {
+  slides[current].classList.remove('active');
+  current = (n + slides.length) % slides.length;
+  slides[current].classList.add('active');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); show(current + 1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); show(current - 1); }
+  if (e.key === 'f' || e.key === 'F') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (e.clientX > window.innerWidth / 2) show(current + 1);
+  else show(current - 1);
+});
+</script>
+</body>
+</html>

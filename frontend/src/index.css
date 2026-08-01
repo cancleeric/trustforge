@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import './components/diandian.css';
 
 /* 沿用既有 SSR 的 `--tf-*` 色彩 token（見 `src/trustforge/web.py` 內嵌
    CSS，GitHub dark 系配色），維持新舊前端視覺一致，不是重新發明一套色。 */
