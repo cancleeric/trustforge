@@ -7713,20 +7713,22 @@ def _handle_api_carbon(client_ip: str = "") -> tuple[int, str]:
         from .ledger import get_ledger
 
         records = get_ledger().read_all()
-        # Build synthetic llm.cost events from ledger records for carbon calc
+        # Build synthetic llm.cost events from ledger run records
         llm_events = []
         for record in records:
-            model = record.get("model") or record.get("model_id") or "unknown"
-            tokens_in = int(record.get("tokens_in", 0) or 0)
-            tokens_out = int(record.get("tokens_out", 0) or 0)
-            llm_events.append({
-                "tool": "llm.cost",
-                "params": {
-                    "model": model,
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                },
-            })
+            calls = record.get("calls", [])
+            for call in calls:
+                model = call.get("model") or "unknown"
+                tokens_in = int(call.get("tokens_in", 0) or 0)
+                tokens_out = int(call.get("tokens_out", 0) or 0)
+                llm_events.append({
+                    "tool": "llm.cost",
+                    "params": {
+                        "model": model,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                    },
+                })
 
         summary = carbon_from_llm_events(llm_events)
         return 200, _json_envelope_ok({
