@@ -5,7 +5,11 @@
 | 文件 ID | AIMS-RACI-001 |
 | 版本／狀態 | 0.1-draft／草案、未核准 |
 | Owner／核准者 | 待 CEO 指派／待 CEO 核准 |
+| 核准紀錄／生效日 | pending／not-applicable（草案） |
 | Review / next review | 待核准時設定／待核准時設定 |
+| 分類 | internal-draft |
+| 變更摘要／取代文件 | 建立角色、RACI 與殘餘風險接受草案／not-applicable（初版） |
+| Repository path | `docs/aims/02-policy/roles-raci-and-risk-acceptance.md` |
 
 R = 執行，A = 最終負責／核准，C = 諮詢，I = 知會。下表是建議介面，不代表人員已接受任命。
 

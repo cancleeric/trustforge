@@ -5,7 +5,11 @@
 | 文件 ID | AIMS-SCOPE-001 |
 | 版本／狀態 | 0.1-draft／草案、未核准 |
 | Owner／核准者 | 待 CEO 指派／待 CEO 核准 |
+| 核准紀錄／生效日 | pending／not-applicable（草案） |
 | Review / next review | 待核准時設定／待核准時設定 |
+| 分類 | internal-draft |
+| 變更摘要／取代文件 | 建立 AIMS 範圍草案／not-applicable（初版） |
+| Repository path | `docs/aims/01-scope/scope.md` |
 
 ## 目的與邊界
 
@@ -32,10 +36,19 @@
 - ISO/IEC 42001 第三方稽核、驗證或認證活動；是否進入認證由後續管理審查決定。
 - 競賽規則本身；競賽義務另依 `docs/competition/COMPETITION-OFFICIAL.md` 追溯。
 
-## 適用地點與生命週期
+## 適用環境與生命週期
 
-文件與程式碼以此 repository 為目前可驗證邊界；實際部署地點、營運環境、資料地域與 retention
-尚待資產及供應商盤點確認。生命週期從構想到退役均納入，但本文件不宣稱各階段控制已有效實作。
+| 環境 | 暫定範圍判定 | 可驗證依據／限制 |
+|---|---|---|
+| 本 repository 內的本機開發、測試與文件流程 | 納入 | `AGENTS.md`、`pyproject.toml`；不推論任一人的私人裝置全機受 AIMS 管理 |
+| GitHub issue／branch／PR 與 repo-defined review gate | 納入可由 HurricaneSoft 控制的流程 | `AGENTS.md`；GitHub Actions 已停用，不能宣稱其為有效控制 |
+| AWS Bedrock 模型介面與供應商依賴 | 納入介面、資料交換及供應商治理 | `README.md`、`pyproject.toml`；帳號、region、實際啟用狀態待清冊確認 |
+| App Runner／其他 production runtime | 暫定納入 TrustForge 實際受控 deployment；環境身分待確認 | `README.md` 僅載建議路線，不證明目前 production 位置或啟用狀態 |
+| 第三方供應商內部訓練／基礎設施 | 排除直接控制；納入依賴風險 | HurricaneSoft 無直接控制權，仍須供應商評估 |
+| 使用者自行交易、私人錢包／交易所環境 | 排除 | TrustForge 不控制該環境；可預見誤用影響仍納入評估 |
+
+生命週期從構想到退役均納入；實際 production 身分、資料地域與 retention 是 scope 核准前的 blocker，
+不得因「暫定納入」推論已完成清冊、控制有效或已覆蓋未知環境。
 
 ## 未決事項
 

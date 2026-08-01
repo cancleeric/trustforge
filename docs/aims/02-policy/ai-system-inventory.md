@@ -5,7 +5,11 @@
 | 文件 ID | AIMS-INV-001 |
 | 版本／狀態 | 0.1-draft／草案、未核准 |
 | Owner／核准者 | 待 CEO 指派／待 CEO 核准 |
+| 核准紀錄／生效日 | pending／not-applicable（草案） |
 | Review / next review | 待核准時設定／待核准時設定 |
+| 分類 | internal-draft |
+| 變更摘要／取代文件 | 建立清冊 schema 與 TrustForge 初始登錄／not-applicable（初版） |
+| Repository path | `docs/aims/02-policy/ai-system-inventory.md` |
 
 ## 最低欄位
 

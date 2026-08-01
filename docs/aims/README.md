@@ -7,9 +7,14 @@
 | 狀態 | 草案／未核准 |
 | Owner | 待 CEO 指派 |
 | 核准者 | 待 CEO 核准 |
-| 生效日 | 不適用（草案） |
+| 核准紀錄 | pending（草案不得以 commit／merge 代替核准） |
+| 生效日 | not-applicable（草案） |
 | Review date | 待核准時設定 |
 | Next review date | 待核准時設定 |
+| 分類 | internal-draft |
+| 變更摘要 | 建立 AIMS GOV 文件索引與狀態語意 |
+| 取代文件 | not-applicable（初版） |
+| Repository path | `docs/aims/README.md` |
 
 > 本目錄是 ISO/IEC 42001 AIMS 改善工作的內部草案，不是認證、符合性或控制有效性聲明。
 > 除非文件附有可驗證的核准紀錄，所有內容都視為未核准。

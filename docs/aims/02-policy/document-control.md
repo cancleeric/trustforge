@@ -5,7 +5,11 @@
 | 文件 ID | AIMS-DOC-001 |
 | 版本／狀態 | 0.1-draft／草案、未核准 |
 | Owner／核准者 | 待 CEO 指派／待 CEO 核准 |
+| 核准紀錄／生效日 | pending／not-applicable（草案） |
 | Review / next review | 待核准時設定／待核准時設定 |
+| 分類 | internal-draft |
+| 變更摘要／取代文件 | 建立文件控制與 evidence manifest schema／not-applicable（初版） |
+| Repository path | `docs/aims/02-policy/document-control.md` |
 
 ## 文件 metadata schema
 
@@ -42,7 +46,9 @@
 
 Evidence URI 必須由獲授權 reviewer 可定位；拒絕存取時應走受控 evidence access／temporary grant，
 不得為方便審查複製到 repo 或非核准儲存。URI、title、description 與其他 metadata 本身不得洩漏 secret、
-token、內部識別碼、個資或敏感系統位置。外部連結需保存必要 metadata；敏感 evidence target 必須位於
+token、敏感內部識別碼、個資或敏感系統位置。可安全揭露的治理 ID（例如 `evidence_id` 與
+`control_or_requirement_id`）及 repo 相對路徑不受此限，但不得由其值反推出 secret 或受限資產。
+外部連結需保存必要 metadata；敏感 evidence target 必須位於
 核准 secure store，依 classification 授權、遮罩及記錄存取，且不得把敏感內容放入 manifest。
 文件、程式碼或測試存在只證明其存在，不自動證明控制設計適當、持續運作或有效。
 

@@ -5,7 +5,11 @@
 | 文件 ID | AIMS-POL-001 |
 | 版本／狀態 | 0.1-draft／草案、未核准、未生效 |
 | Policy owner／核准者 | 待 CEO 指派／待 CEO 核准 |
+| 核准紀錄／生效日 | pending／not-applicable（草案） |
 | Review / next review | 待核准時設定／待核准時設定 |
+| 分類 | internal-draft |
+| 變更摘要／取代文件 | 建立 AI 政策與最低升級路徑草案／not-applicable（初版） |
+| Repository path | `docs/aims/02-policy/ai-policy.md` |
 
 HurricaneSoft 擬以風險為本、可追溯且以人負責的方式設計及運行 TrustForge。正式核准後，
 適用範圍內的角色應遵循下列原則：
