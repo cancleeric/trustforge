@@ -337,7 +337,11 @@ def _run_lane(
         )
         if capture:
             # One write keeps a batch's header and its pytest output together
-            # even though neighbours finish in between.
+            # even though neighbours finish in between. A batch torn down
+            # mid-progress-line leaves output without a trailing newline, which
+            # would otherwise glue the next batch's header onto it.
+            if output and not output.endswith("\n"):
+                output += "\n"
             sys.stdout.write(f"{label}\n{output}")
             sys.stdout.flush()
         if returncode == 5:
