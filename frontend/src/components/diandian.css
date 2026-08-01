@@ -5,11 +5,19 @@
 /* --- Avatar Container --- */
 .diandian-container {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: 8px;
+  left: calc(var(--hermes-rail, 0px) + clamp(120px, 13vw, 180px));
   z-index: 50;
   cursor: pointer;
   transition: transform 0.2s ease;
+}
+@media (max-width: 900px) {
+  .diandian-container { left: auto; right: 12px; top: 8px; }
+}
+
+/* Position inside the left rail */
+.hermes-left-rail {
+  position: relative !important;
 }
 .diandian-container:hover {
   transform: scale(1.1);
