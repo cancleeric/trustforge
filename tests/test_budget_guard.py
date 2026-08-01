@@ -297,6 +297,58 @@ def test_run_daily_cap_not_hit_but_switch_off_stays_fully_offline_no_note(monkey
     assert not any("線上深度分析" in s for s in report.limits)
 
 
+def test_run_retains_shared_reservation_when_durable_ledger_commit_fails(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "anthropic.claude-haiku-4-5-20251001-v1:0")
+    monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
+    monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(pl, "collect", _fake_collect)
+    monkeypatch.setattr(pl, "try_reserve_request_budget", lambda: 0.05)
+    retained = []
+    released = []
+    monkeypatch.setattr(pl, "mark_reservation_accounting_uncertain", retained.append)
+    monkeypatch.setattr(pl, "release_request_budget", released.append)
+
+    def fake_pipeline(*args, ledger_persistence_observer=None, **kwargs):
+        ledger_persistence_observer(False, 0.01)
+        return object(), []
+
+    monkeypatch.setattr(pl, "run_agent_pipeline", fake_pipeline)
+    monkeypatch.setattr(pl, "_apply_report_policy", lambda *args, **kwargs: None)
+
+    pl.run(
+        "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
+        data_mode="live", llm_mode="bedrock",
+    )
+
+    assert retained == [0.05]
+    assert released == []
+
+
+def test_run_retains_reservation_when_pipeline_raises_before_ledger_receipt(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
+    monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
+    monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(pl, "collect", _fake_collect)
+    monkeypatch.setattr(pl, "try_reserve_request_budget", lambda: 0.05)
+    retained = []
+    released = []
+    monkeypatch.setattr(pl, "mark_reservation_accounting_uncertain", retained.append)
+    monkeypatch.setattr(pl, "release_request_budget", released.append)
+    monkeypatch.setattr(
+        pl, "run_agent_pipeline", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("after spend"))
+    )
+
+    with pytest.raises(RuntimeError, match="after spend"):
+        pl.run(
+            "BTC", "分析 BTC", QuestionType.MULTI_SOURCE,
+            data_mode="live", llm_mode="bedrock",
+        )
+
+    assert retained == [0.05]
+    assert released == []
+
+
 # ---------------------------------------------------------------------------
 # 7) pipeline.run()：online-stance 開關開＋cap 未達標 → stance 改用「真 Bedrock」
 #    （narrative 仍離線，$0；只有 stance 判斷的 client 旗標改變，不代表真的

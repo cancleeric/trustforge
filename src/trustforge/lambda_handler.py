@@ -11,6 +11,7 @@ live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶 `X-Live-Token` head
 from __future__ import annotations
 
 import json
+import hmac
 import importlib
 import logging
 import os
@@ -68,6 +69,9 @@ def _competition_mode() -> str | None:
 
 _COMPETITION_MODE = _competition_mode()
 
+_LIVE_ALLOWED_PATHS = frozenset({"/", "/healthz", "/analyze", "/analyze.json"})
+_LIVE_ANALYSIS_PATHS = frozenset({"/analyze", "/analyze.json"})
+
 
 def _offline_landing() -> str:
     return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
@@ -87,6 +91,16 @@ def handler(event, context=None):
         event.get("requestContext", {}).get("http", {}).get("method", "GET")
         or "GET"
     ).upper()
+    if _COMPETITION_MODE == "live" and (
+        method != "GET" or path not in _LIVE_ALLOWED_PATHS
+    ):
+        return _resp(
+            404,
+            web.render_page(
+                web._render_error_card("找不到頁面", "此競賽 Live 端點未開放該路由。")
+            ),
+            "text/html; charset=utf-8",
+        )
     if _COMPETITION_MODE == "offline" and (
         method != "GET" or path not in ("/", "/healthz")
     ):
@@ -115,6 +129,21 @@ def handler(event, context=None):
     _lambda_headers_lower = {
         (k or "").lower(): v for k, v in _lambda_headers.items()
     }
+    if _COMPETITION_MODE == "live" and path in _LIVE_ANALYSIS_PATHS:
+        supplied_token = _lambda_headers_lower.get("x-live-token") or ""
+        expected_token = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+        if raw_qs.get("live") != "1" or not expected_token or not hmac.compare_digest(
+            supplied_token, expected_token
+        ):
+            return _resp(
+                401,
+                web.render_page(
+                    web._render_error_card(
+                        "未授權", "Live 分析需要有效的 X-Live-Token。"
+                    )
+                ),
+                "text/html; charset=utf-8",
+            )
     # PR #99 終審 LOW：`raw_qs`（Lambda 原生 queryStringParameters dict）本來
     # 就會保留空值 key（`?token=`／裸 `?token` 都會是 `{"token": ""}`），直接用
     # `"token" in raw_qs` 判斷「query 是否帶了 token」，不看轉出來的 qs 值是否
