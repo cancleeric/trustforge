@@ -212,10 +212,18 @@ def _public_params(event: dict) -> dict:
 _COLON_SECRET_KEY_ALT = "|".join(
     _SECRET_KEY_MARKERS + ("passwd", "pw", "access_token", "key")
 )
+# Match the same marker semantics inside composite names that ``_is_secret_key``
+# recognises (for example ``client_secret`` and ``refresh-token``).  Components
+# must be separator-delimited so innocent names such as ``monkey`` do not match
+# the short ``key`` marker.
+_STRUCTURED_SECRET_KEY = (
+    rf"(?:[A-Za-z0-9]+[._-])*(?:{_COLON_SECRET_KEY_ALT})"
+    r"(?:[._-][A-Za-z0-9]+)*"
+)
 _TOKEN_LIKE_PATTERNS = (
     # URL query param：?token=... / &api_key=... / ?access_token=... —— 保留前綴只遮值。
     re.compile(
-        r"([?&](?:token|apikey|api_key|access_token|secret|password|passwd|code|auth|credential)=)[^&#\s]+",
+        rf"([?&]{_STRUCTURED_SECRET_KEY}=)[^&#\s]+",
         re.IGNORECASE,
     ),
     # ``bearer <token>``
@@ -223,15 +231,16 @@ _TOKEN_LIKE_PATTERNS = (
     # header / ``key: value``：authorization: ... / password: ... / token: ... ——
     # key 名集合對齊 _SECRET_KEY_MARKERS（經 _COLON_SECRET_KEY_ALT 展開）。
     re.compile(
-        rf"((?:{_COLON_SECRET_KEY_ALT}):\s*)[^\s,;]+",
+        rf"({_STRUCTURED_SECRET_KEY}:\s*)[^\s,;]+",
         re.IGNORECASE,
     ),
     # Assignment form outside URL query strings: ``key=value`` / ``pw='value'``.
     # Requiring a recognised secret marker avoids redacting ordinary ``name=value``
     # diagnostics.  URL query forms are handled by the first pattern above.
     re.compile(
-        rf"((?<![?&])\b(?:{_COLON_SECRET_KEY_ALT})\s*=\s*)"
-        r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)",
+        rf"((?<![?&A-Za-z0-9_]){_STRUCTURED_SECRET_KEY}\s*=\s*)"
+        r'(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'
+        r"'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s,;]+)",
         re.IGNORECASE,
     ),
     # Standard padded base64 blobs (minimum 16 encoded characters).  Padding is

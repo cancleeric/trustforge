@@ -446,3 +446,25 @@ def test_scrub_summary_preserves_non_secret_assignments_and_unpadded_prose():
     )
 
     assert _scrub_summary(summary) == summary
+
+
+def test_scrub_summary_handles_escaped_quotes_and_composite_secret_keys():
+    summary = (
+        r'password="prefix\"DOUBLE_SECRET" '
+        r"client_secret='prefix\'SINGLE_SECRET' "
+        "refresh_token=REFRESH_SECRET "
+        "url=https://host/?service_access_token=QUERY_SECRET "
+        "client.secret: COLON_SECRET"
+    )
+
+    scrubbed = _scrub_summary(summary)
+
+    for secret in (
+        "DOUBLE_SECRET",
+        "SINGLE_SECRET",
+        "REFRESH_SECRET",
+        "QUERY_SECRET",
+        "COLON_SECRET",
+    ):
+        assert secret not in scrubbed
+    assert scrubbed.count(REDACTED) == 5
