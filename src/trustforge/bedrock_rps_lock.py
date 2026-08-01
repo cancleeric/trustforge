@@ -33,10 +33,12 @@ migration。
       殺掉、網路斷線），鎖不會永久卡死，但也不會立刻開放——維持 fail-closed。
 
     release：
-        UpdateItem SET available_at=:invoke_start_plus_interval
+        先用 owner 本機 monotonic clock 持鎖到 invoke 起始後至少 1 秒，再執行
+        owner-conditional UpdateItem SET available_at=:released_at
         ConditionExpression: lock_owner = :owner
-      把 `available_at` **收斂**回「invoke 起始時刻 + 1 秒」——這正是規範要求的
-      「cooldown 持續到 invoke 開始後一秒」。條件綁 owner，確保不會把別人
+      monotonic 等待讓 cooldown 不依賴不同 Lambda execution environment 的 wall
+      clock 是否同步；release 後的 wall timestamp 只決定較慢時鐘是否保守多等，
+      不可能讓較快時鐘在真實一秒前取得鎖。條件綁 owner，確保不會把別人
       （guard 過期後接手的下一位）的鎖誤推遲或誤釋放。
 
 fail-closed 三條路（規範要求）：
@@ -155,6 +157,7 @@ class DynamoDBBedrockRpsLock:
         self._acquire(owner)
         # Cooldown 必須以「DynamoDB 確認取鎖後」的真實 invoke 起點計算。
         # 不可重用 UpdateItem 前的時間，否則取鎖 latency 會吃掉 1s 間隔。
+        invoke_start_monotonic = self._monotonic()
         invoke_start = self._now()
         body_failed = False
         try:
@@ -164,7 +167,7 @@ class DynamoDBBedrockRpsLock:
             raise
         finally:
             try:
-                self._release(owner, invoke_start)
+                self._release(owner, invoke_start_monotonic)
             except BedrockLockError:
                 # release 失敗 → `available_at` 仍停在 guard，後續呼叫者被擋住
                 # （fail-closed 的實質保證已經成立）。body 本身已經炸掉時不要
@@ -244,17 +247,30 @@ class DynamoDBBedrockRpsLock:
             wait = min(remaining, self._jitter(base_wait * 0.8, base_wait))
             self._sleep(max(_MIN_POLL_INTERVAL_SECONDS, wait))
 
-    def _release(self, owner: str, invoke_start: float) -> None:
+    def _release(self, owner: str, invoke_start_monotonic: float) -> None:
         from boto3.dynamodb.conditions import Attr
         from botocore.exceptions import ClientError
 
-        next_available = invoke_start + self.min_interval
+        # Client wall clocks are not a safe distributed cooldown boundary: a
+        # faster next Lambda could satisfy ``available_at <= its_now`` early.
+        # Keep ownership until this process's monotonic clock proves that the
+        # real interval elapsed.  Loop because injected/platform sleeps may
+        # return early; a lost process leaves the long guard in place.
+        while True:
+            remaining = self.min_interval - (
+                self._monotonic() - invoke_start_monotonic
+            )
+            if remaining <= 0:
+                break
+            self._sleep(remaining)
+
+        released_at = self._now()
         try:
             self._get_table().update_item(
                 Key={"source_id": _PK, "coin": _SK},
                 UpdateExpression="SET available_at = :next",
                 ConditionExpression=Attr("lock_owner").eq(owner),
-                ExpressionAttributeValues={":next": _decimal(next_available)},
+                ExpressionAttributeValues={":next": _decimal(released_at)},
             )
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code")

@@ -70,17 +70,19 @@ class _FakeTable:
             raise self.fail_with
         values = kwargs["ExpressionAttributeValues"]
         if "lock_owner = :owner" in kwargs["UpdateExpression"]:
-            return self._acquire(values)
+            return self._acquire(kwargs["ConditionExpression"], values)
         return self._release(kwargs["ConditionExpression"], values)
 
     def get_item(self, **kwargs):
         return {"Item": dict(self.item)}
 
-    def _acquire(self, values):
+    def _acquire(self, condition, values):
         available_at = self.item.get("available_at")
         # ConditionExpression: attribute_not_exists(available_at)
         #                      OR available_at <= :now
-        if available_at is not None and float(available_at) > self.clock.now():
+        comparison = condition.get_expression()["values"][1].get_expression()
+        candidate_now = float(comparison["values"][1])
+        if available_at is not None and float(available_at) > candidate_now:
             raise _CONDITION_FAILED
         self.item["lock_owner"] = values[":owner"]
         self.item["available_at"] = values[":guard"]
@@ -167,9 +169,8 @@ def test_second_caller_waits_until_cooldown_expires() -> None:
     table = _FakeTable(clock)
     lock = _lock(table, now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep)
 
-    with lock.slot():
+    with lock.slot() as first_start:
         pass
-    first_start = clock.wall
 
     with lock.slot() as second_start:
         pass
@@ -180,6 +181,46 @@ def test_second_caller_waits_until_cooldown_expires() -> None:
     # 全部含第一次 acquire/release 與第二次 release；第二個
     # caller 只有一次失敗 write，不是 20 次/second 忙等。
     assert len(table.calls) <= 5
+
+
+def test_faster_second_wall_clock_cannot_shorten_real_cooldown() -> None:
+    class SharedTimelineClock:
+        def __init__(self, timeline: list[float], offset: float) -> None:
+            self.timeline = timeline
+            self.offset = offset
+
+        def now(self) -> float:
+            return 1_800_000_000.0 + self.timeline[0] + self.offset
+
+        def monotonic(self) -> float:
+            return self.timeline[0]
+
+        def sleep(self, seconds: float) -> None:
+            self.timeline[0] += seconds
+
+    timeline = [0.0]
+    owner_clock = SharedTimelineClock(timeline, offset=0.0)
+    faster_clock = SharedTimelineClock(timeline, offset=2.0)
+    table = _FakeTable(_Clock())
+    owner = _lock(
+        table,
+        now=owner_clock.now,
+        monotonic=owner_clock.monotonic,
+        sleep=owner_clock.sleep,
+    )
+    next_caller = _lock(
+        table,
+        now=faster_clock.now,
+        monotonic=faster_clock.monotonic,
+        sleep=faster_clock.sleep,
+    )
+
+    with owner.slot():
+        first_real_start = timeline[0]
+    with next_caller.slot():
+        second_real_start = timeline[0]
+
+    assert second_real_start - first_real_start >= 1.0
 
 
 def test_fractional_millisecond_cannot_relax_one_second_gap() -> None:
