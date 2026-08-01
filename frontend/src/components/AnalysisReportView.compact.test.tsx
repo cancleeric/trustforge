@@ -118,8 +118,27 @@ describe('AnalysisReportView compact 模式（比較頁）', () => {
     const reasoning = screen.getByRole('tab', { name: '推理依據' })
     expect(reasoning).toHaveFocus()
     expect(reasoning).toHaveAttribute('aria-selected', 'true')
-    expect(reasoning).toHaveAttribute('aria-controls', 'deep-dive-panel-reasoning')
-    expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'deep-dive-tab-reasoning')
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', reasoning.id)
+    expect(reasoning.getAttribute('aria-controls')).toBe(screen.getByRole('tabpanel').id)
+  })
+
+  it('keeps keyboard focus local when two compact reports are rendered', () => {
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter>
+          <AnalysisReportView data={makeData()} heading="幣種 A · BTC" compact />
+          <AnalysisReportView data={makeData()} heading="幣種 B · ETH" compact />
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    const trustTabs = screen.getAllByRole('tab', { name: '信任分數' })
+    const reasoningTabs = screen.getAllByRole('tab', { name: '推理依據' })
+    expect(trustTabs[0].id).not.toBe(trustTabs[1].id)
+    trustTabs[1].focus()
+    fireEvent.keyDown(trustTabs[1], { key: 'ArrowRight' })
+    expect(reasoningTabs[1]).toHaveFocus()
+    expect(reasoningTabs[1]).toHaveAttribute('aria-selected', 'true')
+    expect(reasoningTabs[0]).toHaveAttribute('aria-selected', 'false')
   })
 
   it('does not mount lazy evidence charts until the evidence details are opened', async () => {

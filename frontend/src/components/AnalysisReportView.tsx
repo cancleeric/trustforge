@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, type KeyboardEvent } from 'react'
+import { lazy, Suspense, useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { AnalyzeData } from '../lib/types'
 import ConfidenceGauge from './ConfidenceGauge'
 import TrustBreakdown from './TrustBreakdown'
@@ -29,11 +29,12 @@ const EvidenceDistributionCharts = lazy(() => import('./EvidenceDistributionChar
 
 type DeepDiveTab = 'trust' | 'reasoning' | 'risk'
 
-function relativeMinutes(timestamp: string, copy: { unknown: string; justNow: string; minutesAgo: (minutes: number) => string }): string {
+function relativeMinutes(timestamp: string, copy: { unknown: string; justNow: string; minuteAgo: string; minutesAgo: (minutes: number) => string }): string {
   const value = Date.parse(timestamp)
   if (!Number.isFinite(value)) return copy.unknown
   const minutes = Math.max(0, Math.floor((Date.now() - value) / 60_000))
   if (minutes < 1) return copy.justNow
+  if (minutes === 1) return copy.minuteAgo
   return copy.minutesAgo(minutes)
 }
 
@@ -57,6 +58,8 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
   const { t } = useHermesI18n()
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [deepDiveTab, setDeepDiveTab] = useState<DeepDiveTab>('trust')
+  const instanceId = useId()
+  const tabRefs = useRef<Record<DeepDiveTab, HTMLButtonElement | null>>({ trust: null, reasoning: null, risk: null })
   // N71（CEO：「手動分析的報告要在哪裡下載？執行過程的 LOG 要在哪裡看」）：
   // 三顆下載鈕本來只在最底下那個預設收合的「技術細節」裡，跑完分析根本找不到。
   // 這裡在報告抬頭補一排永遠看得見的動作，外加一顆帶去執行過程面板的按鈕
@@ -75,6 +78,7 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
   const generatedAgo = relativeMinutes(data.report.generated_at, {
     unknown: t('arvTimeUnknown'),
     justNow: t('arvTimeJustNow'),
+    minuteAgo: t('arvMinuteAgo'),
     minutesAgo: (minutes) => t('arvMinutesAgo', { minutes }),
   })
   const deepDiveTabs: Array<[DeepDiveTab, string]> = [
@@ -93,7 +97,7 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
     event.preventDefault()
     const target = deepDiveTabs[targetIndex][0]
     setDeepDiveTab(target)
-    document.getElementById(`deep-dive-tab-${target}`)?.focus()
+    tabRefs.current[target]?.focus()
   }
   return (
     <div className="flex flex-col gap-4">
@@ -167,11 +171,12 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
             {deepDiveTabs.map(([id, label]) => (
               <button
                 key={id}
-                id={`deep-dive-tab-${id}`}
+                id={`${instanceId}-deep-dive-tab-${id}`}
+                ref={(element) => { tabRefs.current[id] = element }}
                 type="button"
                 role="tab"
                 aria-selected={deepDiveTab === id}
-                aria-controls={`deep-dive-panel-${id}`}
+                aria-controls={`${instanceId}-deep-dive-panel-${id}`}
                 tabIndex={deepDiveTab === id ? 0 : -1}
                 className={`rounded-md px-3 py-1.5 text-sm ${deepDiveTab === id ? 'bg-tf-accent text-white' : 'border border-tf-border text-tf-text2'}`}
                 onClick={() => setDeepDiveTab(id)}
@@ -182,7 +187,7 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
             ))}
           </div>
           {deepDiveTab === 'trust' && (
-            <div id="deep-dive-panel-trust" role="tabpanel" aria-labelledby="deep-dive-tab-trust" className="flex flex-col gap-4">
+            <div id={`${instanceId}-deep-dive-panel-trust`} role="tabpanel" aria-labelledby={`${instanceId}-deep-dive-tab-trust`} className="flex flex-col gap-4">
               <TrustBreakdown data={data.trust_components_aggregate} />
               <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
                 <TrustRadarChart radar={data.trust_radar} />
@@ -191,14 +196,14 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
             </div>
           )}
           {deepDiveTab === 'reasoning' && (
-            <div id="deep-dive-panel-reasoning" role="tabpanel" aria-labelledby="deep-dive-tab-reasoning" className="flex flex-col gap-4">
+            <div id={`${instanceId}-deep-dive-panel-reasoning`} role="tabpanel" aria-labelledby={`${instanceId}-deep-dive-tab-reasoning`} className="flex flex-col gap-4">
               <FactsInferenceLadder facts={data.report.facts} inferences={data.report.inferences} marketJudgment={data.report.market_judgment} />
               <div id="key-basis"><KeyBasisList items={data.report.key_basis} /></div>
               <HypothesisLedgerPanel ledger={data.report.hypothesis_ledger} evidence={data.evidence} />
             </div>
           )}
           {deepDiveTab === 'risk' && (
-            <div id="deep-dive-panel-risk" role="tabpanel" aria-labelledby="deep-dive-tab-risk" className="flex flex-col gap-4">
+            <div id={`${instanceId}-deep-dive-panel-risk`} role="tabpanel" aria-labelledby={`${instanceId}-deep-dive-tab-risk`} className="flex flex-col gap-4">
               <AssetIntrinsicShadowPanel value={data.report.asset_intrinsic_assessment} />
               <TrustTrendSection coin={data.report.coin} />
               {data.report.limits.length > 0 && (
