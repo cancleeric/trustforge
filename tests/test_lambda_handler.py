@@ -170,6 +170,115 @@ def test_noncompetition_function_preserves_existing_routes(monkeypatch):
     assert lambda_handler._competition_mode() is None
 
 
+def test_noncompetition_analysis_never_refreshes_providers(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", None)
+    monkeypatch.setattr(
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: pytest.fail(f"noncompetition refresh attempted for {coin}"),
+    )
+    monkeypatch.setattr(web, "_do_analyze", lambda *args, **kwargs: (object(), [], []))
+    monkeypatch.setattr(web, "_render_report", lambda *args: "ok")
+
+    assert lambda_handler.handler(_event("/analyze", {"coin": "BTC"}))["statusCode"] == 200
+
+
+@pytest.mark.parametrize("coin", ["", "DOGE", "X" * 2048])
+def test_live_invalid_coin_never_refreshes_provider(monkeypatch, coin):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": coin, "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_invalid_comparison_second_coin_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "comparison", "coin": "BTC", "coin2": "DOGE", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert calls == []
+
+
+def test_live_rate_limited_request_never_refreshes_provider(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    calls = []
+    monkeypatch.setattr(
+        web,
+        "_analyze_enforce_caller_rate_limit",
+        lambda *_args: (_ for _ in ()).throw(web.TooManyRequests("limited")),
+    )
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda value: calls.append(value)
+    )
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": "BTC", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 429
+    assert calls == []
+
+
+def test_live_comparison_refreshes_both_coins_and_counts_rate_limit_once(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    refreshed = []
+    limited = []
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda coin: refreshed.append(coin)
+    )
+    monkeypatch.setattr(
+        web, "_analyze_enforce_caller_rate_limit", lambda qs, ip: limited.append(ip)
+    )
+
+    def _comparison(*args, **kwargs):
+        assert kwargs["client_ip"] == ""
+        raise ValueError("stop after admission")
+
+    monkeypatch.setattr(web, "_do_comparison", _comparison)
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"type": "comparison", "coin": "BTC", "coin2": "ETH", "live": "1"},
+            {"X-Live-Token": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 400
+    assert refreshed == ["BTC", "ETH"]
+    assert limited == ["9.9.9.9"]
+
+
 def test_secret_hydration_precedes_delayed_web_import():
     source = __import__("inspect").getsource(lambda_handler)
 

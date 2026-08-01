@@ -185,12 +185,6 @@ def handler(event, context=None):
             return _resp(200, "ok", "text/plain; charset=utf-8")
 
         if path in ("/analyze", "/analyze.json"):
-            # The product pipeline stays cache-only.  After authentication,
-            # refresh only the four owner-authorized provider entries before
-            # analysis; the helper never exposes exception text or URLs.
-            from .lambda_provider_cache import refresh_provider_cache
-
-            refresh_provider_cache(qs.get("coin", [""])[0])
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
             from .schema import QuestionType
             qtype_raw = qs.get("type", ["multi_source"])[0]
@@ -200,10 +194,45 @@ def handler(event, context=None):
                 qtype = QuestionType.MULTI_SOURCE
 
             try:
+                # Competition Live 的 provider refresh 必須位於完整 admission
+                # gate 後：先驗 query/幣種，再對 caller 限流一次，才允許消耗
+                # 外部 provider quota。下游分析以 enforce_rate_limit=False 避免
+                # 同一請求被重複計數。非 competition Lambda 永不走此 refresh。
+                refresh_coins: tuple[str, ...] = ()
+                if _COMPETITION_MODE == "live":
+                    query = qs.get("q", [""])[0]
+                    if len(query) > 1000:
+                        raise ValueError(
+                            f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）"
+                        )
+                    coin_raw = qs.get("coin", ["BTC"])[0].strip()
+                    if qtype == QuestionType.COMPARISON:
+                        coin2_raw = qs.get("coin2", [""])[0].strip()
+                        if coin2_raw and "," not in coin_raw:
+                            coin_raw = f"{coin_raw},{coin2_raw}"
+                        pair = web._parse_comparison_coins(coin_raw, query)
+                        if pair is None:
+                            raise ValueError("比較分析需要選擇兩個可用且不同的幣種")
+                        refresh_coins = pair
+                    else:
+                        coin = coin_raw.upper()
+                        if coin not in web.COIN_POOL:
+                            raise ValueError(
+                                f"幣種須為以下其中之一：{'、'.join(web.COIN_POOL)}"
+                            )
+                        refresh_coins = (coin,)
+
+                    web._analyze_enforce_caller_rate_limit(qs, client_ip)
+                    from .lambda_provider_cache import refresh_provider_cache
+                    for refresh_coin in refresh_coins:
+                        refresh_provider_cache(refresh_coin)
+
                 if qtype == QuestionType.COMPARISON:
-                    result = web._do_comparison(
-                        qs, client_ip=client_ip
-                    )
+                    # Competition Live 已在 refresh 前對真實 caller IP 限流；
+                    # 下游用空 IP 使既有 parser 不再計第二次，同時保留既有
+                    # callable 介面（部署外的窄簽名 adapter 不會被新 kwarg 弄壞）。
+                    analysis_ip = "" if _COMPETITION_MODE == "live" else client_ip
+                    result = web._do_comparison(qs, client_ip=analysis_ip)
                     report_a, evidence_a, report_b, evidence_b, log = result
                     if path == "/analyze.json":
                         # codex vp-engineering 終審 H1（已實測證實 author 從此
@@ -223,7 +252,8 @@ def handler(event, context=None):
                         "text/html; charset=utf-8",
                     )
                 else:
-                    report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
+                    analysis_ip = "" if _COMPETITION_MODE == "live" else client_ip
+                    report, evidence, log = web._do_analyze(qs, client_ip=analysis_ip)
                     if path == "/analyze.json":
                         # 同上：呼叫 web.py 共用函式，不再自己組 payload。
                         payload = web._build_analyze_json_payload(report, evidence, log)
