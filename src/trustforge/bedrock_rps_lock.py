@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import secrets
 import threading
 import time
@@ -69,14 +70,16 @@ _TTL_BUFFER_SECONDS = 86_400  # 讓 DynamoDB TTL 最終回收這筆鎖 item
 _PK = "__bedrock_rps_lock__"
 _SK = "global"
 
-# guard 必須涵蓋一次真實 invoke 的最長時間（live contract 的 narrative read
-# timeout 是 20s），否則 release 還沒跑到 guard 就過期，兩個呼叫者會同時認為
-# 自己持有鎖。取 25s 留 5s 緩衝；同時它也是 release 失敗時的最長封鎖時間，
-# 遠小於 Lambda 的 90s timeout，不會讓 live demo 永久卡死。
-_DEFAULT_HOLD_SECONDS = 25.0
+# guard 必須涵蓋最壞的 narrative invoke（10s connect + 60s read）與取鎖
+# 後的排程緩衝，否則 lease 可在真實 invoke 仍進行時過期。live Lambda
+# contract 的整體 timeout 是 90s，因此 guard 用同一上界；release 正常時仍會
+# 立即收旂到 invoke start + 1s。
+_DEFAULT_HOLD_SECONDS = 90.0
 # 等待鎖的上限。超過即 fail-closed 拒絕本次 invoke，不無限排隊吃掉 Lambda timeout。
 _DEFAULT_CONTENTION_DEADLINE_SECONDS = 20.0
-_POLL_INTERVAL_SECONDS = 0.05
+_MIN_POLL_INTERVAL_SECONDS = 0.10
+_MAX_POLL_INTERVAL_SECONDS = 1.0
+_MAX_ACQUIRE_ATTEMPTS = 25
 
 
 class BedrockLockError(RuntimeError):
@@ -105,6 +108,7 @@ class DynamoDBBedrockRpsLock:
         now: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        jitter: Callable[[float, float], float] = random.uniform,
     ) -> None:
         self.table_name = table_name or os.getenv(
             "TRUSTFORGE_BUDGET_COUNTER_TABLE", "trustforge-budget-guard"
@@ -119,6 +123,7 @@ class DynamoDBBedrockRpsLock:
         self._now = now
         self._monotonic = monotonic
         self._sleep = sleep
+        self._jitter = jitter
         self._table: Any = None
         self._table_lock = threading.Lock()
 
@@ -147,7 +152,10 @@ class DynamoDBBedrockRpsLock:
         一秒為止，才能保證任兩次 invoke 的起始間隔 >= 1 秒。
         """
         owner = secrets.token_hex(16)
-        invoke_start = self._acquire(owner)
+        self._acquire(owner)
+        # Cooldown 必須以「DynamoDB 確認取鎖後」的真實 invoke 起點計算。
+        # 不可重用 UpdateItem 前的時間，否則取鎖 latency 會吃掉 1s 間隔。
+        invoke_start = self._now()
         body_failed = False
         try:
             yield invoke_start
@@ -168,13 +176,15 @@ class DynamoDBBedrockRpsLock:
                 else:
                     raise
 
-    def _acquire(self, owner: str) -> float:
+    def _acquire(self, owner: str) -> None:
         from boto3.dynamodb.conditions import Attr
         from botocore.exceptions import ClientError
 
         table = self._get_table()
         deadline = self._monotonic() + self.contention_deadline_seconds
-        while True:
+        attempts = 0
+        while attempts < _MAX_ACQUIRE_ATTEMPTS:
+            attempts += 1
             now = self._now()
             guard_until = now + self.hold_seconds
             condition = Attr("available_at").not_exists() | Attr("available_at").lte(
@@ -195,7 +205,7 @@ class DynamoDBBedrockRpsLock:
                         ":ttl_val": int(now) + _TTL_BUFFER_SECONDS,
                     },
                 )
-                return now
+                return
             except ClientError as exc:
                 code = exc.response.get("Error", {}).get("Code")
                 if code != "ConditionalCheckFailedException":
@@ -207,11 +217,32 @@ class DynamoDBBedrockRpsLock:
                     f"Bedrock RPS 鎖取得失敗（DynamoDB 後端錯誤）: {exc}"
                 ) from exc
 
-            if self._monotonic() >= deadline:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0 or attempts >= _MAX_ACQUIRE_ATTEMPTS:
                 raise BedrockLockContentionError(
                     "Bedrock RPS 鎖競爭超過期限，本次呼叫 fail-closed 拒絕"
                 )
-            self._sleep(_POLL_INTERVAL_SECONDS)
+
+            # 先讀取現任 holder 的 available_at，避免每 50ms 盲打一次
+            # conditional write。讀取失敗也不能降級成無鎖路徑。
+            try:
+                item = table.get_item(
+                    Key={"source_id": _PK, "coin": _SK}, ConsistentRead=True
+                ).get("Item", {})
+                available_at = float(item.get("available_at", now))
+            except Exception as exc:  # noqa: BLE001
+                raise BedrockLockBackendError(
+                    f"Bedrock RPS 鎖等待失敗（DynamoDB 後端錯誤）: {exc}"
+                ) from exc
+
+            exponential = min(
+                _MAX_POLL_INTERVAL_SECONDS,
+                _MIN_POLL_INTERVAL_SECONDS * (2 ** min(attempts - 1, 4)),
+            )
+            until_available = max(0.0, available_at - self._now())
+            base_wait = max(exponential, min(until_available, _MAX_POLL_INTERVAL_SECONDS))
+            wait = min(remaining, self._jitter(base_wait * 0.8, base_wait))
+            self._sleep(max(_MIN_POLL_INTERVAL_SECONDS, wait))
 
     def _release(self, owner: str, invoke_start: float) -> None:
         from boto3.dynamodb.conditions import Attr
@@ -241,5 +272,5 @@ class DynamoDBBedrockRpsLock:
 
 
 def _decimal(value: float) -> Decimal:
-    """epoch 秒轉 DynamoDB 可存的 Decimal（毫秒精度即足夠，避免浮點尾數爆長）。"""
-    return Decimal(f"{value:.3f}")
+    """epoch 秒轉 DynamoDB Decimal，不可四捨五入而放寬 1 RPS。"""
+    return Decimal(str(value))

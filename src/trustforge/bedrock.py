@@ -249,6 +249,11 @@ def _default_distributed_lock() -> Any | None:
 _DEFAULT_RPS_LIMITER = BedrockRpsLimiter(distributed_lock=_default_distributed_lock())
 
 
+def bedrock_invoke_slot():
+    """Shared gate for the few Bedrock converse adapters outside BedrockClient."""
+    return _DEFAULT_RPS_LIMITER.slot()
+
+
 @dataclass
 class BedrockConfig:
     # Competition default region: the hackathon environment restricts primary

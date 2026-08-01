@@ -73,6 +73,9 @@ class _FakeTable:
             return self._acquire(values)
         return self._release(kwargs["ConditionExpression"], values)
 
+    def get_item(self, **kwargs):
+        return {"Item": dict(self.item)}
+
     def _acquire(self, values):
         available_at = self.item.get("available_at")
         # ConditionExpression: attribute_not_exists(available_at)
@@ -93,6 +96,7 @@ class _FakeTable:
 
 
 def _lock(table: _FakeTable, **kwargs) -> DynamoDBBedrockRpsLock:
+    kwargs.setdefault("jitter", lambda low, high: high)
     lock = DynamoDBBedrockRpsLock(table_name="competition-trustforge-team11-budget", **kwargs)
     lock._table = table
     return lock
@@ -128,6 +132,29 @@ def test_cooldown_is_held_until_one_second_after_invoke_start() -> None:
     assert float(table.item["available_at"]) == pytest.approx(start + 1.0)
 
 
+def test_cooldown_starts_after_slow_acquire_returns() -> None:
+    clock = _Clock()
+    table = _FakeTable(clock)
+    original_update = table.update_item
+
+    def slow_update(**kwargs):
+        clock.sleep(1.2)
+        return original_update(**kwargs)
+
+    table.update_item = slow_update
+    lock = _lock(table, now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep)
+
+    with lock.slot() as invoke_start:
+        assert invoke_start == pytest.approx(1_800_000_001.2)
+
+    assert float(table.item["available_at"]) == pytest.approx(invoke_start + 1.0)
+
+
+def test_default_guard_covers_worst_case_narrative_timeout() -> None:
+    lock = DynamoDBBedrockRpsLock()
+    assert lock.hold_seconds >= 10 + 60 + 10
+
+
 def test_min_interval_cannot_be_relaxed_below_one_second() -> None:
     lock = DynamoDBBedrockRpsLock(min_interval=0.01)
     assert lock.min_interval == 1.0
@@ -149,6 +176,46 @@ def test_second_caller_waits_until_cooldown_expires() -> None:
 
     assert second_start - first_start >= 1.0
     assert clock.sleeps  # 真的等過，不是直接放行
+    # available_at-aware backoff 不會產生 50ms conditional-write 風暴。
+    # 全部含第一次 acquire/release 與第二次 release；第二個
+    # caller 只有一次失敗 write，不是 20 次/second 忙等。
+    assert len(table.calls) <= 5
+
+
+def test_fractional_millisecond_cannot_relax_one_second_gap() -> None:
+    clock = _Clock()
+    clock.wall = 1_800_000_000.00049
+    table = _FakeTable(clock)
+    lock = _lock(table, now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep)
+
+    with lock.slot() as first_start:
+        pass
+
+    # 舊的毫秒四捨五入會讓這個時點的 condition 提前成立。
+    clock.sleep(0.99952)
+    with lock.slot() as second_start:
+        pass
+
+    assert second_start - first_start >= 1.0
+
+
+def test_contention_has_a_hard_operation_bound() -> None:
+    clock = _Clock()
+    table = _FakeTable(clock)
+    table.item = {"lock_owner": "someone-else", "available_at": clock.wall + 3600}
+    lock = _lock(
+        table,
+        contention_deadline_seconds=100,
+        now=clock.now,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    with pytest.raises(BedrockLockContentionError):
+        with lock.slot():
+            pass
+
+    assert len(table.calls) == 25
 
 
 # --- fail-closed -----------------------------------------------------------
