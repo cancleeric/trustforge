@@ -84,7 +84,7 @@ def test_team_11_final_competition_artifacts_are_authentic_and_parseable():
     html = final_deck.read_text(encoding="utf-8")
     assert final_deck.read_bytes() == canonical_deck.read_bytes()
     assert "正式提案簡報" in html
-    assert html.count('<section class="slide') == 6
+    assert html.count('<section class="slide') == 8
     assert "逐字講稿" not in html
     assert "App Runner" not in html
     assert "EC2 + nginx" in html
