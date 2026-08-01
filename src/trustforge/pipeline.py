@@ -355,12 +355,15 @@ def run(coin: str, query: str, qtype: QuestionType,
         stance_offline=stance_offline,
     )
 
-    _durable_ledger_commit = True
+    # Fail closed: after capacity has been reserved, accounting is uncertain
+    # until the ledger observer positively proves a durable commit or confirms
+    # that this run incurred zero model cost.  Exceptions before the observer
+    # must retain capacity across cold starts.
+    _durable_ledger_commit = False
 
     def _observe_ledger_persistence(persisted: bool, cost_usd: float) -> None:
         nonlocal _durable_ledger_commit
-        if cost_usd > 0 and not persisted:
-            _durable_ledger_commit = False
+        _durable_ledger_commit = cost_usd <= 0 or persisted
 
     try:
         report, evidence = run_agent_pipeline(

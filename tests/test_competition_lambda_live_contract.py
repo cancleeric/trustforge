@@ -83,6 +83,11 @@ def test_execution_role_and_function_url_policies_are_exact():
         assert all(resource != "*" for resource in statement["resources"])
         assert all("850849012389" in resource or "::foundation-model/" in resource
                    for resource in statement["resources"])
+    assert CONTRACT["deployment_alias"] == "live"
+    assert {entry["statement_id"] for entry in CONTRACT["function_url_policy"]} == {
+        "FunctionURLAllowPublicAccess", "FunctionURLAllowPublicInvoke"
+    }
+    assert {entry["principal"] for entry in CONTRACT["function_url_policy"]} == {"*"}
     assert {entry["resource"] for entry in CONTRACT["function_url_policy"]} == {
-        "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live"
+        "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live:live"
     }

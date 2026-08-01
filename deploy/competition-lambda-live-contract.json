@@ -3,6 +3,8 @@
   "account_id": "850849012389",
   "region": "us-east-1",
   "function_name": "competition-trustforge-team11-live",
+  "deployment_alias": "live",
+  "qualified_function_arn": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live:live",
   "runtime": "python3.12",
   "handler": "trustforge.lambda_handler.handler",
   "memory_mb": 512,
@@ -71,13 +73,17 @@
   },
   "function_url_policy": [
     {
+      "statement_id": "FunctionURLAllowPublicAccess",
       "action": "lambda:InvokeFunctionUrl",
-      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live",
+      "principal": "*",
+      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live:live",
       "condition": {"lambda:FunctionUrlAuthType": "NONE"}
     },
     {
+      "statement_id": "FunctionURLAllowPublicInvoke",
       "action": "lambda:InvokeFunction",
-      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live",
+      "principal": "*",
+      "resource": "arn:aws:lambda:us-east-1:850849012389:function:competition-trustforge-team11-live:live",
       "condition": {"lambda:InvokedViaFunctionUrl": "true"}
     }
   ],
