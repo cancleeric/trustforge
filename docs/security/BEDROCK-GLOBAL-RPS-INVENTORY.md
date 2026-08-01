@@ -2,7 +2,7 @@
 
 All production model requests share `trustforge.bedrock._DEFAULT_RPS_LIMITER`.
 Production EC2 and competition Lambda select the same DynamoDB owner lock and
-the same `TRUSTFORGE_BUDGET_COUNTER_TABLE`; local development alone may use the
+the same immutable `TRUSTFORGE_BEDROCK_RPS_REGION` / `_TABLE`; local development may use the
 host-local flock fallback. The enforced minimum is 1.0 seconds and cannot be
 reduced by environment configuration.
 
@@ -20,7 +20,7 @@ reduced by environment configuration.
 client; it does not invoke a model. The legacy `app/CustomerSupport` Strands
 demo is fail-closed because Strands would otherwise create an unaudited client.
 
-The architecture test scans `src/`, `scripts/`, and `app/` and fails whenever a
+The architecture test scans `src/`, `scripts/`, `app/`, `deploy/`, and `tools/` and fails whenever a
 new model operation appears outside this inventory or a direct
 `boto3.client("bedrock-runtime")` is added outside the sole audited factory.
 

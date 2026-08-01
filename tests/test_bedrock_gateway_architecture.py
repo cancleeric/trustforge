@@ -22,7 +22,8 @@ MODEL_METHODS = {
 def _production_python() -> list[Path]:
     return sorted(
         path
-        for root in (ROOT / "src", ROOT / "scripts", ROOT / "app")
+        for root in (ROOT / "src", ROOT / "scripts", ROOT / "app", ROOT / "deploy", ROOT / "tools")
+        if root.exists()
         for path in root.rglob("*.py")
     )
 
@@ -43,7 +44,12 @@ def test_only_the_audited_factory_constructs_bedrock_runtime_clients() -> None:
             ):
                 continue
             relative = path.relative_to(ROOT).as_posix()
-            if relative != "src/trustforge/bedrock.py":
+            factory = next(
+                item for item in tree.body
+                if isinstance(item, ast.FunctionDef)
+                and item.name == "create_bedrock_runtime_client"
+            ) if relative == "src/trustforge/bedrock.py" else None
+            if factory is None or node not in ast.walk(factory):
                 violations.append(f"{relative}:{node.lineno}")
     assert violations == []
 

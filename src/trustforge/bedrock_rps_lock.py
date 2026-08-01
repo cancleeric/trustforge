@@ -114,9 +114,12 @@ class DynamoDBBedrockRpsLock:
         jitter: Callable[[float, float], float] = random.uniform,
     ) -> None:
         self.table_name = table_name or os.getenv(
-            "TRUSTFORGE_BUDGET_COUNTER_TABLE", "trustforge-budget-guard"
+            "TRUSTFORGE_BEDROCK_RPS_TABLE",
+            os.getenv("TRUSTFORGE_BUDGET_COUNTER_TABLE", "trustforge-budget-guard"),
         )
-        self.region = region or os.getenv("AWS_REGION", "us-east-1")
+        self.region = region or os.getenv(
+            "TRUSTFORGE_BEDROCK_RPS_REGION", os.getenv("AWS_REGION", "us-east-1")
+        )
         # 與 flock 路徑一致：環境變數不得把節流放寬到 1 秒以下。
         self.min_interval = max(1.0, float(min_interval))
         # guard 至少要 >= min_interval，否則 release 失敗時的封鎖比正常
