@@ -59,11 +59,10 @@ def run_smoke(out_dir: str = "out") -> int:
 
     # ── Check 3: boto3 client 可建立 ─────────────────────────────────────
     try:
-        import boto3  # noqa: PLC0415
         from botocore.config import Config  # noqa: PLC0415
+        from .bedrock import create_bedrock_runtime_client
 
-        client = boto3.client(
-            "bedrock-runtime",
+        client = create_bedrock_runtime_client(
             region_name=region,
             config=Config(
                 read_timeout=30,
@@ -85,11 +84,14 @@ def run_smoke(out_dir: str = "out") -> int:
     prompt = "Say exactly: BEDROCK_SMOKE_OK"
     start = time.time()
     try:
-        response = client.converse(
-            modelId=model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": 64, "temperature": 0.0},
-        )
+        from .bedrock import bedrock_invoke_slot
+
+        with bedrock_invoke_slot():
+            response = client.converse(
+                modelId=model_id,
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                inferenceConfig={"maxTokens": 64, "temperature": 0.0},
+            )
         elapsed = time.time() - start
 
         # Extract response text
