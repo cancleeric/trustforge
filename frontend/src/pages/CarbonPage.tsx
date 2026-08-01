@@ -89,7 +89,7 @@ export default function CarbonPage() {
     return (
       <div className="mx-auto max-w-4xl px-4 py-8">
         <h1 className="mb-6 text-xl font-semibold text-tf-text">碳足跡</h1>
-        <ErrorState message={error || '資料載入失敗'} />
+        <ErrorState code="carbon_load_failed" message={error || '資料載入失敗'} />
       </div>
     )
   }
