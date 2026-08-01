@@ -68,6 +68,66 @@ def test_competition_offline_landing_is_truthful_and_has_no_analysis_cta(monkeyp
     assert "/analyze" not in response["body"]
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("POST", "/"), ("POST", "/analyze"), ("GET", "/status"), ("GET", "/admin")],
+)
+def test_competition_live_rejects_non_allowlisted_routes(monkeypatch, method, path):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    event = _event(path)
+    event["requestContext"]["http"].update({"method": method, "path": path})
+
+    response = lambda_handler.handler(event)
+
+    assert response["statusCode"] == 404
+    assert "Live 端點未開放" in response["body"]
+
+
+@pytest.mark.parametrize(
+    ("qs", "headers"),
+    [
+        ({"coin": "BTC"}, {"X-Live-Token": "correct-token"}),
+        ({"coin": "BTC", "live": "1"}, {}),
+        ({"coin": "BTC", "live": "1"}, {"X-Live-Token": "wrong-token"}),
+        ({"coin": "BTC", "live": "1", "token": "correct-token"}, {}),
+    ],
+)
+def test_competition_live_analysis_fails_closed_without_exact_header(
+    monkeypatch, qs, headers
+):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    monkeypatch.setattr(
+        web,
+        "_do_analyze",
+        lambda *args, **kwargs: pytest.fail("unauthorized request reached analysis"),
+    )
+
+    response = lambda_handler.handler(_event("/analyze", qs, headers))
+
+    assert response["statusCode"] == 401
+    assert "correct-token" not in response["body"]
+    assert "wrong-token" not in response["body"]
+
+
+def test_competition_live_allows_exact_header_and_live_flag(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    monkeypatch.setattr(web, "_do_analyze", lambda *args, **kwargs: (object(), [], []))
+    monkeypatch.setattr(web, "_render_report", lambda *args: "<html>live ok</html>")
+
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": "BTC", "live": "1"},
+            {"X-LIVE-TOKEN": "correct-token"},
+        )
+    )
+
+    assert response["statusCode"] == 200
+    assert "live ok" in response["body"]
+
+
 def test_competition_function_requires_explicit_mode(monkeypatch):
     monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "competition-trustforge-team11-offline")
     monkeypatch.delenv("TRUSTFORGE_COMPETITION_MODE", raising=False)

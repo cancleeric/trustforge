@@ -12,6 +12,15 @@ status remains blocked until the owner explicitly authorizes creation of the
 competition token and harper approves the final IAM, counter, and endpoint
 configuration.
 
+After explicit owner authorization, the reviewed Live target is recorded in
+`deploy/competition-lambda-live-contract.json`.  It uses a separate `-live`
+function identity, an exact-version Secrets Manager token, an exact-model
+Bedrock allowlist, and competition-only DynamoDB tables for atomic reservation
+and durable cost accounting.  Live analysis accepts only `GET /analyze` and
+`GET /analyze.json`, requires both `live=1` and `X-Live-Token`, and rejects all
+POST and non-allowlisted routes.  `TRUSTFORGE_ONLINE_STANCE` stays unset so no
+unauthenticated side path can invoke Bedrock.
+
 ## Token rotation contract
 
 The Lambda process pins the optional Secrets Manager `VersionId` supplied in

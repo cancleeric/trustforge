@@ -1,0 +1,73 @@
+{
+  "status": "approved-for-owner-authorized-deployment",
+  "account_id": "850849012389",
+  "region": "us-east-1",
+  "function_name": "competition-trustforge-team11-live",
+  "runtime": "python3.12",
+  "handler": "trustforge.lambda_handler.handler",
+  "memory_mb": 512,
+  "timeout_seconds": 30,
+  "reserved_concurrency": 1,
+  "function_url_auth_type": "NONE",
+  "environment": {
+    "TRUSTFORGE_HOME": "/var/task",
+    "TRUSTFORGE_COMPETITION_MODE": "live",
+    "BEDROCK_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "BEDROCK_HAIKU_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "TRUSTFORGE_BEDROCK_DAILY_USD_CAP": "10",
+    "TRUSTFORGE_BUDGET_GUARD_BACKEND": "dynamodb",
+    "TRUSTFORGE_BUDGET_COUNTER_TABLE": "competition-trustforge-team11-budget",
+    "COST_LEDGER_BACKEND": "dynamodb",
+    "TRUSTFORGE_COST_LEDGER_TABLE": "competition-trustforge-team11-cost-ledger",
+    "TRUSTFORGE_DISABLE_ADMIN_CONFIG": "true"
+  },
+  "secret_environment_inputs": [
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN",
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID"
+  ],
+  "forbidden_environment": [
+    "TRUSTFORGE_LIVE_TOKEN",
+    "TRUSTFORGE_ONLINE_STANCE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN"
+  ],
+  "public_requests": [
+    {"method": "GET", "path": "/"},
+    {"method": "GET", "path": "/healthz"}
+  ],
+  "token_protected_requests": [
+    {"method": "GET", "path": "/analyze", "requires": ["live=1", "X-Live-Token"]},
+    {"method": "GET", "path": "/analyze.json", "requires": ["live=1", "X-Live-Token"]}
+  ],
+  "bedrock": {
+    "actions": ["bedrock:InvokeModel"],
+    "resources": [
+      "arn:aws:bedrock:us-east-1:850849012389:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+    ]
+  },
+  "dynamodb": {
+    "budget_table": {
+      "name": "competition-trustforge-team11-budget",
+      "partition_key": "source_id",
+      "sort_key": "coin",
+      "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    },
+    "cost_ledger_table": {
+      "name": "competition-trustforge-team11-cost-ledger",
+      "partition_key": "run_id",
+      "sort_key": "ts",
+      "actions": ["dynamodb:PutItem", "dynamodb:Scan"]
+    }
+  },
+  "daily_usd_cap": 10,
+  "tags": {
+    "owner": "team11",
+    "purpose": "competition-live",
+    "cost-center": "hackathon-2026",
+    "expiry": "2026-08-03"
+  }
+}
