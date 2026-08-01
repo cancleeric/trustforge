@@ -436,6 +436,11 @@ class DynamoDBLedger(Ledger):
     def read_all(self) -> list[dict[str, Any]]:
         """scan DynamoDB + 合併 JSONL fallback，去重後依 `(ts, run_id)` 排序回傳。
 
+        `Scan` 一律使用強一致讀。成本 admission 會以這份帳本計算已花費金額，
+        而 shared reservation 會在成功寫入帳本後釋放；若沿用 DynamoDB 預設的
+        最終一致讀，下一個請求可能同時看見舊 spend 與已歸零的 reservation，
+        形成短暫的超額放行窗口。分頁時也必須保留同一個 `ConsistentRead=True`。
+
         `append_run()` 遇到 `put_item` 失敗（outage/缺憑證/表未建）會 fallback
         寫進 `JsonlLedger`（見模組頂部說明）；若這裡只 scan DynamoDB，outage
         期間的記錄雖然還在磁碟上，卻不會出現在 `/costs`。因此一律也讀一次
@@ -451,7 +456,7 @@ class DynamoDBLedger(Ledger):
         """
         dynamo_records: list[dict[str, Any]] = []
         table = self._get_table()
-        scan_kwargs: dict[str, Any] = {}
+        scan_kwargs: dict[str, Any] = {"ConsistentRead": True}
         while True:
             resp = table.scan(**scan_kwargs)
             for item in resp.get("Items", []) or []:
