@@ -394,9 +394,15 @@
   white-space: nowrap !important;
 }
 
-/* Right rail: wider */
+/* Right rail: keep original width, just ensure z-index */
 .hermes-right-rail {
-  width: clamp(260px, 24vw, 380px) !important;
+  z-index: 20 !important;
+}
+
+/* 左欄稍微縮小，右欄稍微加大，總寬不超出螢幕 */
+:root {
+  --hermes-rail: clamp(190px, 16vw, 240px) !important;
+  --hermes-right-rail: clamp(220px, 22vw, 320px) !important;
 }
 
 @media (max-width: 900px) {
