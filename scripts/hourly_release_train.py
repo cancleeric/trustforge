@@ -22,7 +22,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "out" / "release-train"
-PRODUCTION_ACCOUNT = "795930814369"
+PRODUCTION_ACCOUNT_ENV = "TRUSTFORGE_PRODUCTION_ACCOUNT_ID"
 PRODUCTION_REGION = "ap-southeast-2"
 PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
 VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)\Z")
@@ -32,6 +32,13 @@ VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P
 # 寫壞、或 activate 一個生產環境跑不起來的 formal-run 版本。
 FORMAL_RUN_READY_FLAG = OUT / "formal-run-prod-ready"
 FORMAL_HANDLER_MARKER = "_handle_api_formal_analysis_question"
+
+
+def production_account() -> str:
+    account = os.getenv(PRODUCTION_ACCOUNT_ENV, "")
+    if not re.fullmatch(r"[0-9]{12}", account):
+        raise RuntimeError(f"{PRODUCTION_ACCOUNT_ENV} must be a 12-digit AWS account id")
+    return account
 
 
 def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -244,10 +251,11 @@ def _localize_gate_interpreter(
 
 
 def production_identity() -> tuple[str, str]:
+    production_account_id = production_account()
     account = run(["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"], capture=True).strip()
-    if account != PRODUCTION_ACCOUNT:
+    if account != production_account_id:
         raise RuntimeError("AWS caller is not the pinned TrustForge production account")
-    bucket = f"trustforge-deploy-{PRODUCTION_ACCOUNT}"
+    bucket = f"trustforge-deploy-{production_account_id}"
     pointer = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/pointers/active.json", "-", "--region", PRODUCTION_REGION], capture=True))
     digest = str(pointer["digest"])
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
@@ -267,7 +275,7 @@ def production_identity() -> tuple[str, str]:
 def capture_active_pointer(expected_digest: str) -> dict[str, object]:
     if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
         raise RuntimeError("production active digest is invalid")
-    bucket = f"trustforge-deploy-{PRODUCTION_ACCOUNT}"
+    bucket = f"trustforge-deploy-{production_account()}"
     pointer = json.loads(
         run(
             [
@@ -582,7 +590,7 @@ def restore_backend(
         raise RuntimeError("rollback backend SHA is invalid")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
         raise RuntimeError("rollback backend digest is invalid")
-    bucket = f"trustforge-deploy-{PRODUCTION_ACCOUNT}"
+    bucket = f"trustforge-deploy-{production_account()}"
     manifest = json.loads(
         run(
             [

@@ -886,6 +886,7 @@ def test_run_agent_pipeline_offline_appends_zero_cost_run(monkeypatch):
     run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-cost-ledger-append",
     )
 
     assert len(captured) == 1
@@ -921,6 +922,7 @@ def test_run_agent_pipeline_online_ledger_total_matches_log_sum(monkeypatch):
     run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-cost-ledger-costsum",
     )
 
     assert len(captured) == 1
@@ -958,10 +960,12 @@ def test_comparison_shared_log_does_not_double_count_ledger_cost(monkeypatch):
     run_agent_pipeline(
         query="比較 BTC/ETH", coin="BTC", qtype=QuestionType.COMPARISON,
         docs=docs, client=client_a, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-cost-ledger-cmp-btc",
     )
     run_agent_pipeline(
         query="比較 BTC/ETH", coin="ETH", qtype=QuestionType.COMPARISON,
         docs=docs, client=client_b, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-cost-ledger-cmp-eth",
     )
 
     assert len(captured) == 2  # 兩輪各寫一筆
@@ -1027,6 +1031,7 @@ def test_run_agent_pipeline_survives_unwritable_ledger_path(monkeypatch, tmp_pat
     report, evidence = run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+        run_scope_id="test-cost-ledger-persist-ok",
     )
 
     assert report is not None

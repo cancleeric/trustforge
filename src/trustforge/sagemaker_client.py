@@ -25,7 +25,7 @@ from typing import Any, Callable
 from .training_backend import TrainingBackendConfigError
 
 # 預設環境變數
-_DEFAULT_REGION = "ap-southeast-2"
+_DEFAULT_REGION = "us-east-1"
 _DEFAULT_INSTANCE_TYPE = "ml.m5.large"
 _DEFAULT_POLL_INTERVAL = 5.0
 _DEFAULT_POLL_MAX_WAIT = 300.0

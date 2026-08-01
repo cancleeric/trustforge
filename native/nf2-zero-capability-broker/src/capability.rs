@@ -7,7 +7,7 @@
 //! deliberately `cfg`-free so the descriptor type (and the cross-crate
 //! `CapabilitySink`) is visible to every target, not just Linux x86_64.
 
-use crate::sha256;
+use trustforge_native_sys::sha256;
 
 /// Length-prefixed framing tag. Domain-separates this digest from every other
 /// sha256 the crate computes (canonical JSON, manifest, foundation) so two
@@ -109,7 +109,7 @@ impl CapabilityDescriptor {
         buffer.extend_from_slice(&self.runtime_device.to_be_bytes());
         buffer.extend_from_slice(&self.runtime_inode.to_be_bytes());
         buffer.push(self.capability_kind.discriminant());
-        sha256::digest(&buffer)
+        sha256::digest(&buffer, 1024).expect("capability descriptor digest is bounded")
     }
 
     /// Asserts the descriptor carries no authority material.

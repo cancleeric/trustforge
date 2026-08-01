@@ -110,6 +110,24 @@ DEV_FILE_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
+def _is_known_false_positive_secret(relpath: str, line: str, pattern_name: str) -> bool:
+    """Return True for UI labels / dummy test payloads that look like keys."""
+    normalized = relpath.replace("\\", "/")
+    if (
+        pattern_name == "private_key"
+        and normalized == "src/trustforge/hermes_audit_contracts.py"
+        and "BEGIN(?: [A-Z]+)? PRIVATE KEY" in line
+    ):
+        return True
+    if pattern_name != "hardcoded_secret":
+        return False
+    if normalized == "frontend/src/hermes/hermesI18n.tsx" and (
+        "Admin Token" in line or "Gas token" in line
+    ):
+        return True
+    return False
+
+
 @dataclass
 class Finding:
     severity: str  # P0, P1, P2
@@ -242,7 +260,18 @@ def scan(root: Path | None = None) -> ScanResult:
             for pattern_name, pattern in SECRET_PATTERNS:
                 m = pattern.search(line)
                 if m:
-                    severity = "P2" if is_secret_relaxed else "P0"
+                    if _is_known_false_positive_secret(relpath, line, pattern_name):
+                        continue
+                    exact_dummy_fixture = (
+                        relpath.replace("\\", "/")
+                        == "frontend/src/lib/adminApi.test.ts"
+                        and re.fullmatch(
+                            r"\s*api_key: ['\"]must-not-be-accepted['\"],\s*",
+                            line,
+                        )
+                        is not None
+                    )
+                    severity = "P2" if is_secret_relaxed or exact_dummy_fixture else "P0"
                     result.add(Finding(
                         severity=severity,
                         category="secret",

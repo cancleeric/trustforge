@@ -83,7 +83,13 @@ def comparison_report(monkeypatch):
         return _make_fixture_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
-    result = run_comparison("BTC", "ETH", "比較 BTC 與 ETH", offline=True)
+    result = run_comparison(
+        "BTC",
+        "ETH",
+        "比較 BTC 與 ETH",
+        offline=True,
+        run_scope_id="test-issue-1224",
+    )
     assert result.comparison is not None
     return result
 

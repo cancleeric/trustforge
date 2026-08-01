@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 from .ledger import estimate_cost
 
@@ -128,24 +131,97 @@ _STANCE_FEWSHOT = [
 ]
 
 
+# Competition Bedrock hard limit (#1203): Amazon Bedrock calls must stay below
+# one request per second.  Keep this guard in the single Bedrock gateway so
+# narrative, stance, and structured-extraction calls share the same host-local
+# canonical flock timestamp. Lambda fails closed; non-Lambda deployments must
+# remain single-host because this is intentionally not a distributed lease.
+_BEDROCK_MIN_INTERVAL_SEC = float(os.getenv("TRUSTFORGE_BEDROCK_MIN_INTERVAL_SEC", "1.0"))
+
+
+class BedrockRpsLimiter:
+    """Cross-process minimum-interval limiter for Bedrock invoke paths."""
+
+    def __init__(
+        self,
+        *,
+        min_interval: float = _BEDROCK_MIN_INTERVAL_SEC,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        lock_path: str | os.PathLike[str] | None = None,
+    ) -> None:
+        self.min_interval = max(1.0, float(min_interval))
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._last_call_at: float | None = None
+        injected_clock = monotonic is not time.monotonic or sleep is not time.sleep
+        default_lock = (
+            f"/tmp/trustforge-bedrock-rps-test-{id(self)}.lock"
+            if injected_clock
+            else "/tmp/trustforge-bedrock-rps.lock"
+        )
+        # Production always uses one canonical host-local path. ``lock_path`` is
+        # constructor-only test injection; environment cannot split the gate.
+        self._lock_path = Path(lock_path or default_lock)
+        if injected_clock and lock_path is None:
+            self._lock_path.unlink(missing_ok=True)
+        self._unsupported_lambda_runtime = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+
+    def acquire(self) -> None:
+        if self._unsupported_lambda_runtime:
+            raise RuntimeError(
+                "Lambda Bedrock calls require a real shared distributed limiter"
+            )
+        try:
+            import fcntl
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Bedrock calls require host-local flock support"
+            ) from exc
+        with self._lock:
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                lock_file.seek(0)
+                raw = lock_file.read().strip()
+                try:
+                    last_call_at = float(raw) if raw else self._last_call_at
+                except ValueError as exc:
+                    raise RuntimeError("Bedrock limiter state is malformed") from exc
+                now = self._monotonic()
+                if last_call_at is not None and last_call_at > now:
+                    raise RuntimeError("Bedrock limiter timestamp is in the future")
+                wait = 0.0
+                if last_call_at is not None:
+                    wait = self.min_interval - (now - last_call_at)
+                if wait > 0:
+                    self._sleep(wait)
+                    now = self._monotonic()
+                self._last_call_at = now
+                lock_file.seek(0)
+                lock_file.truncate()
+                lock_file.write(f"{now:.9f}\n")
+                lock_file.flush()
+
+
+# One limiter per process so multiple BedrockClient instances do not bypass the
+# 1 RPS rule. Tests may inject their own limiter via BedrockClient.__init__.
+_DEFAULT_RPS_LIMITER = BedrockRpsLimiter()
+
+
 @dataclass
 class BedrockConfig:
-    # codex 審查發現的 HIGH：預設值必須跟預設 `stance_model_id` 用的 `au.` 地理
-    # profile（只能從 ap-southeast-2/4/6 呼叫）相容——EC2/Bedrock 實際部署在
-    # 雪梨，region 預設改 `ap-southeast-2`。舊預設 `us-east-1` 會讓沒設
-    # `AWS_REGION` 環境變數的每一次 stance 呼叫都失敗（pipeline 降級 neutral、
-    # gen 腳本中止），先前驗證時是因為手動帶了 `AWS_REGION=ap-southeast-2`
-    # 才成功，掩蓋了這個預設不相容組合。env `AWS_REGION` 仍可覆寫。
-    region: str = os.getenv("AWS_REGION", "ap-southeast-2")
-    # 競賽現場（8/1）公告可用模型後填入；保持環境變數可配置，勿在程式碼寫死。
-    # 目前預設空字串（未指定任何 region profile），故不受 region 相容性問題影響。
+    # Competition default region: the hackathon environment restricts primary
+    # deployment regions to us-east-1 / us-west-2.  Keep env overrides for the
+    # final on-site model announcement, but never default to ap-* / au.* profiles.
+    region: str = os.getenv("AWS_REGION", "us-east-1")
     model_id: str = os.getenv("BEDROCK_MODEL_ID", "")
     max_tokens: int = int(os.getenv("BEDROCK_MAX_TOKENS", "1024"))
-    # W1.5（#15）：語意 stance 子分類器專用小模型，與主敘事模型分開設定，
-    # 讓高頻小任務可用更便宜/低延遲的模型，不佔用主模型預算。`au.` 地理 profile
-    # 需搭配上面 `ap-southeast-2/4/6` 其中一個 region 才能呼叫。
+    # Stance classifier uses a US cross-region inference profile by default so
+    # zero-env production does not silently fail under us-east-1/us-west-2.
     stance_model_id: str = os.getenv(
-        "BEDROCK_HAIKU_MODEL_ID", "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+        "BEDROCK_HAIKU_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     )
 
 
@@ -161,6 +237,9 @@ class BedrockClient:
         config: BedrockConfig | None = None,
         offline: bool = False,
         stance_offline: bool | None = None,
+        rps_limiter: BedrockRpsLimiter | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ):
         self.config = config or BedrockConfig()
         self.offline = offline
@@ -182,6 +261,19 @@ class BedrockClient:
         # classify_stance 每次真呼叫（cache-miss）成功後自行把成本事件累積在此，
         # 呼叫端（orchestrator Step2）於 score() 完成後統一讀出並清空、寫回 log。
         self.cost_events: list[dict] = []
+        if rps_limiter is not None:
+            self._rps_limiter = rps_limiter
+        elif monotonic is not None or sleep is not None:
+            self._rps_limiter = BedrockRpsLimiter(
+                monotonic=monotonic or time.monotonic,
+                sleep=sleep or time.sleep,
+            )
+        else:
+            self._rps_limiter = _DEFAULT_RPS_LIMITER
+
+    def _acquire_bedrock_slot(self) -> None:
+        """Apply the shared Bedrock ≤1 RPS guard before every real invoke."""
+        self._rps_limiter.acquire()
 
     def _runtime(self):
         """#51 codex HIGH 複審 Round 14：主敘事模型呼叫專用 client，見上方
@@ -259,6 +351,7 @@ class BedrockClient:
             "system": system,
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
         }
+        self._acquire_bedrock_slot()
         resp = self._runtime().converse(
             modelId=self.config.model_id,
             system=[{"text": system}],
@@ -381,6 +474,7 @@ class BedrockClient:
             "toolChoice": {"tool": {"name": _EXTRACT_TOOL_NAME}},
         }
 
+        self._acquire_bedrock_slot()
         resp = self._stance_runtime().converse(
             modelId=self.config.stance_model_id,
             system=[{"text": _EXTRACT_SYSTEM}],
@@ -445,6 +539,7 @@ class BedrockClient:
             "toolChoice": {"tool": {"name": _STANCE_TOOL_NAME}},
         }
 
+        self._acquire_bedrock_slot()
         resp = self._stance_runtime().converse(
             modelId=self.config.stance_model_id,
             system=[{"text": _STANCE_SYSTEM}],

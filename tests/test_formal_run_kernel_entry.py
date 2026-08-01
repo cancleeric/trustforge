@@ -46,6 +46,7 @@ def test_formal_pipeline_pr1_never_enters_candidate_runtime(monkeypatch):
         "formal BTC multi-source analysis",
         QuestionType.MULTI_SOURCE,
         offline=True,
+        run_scope_id="test-formal-run-kernel-entry",
     )
 
     assert report.coin == "BTC"

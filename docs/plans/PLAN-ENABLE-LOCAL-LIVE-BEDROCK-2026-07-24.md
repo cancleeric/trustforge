@@ -61,7 +61,7 @@
 
 | 項目 | 位置 | 說明 |
 |---|---|---|
-| `AWS_REGION` 預設值 | `src/trustforge/bedrock.py:112` | `region: str = os.getenv("AWS_REGION", "ap-southeast-2")` —— 若不顯式設 `AWS_REGION=us-east-1`，會用舊預設 `ap-southeast-2`，打新帳號 `795930814369`（us-east-1）會失敗。 |
+| `AWS_REGION` 預設值 | `src/trustforge/bedrock.py:112` | `region: str = os.getenv("AWS_REGION", "ap-southeast-2")` —— 若不顯式設 `AWS_REGION=us-east-1`，會用舊預設 `ap-southeast-2`，打新帳號 `<ACCOUNT_ID>`（us-east-1）會失敗。 |
 | narrative 主模型 | `src/trustforge/bedrock.py:115` | `model_id: str = os.getenv("BEDROCK_MODEL_ID", "")` —— 必須顯式設。 |
 | stance 子模型預設值（地雷） | `src/trustforge/bedrock.py:120-122`、`src/trustforge/budget_guard.py:45` | `stance_model_id` 預設是 `au.anthropic.claude-haiku-4-5-20251001-v1:0`（`au.` 是 region-prefix，只能在 `ap-southeast-2/4/6` 呼叫）。**只設 `AWS_REGION=us-east-1` 而不覆寫這個預設，stance 分類會每次真呼叫失敗**（`classify_stance` 失敗會靜默 fallback `neutral`，見 bedrock.py:258-266 docstring，不會報錯但會悄悄降級品質）。**必須額外設 `BEDROCK_HAIKU_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0`** 覆寫成跟 narrative 同一個、已實測可用的 `us.` prefix 模型。 |
 | 計價表確認 | `src/trustforge/ledger.py:51` | `"us.anthropic.claude-haiku-4-5-20251001-v1:0": (1.0, 5.0)` —— 已在 `PRICING` 登記（$1/$5 每百萬 token），narrative 與 stance 都用同一顆已計價模型，不會被 `budget_guard.narrative_model_priced()`/`stance_model_priced()`（`budget_guard.py:701-713`）fail-closed 擋掉。 |
@@ -98,13 +98,13 @@ MODELHUB_API_KEY=<沿用 PID 30602 現有值，不在本文件明寫，執行時
 MODELHUB_BASE_URL=http://localhost:8950
 ```
 
-**⛔ 執行前必做（憑證衛生）**：目前 daemon（PID 37438）process 環境裡已經帶有一組 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`（STS 臨時憑證），從我診斷時解出的帳號片段判斷，**疑似是舊/其他帳號的殘留憑證，不是新的 `795930814369`**，且 STS session token 通常數小時到最長 36 小時就過期（daemon 已跑 3 天，這組憑證幾乎必然已失效）。boto3 的憑證優先序是「顯式 env 變數 > `~/.aws/config`」，**若重啟時繼承了同一個 shell 殘留的這三個 env 變數，会蓋掉 `~/.aws/config` 的新 default profile**，導致連線失敗或（更糟）誤打舊帳號。
+**⛔ 執行前必做（憑證衛生）**：目前 daemon（PID 37438）process 環境裡已經帶有一組 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`（STS 臨時憑證），從我診斷時解出的帳號片段判斷，**疑似是舊/其他帳號的殘留憑證，不是新的 `<ACCOUNT_ID>`**，且 STS session token 通常數小時到最長 36 小時就過期（daemon 已跑 3 天，這組憑證幾乎必然已失效）。boto3 的憑證優先序是「顯式 env 變數 > `~/.aws/config`」，**若重啟時繼承了同一個 shell 殘留的這三個 env 變數，会蓋掉 `~/.aws/config` 的新 default profile**，導致連線失敗或（更糟）誤打舊帳號。
 
 → 重啟前務必先：
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 ```
-讓 boto3 走 `~/.aws/config`（已確認：`[default]` → `arn:aws:iam::795930814369:root`、`region=us-east-1`，CTO 已用這個 profile 實測 `us.anthropic.claude-haiku-4-5-20251001-v1:0` converse 成功）。
+讓 boto3 走 `~/.aws/config`（已確認：`[default]` → `arn:aws:iam::<ACCOUNT_ID>:root`、`region=us-east-1`，CTO 已用這個 profile 實測 `us.anthropic.claude-haiku-4-5-20251001-v1:0` converse 成功）。
 
 （附註：這組憑證因為 `analysis_flow.py:745/755` 硬編碼離線，daemon 實際上從未真的用它打過 Bedrock——不構成本輪資安風險，只是顯示先前那次嘗試的 env 設定本身就是矛盾/不完整的，值得記錄。）
 

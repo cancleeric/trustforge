@@ -5,6 +5,7 @@ import pytest
 
 from trustforge.ingestion.whale_trades import (
     ArkhamIntelSource,
+    _ARKHAM_COIN_CHAINS,
     _arkham_transfer_limit,
     _extract_entity_name,
     _has_arkham_attribution,
@@ -384,3 +385,38 @@ def test_arkham_missing_provider_transfer_identity_fails_closed():
     }
 
     assert ArkhamIntelSource()._parse_transfer(transfer, "BTC") is None
+
+
+def test_arkham_coin_chain_identifiers_match_provider_registry():
+    """Pin Arkham 的鏈註冊名。
+
+    Arkham `/transfers` 對未註冊的 chain 直接回 400
+    `invalid chain: chain unregistered`，而連接器把該錯誤降級為空結果，
+    因此拼錯的識別字不會有任何症狀 —— ARB 就這樣長期靜默回 0 筆
+    （`arbitrum` 並非註冊名，正確為 `arbitrum_one`）。
+
+    這裡固定住整張表：任何改動都必須先對 provider 實測再更新此測試。
+    """
+    assert _ARKHAM_COIN_CHAINS == {
+        "BTC": "bitcoin",
+        "ETH": "ethereum",
+        "SOL": "solana",
+        "BNB": "bsc",
+        "XRP": "xrp",
+        "ARB": "arbitrum_one",
+    }
+
+
+def test_arkham_fetch_sends_registered_arbitrum_chain(monkeypatch):
+    monkeypatch.setenv("ARKHAM_API_KEY", "test-key")
+    captured = {}
+
+    def fake_fetch(url, extra_headers=None):
+        captured["url"] = url
+        return json.dumps({"transfers": []}).encode()
+
+    monkeypatch.setattr("trustforge.ingestion.whale_trades._fetch_url", fake_fetch)
+    ArkhamIntelSource().fetch("", coin="ARB")
+
+    params = parse_qs(urlparse(captured["url"]).query)
+    assert params["chains"] == ["arbitrum_one"]

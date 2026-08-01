@@ -56,6 +56,14 @@ run_gate() {
   fi
 }
 
+# Consume Git's pre-push ref tuples before any test process can read stdin.
+# Each new commit is scanned from its immutable Git tree, not from the current
+# checkout, so pushing another ref or a multi-commit range cannot bypass P0.
+run_gate \
+  "security gate (exact pushed commits)" \
+  env PYTHONPATH=src "$PYTHON" scripts/security_gate_push.py \
+    --repo . --remote-location "${2:-}" --out out/pre-push/security-gate-push
+
 # Node version gate (issue #660): Vite 8 bundled rolldown needs util.styleText (Node >=20.12).
 NODE_MIN_MAJOR=20
 NODE_MIN_MINOR=12

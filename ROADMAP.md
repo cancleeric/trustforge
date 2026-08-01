@@ -14,7 +14,7 @@
 - [x] GitHub（主）+ Gitea（鏡像）
 
 ## M1 — 工作坊前（~7/10，✅ 大致完成）
-- [x] 申請競賽 AWS 帳號，確認 Bedrock 可用模型與區域（帳號 795930814369；Claude Sonnet/Haiku 4.x 雪梨 ap-southeast-2 + 東京可用；`au.anthropic.claude-*` inference profile）
+- [x] 申請競賽 AWS 帳號，確認 Bedrock 可用模型與區域（帳號 <ACCOUNT_ID>；Claude Sonnet/Haiku 4.x 雪梨 ap-southeast-2 + 東京可用；`au.anthropic.claude-*` inference profile）
 - [x] 把附件 1/2（命題、資料文件）歸檔 docs/（`COMPETITION-OFFICIAL.md` / `COMPLIANCE-CHECK.md`）
 - [ ] 報名工作坊、確認隊員與出席分工（真人事項，隊名「中再參與」已定，7/13 工作坊全員出席）
 

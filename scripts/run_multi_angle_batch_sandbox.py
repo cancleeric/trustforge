@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
+import os
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -25,6 +28,11 @@ _ALLOWLIST_PATH = (
 )
 _SANDBOX_TAG_KEY = "Environment"
 _SANDBOX_TAG_VALUE = "sandbox"
+_IDENTITY_ENV = {
+    "account_id": "TRUSTFORGE_SANDBOX_ACCOUNT_ID",
+    "caller_arn": "TRUSTFORGE_SANDBOX_CALLER_ARN",
+    "table_arn": "TRUSTFORGE_SANDBOX_TABLE_ARN",
+}
 
 
 def _hash(value: str) -> str:
@@ -104,13 +112,46 @@ def _load_allowlist() -> dict[str, str]:
         raw = json.loads(_ALLOWLIST_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError("reviewed sandbox allowlist is unavailable") from exc
-    required = ("account_id", "caller_arn", "table_arn", "region", "config_version")
+    required = (
+        "account_id_sha256",
+        "caller_arn_sha256",
+        "table_arn_sha256",
+        "region",
+        "config_version",
+    )
     if raw.get("enabled") is not True or any(
         not isinstance(raw.get(field), str) or not raw[field]
         for field in required
     ):
         raise RuntimeError("reviewed sandbox allowlist is disabled or incomplete")
-    return {field: raw[field] for field in required}
+    resolved = {field: raw[field] for field in ("region", "config_version")}
+    for field, env_name in _IDENTITY_ENV.items():
+        value = os.getenv(env_name, "")
+        if not value:
+            raise RuntimeError(f"required sandbox setting {env_name} is missing")
+        expected_digest = raw[f"{field}_sha256"]
+        actual_digest = hashlib.sha256(value.encode()).hexdigest()
+        if not hmac.compare_digest(actual_digest, expected_digest):
+            raise RuntimeError(f"sandbox setting {env_name} does not match reviewed allowlist")
+        resolved[field] = value
+    if not re.fullmatch(r"[0-9]{12}", resolved["account_id"]):
+        raise RuntimeError("sandbox account id must be 12 digits")
+    expected_caller_prefixes = (
+        f"arn:aws:iam::{resolved['account_id']}:role/trustforge-896-sandbox-runner",
+        f"arn:aws:sts::{resolved['account_id']}:assumed-role/trustforge-896-sandbox-runner/",
+    )
+    if not (
+        resolved["caller_arn"] == expected_caller_prefixes[0]
+        or resolved["caller_arn"].startswith(expected_caller_prefixes[1])
+    ):
+        raise RuntimeError("sandbox caller must use the reviewed runner role")
+    expected_table = (
+        f"arn:aws:dynamodb:{resolved['region']}:{resolved['account_id']}:"
+        "table/trustforge-issue896-sandbox-3"
+    )
+    if resolved["table_arn"] != expected_table:
+        raise RuntimeError("sandbox table ARN does not match the reviewed table")
+    return resolved
 
 
 def _request(batch_id: str, day: str, config_version: str) -> AtomicBatchRequest:

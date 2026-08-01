@@ -79,8 +79,10 @@ def _protected_json(
             verified_raw = os.read(verify_descriptor, max_bytes + 1)
         finally:
             os.close(verify_descriptor)
+        reread = os.pread(descriptor, min(info.st_size, max_bytes + 1), 0)
         if (
             len(raw) != info.st_size
+            or reread != raw
             or verified_raw != raw
             or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
             != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)

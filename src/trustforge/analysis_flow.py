@@ -34,6 +34,13 @@ from . import budget_guard
 from .agent.narrative_locale import DEFAULT_LOCALE as DEFAULT_NARRATIVE_LOCALE
 from .agent.narrative_locale import normalize_locale
 from .agent.orchestrator import build_report
+from .analysis_flow_ports import bedrock_allowed
+from .analysis_presentation import (
+    VERSION,
+    aggregate_trust_components,
+    price_provenance_data,
+    public_evidence_dict,
+)
 from .bedrock import (
     BedrockClient,
     _CLAIM_EXTRACTION_CONTEXT_VERSION,
@@ -327,9 +334,7 @@ def _bedrock_live_attempt(
     reservation_backend = budget_guard.budget_reservation_backend()
     live = False
     try:
-        from .web import _bedrock_allowed  # noqa: PLC0415 — 避免頂層循環匯入
-
-        if _bedrock_allowed() and budget_guard.narrative_model_priced():
+        if bedrock_allowed() and budget_guard.narrative_model_priced():
             if batch_allocation or formal_pre_reserved:
                 # #884: the authority transaction already reserved this job's
                 # conservative allocation. Re-entering the legacy per-call
@@ -3492,6 +3497,7 @@ class AnalysisFlow:
                 client=client, log=log, stance_fn=package["stance"], scored=package["scored"],
                 kernel_judgment=package["kernel_judgment"],
                 locale=package.get("locale", DEFAULT_NARRATIVE_LOCALE),
+                run_scope_id=job["job_id"],
             )
 
         narrative_tool_id = "bedrock-narrative-generation"
@@ -3609,14 +3615,13 @@ class AnalysisFlow:
         # Reuse the public API's established presentation aggregates so a stored
         # pre-analysis snapshot has exactly the same contract as /api/analyze.
         from .agent.orchestrator import aggregate_trust_by_kind
-        from .web import VERSION, _aggregate_trust_components, _price_provenance_data, _public_evidence_dict
         evidence = package["evidence"]
         memory_counts = self._agos_memory_counts(job["job_id"])
         payload = {"version": VERSION, "report": dataclasses.asdict(package["report"]),
-                   "evidence": [_public_evidence_dict(e) for e in evidence],
+                   "evidence": [public_evidence_dict(e) for e in evidence],
                    "trust_radar": aggregate_trust_by_kind(evidence),
-                   "trust_components_aggregate": _aggregate_trust_components(evidence),
-                   "price_provenance": _price_provenance_data(evidence),
+                   "trust_components_aggregate": aggregate_trust_components(evidence),
+                   "price_provenance": price_provenance_data(evidence),
                    "agent_os_memory_counts": memory_counts,
                    "retrieval_context": package.get("retrieval_context", []),
                     "execution": log.manifest(), "execution_log": to_public_events(log.events), "snapshot_id": job["snapshot_id"],

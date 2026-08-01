@@ -11,7 +11,6 @@ pub const BLOCKED_EXTERNAL_LINUX: i32 = 77;
 pub mod canonical_json;
 pub mod capability;
 pub mod manifest;
-pub mod sha256;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Outcome {

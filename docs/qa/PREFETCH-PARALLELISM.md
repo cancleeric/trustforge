@@ -2,7 +2,7 @@
 
 ## 2026-07-14 v0.14.3 cycle
 
-- Runtime: EC2 `i-0152b70368358a81c`, region `ap-southeast-2`.
+- Runtime: EC2 `<EC2_INSTANCE_ID>`, region `ap-southeast-2`.
 - Service: `hermes-cycle.service`, result `success`, exit status `0`.
 - Scheduler: 4 source-owner workers, 900 second total budget.
 - Fetch elapsed time: 25.40 seconds.

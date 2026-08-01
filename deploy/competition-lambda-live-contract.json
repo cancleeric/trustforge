@@ -8,7 +8,7 @@
   "runtime": "python3.12",
   "handler": "trustforge.lambda_handler.handler",
   "memory_mb": 512,
-  "timeout_seconds": 30,
+  "timeout_seconds": 90,
   "reserved_concurrency": 1,
   "function_url_auth_type": "NONE",
   "environment": {
@@ -16,6 +16,8 @@
     "TRUSTFORGE_COMPETITION_MODE": "live",
     "BEDROCK_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "BEDROCK_HAIKU_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "TRUSTFORGE_NARRATIVE_CONNECT_TIMEOUT_SEC": "3",
+    "TRUSTFORGE_NARRATIVE_READ_TIMEOUT_SEC": "20",
     "TRUSTFORGE_BEDROCK_DAILY_USD_CAP": "10",
     "TRUSTFORGE_BUDGET_GUARD_BACKEND": "dynamodb",
     "TRUSTFORGE_BUDGET_COUNTER_TABLE": "competition-trustforge-team11-budget",
@@ -25,14 +27,34 @@
     "CACHE_BACKEND": "json",
     "TRUSTFORGE_CACHE_JSON_PATH": "/tmp/trustforge-connector-cache.json",
     "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/live-token-OOlkjq",
-    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID": "f004e6f6-42d6-48eb-94a0-175159442246"
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID": "f004e6f6-42d6-48eb-94a0-175159442246",
+    "TRUSTFORGE_ARKHAM_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/arkham-JhZl7X",
+    "TRUSTFORGE_ARKHAM_SECRET_VERSION_ID": "339acf6c-4905-4a4b-a9cf-b0ed2c686cd8",
+    "TRUSTFORGE_CMC_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/coinmarketcap-XGN9vB",
+    "TRUSTFORGE_CMC_SECRET_VERSION_ID": "047ab698-43e7-48d9-a332-e9661c98359c",
+    "TRUSTFORGE_ETHERSCAN_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/etherscan-fYvuSo",
+    "TRUSTFORGE_ETHERSCAN_SECRET_VERSION_ID": "de752c03-e796-4d32-aba3-c4246c633118",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_ARN": "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/whale-alert-b2Ddeo",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_VERSION_ID": "491c08f9-eeef-4051-82f8-0f26697ff7a1"
   },
   "secret_environment_inputs": [
     "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN",
-    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID"
+    "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID",
+    "TRUSTFORGE_ARKHAM_SECRET_ARN",
+    "TRUSTFORGE_ARKHAM_SECRET_VERSION_ID",
+    "TRUSTFORGE_CMC_SECRET_ARN",
+    "TRUSTFORGE_CMC_SECRET_VERSION_ID",
+    "TRUSTFORGE_ETHERSCAN_SECRET_ARN",
+    "TRUSTFORGE_ETHERSCAN_SECRET_VERSION_ID",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_ARN",
+    "TRUSTFORGE_WHALE_ALERT_SECRET_VERSION_ID"
   ],
   "forbidden_environment": [
     "TRUSTFORGE_LIVE_TOKEN",
+    "ARKHAM_API_KEY",
+    "CMC_PRO_API_KEY",
+    "ETHERSCAN_API_KEY",
+    "WHALE_ALERT_API_KEY",
     "TRUSTFORGE_ONLINE_STANCE",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -50,7 +72,13 @@
       },
       {
         "actions": ["secretsmanager:GetSecretValue"],
-        "resources": ["arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/live-token-OOlkjq"]
+        "resources": [
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/live-token-OOlkjq",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/arkham-JhZl7X",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/coinmarketcap-XGN9vB",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/etherscan-fYvuSo",
+          "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition/trustforge/team11/providers/whale-alert-b2Ddeo"
+        ]
       },
       {
         "actions": ["bedrock:InvokeModel"],
@@ -92,8 +120,8 @@
     {"method": "GET", "path": "/healthz"}
   ],
   "token_protected_requests": [
-    {"method": "GET", "path": "/analyze", "requires": ["live=1", "X-Live-Token"]},
-    {"method": "GET", "path": "/analyze.json", "requires": ["live=1", "X-Live-Token"]}
+    {"method": "GET", "path": "/analyze", "requires": ["live=1", "X-Live-Token"], "provider_cache_refresh": "bounded-on-demand"},
+    {"method": "GET", "path": "/analyze.json", "requires": ["live=1", "X-Live-Token"], "provider_cache_refresh": "bounded-on-demand"}
   ],
   "bedrock": {
     "actions": ["bedrock:InvokeModel"],
