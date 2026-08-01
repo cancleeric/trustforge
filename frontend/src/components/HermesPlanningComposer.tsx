@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useHermesI18n, type HermesLocale } from '../hermes/hermesI18n'
+import { secureRandomUuid } from '../lib/uuid'
 import {
   previewAnalysisPlan,
   type AnalysisPlan,
@@ -209,7 +210,7 @@ export default function HermesPlanningComposer() {
         question: normalizedQuestion,
         locale: requestLocale,
         ...(parsedHints.length ? { asset_hints: parsedHints } : {}),
-        client_request_id: crypto.randomUUID(),
+        client_request_id: secureRandomUuid(),
       }, controller.signal)
       if (controller.signal.aborted || requestSequence.current !== requestId) return
       if (currentLocale.current !== requestLocale) {
