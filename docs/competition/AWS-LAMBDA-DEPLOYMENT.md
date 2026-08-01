@@ -21,6 +21,14 @@ and durable cost accounting.  Live analysis accepts only `GET /analyze` and
 POST and non-allowlisted routes.  `TRUSTFORGE_ONLINE_STANCE` stays unset so no
 unauthenticated side path can invoke Bedrock.
 
+The Live function has a 90-second execution limit and pins narrative Bedrock
+timeouts to 3 seconds for connect and 20 seconds for read, with retries
+disabled by the client. This bounds the three model stages plus the parallel
+provider refresh with response-serialization headroom. Provider refresh does
+not consume Bedrock budget and is separately bounded by the Live token,
+caller rate limit, reserved concurrency of one, and a ten-minute cache;
+Bedrock still requires its durable budget reservation before model invocation.
+
 ## Lambda secret rotation contract
 
 The Lambda process pins an explicit Secrets Manager `VersionId` for every

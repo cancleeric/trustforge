@@ -8,7 +8,7 @@
   "runtime": "python3.12",
   "handler": "trustforge.lambda_handler.handler",
   "memory_mb": 512,
-  "timeout_seconds": 30,
+  "timeout_seconds": 90,
   "reserved_concurrency": 1,
   "function_url_auth_type": "NONE",
   "environment": {
@@ -16,6 +16,8 @@
     "TRUSTFORGE_COMPETITION_MODE": "live",
     "BEDROCK_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "BEDROCK_HAIKU_MODEL_ID": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "TRUSTFORGE_NARRATIVE_CONNECT_TIMEOUT_SEC": "3",
+    "TRUSTFORGE_NARRATIVE_READ_TIMEOUT_SEC": "20",
     "TRUSTFORGE_BEDROCK_DAILY_USD_CAP": "10",
     "TRUSTFORGE_BUDGET_GUARD_BACKEND": "dynamodb",
     "TRUSTFORGE_BUDGET_COUNTER_TABLE": "competition-trustforge-team11-budget",

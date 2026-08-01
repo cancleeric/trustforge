@@ -15,7 +15,9 @@ def test_live_contract_is_exactly_scoped():
     assert CONTRACT["region"] == "us-east-1"
     assert CONTRACT["function_name"] == "competition-trustforge-team11-live"
     assert CONTRACT["reserved_concurrency"] == 1
-    assert CONTRACT["timeout_seconds"] == 30
+    assert CONTRACT["timeout_seconds"] == 90
+    assert CONTRACT["environment"]["TRUSTFORGE_NARRATIVE_CONNECT_TIMEOUT_SEC"] == "3"
+    assert CONTRACT["environment"]["TRUSTFORGE_NARRATIVE_READ_TIMEOUT_SEC"] == "20"
     assert CONTRACT["daily_usd_cap"] == 10
 
 
