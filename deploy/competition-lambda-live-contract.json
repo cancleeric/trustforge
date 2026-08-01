@@ -1,5 +1,8 @@
 {
-  "status": "owner-authorized-pending-final-ciso-review",
+  "status": "blocked-bedrock-distributed-limiter",
+  "activation_blockers": [
+    "Lambda Bedrock invocation remains disabled until a reviewed distributed <=1 RPS limiter is implemented"
+  ],
   "account_id": "850849012389",
   "region": "us-east-1",
   "function_name": "competition-trustforge-team11-live",
@@ -21,6 +24,9 @@
     "TRUSTFORGE_BEDROCK_DAILY_USD_CAP": "10",
     "TRUSTFORGE_BUDGET_GUARD_BACKEND": "dynamodb",
     "TRUSTFORGE_BUDGET_COUNTER_TABLE": "competition-trustforge-team11-budget",
+    "TRUSTFORGE_BEDROCK_RPS_BACKEND": "dynamodb",
+    "TRUSTFORGE_BEDROCK_RPS_REGION": "us-east-1",
+    "TRUSTFORGE_BEDROCK_RPS_TABLE": "competition-trustforge-team11-budget",
     "COST_LEDGER_BACKEND": "dynamodb",
     "TRUSTFORGE_COST_LEDGER_TABLE": "competition-trustforge-team11-cost-ledger",
     "TRUSTFORGE_DISABLE_ADMIN_CONFIG": "true",

@@ -1,0 +1,28 @@
+<!doctype html><html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>11 — 測試、QA 與驗收 | TrustForge 技術文件</title>
+<meta name="description" content="Testing & QA · 後端、前端、production smoke、客戶驗收準則">
+<link rel="stylesheet" href="style.css?v=20260726-evidence-grade">
+</head><body><div class="wrap">
+<div class="nav-bar"><a href="10-security-handover.html">← 10 安全</a><a href="index.html">文件首頁</a><a href="12-customer-handover.html">12 客戶交接總表 →</a></div>
+<article><h2>11 — 測試、QA 與驗收</h2><p style="color:var(--mut)">Testing & QA · backend/frontend gates、smoke、acceptance criteria</p>
+<details class="toc" open><summary>目錄</summary><ol><li><a href="#strategy">測試策略</a></li><li><a href="#backend">後端測試</a></li><li><a href="#frontend">前端測試</a></li><li><a href="#smoke">Production Smoke</a></li><li><a href="#acceptance">客戶驗收準則</a></li><li><a href="#known">已知邊界</a></li></ol></details>
+<h3 id="strategy">1. 測試策略</h3><p>TrustForge 的驗證分成五層：靜態檢查、單元測試、整合測試、前端建置／互動測試、production smoke。交接時以「可重跑、可解讀、可追溯」為準。</p><div class="table-scroll"><table><tr><th>層級</th><th>目的</th><th>典型命令</th><th>通過條件</th></tr><tr><td>Static</td><td>格式、型別、trailing whitespace</td><td><code>git diff --check</code></td><td>無 whitespace error</td></tr><tr><td>Backend unit</td><td>TrustScore、cache、rate limit、budget guard</td><td><code>env PYTHONPATH=src python -m pytest -q</code></td><td>測試通過且 coverage ≥ 75%</td></tr><tr><td>Integration</td><td>API envelope、Bedrock fallback、DynamoDB store、data contract</td><td><code>python scripts/check_data_contracts.py</code></td><td>不依賴真 secret；可用 mock/local backend</td></tr><tr><td>Release gate</td><td>stub scan、question bank、diff check</td><td><code>.githooks/pre-push</code>（含 <code>scripts/scan_source_stubs.py</code>、<code>scripts/run_question_bank.py</code>、<code>git diff --check</code>）</td><td>local gate 全部通過；GitHub Actions 不是 release gate</td></tr><tr><td>Frontend</td><td>React test/lint/build、型別與 UI smoke</td><td><code>npm test -- --run && npm run lint && npm run build</code></td><td>測試、lint、TypeScript + Vite build 成功</td></tr><tr><td>Production smoke</td><td>線上健康、API、成本狀態</td><td><code>curl /healthz</code></td><td>HTTP 200 且 JSON envelope 正常</td></tr></table></div>
+<h3 id="backend">2. 後端測試</h3><div class="doc-flow">python -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m pytest --cov=trustforge --cov-fail-under=75</div><ul><li>核心測試重點：信任分數公式、來源佐證、操縱懲罰、成本預留、idempotency lease。</li><li>Bedrock 真實呼叫不應是預設測試前提；需要額外 smoke token 與預算 cap。</li><li>所有外部來源 connector 應支援 cache/mock 模式。</li></ul>
+<h3 id="frontend">3. 前端測試</h3><div class="doc-flow">cd frontend
+npm ci
+npm run build
+npm run test -- --run</div><p>前端驗收重點：Analyze composer、報告卡片、來源引用、錯誤／429 顯示、手機版版面。</p>
+<h3 id="smoke">4. Production Smoke</h3><div class="doc-flow">BASE=https://trustforge.hurricanesoft.com.tw
+curl -fsS "$BASE/healthz"
+curl -fsS "$BASE/api/health"
+curl -fsS "$BASE/api/status"
+curl -fsS "$BASE/api/costs"
+curl -fsS "$BASE/llms.txt" | head -40
+curl -fsS "$BASE/api/openapi.yaml" | head -40</div><div class="doc-callout warn"><strong>注意：</strong>若 smoke 需要 live analyze，必須先確認 daily cap 與 token，避免交接測試造成額外 Bedrock 成本。</div>
+<h3 id="acceptance">5. 客戶驗收準則</h3><ol class="handoff-checklist"><li><input type="checkbox" disabled> 文件首頁能引導客戶找到部署、API、運維、安全與測試。</li><li><input type="checkbox" disabled> 後端測試報告與 coverage 門檻可重跑。</li><li><input type="checkbox" disabled> 前端 build 可重跑並產出可部署 dist。</li><li><input type="checkbox" disabled> production smoke 在客戶環境回 200，且 <code>/llms.txt</code>、<code>/api/openapi.yaml</code> 可讀。</li><li><input type="checkbox" disabled> Bedrock 成本上限已設定，超額時拒絕請求而非繼續燒錢。</li></ol><h3 id="known">6. 已知邊界</h3><ul><li>公開技術文件不承諾包含私有 repo 的所有最新 commit；交接前需以客戶可存取 repo 的 HEAD 再跑一次驗收。</li><li>Live token、AWS secret、GitHub token 不放文件，交接時另走安全通道。</li></ul><div class="next-steps"><a href="05-api.html">API 參考</a><a href="09-frontend.html">前端架構</a><a href="10-security-handover.html">安全交接</a><a href="12-customer-handover.html">交接總表</a></div></article>
+<footer>TrustForge by HurricaneSoft（颶風軟體）· 技術文件區 · 客戶交接版<br>文件版本：v0.18.5 · 最後更新：2026-07-26</footer>
+</div></body></html>

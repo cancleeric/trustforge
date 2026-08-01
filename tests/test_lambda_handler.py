@@ -19,7 +19,125 @@ from trustforge.schema import Evidence, QuestionType
 
 @pytest.fixture(autouse=True)
 def _disable_real_provider_refresh(monkeypatch):
-    monkeypatch.setattr(lambda_provider_cache, "refresh_provider_cache", lambda coin: {})
+    monkeypatch.setattr(
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: {
+            name: ("cached", 1)
+            for name in (
+                "arkham-intel",
+                "coinmarketcap-price",
+                "etherscan-whale",
+                "whale-alert",
+            )
+        },
+    )
+
+
+def test_noncompetition_analysis_does_not_refresh_providers(monkeypatch):
+    calls = []
+    def stop_pipeline(*args, **kwargs):
+        raise RuntimeError("stop after refresh check")
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", None)
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda coin: calls.append(coin)
+    )
+    monkeypatch.setattr(web, "_do_analyze", stop_pipeline)
+    response = lambda_handler.handler(_event("/analyze", {"coin": "BTC"}))
+    assert response["statusCode"] == 502
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"coin": "BTC,ETH", "type": "comparison", "live": "1"},
+        {"coin": "BTC", "coin2": "ETH", "type": "comparison", "live": "1"},
+    ],
+)
+def test_live_comparison_refreshes_both_coins(monkeypatch, query):
+    calls = []
+    def stop_pipeline(*args, **kwargs):
+        raise RuntimeError("stop after refresh check")
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "valid-token")
+    monkeypatch.setattr(
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: calls.append(coin) or {
+            name: ("cached", 1)
+            for name in (
+                "arkham-intel", "coinmarketcap-price", "etherscan-whale", "whale-alert"
+            )
+        },
+    )
+    monkeypatch.setattr(web, "_do_comparison", stop_pipeline)
+    response = lambda_handler.handler(
+        _event("/analyze.json", query, {"X-Live-Token": "valid-token"})
+    )
+    assert response["statusCode"] == 502
+    assert calls == ["BTC", "ETH"]
+
+
+def test_live_provider_refresh_failure_returns_safe_502(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "valid-token")
+    monkeypatch.setattr(
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: {"arkham-intel": ("failed:TimeoutError", 0)},
+    )
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": "BTC", "live": "1"},
+            {"X-Live-Token": "valid-token"},
+        )
+    )
+    assert response["statusCode"] == 502
+    assert "TimeoutError" not in response["body"]
+
+
+def test_live_missing_coin_refreshes_btc_before_pipeline(monkeypatch):
+    calls = []
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "valid-token")
+    monkeypatch.setattr(
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: calls.append(coin) or {
+            name: ("cached", 1)
+            for name in (
+                "arkham-intel", "coinmarketcap-price", "etherscan-whale", "whale-alert"
+            )
+        },
+    )
+    monkeypatch.setattr(
+        web, "_do_analyze", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop"))
+    )
+    response = lambda_handler.handler(
+        _event("/analyze", {"live": "1"}, {"X-Live-Token": "valid-token"})
+    )
+    assert response["statusCode"] == 502
+    assert calls == ["BTC"]
+
+
+def test_live_invalid_coin_does_not_spend_provider_quota(monkeypatch):
+    calls = []
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "live")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "valid-token")
+    monkeypatch.setattr(
+        lambda_provider_cache, "refresh_provider_cache", lambda coin: calls.append(coin)
+    )
+    response = lambda_handler.handler(
+        _event(
+            "/analyze",
+            {"coin": "DOGE", "live": "1"},
+            {"X-Live-Token": "valid-token"},
+        )
+    )
+    assert response["statusCode"] == 400
+    assert calls == []
 
 
 def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> dict:
@@ -275,7 +393,14 @@ def test_live_comparison_refreshes_both_coins_and_counts_rate_limit_once(monkeyp
     refreshed = []
     limited = []
     monkeypatch.setattr(
-        lambda_provider_cache, "refresh_provider_cache", lambda coin: refreshed.append(coin)
+        lambda_provider_cache,
+        "refresh_provider_cache",
+        lambda coin: refreshed.append(coin) or {
+            name: ("cached", 1)
+            for name in (
+                "arkham-intel", "coinmarketcap-price", "etherscan-whale", "whale-alert"
+            )
+        },
     )
     monkeypatch.setattr(
         web, "_analyze_enforce_caller_rate_limit", lambda qs, ip: limited.append(ip)

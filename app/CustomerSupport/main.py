@@ -15,7 +15,13 @@ except ImportError:
 
 
 def create_agent():
-    """Build the CustomerSupport coding agent."""
+    """Fail closed until Strands can receive the audited shared runtime gate."""
+    raise RuntimeError(
+        "CustomerSupport model access is disabled: unmanaged Bedrock clients are forbidden"
+    )
+
+    # Unreachable until a gated Strands adapter is implemented. Keeping the
+    # schema here avoids silently changing this legacy demo's public contract.
     if not STRANDS_AVAILABLE:
         raise RuntimeError("strands-agents not installed")
     

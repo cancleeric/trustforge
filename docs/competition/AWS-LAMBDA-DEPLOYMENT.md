@@ -6,11 +6,11 @@ it exposes only `GET /` and `GET /healthz`, has no Bedrock, secret, database,
 S3, or production-account permission, and is bounded to one concurrent Lambda
 with a 30-second timeout.
 
-Live activation is a separate security milestone. The contract records both
-priced `us.*` model IDs, the daily cap, and exact Bedrock resource ARNs, but its
-status remains blocked until the owner explicitly authorizes creation of the
-competition token and harper approves the final IAM, counter, and endpoint
-configuration.
+Live activation is a separate security milestone. Both machine-readable
+contracts mark it `blocked-bedrock-distributed-limiter`: Lambda Bedrock
+invocation remains disabled until a reviewed distributed limiter can prove the
+competition-wide maximum of one request per second. Owner authorization,
+secrets, IAM, counters, and endpoint review do not remove this blocker.
 
 After explicit owner authorization, the reviewed Live target is recorded in
 `deploy/competition-lambda-live-contract.json`.  It uses a separate `-live`

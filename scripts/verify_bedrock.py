@@ -86,8 +86,9 @@ def _check_bedrock_access(region: str) -> dict:
         from botocore.config import Config  # noqa: PLC0415
 
         # 嘗試建立 runtime client
-        runtime_client = boto3.client(
-            "bedrock-runtime",
+        from trustforge.bedrock import create_bedrock_runtime_client
+
+        runtime_client = create_bedrock_runtime_client(
             region_name=region,
             config=Config(
                 connect_timeout=5,

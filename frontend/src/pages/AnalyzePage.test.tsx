@@ -766,6 +766,21 @@ describe('AnalyzePage manual execution', () => {
       expect(registerAnalysisQuestion).not.toHaveBeenCalled()
     })
 
+    it('keeps keyboard focus inside the confirmation dialog', () => {
+      renderAnalyze('/analyze')
+      fireEvent.change(screen.getByLabelText('問題'), { target: { value: '鍵盤焦點測試' } })
+      fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+
+      const cancel = screen.getByRole('button', { name: '取消' })
+      const confirm = screen.getByRole('button', { name: '確認執行' })
+      expect(confirm).toHaveFocus()
+
+      fireEvent.keyDown(document, { key: 'Tab' })
+      expect(cancel).toHaveFocus()
+      fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+      expect(confirm).toHaveFocus()
+    })
+
     it('renders a reconnecting banner when reattaching to an in-progress URL job', async () => {
       vi.useFakeTimers()
       try {

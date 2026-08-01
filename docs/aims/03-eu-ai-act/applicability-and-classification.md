@@ -13,6 +13,8 @@
 > Parent tracking issue: #1264
 >
 > This document slice: #1265 / PR-A
+>
+> Actor-boundary follow-up: #1286 / F1
 
 ## Proposed intended purpose
 
@@ -70,6 +72,9 @@ The Article 50(2) transition must be checked separately against Regulation (EU) 
 - Article 25 provider transition is scoped to high-risk AI systems and requires a separate legal assessment of the statutory conditions, including placing a system on the market or putting it into service under one's own name or trademark, making a substantial modification, or changing the intended purpose of a system that was not classified as high-risk so that it becomes high-risk under Article 25(1)(c). It is not a generic transition rule for every AI system and is not the same as customer misuse.
 - Off-label actual use and reasonably foreseeable misuse are separate records. Neither automatically proves an Article 25 provider transition.
 - Articles 17 and 72 are assessed conditionally for a high-risk-system provider.
+- Article 17(3) is a separate conditional incorporation route. Whether another relevant sectoral Union-law quality management system or equivalent function applies, and whether the Article 17(1) aspects are incorporated into it, are `pending / not assessed`; exact-version applicability and evidence require Compliance Counsel approval.
+- Article 17(4) is a separate conditional deemed-fulfilment mechanism for a provider that is a financial institution subject to Union financial-services-law internal-governance, arrangement or process requirements. Actor status, applicable financial-services law and compliance evidence are `pending / not assessed`. When the mechanism applies, compliance with those requirements deems the QMS obligation fulfilled, but the provider must still fulfil Article 17(1)(g), (h) and (i) and take into account the harmonised standards referred to in Article 40. This is not a general financial-sector exemption or a finding that those express duties are inapplicable.
+- Article 25(3) is a separate conditional route from Article 25(1) and is limited to a manufacturer of a product covered by Annex I Section A. The two triggers to assess are: a high-risk AI system is placed on the market together with the product under the manufacturer's own name or trademark; or, after the product has been placed on the market, that system is put into service under the manufacturer's name or trademark. Trigger facts and applicability are `pending / not assessed`; once exact-version review confirms applicability and a trigger is established, the manufacturer SHALL be considered the provider and IS subject to Article 16 obligations. Off-label actual use or reasonably foreseeable misuse does not establish the route.
 - Article 26 deployer monitoring, use and escalation duties are assessed separately from provider controls.
 - Article 73 reporting is assessed conditionally for the provider, with other actors' escalation interfaces recorded separately.
 - Article 10 is conditional on high-risk applicability and must distinguish systems using techniques involving model training from systems not using such techniques. A production-only PII boundary, if verified, would not establish Article 10 compliance.

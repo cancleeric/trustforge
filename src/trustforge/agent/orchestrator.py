@@ -243,6 +243,7 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         related_claim=related,
         source_url=doc.url,
         kind=doc.kind,
+        direction=sc.claim.direction,
         trust=round(sc.trust, 3),
         trust_components=trust_components,
         # Tier2 可解釋 UX：操縱關鍵詞命中原文回填，供 web.py 渲染紅旗

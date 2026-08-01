@@ -60,6 +60,7 @@ def hydrate_lambda_secrets(*, client: Any | None = None) -> bool:
         return any(os.environ.get(target_env) for _, _, _, target_env in _SECRET_SPECS)
 
     configured = []
+    live_mode = os.environ.get("TRUSTFORGE_COMPETITION_MODE", "").strip() == "live"
     for label, arn_env, version_env, target_env in _SECRET_SPECS:
         secret_arn = os.environ.get(arn_env, "").strip()
         secret_version = os.environ.get(version_env, "").strip()
@@ -72,6 +73,9 @@ def hydrate_lambda_secrets(*, client: Any | None = None) -> bool:
                 f"{target_env} must not be configured when {arn_env} is set"
             )
         configured.append((label, secret_arn, secret_version, target_env))
+
+    if live_mode and len(configured) != len(_SECRET_SPECS):
+        raise RuntimeError("competition Live requires all five pinned secrets")
 
     if not configured:
         _hydrated = True

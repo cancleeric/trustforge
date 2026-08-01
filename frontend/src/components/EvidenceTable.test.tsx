@@ -50,6 +50,11 @@ function Wrapper({ children }: { children: React.ReactNode }) {
 }
 
 describe('EvidenceTable', () => {
+  it('keeps a fixed minimum table width inside a horizontal overflow container for mobile', () => {
+    const { container } = render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })
+    expect(container.firstElementChild?.className).toContain('overflow-x-auto')
+    expect(container.querySelector('table')?.className).toContain('min-w-[760px]')
+  })
   it('renders flat mode when evidenceGroups is not provided', () => {
     render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })
     // All 4 evidence items rendered individually
@@ -66,13 +71,17 @@ describe('EvidenceTable', () => {
   })
 
   it('renders grouped mode with evidenceGroups', () => {
-    render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
+    const { container } = render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
     // Group row shows member count badge
     expect(screen.getByText('3 筆觀測')).toBeInTheDocument()
     // Group row shows value range
     expect(screen.getByText('828–891 TH/s')).toBeInTheDocument()
     // Singleton group renders as normal row
     expect(screen.getByText('E3')).toBeInTheDocument()
+    const groupedCells = container.querySelectorAll('tbody tr:first-child td')
+    expect(groupedCells[1].textContent).toContain('F2pool')
+    expect(groupedCells[2].textContent).toContain('算力: 891 TH/s')
+    expect(groupedCells[3].textContent).toContain('2026-07-20T10:00:00Z')
   })
 
   it('group row shows trend badge', () => {
@@ -105,5 +114,26 @@ describe('EvidenceTable', () => {
     expect(screen.getByText('E0')).toBeInTheDocument()
     fireEvent.click(groupRow) // collapse
     expect(screen.queryByText('E0')).not.toBeInTheDocument()
+  })
+
+  it('sorts the flat table by trust without changing evidence identities', () => {
+    const { container } = render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })
+    fireEvent.click(screen.getByRole('button', { name: '信任分' }))
+    const rows = Array.from(container.querySelectorAll('tbody tr'))
+    expect(rows.map((row) => row.textContent?.match(/E\d/)?.[0])).toEqual(['E2', 'E1', 'E0', 'E3'])
+    fireEvent.click(screen.getByRole('button', { name: /信任分/ }))
+    const reversed = Array.from(container.querySelectorAll('tbody tr'))
+    expect(reversed.map((row) => row.textContent?.match(/E\d/)?.[0])).toEqual(['E3', 'E0', 'E1', 'E2'])
+  })
+
+  it.each([
+    ['來源', ['E3', 'E0', 'E1', 'E2']],
+    ['時間', ['E0', 'E1', 'E2', 'E3']],
+    ['摘要', ['E3', 'E0', 'E1', 'E2']],
+  ])('sorts by %s deterministically', (column, expected) => {
+    const { container } = render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })
+    fireEvent.click(screen.getByRole('button', { name: column }))
+    const rows = Array.from(container.querySelectorAll('tbody tr'))
+    expect(rows.map((row) => row.textContent?.match(/E\d/)?.[0])).toEqual(expected)
   })
 })

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
@@ -7,7 +7,8 @@ import type { AnalyzeData } from '../lib/types'
 import AnalysisReportView from './AnalysisReportView'
 
 vi.mock('./TrustTrendSection', () => ({ default: () => null }))
-vi.mock('./TrustRadarChart', () => ({ default: () => null }))
+vi.mock('./TrustRadarChart', () => ({ default: () => <div>radar-summary</div> }))
+vi.mock('./EvidenceDistributionCharts', () => ({ default: () => <div>evidence-charts</div> }))
 
 function makeData(): AnalyzeData {
   return {
@@ -18,7 +19,7 @@ function makeData(): AnalyzeData {
       contrarian: [], generated_at: '2026-08-01T00:00:00Z', direction: 'neutral',
       cross_source_signal: null, calibrated_confidence: 0.6, decision_state: 'normal',
     },
-    evidence: [],
+    evidence: [{ source: 'coindesk', fetched_at: '2026-08-01T00:00:00Z', content_reference: 'summary', related_claim: 'claim', source_url: '', kind: 'news', trust: 0.7, trust_components: {}, flags: [], info_flags: [] }],
     trust_radar: {},
     trust_components_aggregate: { reputation: null, corroboration: null, recency: null, manipulation: null },
     price_provenance: {},
@@ -67,17 +68,100 @@ describe('AnalysisReportView compact 模式（比較頁）', () => {
     expect(gaugeGrid).toBeTruthy()
   })
 
-  it('compact=true 時 stats grid 用 gap-1 而非 gap-2', () => {
-    const { container } = renderWithCompact(true)
-    const statsGrid = container.querySelector('.grid.grid-cols-3')!
-    expect(statsGrid.className).toContain('gap-1')
-    expect(statsGrid.className).not.toContain('gap-2')
+  it('keeps the radar in the collapsed L3 trust tab', () => {
+    const { container } = renderWithCompact(false)
+    expect(screen.getByText('radar-summary').closest('#technical-analysis')).not.toBeNull()
+    expect((container.querySelector('#technical-analysis') as HTMLDetailsElement).open).toBe(false)
   })
 
-  it('compact=false 時 stats grid 用 gap-2', () => {
+  it('shows the four-layer dashboard labels', () => {
+    renderWithCompact(false)
+    expect(screen.getByText(/L1 · Executive Summary/)).toBeInTheDocument()
+    expect(screen.getByText(/L2 · 正反證據對照/)).toBeInTheDocument()
+    expect(screen.getByText(/L3 · 深度面板/)).toBeInTheDocument()
+    expect(screen.getByText(/L4 ·/)).toBeInTheDocument()
+  })
+
+  it('does not classify an objective bearish fact as bullish support', () => {
+    const data = makeData()
+    data.report.facts = ['交易所供給增加']
+    data.evidence = [{ ...data.evidence[0], direction: 'bearish', related_claim: '交易所供給增加' }]
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter><AnalysisReportView data={data} /></MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    const supporting = screen.getByRole('heading', { name: '▲ 支持／偏多' }).closest('section')!
+    const opposing = screen.getByRole('heading', { name: '▼ 反方／偏空' }).closest('section')!
+    expect(within(supporting).queryByText('交易所供給增加')).toBeNull()
+    expect(within(opposing).getByText('交易所供給增加')).toBeInTheDocument()
+  })
+
+  it('shows relative freshness and evidence-kind counts in L1', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-01T00:07:00Z'))
+    try {
+      renderWithCompact(false)
+      expect(screen.getByText('更新於 7 分鐘前')).toBeInTheDocument()
+      expect(screen.getByText('news 1')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('localizes the new dashboard copy in English', () => {
+    document.cookie = 'trustforge_hermes_locale=en; Path=/'
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-01T00:07:00Z'))
+    try {
+      renderWithCompact(false)
+      expect(screen.getByText('Updated 7 minutes ago')).toBeInTheDocument()
+      expect(screen.getByText('L2 · Pro and con evidence')).toBeInTheDocument()
+      expect(screen.getByText(/L3 · Deep dive/)).toBeInTheDocument()
+      expect(screen.getByText(/L4 · Evidence list/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+      document.cookie = 'trustforge_hermes_locale=zh-TW; Path=/'
+    }
+  })
+
+  it('supports roving keyboard focus across the deep-dive tabs', () => {
+    renderWithCompact(false)
+    const trust = screen.getByRole('tab', { name: '信任分數' })
+    trust.focus()
+    fireEvent.keyDown(trust, { key: 'ArrowRight' })
+    const reasoning = screen.getByRole('tab', { name: '推理依據' })
+    expect(reasoning).toHaveFocus()
+    expect(reasoning).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', reasoning.id)
+    expect(reasoning.getAttribute('aria-controls')).toBe(screen.getByRole('tabpanel').id)
+  })
+
+  it('keeps keyboard focus local when two compact reports are rendered', () => {
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter>
+          <AnalysisReportView data={makeData()} heading="幣種 A · BTC" compact />
+          <AnalysisReportView data={makeData()} heading="幣種 B · ETH" compact />
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    const trustTabs = screen.getAllByRole('tab', { name: '信任分數' })
+    const reasoningTabs = screen.getAllByRole('tab', { name: '推理依據' })
+    expect(trustTabs[0].id).not.toBe(trustTabs[1].id)
+    trustTabs[1].focus()
+    fireEvent.keyDown(trustTabs[1], { key: 'ArrowRight' })
+    expect(reasoningTabs[1]).toHaveFocus()
+    expect(reasoningTabs[1]).toHaveAttribute('aria-selected', 'true')
+    expect(reasoningTabs[0]).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('does not mount lazy evidence charts until the evidence details are opened', async () => {
     const { container } = renderWithCompact(false)
-    const statsGrid = container.querySelector('.grid.grid-cols-3')!
-    expect(statsGrid.className).toContain('gap-2')
-    expect(statsGrid.className).not.toContain('gap-1')
+    const details = container.querySelector('#evidence-list') as HTMLDetailsElement
+    expect(screen.queryByText('evidence-charts')).toBeNull()
+    details.open = true
+    fireEvent(details, new Event('toggle'))
+    expect(await screen.findByText('evidence-charts')).toBeInTheDocument()
   })
 })
