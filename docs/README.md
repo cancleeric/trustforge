@@ -20,8 +20,9 @@ ISO/IEC 42001 認證或符合性聲明。
 
 EN 18286／EU AI Act 初步適用性與差距分析見
 [plans/ANALYSIS-EN-18286-EU-AI-ACT-GAP-2026-08-01.md](plans/ANALYSIS-EN-18286-EU-AI-ACT-GAP-2026-08-01.md)；
-該 overlay 尚待合法標準全文與 Compliance Counsel 核准，不代表 EU AI Act conformity、
-CE marking、EN certification 或 presumption of conformity。
+EN 18286 bibliographic／publication／official status 及合法標準全文均待 authoritative source；
+目前沒有 Official Journal citation 或 presumption of conformity 主張。該 overlay 尚待 Compliance
+Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certification。
 
 ---
 

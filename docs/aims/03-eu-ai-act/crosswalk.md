@@ -6,7 +6,7 @@
 >
 > Status: Draft — awaiting licensed EN 18286 text — non-effective
 >
-> Tracking issue: #1264
+> Parent tracking issue: #1264; this PR-A slice: #1265
 
 ## Use constraints
 
@@ -14,6 +14,8 @@
 - Populate EN clause identifiers and normative language only from a company-licensed authoritative copy.
 - A mapped document is not evidence that a control is implemented, verified, approved or effective.
 - Record evidence against an exact version or commit and preserve unresolved gaps.
+- Artifact paths below are unverified observations only. Existence, content, activation, ownership and effectiveness remain pending until checked against an exact commit and evidence record.
+- Do not assign `Gap`, `Partial`, `Implemented` or `Verified` before the obligated actor and applicability are approved.
 
 ## Mapping states
 
@@ -29,20 +31,21 @@
 
 ## Preliminary framework
 
-| EN 18286 clause | EU AI Act area | ISO/IEC 42001／AIMS area | TrustForge artifact or evidence | State | Owner／next action |
-|---|---|---|---|---|---|
-| Awaiting licensed text | Article 17 quality management system | AIMS scope, policy, roles, document control | `docs/aims/01-scope/`, `docs/aims/02-policy/` | Partial | Obtain licensed text; Compliance review |
-| Awaiting licensed text | Article 9 risk management | Risk and objectives | Issue #1244 | Gap | Execute AIMS-RISK with EU overlay |
-| Awaiting licensed text | Article 10 data and data governance | Lifecycle and operational controls | Production-only PII boundary; source and Evidence records | Partial | Define dataset quality and provenance controls |
-| Awaiting licensed text | Article 11 and Annex IV technical documentation | Documented information | Architecture, QA and runbook documents are distributed | Gap | Create release-bound technical file index |
-| Awaiting licensed text | Article 12 record keeping | Operational controls and evidence | Execution logs and Evidence exist | Partial | Approve retention, integrity and access controls |
-| Awaiting licensed text | Article 13 transparency and instructions | Communication and lifecycle controls | Product documentation exists | Gap | Create controlled EU instructions for use |
-| Awaiting licensed text | Article 14 human oversight | Roles and operational controls | Human approval boundaries exist | Partial | Define and test oversight measures |
-| Awaiting licensed text | Article 15 accuracy, robustness and cybersecurity | Objectives, lifecycle, monitoring | Tests and security controls exist | Partial | Define regulatory thresholds and release evidence |
-| Awaiting licensed text | Article 72 post-market monitoring | Measurement, audit, management review and CAPA | Issue #1245 | Gap | Create PMS and feedback loop |
-| Awaiting licensed text | Article 73 serious incident reporting | Incident and corrective action | No EU-specific workflow | Gap | Create reporting classification and playbook |
-| Awaiting licensed text | Operator and supplier obligations | Interested parties and supplier controls | AI system inventory is a foundation | Partial | Complete operator and supplier registers |
-| Awaiting licensed text | Conformity assessment, registration and CE | Readiness and SoA | Issue #1246 | Gap | Keep claims blocked pending legal path |
+Effective dates are planning assumptions only: Article 113's general application date is 2026-08-02, while Article 6(1) and corresponding obligations are planned for 2027-08-02. Every row remains subject to re-verification for amendments, transitional provisions and Commission action before reliance.
+
+| EN 18286 clause | EU AI Act area | Applicability | Obligated actor | Effective-date checkpoint | ISO/IEC 42001／AIMS area | Unverified artifact observation | Maturity | Owner／next action |
+|---|---|---|---|---|---|---|---|---|
+| Authoritative text pending | Article 9 risk management | Conditional; classification pending | High-risk provider; role pending | 2026-08-02; reverify | Risk and objectives | Issue #1244 is referenced; content／completion unverified | Not assessed | Legal applicability, then exact-version evidence review |
+| Authoritative text pending | Article 10 data governance | Conditional; classification and training-technique distinction pending | High-risk provider; role pending | 2026-08-02; reverify | Lifecycle and operational controls | PII-boundary and source-record claims unverified; not Article 10 evidence | Not assessed | Determine training technique and applicable paragraphs |
+| Authoritative text pending | Articles 11–15 | Conditional; classification pending | High-risk provider; role pending | 2026-08-02; reverify | Documentation, records, transparency, oversight, assurance | Distributed docs／logs／tests are alleged; exact artifacts and activation unverified | Not assessed | Verify artifact, commit, owner, activation and effectiveness |
+| Authoritative text pending | Article 17 QMS | Conditional; classification pending | High-risk provider; role pending | 2026-08-02; reverify | Scope, policy, roles, document control | `docs/aims/01-scope/` and `02-policy/` paths observed only | Not assessed | Confirm role and applicability before maturity scoring |
+| Authoritative text pending | Article 25 provider transition | Conditional on rebranding, substantial modification or intended-purpose change | Actor becoming provider; pending | 2026-08-02; reverify | Change and supplier controls | White-label／modification controls unverified | Not assessed | Separate provider transition from misuse records |
+| Authoritative text pending | Article 26 deployer duties | Conditional; deployer and use pending | Deployer; pending | 2026-08-02; reverify | Operational monitoring and escalation | No exact-version deployer evidence verified | Not assessed | Map monitoring, logs, escalation and instructions interfaces |
+| Authoritative text pending | Article 50 transparency | Independent feature/output/deployment assessment pending | Provider and/or deployer by paragraph; pending | 2026-08-02; reverify | Communication and output controls | Output modalities and marking/disclosure behavior unverified | Not assessed | Complete standalone Article 50 assessment |
+| Authoritative text pending | Article 72 post-market monitoring | Conditional; classification pending | High-risk provider; role pending | 2026-08-02; reverify | Measurement, review and CAPA | Issue #1245 referenced; content／completion unverified | Not assessed | Confirm actor, scope and exact-version PMS evidence |
+| Authoritative text pending | Article 73 serious incident reporting | Conditional; classification pending | Provider; role pending; other actors need escalation interface | 2026-08-02; reverify | Incident and corrective action | EU workflow existence unverified | Not assessed | Define actor-specific detection, escalation and reporting |
+| Authoritative text pending | Article 6(1) and corresponding obligations | Conditional on Annex I / safety-component facts | Provider and other applicable actors; pending | 2027-08-02; reverify | Classification and readiness | Regulated-product facts unverified | Not assessed | Reverify legal text, amendments and Commission action |
+| Authoritative text pending | Conformity, registration and CE | Conditional; path and role pending | Applicable economic operator; pending | Depends on classification; reverify | Readiness and SoA | Issue #1246 referenced; content／completion unverified | Not assessed | Keep claims blocked pending approved legal path |
 
 ## Required completion evidence
 

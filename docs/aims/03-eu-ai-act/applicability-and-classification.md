@@ -10,13 +10,15 @@
 >
 > Approver: Compliance Counsel (required; not yet approved)
 >
-> Tracking issue: #1264
+> Parent tracking issue: #1264
+>
+> This document slice: #1265 / PR-A
 
-## Intended purpose
+## Proposed intended purpose
 
-TrustForge is an evidence-linked cryptocurrency market-analysis AI agent. It ingests permitted market and contextual sources, produces trust reasoning and an analysis report, and exposes supporting Evidence and execution records. It is intended to support informed analysis; it is not intended to make or substantially determine decisions about a natural person's creditworthiness, insurance eligibility, employment, education, access to essential services, law enforcement, migration, justice, or democratic participation.
+Proposed statement: TrustForge would be positioned as an evidence-linked cryptocurrency market-analysis AI agent that supports informed analysis and would not make or substantially determine decisions in the listed natural-person domains.
 
-This statement is proposed and cannot be used as an approved instruction for use until CPO and Compliance Counsel approval is recorded.
+This is a proposal, not a verified description of the product. Product behavior, marketing claims, contracts, instructions for use, deployment facts and actual customer use are `unknown / evidence pending`; repository README text cannot prove intended purpose. The statement cannot be used as an approved instruction for use until those facts are reconciled and CPO plus Compliance Counsel approval is recorded against an exact version.
 
 ## Prohibited and out-of-scope uses
 
@@ -57,9 +59,22 @@ Status: `pending legal approval`. This is neither a high-risk nor a non-high-ris
 - General-purpose AI dependencies and downstream information requirements where applicable.
 - Territorial scope, output use in the Union and economic operator roles.
 
+## Article 50 feature, output and deployer assessment
+
+Article 50 transparency is assessed independently from Article 6 risk classification. The following remain `not assessed`: whether users interact directly with an AI system; whether outputs are synthetic audio, image, video or text subject to marking or disclosure rules; whether an output is a deep fake or public-interest text; the provider's technical marking duties; and the deployer's disclosure duties. Product features, output modalities, audience, deployment context and actor allocation require exact-version evidence. An Article 50 result is not a limb of the high-risk classification decision.
+
+## Actor and misuse boundaries
+
+- Article 25 provider transition requires a separate legal assessment of substantial modification, rebranding or changed intended purpose; it is not the same as customer misuse.
+- Off-label actual use and reasonably foreseeable misuse are separate records. Neither automatically proves an Article 25 provider transition.
+- Articles 17 and 72 are assessed conditionally for a high-risk-system provider.
+- Article 26 deployer monitoring, use and escalation duties are assessed separately from provider controls.
+- Article 73 reporting is assessed conditionally for the provider, with other actors' escalation interfaces recorded separately.
+- Article 10 is conditional on high-risk applicability and must distinguish systems using techniques involving model training from systems not using such techniques. A production-only PII boundary, if verified, would not establish Article 10 compliance.
+
 ## Reclassification triggers
 
-Reopen this assessment before release or contract approval when any of the following occurs:
+Reopen this assessment immediately when any of the following occurs. Block every affected use, release and contract at once; where already active, stop or isolate the affected path when safe and legally required. Escalate to Compliance Counsel, CISO, CPO and CEO. Unblocking requires recorded approval tied to the exact product, contract and release version:
 
 - intended purpose, target market or marketing claim changes;
 - a customer uses TrustForge for an Annex III or regulated-product decision;
@@ -77,4 +92,3 @@ Reopen this assessment before release or contract approval when any of the follo
 | Economic operator roles | — | — | — | Pending |
 | Risk classification | — | — | — | Pending |
 | Prohibited／out-of-scope uses | — | — | — | Pending |
-
