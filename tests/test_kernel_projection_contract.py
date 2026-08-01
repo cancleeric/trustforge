@@ -613,6 +613,7 @@ class TestSnapshotRoundtrip:
                     author=e.get("author"),
                     reputation_mode=e.get("reputation_mode"),
                     data_lineage=e.get("data_lineage"),
+                    direction=e.get("direction", ""),
                 )
                 for e in thawed_dict["evidence"]
             ),
@@ -631,6 +632,7 @@ class TestSnapshotRoundtrip:
                     author=e.get("author"),
                     reputation_mode=e.get("reputation_mode"),
                     data_lineage=e.get("data_lineage"),
+                    direction=e.get("direction", ""),
                 )
                 for e in thawed_dict["supporting_evidence"]
             ),

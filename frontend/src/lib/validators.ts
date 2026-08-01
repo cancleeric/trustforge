@@ -266,6 +266,7 @@ function isEvidence(value: unknown): value is Evidence {
     typeof value.related_claim === 'string' &&
     typeof value.source_url === 'string' &&
     typeof value.kind === 'string' &&
+    (value.direction === undefined || typeof value.direction === 'string') &&
     typeof value.trust === 'number' &&
     isPlainObject(value.trust_components) &&
     isStringArray(value.flags) &&
