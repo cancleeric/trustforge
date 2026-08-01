@@ -10,7 +10,10 @@ CONTRACT = json.loads(
 
 
 def test_live_contract_is_exactly_scoped():
-    assert CONTRACT["status"] == "owner-authorized-pending-final-ciso-review"
+    assert CONTRACT["status"] == "blocked-bedrock-distributed-limiter"
+    assert CONTRACT["activation_blockers"] == [
+        "Lambda Bedrock invocation remains disabled until a reviewed distributed <=1 RPS limiter is implemented"
+    ]
     assert CONTRACT["account_id"] == "850849012389"
     assert CONTRACT["region"] == "us-east-1"
     assert CONTRACT["function_name"] == "competition-trustforge-team11-live"
