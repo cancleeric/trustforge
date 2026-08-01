@@ -33,10 +33,17 @@
 | `reviewer` / `review_status` | reviewer 與 `not-reviewed`、`accepted`、`rejected` |
 | `captured_at` / `review_date` / `next_review_date` | ISO 8601 日期／時間 |
 | `retention` / `classification` | 保存期限與存取分類 |
+| `access_owner` / `authorized_audience` | 核准 evidence 存取者，以及獲授權角色／群組 |
+| `integrity_proof` | 固定 commit、雜湊、簽章或受控儲存版本等完整性證明 |
+| `redaction_status` | `not-required`、`pending`、`redacted`；並記錄遮罩 reviewer |
+| `storage_class` | `repository-public`、`repository-restricted`、`approved-secure-store` 之一 |
 | `limitations` | 不足、範圍外與不得推論事項 |
 | `approval_record_uri` | 核准紀錄；未核准明寫 `pending` |
 
-Evidence URI 必須由陌生 reviewer 可定位；外部連結需保存必要 metadata，敏感資料不得放入 manifest。
+Evidence URI 必須由獲授權 reviewer 可定位；拒絕存取時應走受控 evidence access／temporary grant，
+不得為方便審查複製到 repo 或非核准儲存。URI、title、description 與其他 metadata 本身不得洩漏 secret、
+token、內部識別碼、個資或敏感系統位置。外部連結需保存必要 metadata；敏感 evidence target 必須位於
+核准 secure store，依 classification 授權、遮罩及記錄存取，且不得把敏感內容放入 manifest。
 文件、程式碼或測試存在只證明其存在，不自動證明控制設計適當、持續運作或有效。
 
 ## 控制流程（待核准）
