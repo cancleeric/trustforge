@@ -101,4 +101,12 @@ def test_team_11_final_competition_artifacts_are_authentic_and_parseable():
             ]
             assert xml_names
             for member in xml_names:
-                ElementTree.fromstring(archive.read(member))
+                xml_bytes = archive.read(member)
+                xml_text = xml_bytes.decode("utf-8")
+                assert "\ufffd" not in xml_text and "\x00" not in xml_text
+                ElementTree.fromstring(xml_bytes)
+
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+            if name == "TrustForge_賽前提案報告.docx":
+                assert "TrustForge_決賽6分鐘簡報.html" in document_xml
+                assert "TrustForge_決賽6分鐘簡報.pptx" not in document_xml
