@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrustForge Hermes｜正式提案六分鐘講稿</title>
+<style>
+body{font-family:"Microsoft JhengHei","Noto Sans TC",sans-serif;background:#f5f8fc;color:#1c2a3a;max-width:920px;margin:auto;padding:36px 28px 72px;line-height:1.75}h1{text-align:center;color:#10294a;margin-bottom:4px}.sub{text-align:center;color:#66788c}.notice,.slide{background:#fff;border:1px solid #d7e3ef;border-radius:14px;padding:20px 24px;margin:20px 0;box-shadow:0 6px 22px rgba(16,41,74,.06)}.notice{background:#eef8fb;border-color:#aee6ed}.slide h2{color:#1b5bb5;font-size:21px;margin:0 0 5px}.time{display:inline-block;padding:2px 12px;border-radius:999px;background:#fff4df;color:#a45308;font-size:13px;font-weight:800}.speech{margin:14px 0;padding:11px 16px;border-left:4px solid #28b8c8;background:#f8fbfd}.speech strong{color:#1264b5}.cue{padding:7px 12px;border-radius:7px;background:#eef2f6;color:#64748b;font-size:13px}.cue:before{content:"操作提示：";font-weight:800}.key{border-color:#89d9e2}.warn{border-color:#f0cf83;background:#fffcf4}.phrase{font-weight:900;color:#1264b5}@media print{body{max-width:none;padding:14px}.slide{break-inside:avoid;box-shadow:none}}
+</style>
+</head>
+<body>
+<h1>TrustForge Hermes｜正式提案六分鐘講稿</h1>
+<p class="sub">6頁｜目標6分鐘｜完全對應 Fanny 提案簡報六段框架</p>
+<div class="notice"><b>說法邊界：</b>自行訓練的是「信心校準模型」，不是大型語言模型；正式競賽採AWS允許服務。鯨魚連接器是可用能力，但現場是否為live須以Execution Log為準；不宣稱已完成碳盤查或穩定低於1秒。</div>
+
+<section class="slide"><span class="time">第1頁｜0:00–0:45</span><h2>痛點與解題方向</h2><div class="speech">各位評審好，我們是Team 11中再參與。加密市場每天都有大量行情、新聞、鏈上與社群資訊，但資訊越多，不代表判斷越可靠。資料可能過時、互相矛盾，同一篇消息也可能被轉載十次，最後被AI誤認成十個獨立證據。</div><div class="speech">因此我們提出<strong>TrustForge Hermes</strong>。我們不預測價格，也不取代人類決策；我們做的不是幫你讀新聞，而是幫你驗新聞。不是資訊聚合，而是信任量化。</div><div class="cue">說完「信任量化」停頓後換頁。</div></section>
+
+<section class="slide"><span class="time">第2頁｜0:45–2:15</span><h2>解決方案：三層管線＋信任公式</h2><div class="speech">TrustForge分成三層。第一層是Ingestion與Claim Extraction：整合新聞、社群、鏈上、HOYA BIT行情、監管公告與市場資料，再由Amazon Bedrock抽取可驗證的Claim；離線時則採規則fallback。第二層是核心Trust Kernel，評估來源信譽、真正獨立的交叉佐證、時效衰減與操縱風險。第三層才是Hermes Agent，由Amazon Bedrock把已完成評分的結果寫成附溯源的報告，並呈現反方證據。</div><div class="speech">公式可以簡化為：TrustScore等於來源信譽，加上獨立佐證，加上時效，再扣除操縱風險。這些分項都能拆開檢查，不是一個黑箱數字。</div><div class="speech"><strong>Layer 2就是我們的護城河：</strong>信任評分在Bedrock行文與生成報告以前完成。每個重要結論都帶claim_id，可以回到原始URL與時間戳；當資料不足或矛盾太大時，系統會降低信心或棄權。</div></section>
+
+<section class="slide key"><span class="time">第3頁｜2:15–4:15</span><h2>AI技術應用＋技術特色</h2><div class="speech">Bedrock只有三個精準用途：extract_claims抽取主張、classify_stance做語義立場分類、assemble_report把既有結果寫成報告。它不負責信任權重、不做價格預測，也不能自行新增依據；判斷結構、證據整合與TrustScore都由pipeline產生。</div><div class="speech">Hermes Agent以14個工具跑有界循環：refresh sources → snapshots → quality measurement → history replay → diagnosis → adversarial review。候選版本經資料Gate、artifact hash、對抗審查與人工批准，永不自動套用，保留最終否決權。</div><div class="speech">我們自行訓練的是Isotonic Regression信心校準器，不是大型語言模型：用raw confidence對照T+7 OHLCV結果，校正過度自信。ModelHub是模型版本、指標與審批的治理台；SageMaker是AWS訓練與產物執行後端；正式競賽採AWS路徑，automatic_apply=false。</div><div class="speech">七項特色可在程式中逐一驗證：有界自主Agent、人工核准的模型訓練、fail-closed升級審查、可拔插Trust Kernel、Execution Log與溯源鏈、Whale Alert／Arkham／Etherscan／CMC鯨魚訊號，以及token／成本／預算／快取護欄降低不必要的LLM呼叫。這些是可追溯的設計能力，不宣稱已完成碳盤查或固定低於一秒。</div><div class="cue">本頁兩分鐘；三句收束：能進化但人類有否決權、核心不綁外部服務、每個判斷都能事後審計。</div></section>
+
+<section class="slide"><span class="time">第4頁｜4:15–5:00</span><h2>數據資料應用</h2><div class="speech">資料分成六類。HOYA BIT與主辦方提供的五幣OHLCV是共同的價格事實錨點，也能作為後續校準的ground truth；新聞與RSS補充事件；社群資料觀察情緒及協同發文風險；Whale Alert、Arkham與Etherscan提供鏈上與鯨魚動態；官方及監管公告提供政策風險；CoinGecko、DefiLlama與CoinMarketCap補充市值和流動性。</div><div class="speech">每筆Evidence都保存來源、取得時間、內容座標與related_claim；網頁附原始URL，API或CSV保留查詢條件。重點不是來源越多越好，而是每個來源都能識別、驗證與追溯。</div></section>
+
+<section class="slide warn"><span class="time">第5頁｜5:00–5:30</span><h2>AWS架構圖</h2><div class="speech">正式流程由EC2與nginx提供HTTPS入口；Amazon Bedrock負責Claim抽取、有限分類與行文；DynamoDB保存狀態、冪等、快取與成本協調；S3保存四份交付物及模型產物；SageMaker執行信心校準模型訓練。IAM Role與SSM管理機密，憑證不進Git。</div><div class="speech">15分鐘正式執行會產出Final Report、Evidence List、Execution Log及Source／Config，並以run_id和claim_id互相作證。</div></section>
+
+<section class="slide"><span class="time">第6頁｜5:30–6:00</span><h2>收尾</h2><div class="speech">TrustForge不預測幣價，也不替使用者做投資決定。我們解決的是更根本的問題：讓使用者看見這個判斷該信幾分、依據什麼，以及什麼情況下應該改變判斷。</div><div class="speech">從HOYA BIT市場資訊頁開始，我們可以逐步累積來源可靠度與校準資料，最終形成可整合的Trust Layer API。<span class="phrase">他們給你答案；我們給你答案背後的證據。</span>謝謝各位。</div><div class="cue">最後一句放慢，說完停頓，不補充。</div></section>
+
+</body>
+</html>
