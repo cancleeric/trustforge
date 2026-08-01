@@ -25,6 +25,9 @@ def test_live_contract_has_no_plaintext_or_online_stance_bypass():
     assert env["TRUSTFORGE_BUDGET_GUARD_BACKEND"] == "dynamodb"
     assert env["COST_LEDGER_BACKEND"] == "dynamodb"
     assert "TRUSTFORGE_LIVE_TOKEN" not in env
+    assert all(name not in env for name in (
+        "ARKHAM_API_KEY", "CMC_PRO_API_KEY", "ETHERSCAN_API_KEY", "WHALE_ALERT_API_KEY"
+    ))
     assert "TRUSTFORGE_ONLINE_STANCE" not in env
     assert env["CACHE_BACKEND"] == "json"
     assert env["TRUSTFORGE_CACHE_JSON_PATH"].startswith("/tmp/")
@@ -35,7 +38,21 @@ def test_live_contract_has_no_plaintext_or_online_stance_bypass():
     assert set(CONTRACT["secret_environment_inputs"]) == {
         "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN",
         "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID",
+        "TRUSTFORGE_ARKHAM_SECRET_ARN",
+        "TRUSTFORGE_ARKHAM_SECRET_VERSION_ID",
+        "TRUSTFORGE_CMC_SECRET_ARN",
+        "TRUSTFORGE_CMC_SECRET_VERSION_ID",
+        "TRUSTFORGE_ETHERSCAN_SECRET_ARN",
+        "TRUSTFORGE_ETHERSCAN_SECRET_VERSION_ID",
+        "TRUSTFORGE_WHALE_ALERT_SECRET_ARN",
+        "TRUSTFORGE_WHALE_ALERT_SECRET_VERSION_ID",
     }
+    provider_arns = [
+        value for key, value in env.items()
+        if key.endswith("_SECRET_ARN") and key != "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN"
+    ]
+    assert len(provider_arns) == 4
+    assert all("/providers/" in arn and "*" not in arn for arn in provider_arns)
 
 
 def test_live_routes_and_iam_are_allowlists_without_wildcards():

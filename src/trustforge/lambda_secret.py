@@ -11,48 +11,98 @@ import os
 from typing import Any
 
 
-_SECRET_ARN_ENV = "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN"
-_SECRET_VERSION_ENV = "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID"
-_TOKEN_ENV = "TRUSTFORGE_LIVE_TOKEN"
+_SECRET_SPECS = (
+    (
+        "live-token",
+        "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN",
+        "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID",
+        "TRUSTFORGE_LIVE_TOKEN",
+    ),
+    (
+        "arkham",
+        "TRUSTFORGE_ARKHAM_SECRET_ARN",
+        "TRUSTFORGE_ARKHAM_SECRET_VERSION_ID",
+        "ARKHAM_API_KEY",
+    ),
+    (
+        "coinmarketcap",
+        "TRUSTFORGE_CMC_SECRET_ARN",
+        "TRUSTFORGE_CMC_SECRET_VERSION_ID",
+        "CMC_PRO_API_KEY",
+    ),
+    (
+        "etherscan",
+        "TRUSTFORGE_ETHERSCAN_SECRET_ARN",
+        "TRUSTFORGE_ETHERSCAN_SECRET_VERSION_ID",
+        "ETHERSCAN_API_KEY",
+    ),
+    (
+        "whale-alert",
+        "TRUSTFORGE_WHALE_ALERT_SECRET_ARN",
+        "TRUSTFORGE_WHALE_ALERT_SECRET_VERSION_ID",
+        "WHALE_ALERT_API_KEY",
+    ),
+)
 _hydrated = False
 
 
-def hydrate_live_token(*, client: Any | None = None) -> bool:
-    """Load the live token from Secrets Manager once, failing closed on errors.
+def hydrate_lambda_secrets(*, client: Any | None = None) -> bool:
+    """Atomically load configured Lambda secrets once, failing closed on errors.
 
-    Returns ``False`` when no secret ARN is configured (the existing offline
-    deployment contract).  A configured ARN must resolve to a non-empty
-    ``SecretString``.  Plaintext and ARN configuration may not coexist.
+    Returns ``False`` when no secret ARN is configured, preserving the offline
+    deployment contract.  Every configured secret must pin a VersionId and
+    resolve to a non-empty ``SecretString``.  Values are applied to the process
+    environment only after all reads validate, so a partial failure cannot
+    leave a half-hydrated execution environment.
     """
     global _hydrated
     if _hydrated:
-        return bool(os.environ.get(_TOKEN_ENV))
+        return any(os.environ.get(target_env) for _, _, _, target_env in _SECRET_SPECS)
 
-    secret_arn = os.environ.get(_SECRET_ARN_ENV, "").strip()
-    if not secret_arn:
+    configured = []
+    for label, arn_env, version_env, target_env in _SECRET_SPECS:
+        secret_arn = os.environ.get(arn_env, "").strip()
+        secret_version = os.environ.get(version_env, "").strip()
+        if not secret_arn and not secret_version:
+            continue
+        if not secret_arn or not secret_version:
+            raise RuntimeError(f"configured {label} secret requires ARN and VersionId")
+        if os.environ.get(target_env):
+            raise RuntimeError(
+                f"{target_env} must not be configured when {arn_env} is set"
+            )
+        configured.append((label, secret_arn, secret_version, target_env))
+
+    if not configured:
         _hydrated = True
         return False
-    if os.environ.get(_TOKEN_ENV):
-        raise RuntimeError(
-            f"{_TOKEN_ENV} must not be configured when {_SECRET_ARN_ENV} is set"
-        )
 
     if client is None:
         import boto3
 
         client = boto3.client("secretsmanager")
 
-    request = {"SecretId": secret_arn}
-    secret_version = os.environ.get(_SECRET_VERSION_ENV, "").strip()
-    if secret_version:
-        request["VersionId"] = secret_version
-    response = client.get_secret_value(**request)
-    if not isinstance(response, dict):
-        raise RuntimeError("configured live-token secret returned an invalid response")
-    token = response.get("SecretString")
-    if not isinstance(token, str) or not token.strip():
-        raise RuntimeError("configured live-token secret has no non-empty SecretString")
+    loaded = {}
+    for label, secret_arn, secret_version, target_env in configured:
+        response = client.get_secret_value(
+            SecretId=secret_arn,
+            VersionId=secret_version,
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError(f"configured {label} secret returned an invalid response")
+        value = response.get("SecretString")
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(
+                f"configured {label} secret has no non-empty SecretString"
+            )
+        loaded[target_env] = value.strip()
 
-    os.environ[_TOKEN_ENV] = token
+    os.environ.update(loaded)
     _hydrated = True
     return True
+
+
+def hydrate_live_token(*, client: Any | None = None) -> bool:
+    """Backward-compatible entry point; hydrates all configured Lambda secrets."""
+    hydrate_lambda_secrets(client=client)
+    return bool(os.environ.get("TRUSTFORGE_LIVE_TOKEN"))

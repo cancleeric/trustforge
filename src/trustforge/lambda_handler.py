@@ -17,13 +17,13 @@ import logging
 import os
 from urllib.parse import urlencode
 
-from .lambda_secret import hydrate_live_token
+from .lambda_secret import hydrate_lambda_secrets
 
 
 # Must run before importing ``web`` because it reads environment-backed
 # security defaults during module initialization.  A configured secret that
 # cannot be retrieved intentionally fails the Lambda cold start closed.
-hydrate_live_token()
+hydrate_lambda_secrets()
 web = importlib.import_module(".web", __package__)
 from .ingestion.hoyabit import log_hoyabit_startup_status
 

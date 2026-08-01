@@ -168,7 +168,7 @@ def test_noncompetition_function_preserves_existing_routes(monkeypatch):
 def test_secret_hydration_precedes_delayed_web_import():
     source = __import__("inspect").getsource(lambda_handler)
 
-    assert source.index("hydrate_live_token()") < source.index(
+    assert source.index("hydrate_lambda_secrets()") < source.index(
         'importlib.import_module(".web", __package__)'
     )
 
