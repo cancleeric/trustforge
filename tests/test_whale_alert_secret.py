@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.error import HTTPError
 
 import pytest
 
@@ -149,6 +150,22 @@ def test_whale_connector_uses_controlled_secret_resolver(monkeypatch):
 
     assert whale_trades.WhaleAlertSource().fetch("BTC") == []
     assert "api_key=controlled-whale-key-123456" in observed["url"]
+
+
+def test_whale_http_error_is_sanitized_without_key_or_exception_chain(monkeypatch):
+    secret = "controlled-whale-key-123456"
+    monkeypatch.setattr(whale_trades, "resolve_api_key", lambda: (secret, "environment"))
+
+    def fail(url, extra_headers=None):
+        raise HTTPError(url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(whale_trades, "_fetch_url", fail)
+    with pytest.raises(RuntimeError, match=r"^Whale Alert request failed: HTTP 429") as caught:
+        whale_trades.WhaleAlertSource().fetch("", coin="BTC")
+
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
 
 
 def test_ssm_parameter_not_found_falls_back_to_env(monkeypatch):

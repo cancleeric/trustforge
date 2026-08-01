@@ -67,7 +67,7 @@ def hydrate_lambda_secrets(*, client: Any | None = None) -> bool:
             continue
         if not secret_arn or not secret_version:
             raise RuntimeError(f"configured {label} secret requires ARN and VersionId")
-        if os.environ.get(target_env):
+        if target_env in os.environ:
             raise RuntimeError(
                 f"{target_env} must not be configured when {arn_env} is set"
             )
@@ -91,13 +91,19 @@ def hydrate_lambda_secrets(*, client: Any | None = None) -> bool:
         if not isinstance(response, dict):
             raise RuntimeError(f"configured {label} secret returned an invalid response")
         value = response.get("SecretString")
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str) or not value.strip() or "\x00" in value:
             raise RuntimeError(
                 f"configured {label} secret has no non-empty SecretString"
             )
         loaded[target_env] = value.strip()
 
-    os.environ.update(loaded)
+    try:
+        for target_env, value in loaded.items():
+            _set_environment_value(target_env, value)
+    except Exception:
+        for target_env in loaded:
+            os.environ.pop(target_env, None)
+        raise
     _hydrated = True
     return True
 
@@ -106,3 +112,8 @@ def hydrate_live_token(*, client: Any | None = None) -> bool:
     """Backward-compatible entry point; hydrates all configured Lambda secrets."""
     hydrate_lambda_secrets(client=client)
     return bool(os.environ.get("TRUSTFORGE_LIVE_TOKEN"))
+
+
+def _set_environment_value(name: str, value: str) -> None:
+    """Single assignment seam used to prove commit-stage rollback in tests."""
+    os.environ[name] = value

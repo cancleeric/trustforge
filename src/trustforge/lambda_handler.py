@@ -185,6 +185,12 @@ def handler(event, context=None):
             return _resp(200, "ok", "text/plain; charset=utf-8")
 
         if path in ("/analyze", "/analyze.json"):
+            # The product pipeline stays cache-only.  After authentication,
+            # refresh only the four owner-authorized provider entries before
+            # analysis; the helper never exposes exception text or URLs.
+            from .lambda_provider_cache import refresh_provider_cache
+
+            refresh_provider_cache(qs.get("coin", [""])[0])
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
             from .schema import QuestionType
             qtype_raw = qs.get("type", ["multi_source"])[0]

@@ -53,6 +53,25 @@ def test_live_contract_has_no_plaintext_or_online_stance_bypass():
     ]
     assert len(provider_arns) == 4
     assert all("/providers/" in arn and "*" not in arn for arn in provider_arns)
+    expected_provider_arns = {
+        provider: env[arn_env]
+        for provider, arn_env in {
+            "arkham": "TRUSTFORGE_ARKHAM_SECRET_ARN",
+            "coinmarketcap": "TRUSTFORGE_CMC_SECRET_ARN",
+            "etherscan": "TRUSTFORGE_ETHERSCAN_SECRET_ARN",
+            "whale-alert": "TRUSTFORGE_WHALE_ALERT_SECRET_ARN",
+        }.items()
+    }
+    assert all(f"/providers/{provider}-" in arn for provider, arn in expected_provider_arns.items())
+    assert all(
+        env[name]
+        for name in (
+            "TRUSTFORGE_ARKHAM_SECRET_VERSION_ID",
+            "TRUSTFORGE_CMC_SECRET_VERSION_ID",
+            "TRUSTFORGE_ETHERSCAN_SECRET_VERSION_ID",
+            "TRUSTFORGE_WHALE_ALERT_SECRET_VERSION_ID",
+        )
+    )
 
 
 def test_live_routes_and_iam_are_allowlists_without_wildcards():
@@ -100,6 +119,14 @@ def test_execution_role_and_function_url_policies_are_exact():
         assert all(resource != "*" for resource in statement["resources"])
         assert all("850849012389" in resource or "::foundation-model/" in resource
                    for resource in statement["resources"])
+    secret_statement = next(
+        statement for statement in role["statements"]
+        if statement["actions"] == ["secretsmanager:GetSecretValue"]
+    )
+    env_secret_arns = {
+        value for key, value in CONTRACT["environment"].items() if key.endswith("_SECRET_ARN")
+    }
+    assert set(secret_statement["resources"]) == env_secret_arns
     assert CONTRACT["deployment_alias"] == "live"
     assert {entry["statement_id"] for entry in CONTRACT["function_url_policy"]} == {
         "FunctionURLAllowPublicAccess", "FunctionURLAllowPublicInvoke"

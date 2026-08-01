@@ -12,9 +12,14 @@ from urllib.parse import urlencode
 
 import pytest
 
-from trustforge import lambda_handler, web
+from trustforge import lambda_handler, lambda_provider_cache, web
 from trustforge.comparison_contract import ComparisonReport, ComparisonRunResult
 from trustforge.schema import Evidence, QuestionType
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_provider_refresh(monkeypatch):
+    monkeypatch.setattr(lambda_provider_cache, "refresh_provider_cache", lambda coin: {})
 
 
 def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> dict:

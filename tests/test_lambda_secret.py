@@ -89,6 +89,15 @@ def test_plaintext_and_secret_arn_cannot_coexist(monkeypatch):
         lambda_secret.hydrate_live_token(client=_SecretsClient())
 
 
+def test_empty_plaintext_and_secret_arn_cannot_coexist(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_ARN", "arn:test")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID", "version-1")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "")
+
+    with pytest.raises(RuntimeError, match="must not be configured"):
+        lambda_secret.hydrate_live_token(client=_SecretsClient())
+
+
 def test_version_id_is_pinned_for_rotation(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_ARN", "arn:test")
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID", "version-2")
@@ -152,6 +161,41 @@ def test_partial_provider_failure_leaves_no_plaintext(monkeypatch):
         lambda_secret.hydrate_lambda_secrets(client=Client())
     assert all(target_env not in os.environ for _, _, _, target_env in providers)
     assert lambda_secret._hydrated is False
+
+
+def test_environment_commit_failure_rolls_back_every_target(monkeypatch):
+    providers = lambda_secret._SECRET_SPECS[1:3]
+    for index, (_, arn_env, version_env, _) in enumerate(providers):
+        monkeypatch.setenv(arn_env, f"arn:provider:{index}")
+        monkeypatch.setenv(version_env, f"version-{index}")
+
+    client = _SecretsClient({"SecretString": "provider-value"})
+    real_set = lambda_secret._set_environment_value
+    assignments = 0
+
+    def fail_second_assignment(name, value):
+        nonlocal assignments
+        assignments += 1
+        if assignments == 2:
+            raise OSError("environment commit failed")
+        real_set(name, value)
+
+    monkeypatch.setattr(lambda_secret, "_set_environment_value", fail_second_assignment)
+    with pytest.raises(OSError, match="environment commit failed"):
+        lambda_secret.hydrate_lambda_secrets(client=client)
+    assert all(target_env not in os.environ for _, _, _, target_env in providers)
+    assert lambda_secret._hydrated is False
+
+
+def test_nul_secret_is_rejected_before_environment_commit(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_ARKHAM_SECRET_ARN", "arn:arkham")
+    monkeypatch.setenv("TRUSTFORGE_ARKHAM_SECRET_VERSION_ID", "version-1")
+
+    with pytest.raises(RuntimeError, match="non-empty SecretString"):
+        lambda_secret.hydrate_lambda_secrets(
+            client=_SecretsClient({"SecretString": "bad\x00value"})
+        )
+    assert "ARKHAM_API_KEY" not in os.environ
 
 
 def test_configured_secret_requires_pinned_version(monkeypatch):

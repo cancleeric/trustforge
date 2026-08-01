@@ -118,8 +118,8 @@
     {"method": "GET", "path": "/healthz"}
   ],
   "token_protected_requests": [
-    {"method": "GET", "path": "/analyze", "requires": ["live=1", "X-Live-Token"]},
-    {"method": "GET", "path": "/analyze.json", "requires": ["live=1", "X-Live-Token"]}
+    {"method": "GET", "path": "/analyze", "requires": ["live=1", "X-Live-Token"], "provider_cache_refresh": "bounded-on-demand"},
+    {"method": "GET", "path": "/analyze.json", "requires": ["live=1", "X-Live-Token"], "provider_cache_refresh": "bounded-on-demand"}
   ],
   "bedrock": {
     "actions": ["bedrock:InvokeModel"],
