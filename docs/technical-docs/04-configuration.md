@@ -102,7 +102,7 @@ Configuration Reference · 全部 25+ 環境變數、預設值、生產建議值
 
 | 變數 | 預設值 | 必要 | 說明 |
 | --- | --- | --- | --- |
-| VITE_API_PROXY_TARGET | `http://13.211.110.218 ` | — | 前端 dev server（ `npm run dev `）的 API proxy 目標。 本機開發設 `http://127.0.0.1:8080 `。 |
+| VITE_API_PROXY_TARGET | `http://127.0.0.1:8799 ` | — | 前端 dev server（ `npm run dev `）的 API proxy 目標；連線其他環境時必須明確覆寫。 |
 
 ### 9. 設定優先級（Config Store → Env）
 
