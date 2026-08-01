@@ -473,3 +473,5 @@ def test_scrub_summary_handles_escaped_quotes_and_composite_secret_keys():
 
     # ``code`` is URL-specific: ordinary diagnostics must remain readable.
     assert _scrub_summary("status code=200") == "status code=200"
+    ordinary_urls = "https://host/?status_code=200&country_code=TW"
+    assert _scrub_summary(ordinary_urls) == ordinary_urls
