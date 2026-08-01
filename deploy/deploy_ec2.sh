@@ -15,6 +15,11 @@ CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
 COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
 LEASE_BACKEND="${TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND:-dynamodb}"
 LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
+ATOMIC_BATCH_TABLE="${TRUSTFORGE_ATOMIC_BATCH_TABLE:-trustforge-multi-angle-batches}"
+ATOMIC_BATCH_CONFIG_VERSION="${TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION:-production-v1}"
+ATOMIC_BATCH_EXCLUSIVE="${TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE:-1}"
+SHARED_ANALYSIS_DB_PATH="${TRUSTFORGE_SHARED_ANALYSIS_DB_PATH:-/var/lib/trustforge/analysis.sqlite3}"
+MULTI_ANGLE_DAILY_BUDGET_USD="${TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD:-1}"
 TRAINING_DATA_DIR="${TRUSTFORGE_TRAINING_DATA_DIR:-/opt/trustforge/data/training}"
 SKILL_CHANGE_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_changes.jsonl}"
 PREVIEW_ADMISSION_ENABLED="${TRUSTFORGE_PREVIEW_ADMISSION_ENABLED:-0}"
@@ -61,6 +66,14 @@ if ! [[ "$SKILL_CHANGE_LOG_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$SKILL_CHANGE_
   echo "[ec2] ERROR: TRUSTFORGE_SKILL_CHANGE_LOG must be an absolute safe path" >&2
   exit 1
 fi
+if ! [[ "$ATOMIC_BATCH_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]] ||
+   ! [[ "$ATOMIC_BATCH_CONFIG_VERSION" =~ ^[A-Za-z0-9_.-]+$ ]] ||
+   [ "$ATOMIC_BATCH_EXCLUSIVE" != "1" ] ||
+   ! [[ "$SHARED_ANALYSIS_DB_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+   ! [[ "$MULTI_ANGLE_DAILY_BUDGET_USD" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "[ec2] ERROR: invalid atomic multi-angle production configuration" >&2
+  exit 1
+fi
 if [ "$PREVIEW_ADMISSION_ENABLED" != "0" ] && [ "$PREVIEW_ADMISSION_ENABLED" != "1" ]; then
   echo "[ec2] ERROR: preview admission flag must be exactly 0 or 1" >&2
   exit 1
@@ -96,6 +109,11 @@ append_unit_env "Environment=TRUSTFORGE_BUDGET_COUNTER_TABLE=${COUNTER_TABLE}"
 append_unit_env "Environment=TRUSTFORGE_CW_METRICS=${CW_METRICS}"
 append_unit_env "Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=${LEASE_BACKEND}"
 append_unit_env "Environment=TRUSTFORGE_LEASE_TABLE=${LEASE_TABLE}"
+append_unit_env "Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=${ATOMIC_BATCH_TABLE}"
+append_unit_env "Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=${ATOMIC_BATCH_CONFIG_VERSION}"
+append_unit_env "Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=${ATOMIC_BATCH_EXCLUSIVE}"
+append_unit_env "Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=${SHARED_ANALYSIS_DB_PATH}"
+append_unit_env "Environment=TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD=${MULTI_ANGLE_DAILY_BUDGET_USD}"
 append_unit_env "Environment=TRUSTFORGE_PREVIEW_ADMISSION_ENABLED=${PREVIEW_ADMISSION_ENABLED}"
 for key in "${PREVIEW_ENV_KEYS[@]}"; do
   value="${!key-}"
@@ -113,6 +131,7 @@ ssm_env_cmd() {
 
 UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")$(ssm_env_cmd TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND "$LEASE_BACKEND")$(ssm_env_cmd TRUSTFORGE_LEASE_TABLE "$LEASE_TABLE")"
 UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd TRUSTFORGE_PREVIEW_ADMISSION_ENABLED "$PREVIEW_ADMISSION_ENABLED")"
+UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_TABLE "$ATOMIC_BATCH_TABLE")$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION "$ATOMIC_BATCH_CONFIG_VERSION")$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE "$ATOMIC_BATCH_EXCLUSIVE")$(ssm_env_cmd TRUSTFORGE_SHARED_ANALYSIS_DB_PATH "$SHARED_ANALYSIS_DB_PATH")$(ssm_env_cmd TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD "$MULTI_ANGLE_DAILY_BUDGET_USD")"
 for key in "${PREVIEW_ENV_KEYS[@]}"; do
   UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd "$key" "${!key-}")"
 done
@@ -280,6 +299,11 @@ if ! "$(dirname "$0")/setup_budget_guard_dynamodb.sh"; then
 fi
 if ! "$(dirname "$0")/setup_idempotency_lease_dynamodb.sh"; then
   echo "[ec2] ERROR: idempotency lease setup failed" >&2
+  exit 1
+fi
+if ! REGION="$REGION" TRUSTFORGE_ATOMIC_BATCH_TABLE="$ATOMIC_BATCH_TABLE" \
+  TRUSTFORGE_EC2_ROLE="$ROLE" "$(dirname "$0")/setup_atomic_batch_dynamodb.sh"; then
+  echo "[ec2] ERROR: atomic multi-angle authority setup failed" >&2
   exit 1
 fi
 if ! aws dynamodb describe-table --region "$REGION" --table-name "$LEASE_TABLE" >/dev/null 2>&1; then
