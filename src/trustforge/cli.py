@@ -58,13 +58,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
 
-        md = comparison_to_markdown(report_a, evidence_a, report_b, evidence_b, args.query)
-        (out / "report.md").write_text(md, encoding="utf-8")
-
-        # CA-08：若 comparison_report 存在，也輸出 unified ComparisonReport.to_markdown()
+        # #1224：主輸出改用 ComparisonReport.to_markdown()（三段式整合格式）；
+        # ComparisonReport 為 None 時 fallback 回舊版並排格式。
         if result.comparison is not None:
-            unified_md = result.comparison.to_markdown()
-            (out / "comparison_report.md").write_text(unified_md, encoding="utf-8")
+            md = result.comparison.to_markdown()
+        else:
+            md = comparison_to_markdown(report_a, evidence_a, report_b, evidence_b, args.query)
+        (out / "report.md").write_text(md, encoding="utf-8")
 
         # evidence.json：兩幣合併，每筆加 coin 欄位標明歸屬；外加 comparison_report
         all_ev = (
@@ -83,7 +83,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         total = len(evidence_a) + len(evidence_b)
         print(f"完成。耗時 {log.elapsed():.2f}s（上限 900s），交付件寫入 {out}/")
         print(
-            f" report.md / evidence.json ({total} 筆，{coin_a}+{coin_b})"
+            f" report.md（整合比較報告） / evidence.json ({total} 筆，{coin_a}+{coin_b})"
             " / execution_log.jsonl"
         )
         if not args.quiet:

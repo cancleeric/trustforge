@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.27.51 — 2026-07-31
+
+- release: automatic version preparation.
+
+## v0.27.50 — 2026-07-31
+
+- release: automatic version preparation.
+
+## v0.27.49 — 2026-07-31
+
+- release: automatic version preparation.
+
+## v0.27.48 — 2026-07-31
+
+- release: automatic version preparation.
+
 ## v0.27.0 — 2026-07-29
 
 - feat: 新增官方雙幣比較契約、證據正規化、Bedrock synthesis、API/CLI/Lambda 輸出、單一報告 UI 與匯出。
