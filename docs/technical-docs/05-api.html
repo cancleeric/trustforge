@@ -1,0 +1,329 @@
+<!doctype html><html lang="zh-Hant"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>05 — API 參考 | TrustForge 技術文件</title>
+<meta name="description" content="TrustForge JSON REST API 參考：端點清單、速率限制、{ok,data,error} 信封格式、誠實設計鐵律。">
+<link rel="stylesheet" href="../style.css?v=20260726-evidence-grade">
+<style>
+.toc { margin:1rem 0 1.2rem; border:1px solid var(--bd); border-radius:10px; background:var(--card); padding:.6rem .9rem; }
+.toc summary { cursor:pointer; color:var(--acc); font-size:.9rem; }
+.toc ol { margin:.5rem 0 0; padding-left:1.2rem; }
+.toc li { margin:.2rem 0; }
+.toc a { color:var(--mut); font-size:.88rem; }
+.toc a:hover { color:var(--fg); }
+.nav-bar { display:flex; gap:.6rem; margin-bottom:1.2rem; flex-wrap:wrap; }
+.nav-bar a { font-size:.9rem; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+.nav-bar a:hover { text-decoration:none; border-color:var(--acc); }
+.warn-box { background:rgba(210,153,34,.08); border:1px solid var(--warn); border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.warn-box strong { color:var(--warn); }
+.danger-box { background:rgba(248,81,73,.08); border:1px solid #f85149; border-radius:8px; padding:.8rem 1rem; margin:1rem 0; font-size:.9rem; }
+.danger-box strong { color:#f85149; }
+.method { display:inline-block; font-size:.75rem; font-weight:700; padding:.08rem .4rem; border-radius:6px; margin-right:.4rem; min-width:38px; text-align:center; }
+.method.get { background:rgba(63,185,80,.15); color:var(--good); border:1px solid var(--good); }
+.method.post { background:rgba(88,166,255,.15); color:var(--acc); border:1px solid var(--acc); }
+.method.put { background:rgba(210,153,34,.15); color:var(--warn); border:1px solid var(--warn); }
+</style>
+</head><body><div class="wrap">
+
+<div class="nav-bar"><a href="04-configuration.html">← 04 環境變數參考</a><a href="index.html">文件首頁</a><a href="06-data-flow.html">06 資料流 →</a></div>
+
+<article>
+<h2>05 — API 參考</h2>
+<p style="color:var(--mut)">API Reference · JSON REST 端點清單、速率限制、{ok,data,error} 信封格式、誠實設計鐵律</p>
+
+<details class="toc" open>
+<summary>目錄</summary>
+<ol>
+  <li><a href="#envelope">統一信封格式 {ok, data, error}</a></li>
+  <li><a href="#invariants">誠實設計鐵律（必讀）</a></li>
+  <li><a href="#endpoints">端點清單</a></li>
+  <li><a href="#rate-limit">速率限制分組</a></li>
+  <li><a href="#analyze">/api/analyze 詳解</a></li>
+  <li><a href="#status">/api/status 詳解</a></li>
+  <li><a href="#overview">/api/overview 詳解</a></li>
+  <li><a href="#admin">Admin API 端點</a></li>
+  <li><a href="#openapi">OpenAPI Spec</a></li>
+</ol>
+</details>
+
+<h3 id="envelope">1. 統一信封格式</h3>
+
+<p>所有 <code>/api/*</code> 端點使用固定 JSON 信封：</p>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>成功：</b>
+{
+  "ok": true,
+  "data": { ... }
+}
+
+<b>失敗：</b>
+{
+  "ok": false,
+  "error": {
+    "code": "rate_limited",
+    "message": "請求過於頻繁，請等待 30 秒後重試。"
+  }
+}
+</pre>
+
+<p><strong>message 語意</strong>：通用中文訊息，刻意不透傳例外 stacktrace 或 DynamoDB 錯誤細節，避免洩露內部依賴資訊給大量掃描/爬取的請求。</p>
+
+<h3 id="invariants">2. 誠實設計鐵律</h3>
+
+<div class="warn-box">
+<strong>這些不變量是 API 設計的核心契約。任何消費此 API 的程式（前端 UI、外部 agent、監控儀表板）都必須遵守，否則會產出誤導資訊。</strong>
+</div>
+
+<h4>2.1 缺鍵 ≠ 零（Missing key is "not evaluated", never zero or safe）</h4>
+<pre>API 中「沒有算過」的欄位會<b>完全省略該鍵</b>，不是填 <code>0</code> 或 <code>null</code>。
+呼叫端 <b>不可</b>用 <code>.get(key, 0)</code> 讀取後當作數值做風險判斷。</pre>
+
+<h4>2.2 <code>manip_score</code>（max）才是操縱風險 primary 訊號</h4>
+<pre>15 筆證據只要有 1 筆已確認操縱（<code>manipulation=1.0</code>），平均會被稀釋——
+所以 primary 訊號用 <code>max()</code>，不是 <code>mean()</code>。UI/agent 只能顯示一個數字時，一律顯示 <code>manip_score</code>。</pre>
+
+<h4>2.3 信任分是校準式打分，不是統計承諾</h4>
+<pre><code>calibrated_confidence</code> 是簡化版分位數校準（quantile calibration），<b>不是</b>
+嚴謹 conformal prediction 的覆蓋率承諾——不可把它包裝成任何形式的正確度百分比。</pre>
+
+<h4>2.4 三態決策（decision_state）</h4>
+<pre><code>abstain</code>：證據不足，刻意不給方向性結論（<code>direction</code> 固定為 "不明"）
+<code>low_confidence</code>：有方向性判斷，但信心偏低
+<code>normal</code>：證據強度足以支持有信心的方向性判斷</pre>
+
+<h3 id="endpoints">3. 端點清單</h3>
+
+<div class="warn-box">
+<strong>本輪同時比對 TrustForge <code>origin/main</code> 與 production live spec。</strong> 下表是客戶導讀版；完整欄位 schema、錯誤碼與範例仍以線上 <code>GET /api/openapi.yaml</code> 為準。若 repo 最新 spec 有端點但 live spec 尚未列出，文件只能寫「repo 支援／待部署驗證」，不能當 production 驗收端點。
+</div>
+
+<table>
+<tr><th>端點</th><th>方法</th><th>Tag</th><th>說明</th></tr>
+<tr><td><code>/api/health</code></td><td><span class="method get">GET</span></td><td>meta</td><td>JSON 健康檢查（零 I/O）。回 <code>{status, version, uptime_seconds}</code></td></tr>
+<tr><td><code>/api/rate-limit-status</code></td><td><span class="method get">GET</span></td><td>observability</td><td>rate limit bucket 觀測狀態。</td></tr>
+<tr><td><code>/api/status</code></td><td><span class="method get">GET</span></td><td>observability</td><td>系統狀態：cache backend、資料鮮度、dedup、runtime capability。</td></tr>
+<tr><td><code>/api/costs</code></td><td><span class="method get">GET</span></td><td>observability</td><td>成本帳本摘要（日/月/全部，按模型分類）。</td></tr>
+<tr><td><code>/api/overview</code></td><td><span class="method get">GET</span></td><td>observability</td><td>多幣總覽儀表板快照。</td></tr>
+<tr><td><code>/api/history</code></td><td><span class="method get">GET</span></td><td>observability</td><td>Point-in-time 歷史分析快照。</td></tr>
+<tr><td><code>/api/data-plane-status</code></td><td><span class="method get">GET</span></td><td>observability</td><td>資料平面狀態。</td></tr>
+<tr><td><code>/api/budget-governance</code></td><td><span class="method get">GET</span></td><td>observability</td><td>預算治理狀態。</td></tr>
+
+<tr><td><code>/api/operations-status</code></td><td><span class="method get">GET</span></td><td>observability</td><td>運維狀態摘要。</td></tr>
+
+<tr><td><code>/api/analyze</code></td><td><span class="method get">GET</span></td><td>analysis</td><td><strong>★ 核心端點</strong>。完整信任加權市場分析。</td></tr>
+<tr><td><code>/api/analysis-flow</code></td><td><span class="method get">GET</span></td><td>analysis</td><td>當前分析 flow 狀態。</td></tr>
+<tr><td><code>/api/analysis-snapshot</code></td><td><span class="method get">GET</span></td><td>analysis</td><td>已發布分析快照檢索。</td></tr>
+<tr><td><code>/api/analysis-job</code></td><td><span class="method get">GET</span></td><td>analysis</td><td>分析 job 狀態。</td></tr>
+<tr><td><code>/api/analysis-question</code></td><td><span class="method post">POST</span></td><td>analysis</td><td>提交分析問題。</td></tr>
+<tr><td><code>/api/analysis-question-context</code></td><td><span class="method get">GET</span></td><td>analysis</td><td>問題相似度與對話上下文檢索。</td></tr>
+<tr><td><code>/api/analysis-comparison-question</code></td><td><span class="method post">POST</span></td><td>analysis</td><td>提交雙幣比較問題。</td></tr>
+<tr><td><code>/api/comparison-snapshot</code></td><td><span class="method get">GET</span></td><td>analysis</td><td>雙幣比較快照檢索。</td></tr>
+<tr><td><code>/api/analysis-journey</code></td><td><span class="method get">GET</span></td><td>analysis</td><td>Hermes 執行旅程與 dead-letter 檢視。</td></tr>
+<tr><td><code>/api/analysis-requeue</code></td><td><span class="method post">POST</span></td><td>analysis</td><td>重新排隊卡住的 job。</td></tr>
+
+
+
+<tr><td><code>/api/improvement-diagnostics</code></td><td><span class="method get">GET</span></td><td>diagnostics</td><td>改善診斷。</td></tr>
+<tr><td><code>/api/evidence-quality</code></td><td><span class="method get">GET</span></td><td>diagnostics</td><td>證據品質摘要。</td></tr>
+<tr><td><code>/api/delivery-status</code></td><td><span class="method get">GET</span></td><td>diagnostics</td><td>交付狀態。</td></tr>
+<tr><td><code>/api/memory-strategy</code></td><td><span class="method get">GET</span></td><td>diagnostics</td><td>記憶策略狀態。</td></tr>
+<tr><td><code>/api/alerts-operations</code></td><td><span class="method get">GET</span></td><td>diagnostics</td><td>告警與操作狀態。</td></tr>
+<tr><td><code>/api/intelligence-status</code></td><td><span class="method get">GET</span></td><td>diagnostics</td><td>intelligence pipeline 狀態。</td></tr>
+<tr><td><code>/api/prompt-versions</code></td><td><span class="method get">GET</span></td><td>diagnostics</td><td>prompt 版本資訊。</td></tr>
+<tr><td><code>/api/hermes-upgrades</code></td><td><span class="method get">GET</span></td><td>Hermes</td><td>Hermes 升級控制平面唯讀資料。</td></tr>
+<tr><td><code>/api/openapi.yaml</code></td><td><span class="method get">GET</span></td><td>meta</td><td>OpenAPI 3.1 規格檔（讀自 <code>docs/api/openapi.yaml</code>）。</td></tr>
+<tr><td><code>/llms.txt</code></td><td><span class="method get">GET</span></td><td>meta</td><td>AI agent / 客戶工程師一頁式契約。</td></tr>
+
+<tr><td><code>/api/admin/config</code></td><td><span class="method get">GET</span> / <span class="method put">PUT</span></td><td>admin</td><td>取得 / 更新 runtime config。</td></tr>
+<tr><td><code>/api/admin/audit</code></td><td><span class="method get">GET</span></td><td>admin</td><td>Config change log。</td></tr>
+<tr><td><code>/api/admin/hermes-upgrades</code></td><td><span class="method get">GET</span></td><td>admin</td><td>管理端 Hermes 升級資料。</td></tr>
+<tr><td><code>/api/admin/hermes-upgrade-sandbox</code></td><td><span class="method post">POST</span></td><td>admin</td><td>執行 Hermes upgrade sandbox。</td></tr>
+<tr><td><code>/api/admin/hermes-upgrade-decision</code></td><td><span class="method post">POST</span></td><td>admin</td><td>核准／拒絕 Hermes upgrade proposal。</td></tr>
+</table>
+
+<div class="warn-box">
+<strong>repo 最新但本輪 production live spec 尚未列出的端點：</strong>
+<code>/api/asset-context</code>、<code>/api/peer-metrics</code>、<code>/api/eco-link</code>、<code>/api/module-telemetry</code>、<code>/api/training-status</code>。本輪 live smoke 對這些 public GET 端點回 404；交付時只能說 repo 最新規格支援，不能說 production 已可用。<code>/api/admin/backend-providers</code> live 會因缺 Admin Token 回 401，屬管理面保護端點，不列入匿名 production smoke。
+</div>
+
+<h3 id="rate-limit">4. 速率限制分組</h3>
+
+<p>三組獨立 per-IP 滑動視窗 bucket，超過門檻回 <code>429 {code: "rate_limited"}</code>：</p>
+
+<table>
+<tr><th>組別</th><th>端點</th><th>視窗</th><th>上限</th><th>說明</th></tr>
+<tr>
+  <td><strong>Observability</strong></td>
+  <td><code>/api/status</code>, <code>/api/costs</code>, <code>/api/overview</code>, <code>/api/history</code></td>
+  <td>30s</td>
+  <td>10 req/IP</td>
+  <td><strong>四個端點共用同一個 bucket</strong>——合計 10 次/30s，不是各自 10 次</td>
+</tr>
+<tr>
+  <td><strong>Analyze (live)</strong></td>
+  <td><code>/api/analyze</code>（<code>?live=1</code>）</td>
+  <td>60s</td>
+  <td>5 req/IP</td>
+  <td>真 Bedrock 呼叫，緊門檻</td>
+</tr>
+<tr>
+  <td><strong>Analyze (default)</strong></td>
+  <td><code>/api/analyze</code>（未帶 <code>live</code>/<code>sample</code>）</td>
+  <td>60s</td>
+  <td>60 req/IP</td>
+  <td>純讀 cache，成本 $0，寬鬆門檻</td>
+</tr>
+<tr>
+  <td><strong>無限制</strong></td>
+  <td><code>/api/health</code>, <code>/api/openapi.yaml</code>, <code>/llms.txt</code></td>
+  <td>—</td>
+  <td>∞</td>
+  <td>零 I/O，純讀檔或純記憶體運算</td>
+</tr>
+</table>
+
+<div class="warn-box">
+<strong>重要：</strong>observability 四個端點共用同一個 per-IP bucket，key 是 IP 不分端點。agent 若同時輪詢多個端點，配額是互相扣抵的。429 回應的訊息文字內含建議等待秒數，但 <strong>不含 <code>Retry-After</code> header</strong>。
+</div>
+
+<h3 id="analyze">5. /api/analyze 詳解</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>Request:</b>
+GET /api/analyze?coin=BTC&type=multi_source&q=BTC 現在適合進場嗎
+
+<b>參數：</b>
+  coin        = BTC | ETH | SOL | BNB | XRP
+  type        = multi_source | hypothesis | comparison
+  q           = 分析問題（URL-encoded）
+  live=1      = 啟用真 Bedrock（需 X-Live-Token header）
+  sample=1    = 離線示範模式（sample data）
+
+<b>Response (200):</b>
+{
+  "ok": true,
+  "data": {
+    "report": {
+      "coin": "BTC",
+      "coin_cn": "比特幣",
+      "direction": "偏多",
+      "decision_state": "normal",
+      "calibrated_confidence": 0.72,
+      "market_judgment": "...",
+      "key_basis": [...],
+      "limits": [...],
+      "trust_radar": {...},
+      "trust_components_aggregate": {...},
+      "insight_labels": [...],
+      "cross_source_signal": {...}
+    },
+    "evidence": [ ... ],
+    "execution_log": [ ... ],
+    "provenance": {
+      "snapshot_id": "...",
+      "snapshot_at": "...",
+      "run_started_at": "..."
+    }
+  }
+}
+</pre>
+
+<h3 id="status">6. /api/status 詳解</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>Response:</b>
+{
+  "ok": true,
+  "data": {
+    "version": "v0.16.18",
+    "uptime_seconds": 191402.507,
+    "bedrock_capable": false,
+    "live_token_set": true,
+    "cache_backend": {
+      "name": "DynamoDBCache",
+      "connected": true,
+      "primary_connected": true,
+      "active_backend": "DynamoDBCache",
+      "degraded": false
+    },
+    "freshness": {
+      "fresh": 96,
+      "stale": 0,
+      "missing": 19,
+      "entries": [ ... ]
+    },
+    "dedup": {
+      "degraded": false,
+      "recent_failures": 0,
+      "window_seconds": 300,
+      "alert_threshold": 5
+    }
+  }
+}
+</pre>
+
+<p><strong>dedup 監控指引</strong>：</p>
+<ul>
+  <li><strong>權威訊號</strong>是 <code>dedup.degraded</code>，不是 server log 的 <code>ALERT:</code> 前綴——<code>degraded</code> 即時反映當下滑動視窗真實計數</li>
+  <li><strong>長期低頻非零也該告警</strong>：<code>alert_threshold=5</code> 是「突波」設計，但穩定 4 次/5min 不歸零 <strong>不會</strong> 觸發 degraded——需另建「<code>recent_failures</code> 是否長期非零」監控</li>
+</ul>
+
+<h3 id="overview">7. /api/overview 詳解</h3>
+
+<pre style="background:var(--card2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;overflow:auto">
+<b>Response:</b>
+{
+  "ok": true,
+  "data": {
+    "snapshot_id": "...",
+    "snapshot_at": "...",
+    "coins": [
+      {
+        "coin": "BTC",
+        "direction": "偏多",
+        "trust_score": 0.72,
+        "manip_score": 0.15,
+        "manip_score_mean": 0.08,
+        "evidence_count": 15,
+        "source_count": 5,
+        "reputation_trace": {...}
+      },
+      ...
+    ]
+  }
+}
+</pre>
+
+<div class="warn-box">
+<strong>缺鍵語意：</strong><code>manip_score</code> / <code>manip_score_mean</code> / <code>reputation_trace</code> 在沒有可用操縱訊號或動態信譽 trace 時，該鍵<strong>完全不回傳</strong>——UI 應顯示「未評估」，不可預設為 0 或安全。
+</div>
+
+<h3 id="admin">8. Admin API 端點</h3>
+
+<table>
+<tr><th>端點</th><th>說明</th><th>認證</th></tr>
+<tr><td><code>GET /api/admin/config</code></td><td>取得 runtime config（live_token、bedrock_enabled、daily_cap）</td><td>Admin Token</td></tr>
+<tr><td><code>PUT /api/admin/config</code></td><td>更新 runtime config</td><td>Admin Token</td></tr>
+<tr><td><code>GET /api/admin/audit</code></td><td>Config change log（誰在何時改什麼）</td><td>Admin Token</td></tr>
+<tr><td><code>GET /api/admin/hermes-upgrades</code></td><td>Hermes 升級審核資料</td><td>Admin Token</td></tr>
+<tr><td><code>POST /api/admin/hermes-upgrade-sandbox</code></td><td>執行 upgrade sandbox</td><td>Admin Token</td></tr>
+<tr><td><code>POST /api/admin/hermes-upgrade-decision</code></td><td>核准／拒絕 proposal</td><td>Admin Token</td></tr>
+</table>
+
+<h3 id="openapi">9. OpenAPI Spec</h3>
+
+<p>完整機器可讀 API 規格位於 <code>docs/api/openapi.yaml</code>。本輪取證結果：TrustForge <code>origin/main</code> spec 為 2976 行；production live <code>GET /api/openapi.yaml</code> 為 2560 行。兩者不同時，以 production live spec 作為客戶驗收依據，origin/main 多出的端點標為「repo 支援／待部署驗證」。</p>
+<p>該規格是 <code>src/trustforge/web.py</code> 內 <code>_handle_api_*</code> series handler 的<strong>逐一對照</strong>——每個欄位都對照過真實回應，不是從手寫 docs 轉寫。</p>
+<p>可透過 <code>GET /api/openapi.yaml</code> 端點在執行期取得；給 AI agent 快速讀取的雙語契約則是 <code>GET /llms.txt</code>。</p>
+
+</article>
+
+<footer>
+  <a href="04-configuration.html">← 03 配置參考</a>
+  <span style="float:right"><a href="06-data-flow.html">06 資料流 →</a></span>
+  <div style="clear:both;margin-top:1rem;color:var(--mut);font-size:.8rem">
+    TrustForge 技術文件 · 05 API 參考 · v0.18.5
+  </div>
+</footer>
+
+</div></body></html>
