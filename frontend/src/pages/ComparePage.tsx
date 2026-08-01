@@ -236,6 +236,7 @@ export default function ComparePage() {
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <AnalysisReportView
               heading={`幣種 A · ${data.report_a.coin}`}
+              compact
               data={{
                 version: data.version,
                 report: data.report_a,
@@ -248,6 +249,7 @@ export default function ComparePage() {
             />
             <AnalysisReportView
               heading={`幣種 B · ${data.report_b.coin}`}
+              compact
               data={{
                 version: data.version,
                 report: data.report_b,

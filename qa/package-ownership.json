@@ -24,6 +24,7 @@
     "deploy/**",
     "qa/**",
     "scripts/**",
+    "tools/**",
     "tests/**",
     ".dockerignore",
     ".gitignore",
@@ -57,7 +58,8 @@
     "README.md",
     "ROADMAP.md",
     "llms.txt",
-    "opencode.json"
+    "opencode.json",
+    "outputs/**"
   ],
   "rules": [
     {"owner": "core", "priority": 100, "glob": "src/trustforge_core/*.py"},
