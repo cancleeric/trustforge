@@ -107,6 +107,14 @@ def test_review_reserves_then_appends_dynamodb_ledger_before_release(monkeypatch
         "release_request_budget",
         lambda amount, *, backend: order.append(f"release:{backend}:{amount}"),
     )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "settle_request_budget",
+        lambda amount, actual_cost, *, backend: order.append(
+            f"settle:{backend}:{amount}:{actual_cost}"
+        )
+        or True,
+    )
     monkeypatch.setattr(ledger_module, "get_ledger", lambda: dynamodb_ledger)
 
     client = _Client(order)
@@ -120,7 +128,7 @@ def test_review_reserves_then_appends_dynamodb_ledger_before_release(monkeypatch
         "reserve",
         "bedrock",
         "ledger_append",
-        "release:dynamodb:0.05",
+        "settle:dynamodb:0.05:0.0002",
     ]
     assert len(table.items) == 1
     item = table.items[0]
@@ -135,6 +143,40 @@ def test_review_reserves_then_appends_dynamodb_ledger_before_release(monkeypatch
     ]
     assert item["total_cost_usd"] == Decimal("0.0002")
     assert item["run_id"]
+
+
+def test_shared_counter_retains_capacity_when_atomic_settlement_is_unavailable(
+    monkeypatch,
+):
+    reviewer = _load_reviewer()
+    order: list[str] = []
+    table = _FakeTable(order)
+    dynamodb_ledger = ledger_module.DynamoDBLedger()
+    dynamodb_ledger._table = table
+    released: list[float] = []
+
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard, "budget_reservation_backend", lambda: "dynamodb"
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "try_reserve_request_budget", lambda **_kwargs: 0.05
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "settle_request_budget", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+    monkeypatch.setattr(ledger_module, "get_ledger", lambda: dynamodb_ledger)
+
+    result = reviewer._review_with_budget(_diagnostic(), _Client(order))
+
+    assert result["status"] == "reviewed"
+    assert order == ["bedrock", "ledger_append"]
+    assert released == []
 
 
 def test_cap_zero_is_a_hard_kill_switch(monkeypatch):

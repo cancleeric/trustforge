@@ -108,6 +108,7 @@ def _budgeted_complete(
         or reservation_backend == "dynamodb"
     )
     release_safe = False
+    accounting_finalized = False
     try:
         try:
             response = client.complete(system=system, prompt=prompt)
@@ -193,7 +194,32 @@ def _budgeted_complete(
                 release_safe = True
             raise _ReviewBlocked("accounting_failed", "durable_ledger_receipt_missing")
 
-        release_safe = True
+        if shared_reservation:
+            try:
+                accounting_finalized = budget_guard.settle_request_budget(
+                    reservation,
+                    float(cost_usd),
+                    backend=reservation_backend,
+                )
+            except Exception:
+                accounting_finalized = False
+                _LOG.warning(
+                    "Hermes reviewer atomic budget settlement failed",
+                    exc_info=True,
+                )
+            if not accounting_finalized:
+                # The durable ledger receipt remains useful for reporting, but
+                # it cannot close the admission race by itself.  Retain shared
+                # capacity until reconciliation rather than reopening spend.
+                try:
+                    budget_guard.mark_reservation_accounting_uncertain(reservation)
+                except Exception:
+                    _LOG.warning(
+                        "Hermes reviewer could not mark retained settlement",
+                        exc_info=True,
+                    )
+        else:
+            release_safe = True
         return response.text
     finally:
         if release_safe:
@@ -208,7 +234,7 @@ def _budgeted_complete(
                     "Hermes reviewer budget release failed",
                     exc_info=True,
                 )
-        else:
+        elif not accounting_finalized:
             _LOG.critical(
                 "Hermes reviewer retained reservation for reconciliation (backend=%s)",
                 reservation_backend,

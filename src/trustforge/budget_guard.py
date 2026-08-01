@@ -87,6 +87,32 @@ def mark_reservation_accounting_uncertain(reservation: float | None) -> None:
         return
     reservation.authority.mark_uncertain(reservation.reservation)
 
+
+def settle_request_budget(
+    reservation: float | None,
+    actual_cost: float,
+    *,
+    backend: str | None = None,
+) -> bool:
+    """Atomically convert a durable reservation into shared settled spend.
+
+    Legacy local/DynamoDB counters do not own a durable settlement ledger, so
+    callers must keep shared capacity reserved until a reconciler can safely
+    release it.  Returning ``False`` makes that limitation explicit instead of
+    allowing a ledger-write/release TOCTOU window.
+    """
+    del backend  # Provenance lives on unified leases; retained for API symmetry.
+    if not isinstance(reservation, _UnifiedBudgetLease):
+        return False
+    try:
+        value = Decimal(str(actual_cost))
+        maximum = Decimal(str(float(reservation)))
+    except (ValueError, TypeError):
+        return False
+    if not value.is_finite() or value < 0 or value > maximum:
+        return False
+    return bool(reservation.authority.settle(reservation.reservation, value))
+
 # stance model 未設定 `BEDROCK_HAIKU_MODEL_ID` 時的預設值，必須跟
 # `bedrock.BedrockConfig.stance_model_id` 的預設值逐字一致——這裡刻意不透過
 # `BedrockConfig()` 讀取（dataclass 欄位預設值 `os.getenv(...)` 只在模組
