@@ -65,7 +65,9 @@ _ARKHAM_COIN_CHAINS: dict[str, str] = {
     "SOL": "solana",
     "BNB": "bsc",
     "XRP": "xrp",
-    "ARB": "arbitrum",
+    # Arkham 註冊名為 `arbitrum_one`；`arbitrum` 會被 API 拒為
+    # `invalid chain: chain unregistered`，導致 ARB 永遠取不到資料。
+    "ARB": "arbitrum_one",
 }
 
 # API key 環境變數名稱
