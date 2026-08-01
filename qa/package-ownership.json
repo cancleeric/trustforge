@@ -106,6 +106,7 @@
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/asset_context.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/asset_intrinsic.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/asset_intrinsic_shadow.py"},
+    {"owner": "platform", "priority": 85, "glob": "src/trustforge/bedrock_rps_lock.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/budget_counter.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/ecolink.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/intrinsic_official_contract.py"},
