@@ -301,14 +301,17 @@ class HermesBedrockPlanner:
         ):
             raise ValueError("invalid planner invocation")
         try:
-            response = self.runtime.converse(
-                modelId=self.model_id,
-                messages=_converse_messages(payload),
-                inferenceConfig={
-                    "maxTokens": MAX_OUTPUT_TOKENS,
-                    "temperature": 0,
-                },
-            )
+            from .bedrock import bedrock_invoke_slot
+
+            with bedrock_invoke_slot():
+                response = self.runtime.converse(
+                    modelId=self.model_id,
+                    messages=_converse_messages(payload),
+                    inferenceConfig={
+                        "maxTokens": MAX_OUTPUT_TOKENS,
+                        "temperature": 0,
+                    },
+                )
         except TimeoutError:
             raise PlannerPortFailure.provider(
                 PreviewTerminalClass.PROVIDER_TIMEOUT

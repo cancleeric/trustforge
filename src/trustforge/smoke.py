@@ -85,11 +85,14 @@ def run_smoke(out_dir: str = "out") -> int:
     prompt = "Say exactly: BEDROCK_SMOKE_OK"
     start = time.time()
     try:
-        response = client.converse(
-            modelId=model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": 64, "temperature": 0.0},
-        )
+        from .bedrock import bedrock_invoke_slot
+
+        with bedrock_invoke_slot():
+            response = client.converse(
+                modelId=model_id,
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                inferenceConfig={"maxTokens": 64, "temperature": 0.0},
+            )
         elapsed = time.time() - start
 
         # Extract response text
