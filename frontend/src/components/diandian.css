@@ -342,3 +342,78 @@
   .hermes-stage-arrow { font-size: 0.9em; margin: 0 3px; }
   .hermes-energy-station { min-width: 100px !important; }
 }
+
+/* main #1271: fixed right rail + narrow left rail */
+.hermes-right-rail {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  overflow: hidden !important;
+  width: clamp(260px, 24vw, 380px) !important;
+}
+.hermes-right-rail-fixed,
+.hermes-right-rail > :first-child {
+  flex-shrink: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 2 !important;
+  padding: 12px 16px !important;
+}
+.hermes-right-rail-scroll,
+.hermes-right-rail > :nth-child(n+2) {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  scrollbar-width: thin !important;
+  padding: 0 16px 16px !important;
+}
+.hermes-left-rail {
+  width: clamp(160px, 14vw, 210px) !important;
+  flex-shrink: 0 !important;
+}
+.hermes-left-rail button,
+.hermes-left-rail label,
+.hermes-left-rail a {
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+@media (max-width: 900px) {
+  .hermes-left-rail, .hermes-right-rail { width: auto !important; }
+}
+
+/* main #1270: collapsible sections and data visualizations */
+.trustforge-collapse {
+  border: 1px solid rgba(77, 216, 224, 0.2);
+  border-radius: 8px;
+  margin: 8px 0;
+  overflow: hidden;
+  background: rgba(10, 16, 24, 0.5);
+}
+.trustforge-collapse summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #dce9f2;
+}
+.trustforge-collapse[open] summary { border-bottom: 1px solid rgba(77, 216, 224, 0.15); }
+.trustforge-progress {
+  width: 100%; height: 8px; border-radius: 4px; overflow: hidden;
+  background: rgba(255, 255, 255, 0.1);
+}
+.trustforge-progress-fill { height: 100%; border-radius: 4px; }
+.trustforge-progress-fill.high { background: linear-gradient(90deg, #4dd8e0, #86efac); }
+.trustforge-progress-fill.mid { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.trustforge-progress-fill.low { background: linear-gradient(90deg, #ef4444, #f87171); }
+.trustforge-bar-chart { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.trustforge-bar-fill {
+  height: 100%; border-radius: 7px;
+  background: linear-gradient(90deg, #4dd8e0, #67e8f9);
+}
+.trustforge-evidence-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.trustforge-evidence-table th, .trustforge-evidence-table td {
+  padding: 6px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.trustforge-kind-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
