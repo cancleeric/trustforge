@@ -1,9 +1,12 @@
 from pathlib import Path
 import argparse
 import html
+import os
 import re
 import shutil
 import subprocess
+import tempfile
+import zipfile
 from docx import Document
 from docx.shared import Pt
 from docx.oxml import OxmlElement
@@ -14,6 +17,7 @@ SLIDE=ROOT/'docs/competition/slide-deck'
 OUT=ROOT/'outputs'
 
 CHROMIUM_VERSION = "151.0.7922.71"
+DOCX_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 TERMS={
  'Runtime':'執行時環境：程式實際運作的地方。在 TrustForge 中，它接收分析請求、呼叫資料來源與 API、執行 Trust Kernel、保存執行紀錄並把結果回傳前端。它是 Agent 的執行引擎，不是模型本身。',
@@ -132,6 +136,34 @@ def copy_html(src,dst,inject=''):
     text=re.sub(r'>([^<>]+)<',visible,text)
     dst.write_text(text,encoding='utf-8')
 
+def save_reproducible_docx(doc, dst):
+    """Save a DOCX with stable ZIP ordering and metadata.
+
+    python-docx writes the current timestamp into each ZIP member.  The XML can
+    therefore be identical while the committed artifact changes on every run.
+    Repack the generated archive with fixed metadata before replacing the
+    destination so a clean checkout rebuild is byte-for-byte reproducible.
+    """
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=dst.parent) as temp_dir:
+        raw_path = Path(temp_dir) / "raw.docx"
+        stable_path = Path(temp_dir) / "stable.docx"
+        doc.save(raw_path)
+        with zipfile.ZipFile(raw_path, "r") as source, zipfile.ZipFile(
+            stable_path,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as destination:
+            for name in sorted(source.namelist()):
+                info = zipfile.ZipInfo(name, DOCX_ZIP_TIMESTAMP)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3
+                info.external_attr = 0o600 << 16
+                destination.writestr(info, source.read(name), compresslevel=9)
+        os.replace(stable_path, dst)
+
 def upgrade_deck():
     src=SLIDE/'TrustForge_正式提案簡報_6分鐘.html'; dst=SLIDE/'TrustForge_正式提案簡報_6分鐘_升級版.html'
     text=src.read_text(encoding='utf-8')
@@ -169,7 +201,7 @@ def upgrade_report():
         p=target.insert_paragraph_before(text); p.style=style
     # metadata
     props=doc.core_properties; props.title='TrustForge Hermes｜完整商業化提案報告（升級版）'; props.author='HurricaneSoft'; props.company='HurricaneSoft'; props.subject='Evidence-native Decision Intelligence Agent 商業化提案'
-    doc.save(dst)
+    save_reproducible_docx(doc, dst)
     src_html=OUT/'TrustForge_完整商業化提案報告.html'; dst_html=OUT/'TrustForge_完整商業化提案報告_升級版.html'
     summary='<section class="commercial-summary"><h1>Executive Summary｜商業化摘要</h1><p><b>目標客戶：</b>交易所、券商研究部、虛擬資產資訊平台、風控與合規團隊。第一個切入點是 HOYA BIT 市場資訊頁的 Trust Layer 外掛。</p><p><b>導入方案：</b>4 週 PoC（5 幣＋4 類外部來源＋Evidence 抽查）→ 8–12 週 Pilot（研究流程與角色權限）→ 3–6 個月 Production（SLA、audit、budget、tenant、dashboard）。</p><p><b>KPI／收費：</b>查核時間、可溯源率、報告完成時間、人工改稿率、恢復時間與每次 run 成本；收費採 API usage、seat、enterprise integration 組合。</p><p><b>風險邊界：</b>不提供投資建議、不承諾價格預測；live/cache/fixture 明示；第三方 API 依授權使用；Evidence、Log、artifact 不輸出秘密。</p><h2>競品與替代方案</h2><p>一般 RAG 找得到資料但不先評估可信度；一般 Crypto AI 難稽核；BI Dashboard 沒有推理鏈；人工研究慢且難重現。TrustForge 建立 Claim → Evidence → Trust → Report 的可治理鏈。</p></section>'
     copy_html(src_html,dst_html,summary)

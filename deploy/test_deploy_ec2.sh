@@ -750,6 +750,11 @@ else
   assert_contains "$UD_CONTENT" "Environment=COST_LEDGER_BACKEND=dynamodb" "user-data: trustforge.service 有 COST_LEDGER_BACKEND"
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb" "user-data: trustforge.service 有 shared lease backend"
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases" "user-data: trustforge.service 有 shared lease table"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_TABLE=trustforge-multi-angle-batches" "user-data: trustforge.service 有 atomic batch table"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION=production-v1" "user-data: trustforge.service 有 atomic config version"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE=1" "user-data: trustforge.service 啟用 exclusive atomic authority"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=/var/lib/trustforge/analysis.sqlite3" "user-data: trustforge.service 有 shared analysis projection path"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD=1" "user-data: trustforge.service 有 multi-angle daily budget"
   assert_contains "$UD_CONTENT" "fetch-scheduler.service" "user-data: 有寫 fetch-scheduler.service"
   assert_contains "$UD_CONTENT" "fetch-scheduler.timer" "user-data: 有寫 fetch-scheduler.timer"
   assert_contains "$UD_CONTENT" "ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py" "user-data: fetch-scheduler ExecStart 正確"
@@ -765,6 +770,16 @@ else
   # PR-B：TRUSTFORGE_TOKEN_SSM_PREFIX 是新的 opt-in 旗標，未設時比照既有
   # ${VAR-} 慣例不寫該行（app 端 fail back 到 env-based token，零設定不變式）。
   assert_not_contains "$UD_CONTENT" "Environment=TRUSTFORGE_TOKEN_SSM_PREFIX" "user-data: 未設 TRUSTFORGE_TOKEN_SSM_PREFIX → 不寫該行（app 端 fallback env）"
+fi
+
+ATOMIC_POLICY_FT=$(cat "$CAPTURE/iam_policy_first-time_trustforge-multi-angle-authority.txt" 2>/dev/null || echo "")
+if [ -z "$ATOMIC_POLICY_FT" ]; then
+  echo "  [FAIL] 首次建置：沒抓到 atomic authority IAM setup call"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$ATOMIC_POLICY_FT" "table/trustforge-multi-angle-batches" "首次建置：atomic authority policy 鎖定正確 table ARN"
+  assert_contains "$ATOMIC_POLICY_FT" "dynamodb:TransactWriteItems" "首次建置：atomic authority policy 允許 transaction write"
+  assert_contains "$ATOMIC_POLICY_FT" "dynamodb:ConditionCheckItem" "首次建置：atomic authority policy 允許 condition check"
 fi
 
 # zip 內容檢查（scripts/ 是否有打包進去，否則 timer 在 EC2 上找不到檔案）
@@ -950,6 +965,14 @@ UPDATE_LOG=$(cat "$CAPTURE/stdout_update-in-place.log" 2>/dev/null || echo "")
 assert_contains "$UPDATE_LOG" "activating candidate artifact" "update-in-place：委派 activate_release transaction"
 assert_contains "$(cat "$REPO_ROOT/deploy/deploy_ec2.sh")" 'deploy/activate_release.sh --target "$IID"' "update-in-place：傳遞既有 instance ID 給 activation"
 
+ATOMIC_POLICY_UP=$(cat "$CAPTURE/iam_policy_update-in-place_trustforge-multi-angle-authority.txt" 2>/dev/null || echo "")
+if [ -z "$ATOMIC_POLICY_UP" ]; then
+  echo "  [FAIL] update-in-place：沒抓到 atomic authority IAM setup call"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$ATOMIC_POLICY_UP" "table/trustforge-multi-angle-batches" "update-in-place：atomic authority setup 仍會 reconcile table policy"
+fi
+
 if false; then
 # Legacy inline-SSM assertions retained as historical documentation. The active
 # behavior is covered by deploy/test_activate_release.sh.
@@ -961,7 +984,6 @@ if [ -z "$VERIFY_UP" ]; then
   echo "  [FAIL] update-in-place：沒捕捉到 fetch-scheduler --probe 同步驗證的 ssm send-command"
   FAIL=$((FAIL + 1))
 else
-  assert_contains "$VERIFY_UP_SEED" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service（best-effort seed，fire-and-forget）"
   assert_contains "$VERIFY_UP" "fetch_scheduler.py --probe" "update-in-place：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
   assert_verify_gate_behavior \
     "update-in-place：一般排程失敗（模擬 reddit 429）但 --probe 通過 → gate 仍判定成功（exit0，不再 false-fail）" \

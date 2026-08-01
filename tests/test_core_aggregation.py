@@ -94,6 +94,41 @@ def test_source_flood_truncates_but_does_not_inflate_independence() -> None:
     assert result.abstain is True
 
 
+def test_rich_snapshot_retains_three_representative_source_kinds() -> None:
+    claims = tuple(
+        _scored(f"price-{index:02}", 0.99 - index * 0.01, f"price-{index}", kind="price")
+        for index in range(12)
+    ) + (
+        _scored("news-representative", 0.70, "news-one", kind="news"),
+        _scored("onchain-representative", 0.69, "chain-one", kind="onchain"),
+        _scored("regulatory-excluded", 0.68, "reg-one", kind="regulatory"),
+    )
+
+    result = _aggregate(claims)
+
+    assert result.supporting_count == 10
+    assert {claim.claim.document.kind for claim in result.supporting} >= {
+        "price", "news", "onchain"
+    }
+    assert "news-representative" in {claim.claim.id for claim in result.supporting}
+    assert "onchain-representative" in {claim.claim.id for claim in result.supporting}
+
+
+def test_sparse_snapshot_keeps_legacy_rank_order_and_abstain() -> None:
+    claims = tuple(
+        _scored(f"price-{index:02}", 0.8 - index * 0.01, "same", kind="price")
+        for index in range(12)
+    )
+
+    result = _aggregate(claims)
+
+    assert tuple(claim.claim.id for claim in result.supporting) == tuple(
+        f"price-{index:02}" for index in range(10)
+    )
+    assert result.abstain is True
+    assert result.reason_codes == ("insufficient_independent_sources",)
+
+
 @pytest.mark.parametrize(
     ("claims", "expected_reasons"),
     [
