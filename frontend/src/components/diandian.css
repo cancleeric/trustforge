@@ -399,6 +399,12 @@
   z-index: 20 !important;
 }
 
+/* #1349: 右欄卡片底色改為跟左欄一致（融入面板背景） */
+.hermes-right-rail .hermes-clip {
+  background: transparent !important;
+  border-color: var(--color-hermes-bd) !important;
+}
+
 /* 左欄稍微縮小，右欄稍微加大，總寬不超出螢幕 */
 :root {
   --hermes-rail: clamp(190px, 16vw, 240px) !important;
