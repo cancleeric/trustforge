@@ -19,6 +19,19 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(rightRail).toContain('className="hermes-clip hermes-divergence-dock"')
   })
 
+  it('pins trust summary above an independently scrolling right-rail body and leaves the node deck unobscured', () => {
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const rightRail = readFileSync(path.join(__dirname, 'HermesRightRail.tsx'), 'utf8')
+
+    expect(rightRail).toContain('className="hermes-right-rail-fixed"')
+    expect(rightRail).toContain('className="hermes-right-rail-scroll"')
+    expect(rightRail).toContain("height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))'")
+    expect(rightRail).toContain("overflow: 'hidden'")
+    expect(css).toMatch(/\.hermes-right-rail-fixed\s*\{[^}]*flex:\s*0 0 auto;/s)
+    expect(css).toMatch(/\.hermes-right-rail-scroll\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/s)
+    expect(css).toMatch(/\.hermes-energy-deck\s*\{[^}]*right:\s*0;/s)
+  })
+
   it('uses the viewport without a fixed canvas or page scrolling', () => {
     const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
     const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
