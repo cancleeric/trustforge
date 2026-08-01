@@ -397,6 +397,7 @@
 /* Right rail: wider */
 .hermes-right-rail {
   width: clamp(260px, 24vw, 380px) !important;
+  z-index: 20 !important;
 }
 
 @media (max-width: 900px) {
