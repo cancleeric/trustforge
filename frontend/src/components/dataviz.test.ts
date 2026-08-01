@@ -19,7 +19,8 @@ describe('#1271 Right rail layout CSS', () => {
   it('has left-rail narrow styles', () => {
     expect(css).toContain('.hermes-left-rail')
     expect(css).toContain('text-overflow: ellipsis')
-    expect(css).toContain('clamp(160px')
+    expect(css).toContain('--hermes-rail: clamp(190px, 16vw, 240px)')
+    expect(css).toContain('--hermes-right-rail: clamp(220px, 22vw, 320px)')
   })
 })
 
