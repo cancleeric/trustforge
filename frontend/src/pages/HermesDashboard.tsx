@@ -767,7 +767,7 @@ export default function HermesDashboard() {
 
         <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
 
-        {/* 點點助手 — 右下角頭像 (#1198) */}
+        {/* 點點助手 — Hermes 欄位右上角頭像 (#1198, #1284) */}
         <DiandianAvatar
           isAnalyzing={phase === 'loading'}
           onClick={() => setDiandianOnboardingOpen(true)}
