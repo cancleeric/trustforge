@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+import trustforge.agent.shadow_evidence_store as shadow_store_module
 
 from trustforge.agent.shadow_contracts import (
     CONTRACT_VERSION,
@@ -30,12 +33,30 @@ from trustforge.asset_intrinsic_promotion_dataset import (
 from trustforge.asset_intrinsic_shadow import intrinsic_facts_hash
 
 
-TEST_CUTOFF = datetime(2100, 1, 1, tzinfo=timezone.utc)
+TEST_CUTOFF = datetime(2030, 1, 1, tzinfo=timezone.utc)
 TEST_BASE = TEST_CUTOFF - timedelta(days=12, hours=12)
+TEST_STORE_TIME = TEST_CUTOFF - timedelta(seconds=1)
 
 
 def _iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+@pytest.fixture(autouse=True)
+def _freeze_sqlite_store_clock(monkeypatch):
+    """Keep durable ledger timestamps independent from the host wall clock."""
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.create_function(
+            "strftime",
+            -1,
+            lambda _format, _modifier="now": _iso(TEST_STORE_TIME),
+        )
+        return connection
+
+    monkeypatch.setattr(shadow_store_module.sqlite3, "connect", connect)
 
 
 def _identity() -> ShadowReleaseIdentity:

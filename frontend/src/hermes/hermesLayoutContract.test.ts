@@ -458,7 +458,11 @@ describe('N80 窄螢幕頂欄不得把語言切換鈕擠出視窗', () => {
     expect(dashboard).toContain('quality={quality}')
     expect(dashboard).toContain('measuring={measuring}')
     expect(dashboard).not.toMatch(/searchParams\.get\('fps'\).*FpsMeter/)
-    expect(css).toMatch(/\.hermes-fps-meter\s*\{[^}]*top:\s*calc\(var\(--hermes-top\) \+ 12px\)[^}]*right:\s*12px/s)
+    const baseMeterBlock = css.slice(css.indexOf('.hermes-fps-meter {'))
+    const baseMeter = baseMeterBlock.slice(0, baseMeterBlock.indexOf('}')).replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(baseMeter).toMatch(/top:\s*calc\(var\(--hermes-top\) \+ 12px\)/)
+    expect(baseMeter).toMatch(/right:\s*12px/)
+    expect(baseMeter).not.toMatch(/\b(?:bottom|left)\s*:/)
     const mobileMeter = css.match(/@media \(max-width:560px\)[\s\S]*?\.hermes-fps-meter\s*\{([^}]*)\}/)?.[1]
     expect(mobileMeter).toBeDefined()
     expect(mobileMeter).not.toMatch(/\b(?:bottom|left)\s*:/)
