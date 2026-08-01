@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrustForge Hermes｜正式提案六分鐘講稿</title>
+<style>
+body{font-family:"Microsoft JhengHei","Noto Sans TC",sans-serif;background:#f5f8fc;color:#1c2a3a;max-width:920px;margin:auto;padding:36px 28px 72px;line-height:1.75}h1{text-align:center;color:#10294a;margin-bottom:4px}.sub{text-align:center;color:#66788c}.notice,.slide{background:#fff;border:1px solid #d7e3ef;border-radius:14px;padding:20px 24px;margin:20px 0;box-shadow:0 6px 22px rgba(16,41,74,.06)}.notice{background:#eef8fb;border-color:#aee6ed}.slide h2{color:#1b5bb5;font-size:21px;margin:0 0 5px}.time{display:inline-block;padding:2px 12px;border-radius:999px;background:#fff4df;color:#a45308;font-size:13px;font-weight:800}.speech{margin:14px 0;padding:11px 16px;border-left:4px solid #28b8c8;background:#f8fbfd}.speech strong{color:#1264b5}.cue{padding:7px 12px;border-radius:7px;background:#eef2f6;color:#64748b;font-size:13px}.cue:before{content:"操作提示：";font-weight:800}.key{border-color:#89d9e2}.warn{border-color:#f0cf83;background:#fffcf4}.phrase{font-weight:900;color:#1264b5}@media print{body{max-width:none;padding:14px}.slide{break-inside:avoid;box-shadow:none}}
+</style>
+</head>
+<body>
+<h1>TrustForge Hermes｜正式提案六分鐘講稿</h1>
+<p class="sub">8頁｜目標5分55秒｜第二階段上台報告使用</p>
+<div class="notice"><b>說法邊界：</b>自行訓練的是「信心校準模型」，不是大型語言模型；正式競賽流程採AWS允許服務，不把外部ModelHub列為15分鐘執行依賴。</div>
+
+<section class="slide"><span class="time">第1頁｜0:00–0:35</span><h2>市場不缺AI答案</h2><div class="speech">各位評審好，我們是Team 11中再參與。加密市場每天都有大量行情、新聞、鏈上與社群資訊，但資訊越多，不代表判斷越可靠。同一篇消息可能被轉載十次，正反訊號可能被AI寫成一個過度流暢的答案。因此我們提出<strong>TrustForge Hermes</strong>：在生成內容以前，先建立可回溯、可反駁、知道邊界的信任層。</div><div class="cue">說完「信任層」停頓後換頁。</div></section>
+
+<section class="slide"><span class="time">第2頁｜0:35–1:15</span><h2>從摘要進化為信任提煉</h2><div class="speech">一般Agent找到資料後就交給模型摘要，容易把同稿轉載誤認成多方支持，也可能把資料缺口藏在一個信心分數裡。TrustForge先拆解Claim、辨識獨立來源、保留支持與矛盾，再要求每個重要判斷對應Evidence。這裡有一條清楚的責任邊界：<strong>Amazon Bedrock負責語意抽取與報告敘事；市場資訊該信多少，由Trust Layer控制。</strong></div></section>
+
+<section class="slide"><span class="time">第3頁｜1:15–2:00</span><h2>企業數據及六類資料應用</h2><div class="speech">我們以HOYA BIT與主辦方提供的五幣OHLCV作為共同的價格事實錨點，再補充五類外部脈絡：鏈上活動、新聞媒體、官方與監管公告、公開社群情緒，以及基本面與生態指標。重點不是來源越多越好，而是來源要互補、可識別、可驗證。</div><div class="speech">每筆Evidence至少保存source、fetched_at、content_reference與related_claim；網頁再附URL，API或CSV則保留查詢條件、交易對與時間範圍。資料不足或來源失敗，也會直接揭露。</div></section>
+
+<section class="slide"><span class="time">第4頁｜2:00–2:50</span><h2>四道核心信任技術</h2><div class="speech">資料進來後會通過四道信任提煉。第一，Claim Extraction把文件拆成可驗證主張並建立claim_id。第二，Trust Kernel依來源聲譽、獨立佐證、時效與風險訊號評分。第三，Conflict Ledger保留支持、矛盾、資訊缺口與可能推翻結論的條件。第四，Reasoning Provenance標記哪些是演算法判斷、哪些只是Bedrock行文。</div><div class="speech">所以我們不是讓AI更敢下結論，而是讓它知道<strong>什麼時候應該降低信心或棄權</strong>。</div></section>
+
+<section class="slide key"><span class="time">第5頁｜2:50–3:45</span><h2>我們自行訓練信心校準模型</h2><div class="speech">我們確實有自行訓練模型，但不是重新訓練大型語言模型。我們訓練的是<strong>TrustForge信心校準模型</strong>：保存分析當下可見的資料，再接回T+7等後續真實結果，利用Isotonic Regression把raw confidence校準成更接近歷史表現的信心。</div><div class="speech">為什麼要自己做？因為AWS基礎模型擅長理解與生成，卻不知道TrustForge的Evidence定義、來源可靠度與信心語意。自有校準模型能針對任務改善過度自信，也能累積「什麼來源在什麼情境下可靠」的資料護城河。</div><div class="speech">程式已提供ModelHub與Amazon SageMaker兩種訓練介面；正式競賽採AWS合規路徑。任何新模型都只是candidate，不能自動上線，必須保留資料版本、產物hash並經人工核准。</div><div class="cue">這頁最重要，請清楚說出「不是大型語言模型」。</div></section>
+
+<section class="slide warn"><span class="time">第6頁｜3:45–4:35</span><h2>AWS架構與資訊安全</h2><div class="speech">生成式AI由Amazon Bedrock負責；EC2與nginx承載服務；DynamoDB保存狀態、冪等與成本協調；S3保存交付物與模型產物；SageMaker AI可執行自有校準模型訓練；CloudWatch負責監控。</div><div class="speech">安全上，AWS憑證與API Key不進Git，由IAM Role與SSM管理。nginx以HTTPS對外，Python API只監聽loopback。產物保存SHA-256與版本manifest。授權、資料或模型狀態不可信時，系統會停止或明確降級，不把fallback冒充正式成功。</div></section>
+
+<section class="slide"><span class="time">第7頁｜4:35–5:20</span><h2>15分鐘Live Demo與四份交付</h2><div class="speech">第一階段在14點30分取得隨機題目與指定幣種，原則上只有一次正式機會。我們必須在15分鐘內完成系統執行並上傳四份檔案：Final Report、Evidence List、Execution Log，以及Source／Config。</div><div class="speech">這四份檔案會互相作證：Report裡的claim_id能回到Evidence；Execution Log證明每一步的時間、工具、資料模式、模型、成本與錯誤；Source／Config則提供原始碼、設定、依賴鎖定與重現方式。來源逾時可使用有時間戳的快取；如果仍無法完成，就在Log明示失敗，不製造假成功。</div></section>
+
+<section class="slide"><span class="time">第8頁｜5:20–5:55</span><h2>從 Demo 成為 HOYA BIT 的信任層</h2><div class="speech">對 HOYA BIT 而言，這不只是一場 Demo。第一步，可以在市場資訊頁為每則分析加上資訊完整度、原始證據與反轉條件；下一步，用後續真實結果持續校準信心，累積不同來源在不同情境下的可靠度；未來則能以 Trust Layer API，讓更多研究工具共用同一套可追溯、可治理的信任能力。</div><div class="speech">我們不預測價格，也不取代人類決策；我們讓每個市場判斷都能被驗證、被反駁、被改進。<span class="phrase">他們給你答案；TrustForge 給你答案背後的證據。</span>謝謝各位。</div><div class="cue">最後一句放慢，說完停頓，不補充。</div></section>
+</body>
+</html>
