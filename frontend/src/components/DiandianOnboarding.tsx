@@ -22,7 +22,7 @@ const STEPS = [
     highlight: '.evidence-table, .evidence-trail',
   },
   {
-    text: '好了！有問題隨時點右下角找我。祝分析愉快！',
+    text: '好了！有問題隨時點 Hermes 欄位右上角找我。祝分析愉快！',
     highlight: null,
   },
 ]
