@@ -353,7 +353,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
   {
     term_id: 'contrarianEvidence',
     label: '反方證據',
-    description: '與目前主結論方向不一致、可能降低信心或推翻結論的證據。',
+    description: '與目前主結論方向不一致、可能降低結論可信度或推翻結論的證據。',
     tooltip: { 'zh-TW': '不支持主結論的訊號', en: 'Signals against the main conclusion' },
     aliases: [],
     audiences: ['report', 'popover', 'beginner'],
