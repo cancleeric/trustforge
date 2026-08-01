@@ -171,6 +171,40 @@ def test_denied_reservation_never_calls_bedrock(monkeypatch):
     assert client.calls == 0
 
 
+def test_zero_reservation_never_calls_bedrock(monkeypatch):
+    reviewer = _load_reviewer()
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(reviewer.budget_guard, "budget_reservation_backend", lambda: "local")
+    monkeypatch.setattr(
+        reviewer.budget_guard, "try_reserve_request_budget", lambda **_kwargs: 0.0
+    )
+    client = _Client([])
+
+    result = reviewer._review_with_budget(_diagnostic(), client)
+
+    assert result["status"] == "budget_denied"
+    assert client.calls == 0
+
+
+def test_oversized_review_input_never_reserves_or_calls_bedrock(monkeypatch):
+    reviewer = _load_reviewer()
+    reserved: list[bool] = []
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "try_reserve_request_budget",
+        lambda **_kwargs: reserved.append(True) or 0.05,
+    )
+    diagnostic = _diagnostic()
+    diagnostic["proposals"][0]["evidence"] = {"blob": "x" * 4_097}
+    client = _Client([])
+
+    result = reviewer._review_with_budget(diagnostic, client)
+
+    assert result["status"] == "input_too_large"
+    assert reserved == []
+    assert client.calls == 0
+
+
 def test_reservation_failure_is_fail_closed(monkeypatch):
     reviewer = _load_reviewer()
     monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
@@ -210,7 +244,7 @@ def test_missing_durable_receipt_retains_shared_reservation(monkeypatch):
         "try_reserve_request_budget",
         lambda **_kwargs: 0.05,
     )
-    monkeypatch.setattr(reviewer, "append_run", lambda _record: False)
+    monkeypatch.setattr(reviewer.ledger_module, "append_run", lambda _record: False)
     monkeypatch.setattr(
         reviewer.budget_guard,
         "record_unledgered_spend",
@@ -227,4 +261,38 @@ def test_missing_durable_receipt_retains_shared_reservation(monkeypatch):
 
     assert result["status"] == "accounting_failed"
     assert unledgered == [0.0002]
+    assert released == []
+
+
+def test_shared_primary_failure_local_fallback_cannot_release_reservation(monkeypatch):
+    reviewer = _load_reviewer()
+    released: list[float] = []
+    local_fallback: list[dict] = []
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(reviewer.budget_guard, "budget_reservation_backend", lambda: "dynamodb")
+    monkeypatch.setattr(
+        reviewer.budget_guard, "try_reserve_request_budget", lambda **_kwargs: 0.05
+    )
+    monkeypatch.setattr(reviewer.budget_guard, "reservation_is_durable_shared", lambda _r: True)
+
+    class FailingSharedLedger(reviewer.ledger_module.DynamoDBLedger):
+        def append(self, _record):
+            raise RuntimeError("shared ledger unavailable")
+
+    monkeypatch.setattr(reviewer.ledger_module, "get_ledger", FailingSharedLedger)
+    monkeypatch.setattr(
+        reviewer.ledger_module,
+        "append_run",
+        lambda record: local_fallback.append(record) or True,
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+
+    result = reviewer._review_with_budget(_diagnostic(), _Client([]))
+
+    assert result["status"] == "accounting_failed"
+    assert local_fallback == []
     assert released == []

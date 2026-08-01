@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -12,14 +13,17 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from trustforge import budget_guard  # noqa: E402
+from trustforge import budget_guard, ledger as ledger_module  # noqa: E402
 from trustforge.bedrock import BedrockClient, BedrockConfig  # noqa: E402
-from trustforge.ledger import append_run, estimate_cost  # noqa: E402
+from trustforge.ledger import estimate_cost  # noqa: E402
 from trustforge.schema import iso_utc  # noqa: E402
 from trustforge.upgrade_queue import UpgradeQueue  # noqa: E402
 from trustforge.upgrade_review import review  # noqa: E402
 
 _LOG = logging.getLogger(__name__)
+_MAX_PROPOSALS = 20
+_MAX_FIELD_BYTES = 4_096
+_MAX_REVIEW_INPUT_BYTES = 32_768
 
 
 class _ReviewBlocked(RuntimeError):
@@ -51,6 +55,8 @@ def _budgeted_complete(
     shared reservation is retained when no durable ledger receipt exists, so a
     DynamoDB outage cannot reopen capacity which may already have been spent.
     """
+    if len(system.encode("utf-8")) + len(prompt.encode("utf-8")) > _MAX_REVIEW_INPUT_BYTES:
+        raise _ReviewBlocked("input_too_large", "review_prompt_exceeds_byte_limit")
     if not budget_guard.narrative_model_priced():
         raise _ReviewBlocked("unpriced_model", "bedrock_model_is_not_priced")
 
@@ -62,7 +68,8 @@ def _budgeted_complete(
     except Exception as exc:
         _LOG.warning("Hermes reviewer budget reservation failed", exc_info=True)
         raise _ReviewBlocked("budget_unavailable", "budget_reservation_failed") from exc
-    if reservation is None:
+    reservation_value = float(reservation) if reservation is not None else 0.0
+    if not math.isfinite(reservation_value) or reservation_value <= 0:
         raise _ReviewBlocked("budget_denied", "budget_reservation_denied")
 
     shared_reservation = (
@@ -110,13 +117,22 @@ def _budgeted_complete(
             "accounting_outcome": "charged",
         }
         try:
-            persisted = append_run(ledger_record)
+            if shared_reservation:
+                # ``append_run`` may successfully fall back to process-local
+                # JSONL after a DynamoDB failure.  That is useful for ordinary
+                # reporting but is not a shared receipt and must never unlock
+                # shared reservation capacity.
+                durable_ledger = ledger_module.get_ledger()
+                if not isinstance(durable_ledger, ledger_module.DynamoDBLedger):
+                    persisted = False
+                else:
+                    durable_ledger.append(ledger_record)
+                    persisted = True
+            else:
+                persisted = ledger_module.append_run(ledger_record)
         except Exception:
             persisted = False
-            _LOG.warning(
-                "Hermes reviewer ledger append raised unexpectedly",
-                exc_info=True,
-            )
+            _LOG.warning("Hermes reviewer ledger append raised unexpectedly", exc_info=True)
         if not persisted:
             budget_guard.record_unledgered_spend(cost_usd)
             if not shared_reservation:
@@ -151,6 +167,10 @@ def _review_with_budget(
     proposals = diagnostic.get("proposals")
     if not isinstance(proposals, list) or not proposals:
         return {"status": "no_candidates", "reviews": [], "can_activate": False}
+    if len(proposals) > _MAX_PROPOSALS:
+        return _blocked_result("input_too_large", "too_many_review_proposals")
+    if _contains_oversized_field(diagnostic):
+        return _blocked_result("input_too_large", "review_field_exceeds_byte_limit")
     try:
         return review(
             diagnostic,
@@ -163,6 +183,19 @@ def _review_with_budget(
     except Exception:
         _LOG.warning("Hermes upgrade review failed", exc_info=True)
         return _blocked_result("review_failed", "invalid_reviewer_response")
+
+
+def _contains_oversized_field(value: object) -> bool:
+    if isinstance(value, str):
+        return len(value.encode("utf-8")) > _MAX_FIELD_BYTES
+    if isinstance(value, dict):
+        return any(
+            _contains_oversized_field(key) or _contains_oversized_field(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_oversized_field(item) for item in value)
+    return False
 
 
 def _bind_diagnostic(
