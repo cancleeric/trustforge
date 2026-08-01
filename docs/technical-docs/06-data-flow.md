@@ -30,17 +30,30 @@ Data Flow & Connectors · 從 7 大來源到最終報告的完整旅程
 
 ┌──────────────────────────────────────────────┐ │ 資料流全景：5 階段端到端 │ └──────────────────────────────────────────────┘ 使用者 Query │ coin=BTC, type=multi_source, q="現在適合進場嗎？" ▼ ┌─────────────────────────────────────────────────────────────────┐ │ Phase 1: Source Ingestion（多源收集） │ │ │ │ prices ───→ load_ohlcv() ───→ data/data/{COIN}_daily_ohlcv.csv │ │ news ─────→ CachedSource ──→ DynamoDB / JSON cache │ │ social ───→ CachedSource ──→ DynamoDB / JSON cache │ │ onchain ──→ CachedSource ──→ DynamoDB / JSON cache │ │ regulatory→ CachedSource ──→ DynamoDB / JSON cache │ │ coingecko → CachedSource ──→ DynamoDB / JSON cache │ │ hoyabit ──→ CachedSource ──→ DynamoDB / JSON cache │ │ │ │ 輸出: List[Document] │ └──────────────────────┬──────────────────────────────────────────┘ ▼ ┌─────────────────────────────────────────────────────────────────┐ │ Phase 2: Claim Extraction（主張抽取）★ 首次 Bedrock 呼叫 │ │ │ │ bedrock.extract_claims_with_llm() ─→ List[Claim] │ │ 若 Bedrock 不可用 → regex fallback │ └──────────────────────┬──────────────────────────────────────────┘ ▼ ┌─────────────────────────────────────────────────────────────────┐ │ Phase 3: Trust Scoring（信任評分）★ 純演算法，無 Bedrock │ │ │ │ trust.scoring.score() ─→ List[ScoredClaim] │ │ ├─ SourceReputation: 來源信譽 × 0.50 │ │ ├─ CrossSourceCorroboration: 多源佐證 × 0.25 │ │ ├─ RecencyDecay: 時效衰減 × 0.15 │ │ └─ ManipulationPenalty: 操縱偵測 − 0.40 │ │ │ │ trust.scoring.aggregate() ─→ TrustedBrief │ │ ├─ 支撐證據 (supporting claims) │ │ └─ 反方證據 (contrarian claims) │ └──────────────────────┬──────────────────────────────────────────┘ ▼ ┌─────────────────────────────────────────────────────────────────┐ │ Phase 4: Narrative Generation（行文生成）★ 第二次 Bedrock 呼叫 │ │ │ │ agent.orchestrator.build_report() │ │ ├─ _scored_to_evidence() ─→ List[Evidence] │ │ ├─ _direction() ─→ 市場方向 │ │ ├─ _derive_limits() ─→ 限制條件 │ │ ├─ detect_cross_source_signal() ─→ 來源分歧/共識 │ │ ├─ trust.insights.detect_insights() ─→ 獨特洞察 │ │ └─ Bedrock narrative ─→ market_judgment（含 claim_id 溯源） │ └──────────────────────┬──────────────────────────────────────────┘ ▼ ┌─────────────────────────────────────────────────────────────────┐ │ Phase 5: Delivery（交付） │ │ │ │ 輸出: Report + List[Evidence] + ExecutionLog │ │ 格式: report.md + evidence.json + execution_log.jsonl │ │ 或 Web UI: HTML (SSR) / JSON (/api/analyze) │ └─────────────────────────────────────────────────────────────────┘
 
-### 2. 7 大來源連接器
+### 2. 目前來源連接器（develop snapshot）
 
-| 來源 | 模組 | 輸入 | 輸出 | Cache 後端 |
+| 來源群 | 模組 | 輸入 | 輸出 | Cache / 安全邊界 |
 | --- | --- | --- | --- | --- |
-| **價格 OHLCV ** | `ingestion/prices.py ` | `data/data/{COIN}_daily_ohlcv.csv ` HOYA BIT 官方 5 年日線（2021-06 至 2026-05） | 價格事實（Document 含 SHA-256 lineage） | 不經 cache（本地檔案讀取） |
-| **新聞 ** | `ingestion/news.py ` | RSS feeds（CoinDesk, CoinTelegraph, The Block, Reuters, Bloomberg 等） | 標題、摘要、發布時間、來源 URL | DynamoDB / JSON |
-| **社群 ** | `ingestion/social.py ` | Reddit RSS, X/Twitter | 情緒、熱度、喊單、討論量 | DynamoDB / JSON |
-| **鏈上 ** | `ingestion/onchain.py ` | blockchain.com, etherscan, Fear & Greed Index | 大額轉帳、交易所流入/流出、恐懼貪婪 | DynamoDB / JSON |
-| **監管 ** | `ingestion/regulatory.py ` | SEC EDGAR, 政府公告 | 政策、合規事件 | DynamoDB / JSON |
-| **CoinGecko ** | `ingestion/coingecko.py ` | CoinGecko API | 即時報價、社群情緒、開發活動 | DynamoDB / JSON |
-| **HOYA BIT ** | `ingestion/hoyabit.py ` | HOYA BIT exchange API | 報價、深度、成交 | DynamoDB / JSON |
+| **價格 OHLCV** | `ingestion/prices.py` | HOYA BIT 官方 5 年日線 | 價格事實（Document 含 SHA-256 lineage） | 本地檔案；不經 cache |
+| **新聞 / Crypto media** | `ingestion/news.py` | Cointelegraph / CoinDesk / The Block 等 RSS | 標題、摘要、發布時間、來源 URL | DynamoDB / JSON cache |
+| **社群** | `ingestion/social.py` | Reddit RSS, X/Twitter | 情緒、熱度、喊單、討論量 | DynamoDB / JSON cache；主張多降為 inference |
+| **鏈上基礎** | `ingestion/onchain.py` | Blockchain.com / Fear & Greed 等 | 鏈上統計、恐懼貪婪、交易所流入/流出 | SSRF-safe fetch + cache |
+| **Whale trades** | `ingestion/whale_trades.py` | Whale Alert + Arkham transfers | 大額轉帳、已標記錢包 / chain transfer 訊號 | key-based；不把 key 寫入 URL/meta/log |
+| **Etherscan** | `ingestion/etherscan.py` | Etherscan V2 txlist | ETH 鯨魚交易；目前方向誠實中性，待 address→exchange mapping | key-based query；例外訊息 sanitized |
+| **CoinGecko** | `ingestion/coingecko.py` | CoinGecko API | 即時報價、社群情緒、開發活動 | keyless / public；cache |
+| **CoinMarketCap** | `ingestion/cmc.py` | CMC quotes/latest | 第三條 price_live 交叉佐證來源 | key 走 `X-CMC_PRO_API_KEY` header，不進 URL |
+| **DefiLlama** | `ingestion/defillama.py` | prices/current、`/v2/chains` | price_live + DeFi TVL 客觀訊號 | keyless；coin/path 白名單 |
+| **台灣監管 / 公開揭露** | `ingestion/taiwan_regulatory.py` | FSC、MOPS、TWSE、TPEx | VASP / 虛擬資產公告、上市櫃揭露 | host 白名單、PIT visible_at、截斷 sentinel、fail-closed |
+| **國際監管** | `ingestion/regulatory.py` | SEC EDGAR / 政府公告 | 政策、合規事件 | DynamoDB / JSON cache |
+| **HOYA BIT** | `ingestion/hoyabit.py` | HOYA BIT exchange API / 官方資料 | 報價、深度、成交 | DynamoDB / JSON cache |
+
+#### 2.1 已接來源數量與誠實邊界
+
+| 類別 | 已接 | 尚未標成已接 |
+| --- | --- | --- |
+| 台灣監管 / 公開揭露 | FSC、MOPS、TWSE、TPEx（4 個） | BlockTempo 等台灣在地媒體 RSS |
+| 外部資料來源主線 | Whale trades（Whale Alert + Arkham）、Etherscan、CoinMarketCap、DefiLlama（4 條主線） | Etherscan 方向分類仍需 address→exchange mapping；key 未配置時只降級不造假 |
+| 既有核心來源 | HOYA BIT OHLCV、CoinGecko、SEC EDGAR、Blockchain.com、news feeds | live enabled 需以 runtime status / cache / credential 驗證 |
 
 ### 3. Cache 層設計
 
