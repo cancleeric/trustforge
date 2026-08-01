@@ -120,9 +120,23 @@ TERMS.update({
 def wrap_terms(text: str) -> str:
     placeholders = {}
     for i, (term, tip) in enumerate(sorted(TERMS.items(), key=lambda item: -len(item[0]))):
-        token = f'__DENSE_GLOSSARY_{i}__'
+        token = f'\ue000{i}\ue001'
         text = text.replace(term, token)
         placeholders[token] = f'<span class="term" data-tip="{tip}">{term}</span>'
+
+    # The script is intended for live speaking practice: every remaining
+    # English token also gets a hover explanation, including lower-case words
+    # such as "runtime" and "agent" that are not in the curated glossary.
+    def generic(match):
+        word = match.group(0)
+        token = f'\ue010{len(placeholders)}\ue011'
+        placeholders[token] = (
+            f'<span class="term" data-tip="英文單字「{word}」：在本段 TrustForge 講稿中，'
+            f'它描述產品、資料、流程或軟體工程概念；請依前後文理解其具體角色。">{word}</span>'
+        )
+        return token
+
+    text = re.sub(r'(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9_./+:-]*(?![A-Za-z0-9])', generic, text)
     for token, html in placeholders.items():
         text = text.replace(token, html)
     return text
