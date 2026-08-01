@@ -70,6 +70,8 @@
 3. 每個 child issue 使用獨立 branch/worktree；禁止直接在 `main` 開發。
 4. worker 只改 ownership 表列出的檔案。需要跨軌修改時先回報整合 owner，不搶改。
 5. DB schema/migration、secret rotation、部署與外部系統接線全部不在本計劃授權內。
+6. 客戶 PII 僅能留在 production；本機開發、測試、tabletop、稽核重演及文件證據只能使用
+   合成資料，或經核准且不可回復識別的資料。不得用本計劃授權跨環境複製客戶 PII。
 
 ### 4.2 建議 worktree 與檔案 ownership
 
@@ -114,6 +116,8 @@ interface 改變，下游必須 rebase 並更新 traceability，不得由整合�
 - normative / informative / internal evidence 三種來源標記；
 - 「已實作、部分實作、僅計劃、不適用」四態之一，不得以文件存在冒充控制有效；
 - evidence URI、owner、review date、next review date；
+- evidence manifest、URI、title 與 metadata 不得包含客戶 PII；需驗證 production evidence 時，
+  只記錄受控存取位置與非敏感證明，不把原始資料複製到 repo、本機或測試環境；
 - reviewer attestation 與 `/codex-review` 結果；
 - `git diff --check` 與 repo-local `.githooks/pre-push` commit-bound 證據。
 
@@ -173,6 +177,8 @@ incident/CAPA 結果及內部稽核共同判定。
 - 不修改 DB schema、不建立 migration、不執行手寫 SQL。
 - 不 rotation 密碼、token、secret，不新增 Secret Manager version。
 - 不部署、不變更 AWS/GCP/IAM、不接外部服務。
+- 客戶 PII 不得離開 production；本機、測試、tabletop 與稽核重演不得使用可識別客戶資料。
+  任何例外均不在本計劃授權範圍，須另走合規、法務與 CEO 明確核准流程。
 - 不複製或提交 ISO/IEC 42001 標準全文。
 - 不以現有競賽合規文件推論已具 ISO 認證。
 - 若後續工作需要上述 DB／secret 權限，必須另開 issue 並依 `AGENTS.md` 取得 Eric
