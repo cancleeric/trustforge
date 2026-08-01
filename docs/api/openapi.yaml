@@ -461,6 +461,42 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/carbon:
+    get:
+      tags: [observability]
+      operationId: getCarbonFootprint
+      summary: 依成本帳本估算 LLM 碳足跡
+      description: |
+        讀取既有成本帳本的 model 與 token 數量，以公開能源與區域電網係數
+        估算耗電及 CO2e。所有數值均為估算，不能直接作為法規申報資料。
+      responses:
+        "200":
+          description: 碳足跡估算摘要
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [total_tokens, total_estimated_kwh, total_estimated_co2e_g, total_estimated_co2e_kg, call_count, breakdown_by_model, methodology, is_estimate, disclaimer]
+                        properties:
+                          total_tokens: {type: integer, minimum: 0}
+                          total_estimated_kwh: {type: number, minimum: 0}
+                          total_estimated_co2e_g: {type: number, minimum: 0}
+                          total_estimated_co2e_kg: {type: number, minimum: 0}
+                          call_count: {type: integer, minimum: 0}
+                          breakdown_by_model: {type: object}
+                          methodology: {type: string, const: token-energy-grid-v1}
+                          is_estimate: {type: boolean, const: true}
+                          disclaimer: {type: string}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/overview:
     get:
       tags: [observability]

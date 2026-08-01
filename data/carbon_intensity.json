@@ -1,0 +1,39 @@
+{
+  "_metadata": {
+    "description": "AWS Region carbon intensity data for LLM carbon footprint estimation",
+    "methodology": "Grid emission factors from public sources; PUE from AWS sustainability reports",
+    "sources": [
+      "AWS Customer Carbon Footprint Methodology (2024)",
+      "IEA Emission Factors (2023)",
+      "Luccioni et al. 2023 - Power Hungry Processing"
+    ],
+    "unit_carbon_intensity": "gCO2e/kWh (grid average, location-based)",
+    "unit_pue": "dimensionless (Power Usage Effectiveness)",
+    "last_updated": "2026-08-01",
+    "disclaimer": "All values are ESTIMATES for indicative carbon accounting only. Actual emissions depend on renewable energy procurement, time-of-day grid mix, and hardware utilization."
+  },
+  "regions": {
+    "us-east-1": {"carbon_intensity_gco2e_kwh": 379.0, "pue": 1.135, "grid": "US-EAST (PJM)"},
+    "us-east-2": {"carbon_intensity_gco2e_kwh": 410.0, "pue": 1.135, "grid": "US-EAST (MISO)"},
+    "us-west-1": {"carbon_intensity_gco2e_kwh": 210.0, "pue": 1.135, "grid": "US-WEST (CAISO)"},
+    "us-west-2": {"carbon_intensity_gco2e_kwh": 102.0, "pue": 1.135, "grid": "US-WEST (BPA/NWPP)"},
+    "eu-west-1": {"carbon_intensity_gco2e_kwh": 296.0, "pue": 1.135, "grid": "Ireland (EirGrid)"},
+    "eu-west-2": {"carbon_intensity_gco2e_kwh": 231.0, "pue": 1.135, "grid": "UK (National Grid)"},
+    "eu-central-1": {"carbon_intensity_gco2e_kwh": 338.0, "pue": 1.135, "grid": "Germany (DE)"},
+    "ap-southeast-1": {"carbon_intensity_gco2e_kwh": 408.0, "pue": 1.135, "grid": "Singapore"},
+    "ap-southeast-2": {"carbon_intensity_gco2e_kwh": 550.0, "pue": 1.135, "grid": "Australia (NEM)"},
+    "ap-northeast-1": {"carbon_intensity_gco2e_kwh": 471.0, "pue": 1.135, "grid": "Japan (TEPCO)"},
+    "ap-northeast-2": {"carbon_intensity_gco2e_kwh": 415.0, "pue": 1.135, "grid": "South Korea (KEPCO)"},
+    "ap-south-1": {"carbon_intensity_gco2e_kwh": 708.0, "pue": 1.135, "grid": "India (CEA)"}
+  },
+  "default_region": "ap-southeast-2",
+  "default_carbon_intensity_gco2e_kwh": 450.0,
+  "default_pue": 1.135,
+  "model_energy_profiles": {
+    "_doc": "Estimated energy per 1000 tokens (kWh/1k tokens). Based on Luccioni et al. 2023 extrapolations for hosted inference.",
+    "haiku": {"kwh_per_1k_tokens": 0.00015, "description": "Small/fast models (Claude Haiku class)"},
+    "sonnet": {"kwh_per_1k_tokens": 0.00045, "description": "Medium models (Claude Sonnet class)"},
+    "opus": {"kwh_per_1k_tokens": 0.0010, "description": "Large models (Claude Opus class)"},
+    "default": {"kwh_per_1k_tokens": 0.00035, "description": "Fallback for unknown model classes"}
+  }
+}
