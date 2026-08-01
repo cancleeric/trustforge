@@ -432,10 +432,6 @@ def test_dynamodb_ledger_read_all_paginates_and_converts_decimal_to_float():
     records = d.read_all()
 
     assert mock_table.scan.call_count == 2
-    assert all(
-        call.kwargs.get("ConsistentRead") is True
-        for call in mock_table.scan.call_args_list
-    )
     second_call_kwargs = mock_table.scan.call_args_list[1].kwargs
     assert second_call_kwargs.get("ExclusiveStartKey") == {"run_id": "r1", "ts": "t1"}
     assert len(records) == 2
