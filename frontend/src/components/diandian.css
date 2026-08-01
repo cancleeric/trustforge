@@ -342,3 +342,8 @@
   .hermes-stage-arrow { font-size: 0.9em; margin: 0 3px; }
   .hermes-energy-station { min-width: 100px !important; }
 }
+.trustforge-collapse { overflow: hidden; }
+.trustforge-collapse > summary { cursor: pointer; padding: .75rem 1rem; font-weight: 600; color: var(--color-tf-text); background: color-mix(in srgb, var(--color-tf-accent) 5%, transparent); user-select: none; }
+.trustforge-collapse > summary:hover { background: color-mix(in srgb, var(--color-tf-accent) 10%, transparent); }
+.trustforge-collapse[open] > summary { border-bottom: 1px solid var(--color-tf-border); }
+.trustforge-collapse > :not(summary) { margin: 1rem; }

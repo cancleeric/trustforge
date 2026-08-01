@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { Evidence, EvidenceGroup } from '../lib/types'
 import { getRenderGroups, trendLabel } from '../lib/evidenceGrouping'
 import { sourceDisplayName } from '../lib/sourceBrand'
@@ -24,7 +24,6 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
           <summary className="flex cursor-pointer flex-wrap items-center gap-1.5 text-sm">
             <span className="font-semibold text-tf-text">{sourceDisplayName(ev.source)}</span>
             <TierBadge kind={ev.kind} />
-            <span className="text-[0.68rem] text-tf-muted">{ev.fetched_at}</span>
             {isLow && <LowTrustBadge />}
             <FlagBadge flags={ev.flags} />
             <InfoFlagBadge infoFlags={ev.info_flags} />
@@ -66,6 +65,8 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
           </div>
         </details>
       </td>
+      <td className="max-w-md px-3 py-2 align-top text-xs text-tf-text2">{ev.content_reference}</td>
+      <td className="whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">{ev.fetched_at}</td>
       <td className="px-3 py-2 align-top">
         <div className="flex items-center gap-2">
           <div className="h-1.5 w-16 overflow-hidden rounded-full bg-tf-border">
@@ -146,6 +147,8 @@ function EvidenceGroupRow({ group, evidence }: { group: EvidenceGroup; evidence:
             <p className="mt-0.5 text-xs text-tf-muted">最新：{group.latest_value}</p>
           )}
         </td>
+        <td className="max-w-md px-3 py-2 align-top text-xs text-tf-text2">{rep.content_reference}</td>
+        <td className="whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">{rep.fetched_at}</td>
         <td className="px-3 py-2 align-top">
           <div className="flex items-center gap-2">
             <div className="h-1.5 w-16 overflow-hidden rounded-full bg-tf-border">
@@ -175,17 +178,34 @@ export default function EvidenceTable({
   evidence: Evidence[]
   evidenceGroups?: EvidenceGroup[] | null
 }) {
+  const [sort, setSort] = useState<'default' | 'source' | 'summary' | 'trust' | 'time'>('default')
+  const [descending, setDescending] = useState(true)
   const groups = getRenderGroups(evidenceGroups)
-  const useGrouped = groups.length > 0
+  const useGrouped = groups.length > 0 && sort === 'default'
+  const sortedEvidence = useMemo(() => evidence.map((ev, idx) => ({ ev, idx })).sort((a, b) => {
+    if (sort === 'default') return a.idx - b.idx
+    const direction = descending ? -1 : 1
+    if (sort === 'source') return direction * a.ev.source.localeCompare(b.ev.source)
+    if (sort === 'summary') return direction * a.ev.content_reference.localeCompare(b.ev.content_reference)
+    if (sort === 'trust') return direction * (a.ev.trust - b.ev.trust)
+    return direction * (Date.parse(a.ev.fetched_at) - Date.parse(b.ev.fetched_at))
+  }), [descending, evidence, sort])
+  const chooseSort = (next: typeof sort) => {
+    if (sort === next) setDescending((value) => !value)
+    else { setSort(next); setDescending(next === 'trust' || next === 'time') }
+  }
+  const sortLabel = (key: typeof sort) => sort === key ? (descending ? ' ▼' : ' ▲') : ''
 
   return (
     <div className="overflow-x-auto hermes-clip rounded-lg border border-tf-border bg-tf-card">
-      <table className="w-full border-collapse text-left">
+      <table className="min-w-[760px] w-full border-collapse text-left">
         <thead>
           <tr className="border-b border-tf-border text-xs text-tf-muted">
             <th className="px-3 py-2 font-medium">#</th>
-            <th className="px-3 py-2 font-medium">來源（點展開）</th>
-            <th className="px-3 py-2 font-medium">信任分</th>
+            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('source')}>來源{sortLabel('source')}</button></th>
+            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('summary')}>摘要{sortLabel('summary')}</button></th>
+            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('time')}>時間{sortLabel('time')}</button></th>
+            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('trust')}>信任分{sortLabel('trust')}</button></th>
           </tr>
         </thead>
         <tbody className="divide-y divide-tf-border">
@@ -197,8 +217,8 @@ export default function EvidenceTable({
                 evidence={evidence}
               />
             ))
-            : evidence.map((ev, i) => (
-              <EvidenceRow key={i} ev={ev} idx={i} />
+            : sortedEvidence.map(({ ev, idx }) => (
+              <EvidenceRow key={idx} ev={ev} idx={idx} />
             ))}
         </tbody>
       </table>

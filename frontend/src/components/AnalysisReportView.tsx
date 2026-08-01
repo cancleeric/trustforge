@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import type { AnalyzeData } from '../lib/types'
 import ConfidenceGauge from './ConfidenceGauge'
 import TrustBreakdown from './TrustBreakdown'
@@ -25,6 +25,7 @@ import AssetIntrinsicShadowPanel from './AssetIntrinsicShadowPanel'
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
 const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
+const EvidenceDistributionCharts = lazy(() => import('./EvidenceDistributionCharts'))
 
 /** 單份分析報告的完整渲染區塊——`AnalyzePage`（單幣）與 `ComparePage`
  * （雙幣並列，各自渲染一份 `report_a`/`report_b`）共用同一顆元件，兩邊
@@ -35,6 +36,7 @@ const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
  * 在標題列顯示本次分析用的模式（呼應設計稿 R2 mode: multi_source 標籤）。 */
 export default function AnalysisReportView({ data, heading, mode, compact }: { data: AnalyzeData; heading?: string; mode?: string; compact?: boolean }) {
   const { t } = useHermesI18n()
+  const [evidenceOpen, setEvidenceOpen] = useState(false)
   // N71（CEO：「手動分析的報告要在哪裡下載？執行過程的 LOG 要在哪裡看」）：
   // 三顆下載鈕本來只在最底下那個預設收合的「技術細節」裡，跑完分析根本找不到。
   // 這裡在報告抬頭補一排永遠看得見的動作，外加一顆帶去執行過程面板的按鈕
@@ -107,18 +109,22 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
         </section>
       </div>
 
+      <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
+        <TrustRadarChart radar={data.trust_radar} />
+      </Suspense>
+
       <details id="technical-analysis" className="hermes-technical-details hermes-clip border border-tf-border bg-tf-card">
         <summary>{t('arvTechnicalDetailsSummary')} <span>{t('arvTechnicalDetailsHint')}</span></summary>
         <div className="flex flex-col gap-4 p-4">
           <HermesExecutionPanel execution={data.execution} events={data.execution_log} report={data.report} evidence={data.evidence} />
           <TrustBreakdown data={data.trust_components_aggregate} />
           <TrustTrendSection coin={data.report.coin} />
-          <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
-            <TrustRadarChart radar={data.trust_radar} />
-          </Suspense>
         </div>
       </details>
 
+      <details className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
+        <summary>展開詳細分析（{data.report.facts.length + data.report.inferences.length} 項推理、{data.report.contrarian.length} 項反方訊號）</summary>
+        <div className="flex flex-col gap-4">
       <FactsInferenceLadder
         facts={data.report.facts}
         inferences={data.report.inferences}
@@ -158,22 +164,25 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
       )}
 
       {data.report.contrarian.length > 0 && (
-        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-          <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvContrarian')}</h3>
+        <details className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
+          <summary>{t('arvContrarian')}（{data.report.contrarian.length}）</summary>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.contrarian.map((l, i) => (
               <li key={i}><AnnotatedText text={l} /></li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
 
       <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
+        </div>
+      </details>
 
-      <div id="evidence-list">
-        <h3 className="mb-3 text-sm font-semibold text-tf-text">{t('arvEvidenceList')}</h3>
+      <details id="evidence-list" className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card" onToggle={(event) => setEvidenceOpen(event.currentTarget.open)}>
+        <summary>{t('arvEvidenceList')}（{data.evidence.length}）</summary>
+        {evidenceOpen && <Suspense fallback={<LoadingState label="圖表載入中" />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>}
         <EvidenceTable evidence={data.evidence} evidenceGroups={data.report.evidence_groups} />
-      </div>
+      </details>
     </div>
   )
 }

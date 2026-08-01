@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
@@ -7,7 +7,8 @@ import type { AnalyzeData } from '../lib/types'
 import AnalysisReportView from './AnalysisReportView'
 
 vi.mock('./TrustTrendSection', () => ({ default: () => null }))
-vi.mock('./TrustRadarChart', () => ({ default: () => null }))
+vi.mock('./TrustRadarChart', () => ({ default: () => <div>radar-summary</div> }))
+vi.mock('./EvidenceDistributionCharts', () => ({ default: () => <div>evidence-charts</div> }))
 
 function makeData(): AnalyzeData {
   return {
@@ -18,7 +19,7 @@ function makeData(): AnalyzeData {
       contrarian: [], generated_at: '2026-08-01T00:00:00Z', direction: 'neutral',
       cross_source_signal: null, calibrated_confidence: 0.6, decision_state: 'normal',
     },
-    evidence: [],
+    evidence: [{ source: 'coindesk', fetched_at: '2026-08-01T00:00:00Z', content_reference: 'summary', related_claim: 'claim', source_url: '', kind: 'news', trust: 0.7, trust_components: {}, flags: [], info_flags: [] }],
     trust_radar: {},
     trust_components_aggregate: { reputation: null, corroboration: null, recency: null, manipulation: null },
     price_provenance: {},
@@ -79,5 +80,20 @@ describe('AnalysisReportView compact 模式（比較頁）', () => {
     const statsGrid = container.querySelector('.grid.grid-cols-3')!
     expect(statsGrid.className).toContain('gap-2')
     expect(statsGrid.className).not.toContain('gap-1')
+  })
+
+  it('shows the radar in the first-glance summary, outside closed technical details', () => {
+    const { container } = renderWithCompact(false)
+    expect(screen.getByText('radar-summary').closest('#technical-analysis')).toBeNull()
+    expect((container.querySelector('#technical-analysis') as HTMLDetailsElement).open).toBe(false)
+  })
+
+  it('does not mount lazy evidence charts until the evidence details are opened', async () => {
+    const { container } = renderWithCompact(false)
+    const details = container.querySelector('#evidence-list') as HTMLDetailsElement
+    expect(screen.queryByText('evidence-charts')).toBeNull()
+    details.open = true
+    fireEvent(details, new Event('toggle'))
+    expect(await screen.findByText('evidence-charts')).toBeInTheDocument()
   })
 })
