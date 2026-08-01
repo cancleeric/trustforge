@@ -9,9 +9,10 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from .ledger import estimate_cost
 
@@ -134,8 +135,9 @@ _STANCE_FEWSHOT = [
 # Competition Bedrock hard limit (#1203): Amazon Bedrock calls must stay below
 # one request per second.  Keep this guard in the single Bedrock gateway so
 # narrative, stance, and structured-extraction calls share the same host-local
-# canonical flock timestamp. Lambda fails closed; non-Lambda deployments must
-# remain single-host because this is intentionally not a distributed lease.
+# canonical flock timestamp. Non-Lambda deployments must remain single-host
+# because flock is intentionally not a distributed lease; Lambda (#1308) must be
+# given a real distributed lock and otherwise still fails closed.
 _BEDROCK_MIN_INTERVAL_SEC = float(os.getenv("TRUSTFORGE_BEDROCK_MIN_INTERVAL_SEC", "1.0"))
 
 
@@ -149,6 +151,7 @@ class BedrockRpsLimiter:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         lock_path: str | os.PathLike[str] | None = None,
+        distributed_lock: Any | None = None,
     ) -> None:
         self.min_interval = max(1.0, float(min_interval))
         self._monotonic = monotonic
@@ -166,7 +169,29 @@ class BedrockRpsLimiter:
         self._lock_path = Path(lock_path or default_lock)
         if injected_clock and lock_path is None:
             self._lock_path.unlink(missing_ok=True)
-        self._unsupported_lambda_runtime = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+        self._distributed_lock = distributed_lock
+        # Lambda 沒有跨執行環境共享的 /tmp，flock 在此無效。有分散式鎖才放行，
+        # 沒有就維持既有的 fail-closed 行為（#1203）。
+        self._unsupported_lambda_runtime = (
+            bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME")) and distributed_lock is None
+        )
+        self._use_distributed_lock = (
+            bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME")) and distributed_lock is not None
+        )
+
+    @contextmanager
+    def slot(self):
+        """包住一次真正的 Bedrock invoke，離開前不釋放節流。
+
+        Lambda 走 DynamoDB 分散式 owner lock（cooldown 持續到 invoke 起始後
+        一秒）；其他部署沿用既有 host-local flock 行為，語意不變。
+        """
+        if self._use_distributed_lock:
+            with self._distributed_lock.slot():
+                yield
+            return
+        self.acquire()
+        yield
 
     def acquire(self) -> None:
         if self._unsupported_lambda_runtime:
@@ -205,9 +230,23 @@ class BedrockRpsLimiter:
                 lock_file.flush()
 
 
+def _default_distributed_lock() -> Any | None:
+    """#1308: on Lambda, back the 1 RPS guard with the shared DynamoDB lock.
+
+    Non-Lambda deployments return ``None`` so the existing host-local flock
+    path stays byte-for-byte the same. Construction is cheap and lazy — the
+    boto3 resource is only built on first acquire.
+    """
+    if not os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        return None
+    from .bedrock_rps_lock import DynamoDBBedrockRpsLock
+
+    return DynamoDBBedrockRpsLock(min_interval=_BEDROCK_MIN_INTERVAL_SEC)
+
+
 # One limiter per process so multiple BedrockClient instances do not bypass the
 # 1 RPS rule. Tests may inject their own limiter via BedrockClient.__init__.
-_DEFAULT_RPS_LIMITER = BedrockRpsLimiter()
+_DEFAULT_RPS_LIMITER = BedrockRpsLimiter(distributed_lock=_default_distributed_lock())
 
 
 @dataclass
@@ -271,9 +310,13 @@ class BedrockClient:
         else:
             self._rps_limiter = _DEFAULT_RPS_LIMITER
 
-    def _acquire_bedrock_slot(self) -> None:
-        """Apply the shared Bedrock ≤1 RPS guard before every real invoke."""
-        self._rps_limiter.acquire()
+    def _bedrock_slot(self):
+        """Wrap every real Bedrock invoke in the shared ≤1 RPS guard.
+
+        #1308: the guard must stay held across the invoke itself, because the
+        distributed Lambda lease releases its cooldown at *invoke start + 1s*.
+        """
+        return self._rps_limiter.slot()
 
     def _runtime(self):
         """#51 codex HIGH 複審 Round 14：主敘事模型呼叫專用 client，見上方
@@ -351,13 +394,13 @@ class BedrockClient:
             "system": system,
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
         }
-        self._acquire_bedrock_slot()
-        resp = self._runtime().converse(
-            modelId=self.config.model_id,
-            system=[{"text": system}],
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": self.config.max_tokens},
-        )
+        with self._bedrock_slot():
+            resp = self._runtime().converse(
+                modelId=self.config.model_id,
+                system=[{"text": system}],
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                inferenceConfig={"maxTokens": self.config.max_tokens},
+            )
         output = resp.get("output", {}).get("message", {}).get("content", [])
         text = "".join(b.get("text", "") for b in output)
         usage = resp.get("usage", {}) or {}
@@ -474,19 +517,19 @@ class BedrockClient:
             "toolChoice": {"tool": {"name": _EXTRACT_TOOL_NAME}},
         }
 
-        self._acquire_bedrock_slot()
-        resp = self._stance_runtime().converse(
-            modelId=self.config.stance_model_id,
-            system=[{"text": _EXTRACT_SYSTEM}],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [{"text": f"{instruction}\n\n----- 原文開始 -----\n{text}\n----- 原文結束 -----"}],
-                }
-            ],
-            inferenceConfig={"temperature": 0, "maxTokens": max_tokens},
-            toolConfig=tool_config,
-        )
+        with self._bedrock_slot():
+            resp = self._stance_runtime().converse(
+                modelId=self.config.stance_model_id,
+                system=[{"text": _EXTRACT_SYSTEM}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [{"text": f"{instruction}\n\n----- 原文開始 -----\n{text}\n----- 原文結束 -----"}],
+                    }
+                ],
+                inferenceConfig={"temperature": 0, "maxTokens": max_tokens},
+                toolConfig=tool_config,
+            )
 
         for block in resp.get("output", {}).get("message", {}).get("content", []):
             tool_use = block.get("toolUse")
@@ -539,14 +582,14 @@ class BedrockClient:
             "toolChoice": {"tool": {"name": _STANCE_TOOL_NAME}},
         }
 
-        self._acquire_bedrock_slot()
-        resp = self._stance_runtime().converse(
-            modelId=self.config.stance_model_id,
-            system=[{"text": _STANCE_SYSTEM}],
-            messages=[{"role": "user", "content": [{"text": user_text}]}],
-            inferenceConfig={"temperature": 0, "maxTokens": 128},
-            toolConfig=tool_config,
-        )
+        with self._bedrock_slot():
+            resp = self._stance_runtime().converse(
+                modelId=self.config.stance_model_id,
+                system=[{"text": _STANCE_SYSTEM}],
+                messages=[{"role": "user", "content": [{"text": user_text}]}],
+                inferenceConfig={"temperature": 0, "maxTokens": 128},
+                toolConfig=tool_config,
+            )
         # 只在真呼叫（converse 已成功回來）才記成本——
         # cache-hit 完全不會走到這個函式（見 stance_cache.cached_stance_fn）。
         usage = resp.get("usage", {}) or {}
