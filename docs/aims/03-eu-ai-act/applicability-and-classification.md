@@ -2,7 +2,7 @@
 
 > Document ID: AIMS-EU-APP-001
 >
-> Version: 0.1-draft
+> Version: 0.2-draft
 >
 > Status: Draft — classification pending legal approval — non-effective
 >
@@ -12,7 +12,7 @@
 >
 > Parent tracking issue: #1264
 >
-> This document slice: #1265 / PR-A
+> Initial document slice: #1265 / PR-A; conditional actor-boundary amendment: #1286
 
 ## Proposed intended purpose
 
@@ -73,6 +73,31 @@ The Article 50(2) transition must be checked separately against Regulation (EU) 
 - Article 26 deployer monitoring, use and escalation duties are assessed separately from provider controls.
 - Article 73 reporting is assessed conditionally for the provider, with other actors' escalation interfaces recorded separately.
 - Article 10 is conditional on high-risk applicability and must distinguish systems using techniques involving model training from systems not using such techniques. A production-only PII boundary, if verified, would not establish Article 10 compliance.
+
+### Conditional Article 17(4) assessment route
+
+This route applies only if the system is a high-risk AI system, the provider is a credit institution subject to Directive 2013/36/EU, and the quality-management system is part of that institution's governance arrangements, processes and mechanisms under Article 74 of that Directive. If those predicates are verified, Article 17(4) provides the conditional deemed-compliance route through compliance with the Article 74 arrangements, processes and mechanisms. None of the predicates, the obligated actor, the underlying facts or supporting evidence has been established for TrustForge. The route therefore remains `Not assessed`; no deemed-compliance, conformity, implementation or effectiveness conclusion is recorded.
+
+| Assessment item | Current state | Evidence or decision needed |
+|---|---|---|
+| High-risk applicability | Pending | Approved Article 6／Annex I or Annex III classification tied to the exact intended purpose and deployment |
+| Credit-institution condition | Pending | Verified legal-entity and regulatory-status evidence |
+| Obligated actor | Pending | Compliance Counsel determination of provider and credit-institution roles |
+| Article 74 governance integration | Not assessed | Exact governance arrangements, processes and mechanisms, control mapping, ownership and effectiveness evidence |
+| Deemed-compliance consequence | Not assessed | Compliance Counsel verification that every Article 17(4) predicate is satisfied against exact evidence |
+| Maturity | Not assessed | Compliance, CPO and CISO exact-version review |
+
+### Conditional Article 25(3) assessment route
+
+This route applies only to a high-risk AI system related to a product covered by the Union harmonisation legislation listed in Annex I Section A. It must be placed on the market together with the product under the product manufacturer's name or trademark, or put into service under that name or trademark after the product has been placed on the market. Product scope, high-risk applicability, actor identity, placement／putting-into-service facts and evidence are all pending. The manufacturer-as-provider consequence therefore remains `Not assessed` and is separate from Article 25(1) provider transition and from off-label use or misuse.
+
+| Assessment item | Current state | Evidence or decision needed |
+|---|---|---|
+| Annex I Section A product relationship | Pending | Exact product, applicable Section A legislation and safety-component facts |
+| High-risk applicability | Pending | Approved Article 6(1) assessment tied to the exact product and intended purpose |
+| Manufacturer／provider actor | Pending | Verified manufacturer, branding, placing-on-market and putting-into-service facts plus Compliance Counsel determination |
+| Article 25(3) consequence | Not assessed | Exact-version legal applicability and actor allocation review |
+| Maturity | Not assessed | Compliance, CPO and CISO exact-version review |
 
 ## Reclassification triggers
 

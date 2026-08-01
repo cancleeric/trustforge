@@ -2,11 +2,11 @@
 
 > Document ID: AIMS-EU-MAP-001
 >
-> Version: 0.1-draft
+> Version: 0.2-draft
 >
 > Status: Draft — awaiting licensed EN 18286 text — non-effective
 >
-> Parent tracking issue: #1264; this PR-A slice: #1265
+> Parent tracking issue: #1264; initial PR-A slice: #1265; conditional actor-boundary amendment: #1286
 
 ## Use constraints
 
@@ -36,7 +36,9 @@ Effective dates are planning assumptions only. Regulation (EU) 2026/1744 amended
 | EN 18286 clause | EU AI Act area | Applicability | Obligated actor | Effective-date checkpoint | ISO/IEC 42001／AIMS area | Unverified artifact observation | Maturity | Owner／next action |
 |---|---|---|---|---|---|---|---|---|
 | Authoritative text pending | Articles 9–17 | Conditional; Article 6(2)／Annex III classification pending | High-risk provider; role pending | 2027-12-02 if Article 6(2)／Annex III; reverify | Risk, lifecycle, documentation and QMS | Distributed docs／logs／tests are alleged; exact artifacts and activation unverified | Not assessed | Determine classification, technique-specific Article 10 scope and exact-version evidence |
+| Authoritative text pending | Article 17(4) credit-institution condition | Conditional; high-risk scope, provider status as a credit institution under Directive 2013/36/EU and QMS integration into Article 74 governance arrangements, processes and mechanisms all pending | High-risk provider that is a qualifying credit institution; actor pending | Follow the approved Article 6 path; reverify | QMS and regulated governance integration | Legal-entity status, Article 74 governance evidence and exact control evidence unverified | Not assessed | Verify every predicate before assessing the conditional deemed-compliance consequence |
 | Authoritative text pending | Article 25 provider transition | Conditional high-risk scope; statutory Article 25(1) condition pending, including changed intended purpose making a previously non-high-risk system high-risk under Article 25(1)(c) | Actor becoming provider; pending | 2027-12-02 for Article 6(2)／Annex III path; 2028-08-02 for Article 6(1)／Annex I path; reverify | Change and supplier controls | White-label／modification controls unverified | Not assessed | Verify high-risk scope and separate provider transition from misuse records |
+| Authoritative text pending | Article 25(3) Annex I Section A product-manufacturer condition | Conditional; Article 6(1) high-risk product relationship, Section A legislation, manufacturer identity and either joint placement or post-product-placement putting-into-service facts pending | Qualifying product manufacturer treated as provider; actor pending | 2028-08-02 for an approved Article 6(1)／Annex I path; reverify | Product lifecycle, role and supplier controls | Product scope, branding, placing-on-market and putting-into-service evidence unverified | Not assessed | Assess both manufacturer-as-provider triggers separately from Article 25(1) transition and misuse |
 | Authoritative text pending | Article 26 deployer duties | Conditional; deployer, use and high-risk path pending | Deployer; pending | 2027-12-02 for Article 6(2)／Annex III path; 2028-08-02 for Article 6(1)／Annex I path; reverify | Operational monitoring and escalation | No exact-version deployer evidence verified | Not assessed | Map monitoring, logs, escalation and instructions interfaces |
 | Authoritative text pending | Article 50 transparency | Independent feature/output/deployment assessment pending | Provider and/or deployer by paragraph; pending | Article 50(2) transition: exact amended date pending legal verification | Communication and output controls | Output modalities and marking/disclosure behavior unverified | Not assessed | Verify Regulation (EU) 2026/1744 transition and complete standalone assessment |
 | Authoritative text pending | Articles 72–73 | Conditional; classification pending | High-risk provider／provider; other actors need escalation interface | 2027-12-02 for Article 6(2)／Annex III path; 2028-08-02 for Article 6(1)／Annex I path; reverify | Measurement, CAPA and incident action | PMS and EU reporting workflow existence unverified | Not assessed | Confirm actor, scope, escalation and exact-version evidence |
