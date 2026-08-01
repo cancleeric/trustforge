@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { modeLabel, useHermesI18n } from './hermesI18n'
+import DiandianAvatar from '../components/DiandianAvatar'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
 import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
 import type { AnalysisFocusId } from '../lib/analysisTaxonomy'
@@ -40,6 +41,8 @@ interface HermesLeftRailProps {
   onReducedMotionToggle?: () => void
   onHelp?: () => void
   onToggleShip?: () => void
+  diandianAnalyzing?: boolean
+  onDiandianClick?: () => void
   questionContext?: AnalysisQuestionContext | null
   onRecallQuestion?: (question: string) => void
   onQuery: (v: string) => void
@@ -60,6 +63,7 @@ export default function HermesLeftRail({
   beginnerMode = false, onChooseIntent,
   activeModule = null, onModuleSelect, onHome, onBeginnerModeChange,
   reducedMotion = false, onReducedMotionToggle, onHelp, onToggleShip,
+  diandianAnalyzing = false, onDiandianClick,
   random = Math.random,
 }: HermesLeftRailProps) {
   const { t, locale } = useHermesI18n()
@@ -438,6 +442,9 @@ export default function HermesLeftRail({
           ⤴
         </button>
         </div>
+      </div>
+      <div style={{ position: 'absolute', top: 14, right: 14, zIndex: 55 }}>
+        <DiandianAvatar isAnalyzing={diandianAnalyzing} onClick={onDiandianClick} />
       </div>
     </div>
   )
