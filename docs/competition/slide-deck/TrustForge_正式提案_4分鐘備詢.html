@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrustForge｜正式提案四分鐘備詢</title>
+<style>
+:root{--navy:#10294a;--blue:#1d5fb9;--cyan:#159baa;--gold:#a86608;--ink:#1e2c3b;--muted:#657789;--line:#d8e3ee;--paper:#fff;--bg:#f3f7fb;--green:#16784b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft JhengHei","Noto Sans TC",sans-serif;line-height:1.75}main{width:min(980px,calc(100% - 32px));margin:32px auto;padding:42px 48px 70px;background:var(--paper);border-radius:20px;box-shadow:0 18px 55px rgba(16,41,74,.09)}h1{margin:0;color:var(--navy);font-size:34px}h2{margin:38px 0 12px;color:var(--blue);font-size:23px}.sub{color:var(--muted);margin:4px 0 24px}.notice{padding:16px 19px;border-left:5px solid var(--cyan);background:#eefafd;border-radius:8px}.qa{margin:16px 0;padding:18px 20px;border:1px solid var(--line);border-radius:13px;background:#fbfdff}.qa h3{margin:0 0 10px;color:var(--navy);font-size:18px}.answer,.proof,.boundary{margin:8px 0;padding-left:62px;position:relative}.answer:before,.proof:before,.boundary:before{position:absolute;left:0;font-weight:900}.answer:before{content:"主答｜";color:var(--blue)}.proof:before{content:"指證｜";color:var(--green)}.boundary:before{content:"界線｜";color:var(--gold)}.danger{background:#fff9ec;border-color:#f0d89c}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.mini{padding:14px 16px;border:1px solid var(--line);border-radius:10px}.mini b{color:var(--blue)}.footer{margin-top:38px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}@media(max-width:720px){main{width:100%;margin:0;padding:26px 18px;border-radius:0}.grid{grid-template-columns:1fr}.answer,.proof,.boundary{padding-left:0}.answer:before,.proof:before,.boundary:before{position:static;margin-right:5px}}@media print{body{background:#fff}main{width:100%;margin:0;padding:16mm;box-shadow:none}.qa{break-inside:avoid}}
+</style>
+</head>
+<body><main>
+<h1>TrustForge 正式提案｜四分鐘備詢</h1>
+<p class="sub">依正式6頁提案簡報與實際程式碼整理｜先回答、再指證、最後說界線</p>
+<div class="notice"><b>答題節奏：</b>第一句直接回答；第二句指出畫面、交付物或程式證據；被追問時再展開限制。不要把簡報重新講一遍。</div>
+
+<h2>十四題核心備詢</h2>
+<section class="qa"><h3>1. 你們自行訓練的是什麼模型？</h3><p class="answer">我們自行訓練的是TrustForge信心校準模型，不是大型語言模型。它把分析當下的raw confidence與T+7等後續真實結果接合，再用Isotonic Regression校準成較符合歷史表現的信心。</p><p class="proof">calibration_model.py、modelhub_training.py、training JSONL與model artifact。</p><p class="boundary">它不生成市場文章、不取代Bedrock，也不等於價格預測模型。</p></section>
+
+<section class="qa"><h3>2. 為什麼不只使用AWS現成模型？</h3><p class="answer">AWS基礎模型擅長語意理解與生成，但不知道TrustForge的Evidence契約、來源可靠度與信心定義。自有校準模型能針對任務修正過度自信、跟上市場變化，並累積來源可靠度資料護城河。</p><p class="proof">Bedrock負責extract／stance／narrative；Trust Layer與calibration_model負責信任計算與校準。</p><p class="boundary">不是排斥AWS，而是把AWS基礎模型與自有任務模型放在不同責任層。</p></section>
+
+<section class="qa"><h3>3. ModelHub和SageMaker有何不同？</h3><p class="answer">兩者都實作TrainingBackend介面：觸發訓練、輪詢結果、下載產物。ModelHub以req_no呼叫訓練服務；Amazon SageMaker以Training Job執行，資料與artifact透過S3。</p><p class="proof">training_backend.py、modelhub_backend.py、modelhub_client.py、sagemaker_client.py。</p><p class="boundary">正式競賽採AWS路徑。ModelHub已有weighted ECE改善門檻；SageMaker目前完成artifact驗證與人工核准，完整holdout ECE比較仍需補齊。</p></section>
+
+<section class="qa danger"><h3>4. 自行訓練是否違反「僅限AWS基礎模型」？</h3><p class="answer">不衝突。生成式AI基礎模型只使用Amazon Bedrock；自有校準模型是TrustForge的確定性信心映射，正式競賽可在允許的AWS EC2或SageMaker AI執行，不呼叫第三方生成模型。</p><p class="proof">Bedrock是唯一生成式模型入口；SageMakerBackend只負責校準訓練。</p><p class="boundary">若主辦方解釋為所有模型都必須走AWS服務，我們就只啟用AWS訓練路徑，ModelHub僅作賽外治理參考。</p></section>
+
+<section class="qa"><h3>5. 為什麼模型不能自動更新？</h3><p class="answer">新資料可能污染、分布可能漂移，候選模型也可能退化。程式把automatic_apply固定為false、requires_human_approval固定為true；新版本必須通過資料Gate、產物驗證與人工審查。</p><p class="proof">modelhub_training.py、modelhub_submit.py、sagemaker_submit.py的candidate proposal。</p><p class="boundary">持續學習是持續產生可審查候選，不是模型自行改寫正式系統。</p></section>
+
+<section class="qa"><h3>6. 六類資料來源如何驗證？</h3><p class="answer">市場行情以HOYA BIT／官方OHLCV為共同基準；鏈上、新聞、官方監管、社群及基本面資料各自保存來源身分、取得時間、引用片段與查詢條件。關鍵結論必須對應related_claim。</p><p class="proof">schema.py的Evidence欄位：source、fetched_at、content_reference、related_claim、source_url。</p><p class="boundary">資料源失效或覆蓋不足會明示data mode與限制，不把cache／fixture說成即時資料。</p></section>
+
+<section class="qa"><h3>7. 如何避免新聞重複計票？</h3><p class="answer">系統先正規化來源身分，再用文本相似度與來源關係形成群組；交叉佐證只計真正獨立來源。Jaccard高相似群組會被標記，呈現可能的轉載或協同發文。</p><p class="proof">trust/scoring.py的Jaccard、union-find相似簇與independent_sources。</p><p class="boundary">高相似不會一律自動扣分，因為合法聯播也可能相似；系統先透明標示，再決定是否計票。</p></section>
+
+<section class="qa"><h3>8. Bedrock是否負責市場判斷？</h3><p class="answer">不單獨負責。Bedrock可做主張抽取、有限立場分類與報告敘事；來源權重、獨立佐證、矛盾、校準與輸出契約由Trust Layer決定。報告必須以claim_id對應Evidence。</p><p class="proof">pipeline.py四步流程、bedrock.py、trust/kernel.py與Reasoning Provenance。</p><p class="boundary">Bedrock未呼叫或失敗時，Execution Log必須標示offline／fallback，不能冒充模型成功。</p></section>
+
+<section class="qa"><h3>9. API Key及AWS憑證如何保護？</h3><p class="answer">長效憑證不得進Git；正式環境使用IAM Role與SSM Parameter Store。nginx以HTTPS對外，Python API僅監聽loopback；公開Evidence與Log只輸出必要欄位。</p><p class="proof">ssm_params.py、connector secret adapters、nginx設定與secret scan。</p><p class="boundary">Workshop Access Code也屬機密，不會出現在簡報、Repo或公開紀錄。</p></section>
+
+<section class="qa"><h3>10. 15分鐘內失敗怎麼處理？</h3><p class="answer">每階段都受ExecutionLog剩餘時間與外部呼叫timeout控制。單一來源失敗可切換有時間戳的快取或明確降級；關鍵資料不足時降低信心或棄權。無法完成就保留失敗Log，不提交假成功。</p><p class="proof">execlog.py的remaining、pipeline timeout／fallback、connector cache的fetched_at。</p><p class="boundary">原則上不以重新送出掩蓋第一次失敗；只有主辦環境問題才依規定申請重跑。</p></section>
+
+<section class="qa"><h3>11. 四份交付物如何證明是真實執行？</h3><p class="answer">四份檔案以同一個run_id與claim_id串接。Report的關鍵依據能回Evidence；Evidence保存來源與取得時間；Execution Log保存工具、資料模式、模型、成本與錯誤；Source／Config提供程式、設定、依賴鎖定與重現步驟。</p><p class="proof">report.md、evidence.json、execution_log.jsonl、GitHub Source／Config、artifact SHA-256。</p><p class="boundary">不能只用漂亮畫面證明執行；評審應能完成Report→Evidence→Log→Source交叉抽查。</p></section>
+
+<section class="qa"><h3>12. 「核心可替換」具體是什麼？</h3><p class="answer">Trust Kernel只接收標準化Claim並輸出信任結果；資料來源、模型、快取、監控與預算控制透過Protocol介面接入，因此更換外部服務時不必改寫核心評分規則。</p><p class="proof">trust/kernel.py的KernelInput／KernelOutput／run_kernel，以及ports.py的ModelProvider、SourceProvider、CacheProvider、ObservabilityProvider與BudgetProvider。</p><p class="boundary">目前kernel仍延遲載入scoring.py，架構測試將它列為待移除bridge；可以說已建立可替換邊界，不應說已百分之百完全解耦。</p></section>
+
+<section class="qa"><h3>13. 鯨魚動態如何影響分析？</h3><p class="answer">Whale Alert提供大額轉帳事件，Arkham補充實體與標籤歸因，Etherscan驗證鏈上交易，CoinMarketCap補充市值與流動性。這些資料會形成鏈上Evidence，與價格、新聞及其他來源交叉判讀。</p><p class="proof">ingestion/whale_trades.py、ingestion/etherscan.py、ingestion/cmc.py及test_whale_trades_arkham.py。</p><p class="boundary">巨鯨轉入交易所不是必然看空，也不會直接變成買賣建議；若憑證或live來源未啟用，必須在Execution Log標示cache／fixture／unavailable。</p></section>
+
+<section class="qa danger"><h3>14. 你們是否已完成碳盤查？Trust Kernel真的低於1秒嗎？</h3><p class="answer">目前沒有宣稱完成正式碳盤查，也沒有把低於1秒當成已驗證SLA。我們能證明的是核心評分採本機記憶體計算、正式路徑避免不必要的LLM呼叫，並記錄Bedrock token、成本、預算與快取使用。</p><p class="proof">trust/kernel.py的offline核心路徑、bedrock.py的token usage、budget_guard.py及ingestion/cache.py。</p><p class="boundary">沒有完整benchmark前不報固定延遲；沒有排放係數、組織邊界與查證流程前，不使用「ISO 14064對齊」或「已完成碳盤查」。</p></section>
+
+<h2>延伸高機率追問</h2><div class="grid"><div class="mini"><b>TrustScore能預測漲跌嗎？</b><br>不能這樣宣稱。它衡量資訊完整度、可溯源性與佐證品質，不提供報酬保證。</div><div class="mini"><b>來源互相矛盾怎麼辦？</b><br>保留正反證據、降低信心並列出could_flip，不把矛盾平均掉。</div><div class="mini"><b>HOYA BIT如何導入？</b><br>第一步在市場資訊頁加入完整度、Evidence與反轉條件；第二步累積來源歷史與校準資料；第三步以Trust Layer API整合研究工具。</div><div class="mini"><b>最大限制是什麼？</b><br>正式入口與外部資料受現場權限、網路與契約影響；SageMaker完整ECE比較尚未與ModelHub完全對齊。</div></div>
+
+<h2>禁止誇大</h2><div class="grid"><div class="mini"><b>不要說：</b>自己訓練大型語言模型<br><b>改成：</b>自行訓練信心校準模型</div><div class="mini"><b>不要說：</b>模型自動持續進化<br><b>改成：</b>候選版本經驗證與人工核准</div><div class="mini"><b>不要說：</b>所有鯨魚資料都是即時<br><b>改成：</b>由Execution Log證明live／cache／fixture狀態</div><div class="mini"><b>不要說：</b>Trust Kernel保證低於1秒、已減碳70%或完成碳盤查<br><b>改成：</b>核心評分不依賴外部LLM，並以token、成本、預算及快取降低冗餘算力</div></div>
+<div class="footer">收尾：TrustForge不替使用者做投資決定；它讓每個結論的資料、證據、模型、限制與執行過程都能被追問。</div>
+</main></body></html>
