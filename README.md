@@ -30,7 +30,7 @@ TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，�
 | 測試檔 | 394 個 |
 | 測試函式 | 6,259 個 |
 | 主文件索引 | [`docs/README.md`](docs/README.md) |
-| 技術文件（Markdown） | [`docs/technical-docs/README.md`](docs/technical-docs/README.md)；HTML 版另存 [`docs/technical-docs/html/`](docs/technical-docs/html/) |
+| 技術文件（Markdown） | [`docs/technical-docs/README.md`](docs/technical-docs/README.md)；含目前已接 4 個台灣來源與 4 條外部資料來源主線，HTML 版另存 [`docs/technical-docs/html/`](docs/technical-docs/html/) |
 | 比賽交付文件 | [`docs/competition/`](docs/competition/) |
 
 ---

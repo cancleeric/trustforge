@@ -70,13 +70,14 @@ TrustScore = w_src × SourceReputation + w_corr × CrossSourceCorroboration + w_
 
 #### 4.1 Static Tier Weight（靜態來源等級）
 
-| 等級 | 來源類型 | 權重 |
-| --- | --- | --- |
-| Tier 1 | On-chain、OHLCV、Regulatory（SEC） | 1.00 |
-| Tier 2 | Mainstream News（Reuters, Bloomberg） | 0.80 |
-| Tier 3 | Crypto Media（CoinDesk, CoinTelegraph） | 0.60 |
-| Tier 4 | CoinGecko | 0.50 |
-| Tier 5 | Anonymous Social（Reddit, X） | 0.30 |
+| 等級 | 來源類型 | 權重 | 現況例子 |
+| --- | --- | --- | --- |
+| Tier 1 | 客觀價格、鏈上、官方監管 / 公開揭露 | 1.00 | HOYA BIT OHLCV、FSC、MOPS、TWSE、TPEx、SEC EDGAR、Blockchain.com |
+| Tier 1/2 | 鏈上外部來源主線 | 0.88–1.00 | Whale Alert + Arkham、Etherscan；Etherscan 方向目前中性，不假裝 exchange inflow/outflow |
+| Tier 2 | 獨立市場資料 API | 0.70–0.80 | CoinGecko、CoinMarketCap、DefiLlama price / TVL |
+| Tier 3 | Crypto Media / News feeds | 0.60 | Cointelegraph、CoinDesk、The Block 等 |
+| Tier 4 | 一般社群 / 半結構化情緒 | 0.30–0.50 | Reddit、X/Twitter、未驗證公開交易者訊號 |
+| Excluded / Pending | 尚未接入或未驗證來源 | 不給已接權重 | BlockTempo 等台灣媒體 RSS 目前仍是待辦 |
 
 #### 4.2 Dawid-Skene Dynamic Reputation（動態信譽）
 
@@ -91,6 +92,17 @@ Dawid-Skene EM 演算法（ `trust/dawid_skene.py `）根據來源歷史正確�
 - 靜態 tier weight × 動態信譽乘數 = 最終 SourceReputation
 
 **離線 fallback： **當 Bedrock 不可用、stance 分類無法線上進行時，Dawid-Skene 從歷史 stance cache（ `trust/stance_cache.py `）讀取標記。若連 cache 都沒有 → 使用靜態 tier weight，不誤報。
+
+
+#### 4.3 新增來源的權重紀律
+
+新增來源不等於自動高信任。TrustForge 依「可驗證性」與「是否能形成獨立佐證」決定權重：
+
+- FSC / MOPS / TWSE / TPEx 屬官方或公開揭露來源，但仍需 crypto 關鍵字閘門與 PIT visible_at，避免把無關公告灌入每個幣。
+- Whale Alert + Arkham 是同一條 whale trades 主線下的兩個供應來源；可互補，但不能把同一事件重複計成多個獨立真相。
+- Etherscan V2 txlist 目前只回 raw address，沒有 exchange label；在沒有 address→exchange mapping 前，方向一律中性。
+- CoinMarketCap / DefiLlama / CoinGecko 可形成 price_live 交叉佐證；TVL 是另一個客觀維度，但 BTC/XRP 無對應 DeFi TVL 時回空，不造假 near-zero。
+- key-based 來源未配置 credential 時降級為無資料；已配置但 SSM / 網路暫失敗時應記錄 failure，不把來源消失當成「沒有事件」。
 
 ### 5. Cross-Source Corroboration（多源佐證）
 

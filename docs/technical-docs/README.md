@@ -4,6 +4,26 @@
 
 另保留一份 HTML 靜態版於 [`html/`](html/)；需要展示原本 devlog 視覺版或離線開瀏覽器時，請看 [`html/index.html`](html/index.html)。
 
+
+## 2026-08-01 current snapshot（develop）
+
+這份技術文件已依目前 `develop` 重新整理，主 repo 內以 Markdown 為主，HTML 僅作展示版備份。近期新增能力請優先看下列入口：
+
+| 主題 | Markdown | HTML 版 | 重點 |
+|---|---|---|---|
+| 最新證據矩陣 | [00-evidence-map.md](00-evidence-map.md) | [html/00-evidence-map.html](html/00-evidence-map.html) | 把 repo 檔案、支援狀態、待 live 驗證邊界分清楚 |
+| 資料流與來源 | [06-data-flow.md](06-data-flow.md) | [html/06-data-flow.html](html/06-data-flow.html) | 4 個台灣監管來源 + 4 條外部資料來源主線 |
+| 信任演算法 | [08-trust-algorithm.md](08-trust-algorithm.md) | [html/08-trust-algorithm.html](html/08-trust-algorithm.html) | 新增來源 tier、客觀/主觀訊號與不造假規則 |
+| 競賽交付 | [16-competition-submission.md](16-competition-submission.md) | [html/16-competition-submission.html](html/16-competition-submission.html) | Final Report / Evidence List / Execution Log / Source & Config 對齊 |
+
+### 已接資料來源快照
+
+| 類別 | 已接來源 | 誠實邊界 |
+|---|---|---|
+| 台灣監管／公開揭露 | FSC、MOPS、TWSE、TPEx | BlockTempo 等台灣媒體 RSS 仍是待辦，不標成已接 |
+| 外部來源主線 | Whale trades（Whale Alert + Arkham）、Etherscan、CoinMarketCap、DefiLlama | key-based 來源需憑證；未配置時降級，不造假 live 結果 |
+| 既有公開來源 | HOYA BIT OHLCV、CoinGecko、SEC EDGAR、Blockchain.com、Cointelegraph / news feeds | 是否 live enabled 需看 runtime / cache / status，不只看程式支援 |
+
 ## Markdown 主要閱讀順序
 
 | 順序 | Markdown 文件 | HTML 版 | 說明 |
