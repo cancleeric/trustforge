@@ -3,13 +3,13 @@
   "files": {
     "src/trustforge/agent/kernel_mapper.py": "sha256:109ce79bee7bf24bea06e14dcbe32417417774f460c2230e76312d01a56ef950",
     "src/trustforge_core/__init__.py": "sha256:052a80c70910a08b2fe118116e2986f44aa39dd36b989cbb9ba74d440bc7b8b3",
-    "src/trustforge_core/aggregation.py": "sha256:d6cf46f22e1279d9e8ca43d40f4d68eff483b96725c17754c06cb65c3c64e98d",
+    "src/trustforge_core/aggregation.py": "sha256:62f1d5a22f4f0c3df79a8a083bdab9b21cdcefa89c688445a9a9770e574dceed",
     "src/trustforge_core/contracts.py": "sha256:0e7c2e464e42217ac09422e8db000aad2943f0e969e8c82fc6c6d4c05fd536fa",
     "src/trustforge_core/corroboration.py": "sha256:848e93b3b9d4a5eda2d7ce5f44d7fe62ff7d99cfb6c1847cc4b18390381eeaec",
     "src/trustforge_core/dawid_skene.py": "sha256:568985fc32e4773a300a050e0a32af67656489350ff6e4c9dab00b56cfebedfa",
     "src/trustforge_core/pure_scoring.py": "sha256:c6791280f4fdfd76c8f8153754426ecfa5960b5620299dfd9c7b99ccf033139f",
     "src/trustforge_core/candidate_composition.py": "sha256:1c1dfd8136b0161d974196c875e2070915b97b50fbc3040644b0ef23c5ed0de8",
-    "src/trustforge_core/scoring.py": "sha256:795120b1954b61f83c8ace56d7506a6794f304f381e655936b972f91e3a6e39a",
+    "src/trustforge_core/scoring.py": "sha256:46eef8e5693e5081a22d03c5348784c618d18aec5cff25e2ff717e4daeabfe61",
     "src/trustforge_core/source_identity.py": "sha256:3cb9390af66690385c6926a1338459c485af65cb5b66b1436b8f28f7b3e96a46"
   },
   "manifest_version": "trustforge.reviewed-shadow-candidate/v1",
