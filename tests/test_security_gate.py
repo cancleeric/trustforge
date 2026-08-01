@@ -256,3 +256,23 @@ def test_new_ref_uses_advertised_remote_not_stale_tracking_refs(tmp_path: Path) 
         ZERO_SHA,
     )
     assert run_push_scan(repo, [update], str(remote), tmp_path / "stale-report") == 1
+
+
+def test_push_scan_scans_symlink_target_blob_without_following_it(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(remote.parent, "init", "--bare", "-q", str(remote))
+
+    (repo / "aws-key-link").symlink_to("AKIAIOSFODNN7EXAMPLE")
+    _git(repo, "add", "aws-key-link")
+    _git(repo, "commit", "-q", "-m", "tracked secret symlink blob")
+    head = _git(repo, "rev-parse", "HEAD")
+    update = PushUpdate(
+        "refs/heads/new-branch",
+        head,
+        "refs/heads/new-branch",
+        ZERO_SHA,
+    )
+    assert run_push_scan(repo, [update], str(remote), tmp_path / "symlink-report") == 1

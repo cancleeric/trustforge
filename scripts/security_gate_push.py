@@ -86,18 +86,22 @@ def commits_for_updates(
     return commits
 
 
-def _safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
+def _safe_members(
+    archive: tarfile.TarFile,
+) -> tuple[list[tarfile.TarInfo], list[tarfile.TarInfo]]:
     members: list[tarfile.TarInfo] = []
+    symlinks: list[tarfile.TarInfo] = []
     for member in archive.getmembers():
         path = PurePosixPath(member.name)
         if path.is_absolute() or ".." in path.parts:
             raise ValueError(f"unsafe path in git archive: {member.name!r}")
-        # Secret-bearing symlink targets are scanned as their tracked link text
-        # by Git history review; do not follow links outside the archive root.
-        if member.issym() or member.islnk():
+        if member.islnk():
+            raise ValueError(f"unexpected hard link in git archive: {member.name!r}")
+        if member.issym():
+            symlinks.append(member)
             continue
         members.append(member)
-    return members
+    return members, symlinks
 
 
 def scan_commit(repo: Path, commit: str, out_dir: Path) -> ScanResult:
@@ -113,7 +117,14 @@ def scan_commit(repo: Path, commit: str, out_dir: Path) -> ScanResult:
         tree = tmp / "tree"
         tree.mkdir()
         with tarfile.open(archive_path, "r") as archive:
-            archive.extractall(tree, members=_safe_members(archive))
+            members, symlinks = _safe_members(archive)
+            archive.extractall(tree, members=members)
+        # A Git symlink's tracked blob is its target text.  Materialize that
+        # text as a regular file for scanning; never create or follow the link.
+        for symlink in symlinks:
+            link_blob = tree / PurePosixPath(symlink.name)
+            link_blob.parent.mkdir(parents=True, exist_ok=True)
+            link_blob.write_text(symlink.linkname, encoding="utf-8")
         result = scan(tree)
         write_report(result, out_dir / commit)
         return result
