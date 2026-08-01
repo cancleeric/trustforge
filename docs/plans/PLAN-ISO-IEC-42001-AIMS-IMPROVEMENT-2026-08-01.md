@@ -85,6 +85,9 @@
 禁止多軌共同修改單一總表。各軌先產出自己的 manifest；整合軌最後彙總 SoA 與 evidence
 index，降低 markdown merge conflict 與過早宣稱控制已完成的風險。
 
+`docs/README.md` 採單一入口策略：GOV 首次加入唯一的 AIMS 導覽連結；中間工作軌不得
+反覆修改該檔，只維護各自 ownership 內的 manifest；SOA 整合軌最後才更新完整索引。
+
 ### 4.3 批次與整合順序
 
 ```text
@@ -139,6 +142,8 @@ interface 改變，下游必須 rebase 並更新 traceability，不得由整合�
 ### M3 — 稽核、CAPA 與管理審查（P0）
 
 - 建立監測指標與 audit programme；由未實作該控制的人執行內部稽核。
+- 必須記錄 auditor 與受稽控制作者的獨立性；若沒有獨立人員，只能標記為
+  readiness exercise／gap review，不得宣稱完成獨立內部稽核。
 - findings 進 CAPA，完成 root cause、修正、矯正措施與有效性檢查。
 - Exit：內部稽核、CAPA sample、management review 均有 commit-bound evidence。
 
@@ -180,4 +185,3 @@ incident/CAPA 結果及內部稽核共同判定。
 2. CEO 核准每張 issue 的範圍、依賴、reviewer 與 ownership 後才建立 worktree。
 3. 第一批只啟動 GOV；其 interface 草案確認後，RISK/SUPPORT/LIFE 才平行開工。
 4. 每三個 PR 或每個 milestone 回報一次；只有親自驗證的控制才標記完成。
-
