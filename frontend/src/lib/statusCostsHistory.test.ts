@@ -130,6 +130,24 @@ describe('isCostsData / /api/costs', () => {
     if (result.ok) expect(result.data).toEqual(data)
   })
 
+  it('account-level run 的 coin 為 null → 正常放行', async () => {
+    const data = validCostsData()
+    data.runs[0].coin = null
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<CostsData>('/api/costs', undefined, isCostsData)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.data).toEqual(data)
+  })
+
+  it('runs 某筆 coin 為非字串且非 null → parse_error', async () => {
+    const data = validCostsData()
+    asMutable(data.runs[0]).coin = 42
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<CostsData>('/api/costs', undefined, isCostsData)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
   it('by_model_detail 某 model 缺 tokens_out → parse_error', async () => {
     const data = validCostsData()
     delete asMutable(data.by_model_detail['claude-3']).tokens_out

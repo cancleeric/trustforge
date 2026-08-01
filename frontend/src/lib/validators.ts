@@ -472,7 +472,7 @@ function isLedgerRunRecord(value: unknown): value is LedgerRunRecord {
     typeof value.ts === 'string' &&
     typeof value.total_cost_usd === 'number' &&
     Array.isArray(value.calls) &&
-    (value.coin === undefined || typeof value.coin === 'string') &&
+    (value.coin === undefined || value.coin === null || typeof value.coin === 'string') &&
     (value.question_type === undefined || typeof value.question_type === 'string') &&
     (value.offline === undefined || typeof value.offline === 'boolean')
   )

@@ -317,7 +317,7 @@ npm run lint
 <p>Vite config（<code>vite.config.ts</code>）設定 API proxy：</p>
 <ul>
   <li>開發時 <code>/api/*</code> 請求由 Vite dev server proxy 轉發到 <code>VITE_API_PROXY_TARGET</code></li>
-  <li>預設目標：<code>http://13.211.110.218</code>（live demo EC2）</li>
+  <li>預設目標：<code>http://127.0.0.1:8799</code>（本機後端）</li>
   <li>本機開發可改為 <code>http://127.0.0.1:8080</code></li>
   <li>Build 產物無 proxy——nginx 在生產環境處理 <code>/api/*</code> 反向代理</li>
 </ul>

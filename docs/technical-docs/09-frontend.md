@@ -309,7 +309,7 @@ Vite config（ `vite.config.ts `）設定 API proxy：
 
 - 開發時 `/api/* `請求由 Vite dev server proxy 轉發到 `VITE_API_PROXY_TARGET `
 
-- 預設目標： `http://13.211.110.218 `（live demo EC2）
+- 預設目標： `http://127.0.0.1:8799 `（本機後端）
 
 - 本機開發可改為 `http://127.0.0.1:8080 `
 

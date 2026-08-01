@@ -30,9 +30,28 @@ Operations Guide · 起停控制、成本控管、監控告警、排程器、緊
 
 #### 1.1 本機開發
 
-`# 啟動（前景） ``python src/trustforge/web.py ````# 啟動（背景 daemon） ``./scripts/trustforge_control.sh start ````# 停止 ``./scripts/trustforge_control.sh stop ````# 檢查狀態 ``./scripts/trustforge_control.sh status `
+本機開發狀態不能寫成固定 PID、固定 `/private/tmp/...` 工作目錄或「目前正在跑」。那些只是一台機器某一刻的觀測值，不能當成 repo 技術文件的穩定事實。
 
-狀態檔案 `TRUSTFORGE_RUNTIME_STATE_PATH `（預設 `out/trustforge-runtime-control.json `），記錄目前是否 running。
+| 項目 | 預設 / 範例 | 正確說法 |
+| --- | --- | --- |
+| 前端 Vite dev | `http://127.0.0.1:5173`（若啟動 `npm run dev`） | 只是開發伺服器預設，不代表現在一定有服務在 listen；以 `ss` / `lsof` / `curl` 當下驗證為準。 |
+| 後端 API | `http://127.0.0.1:${PORT:-8080}`；部分本機測試可改用 `8799` | port 由啟動環境決定；文件不可寫死為「PID 93098 正在跑」。 |
+| Vite `/api` proxy | 通常代理到本機後端 | proxy 只代表瀏覽器同源開發路徑；後端本身若有 Bedrock / DynamoDB / SSM / 外部 API credential，仍可能呼叫 AWS 或外部服務。要保證不燒 AWS，需明確使用 offline / sample / 空 `BEDROCK_MODEL_ID` / 測試 credential。 |
+
+```bash
+# 後端：離線安全啟動範例（不保證 port，依程式與 PORT env）
+CACHE_BACKEND=sqlite TRUSTFORGE_DISABLE_ADMIN_CONFIG=1 BEDROCK_MODEL_ID= python -m trustforge.web
+
+# 前端：Vite dev server
+cd frontend
+npm run dev -- --host 127.0.0.1
+
+# 當下驗證，不把結果寫成永久狀態
+curl -fsS http://127.0.0.1:8080/api/health || curl -fsS http://127.0.0.1:8799/api/health
+curl -fsS http://127.0.0.1:5173/ >/dev/null
+```
+
+狀態檔案 `TRUSTFORGE_RUNTIME_STATE_PATH`（預設 `out/trustforge-runtime-control.json`），只記錄 runtime control 狀態；真正健康度仍以當下 health check 為準。
 
 #### 1.2 Production（EC2 systemd）
 

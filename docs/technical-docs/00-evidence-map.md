@@ -41,33 +41,33 @@ Evidence-first, better than generic workshop docs
 
 | 能力 | repo 檔案 | 文件措辭規則 |
 | --- | --- | --- |
-| Bedrock 唯一模型入口 | `src/trustforge/bedrock.py `、 `pipeline.py `、 `agent/orchestrator.py ` | 可寫「程式支援／集中入口」；只有 `bedrock_capable=true `才能寫 live enabled。 |
-| EC2/nginx/TLS 部署 | `deploy/deploy_ec2.sh `、 `deploy/nginx.conf `、 `deploy/setup_tls.sh `、 `deploy/cutover_switch.sh ` | 可寫 production 路徑與回滾腳本存在；線上 health 已驗證。 |
-| DynamoDB cache / ledger / budget / lease | `ingestion/cache.py `、 `ledger.py `、 `budget_counter.py `、 `rate_limit_store.py `、 `idempotency_lease.py ` | cache 線上 connected 可寫已驗證；其他 store 若未讀線上表，不寫「全部已啟用」。 |
-| SSM token 交接 | `ssm_params.py `、 `deploy/put_runtime_tokens.sh `、 `deploy/deploy_ec2.sh ` | 可寫 token 不進 repo／不進公開文件；不要輸出 token 值。 |
-| API envelope / endpoints | `web.py `、 `docs/api/openapi.yaml `、 `frontend/src/lib/endpoints.ts ` | 可寫 API 端點與 `{ok,data,error} `，並以 smoke 結果佐證。 |
-| 前端 SPA | `frontend/src/App.tsx `、 `frontend/src/pages/*.tsx `、 `frontend/package.json ` | 可寫 React/Vite 技術棧與頁面路由；UI 狀態需用瀏覽器 eye scan 驗證。 |
-| 本機品質 gate | `.githooks/pre-push `、 `pyproject.toml `、 `frontend/package.json ` | 可寫 gate 包含 backend tests、data contracts、stub scan、question bank、frontend test/lint/build、diff check。 |
-| Release governance | `docs/governance/PRE_PUSH_RELEASE_GATES.md `、 `docs/RELEASE-DEPLOY-GOVERNANCE.md ` | 可寫目前 release/deploy gate 是 controlled local process；不要寫 GitHub Actions 是 production release gate。 |
-| AI/agent handoff contract | `llms.txt `、 `frontend/public/llms.txt `、 `docs/api/openapi.yaml ` | 可寫有機器可讀的一頁式契約與 OpenAPI；交付前需 live curl 確認端點有部署。 |
+| Bedrock 唯一模型入口 | `src/trustforge/bedrock.py`、`pipeline.py`、`agent/orchestrator.py` | 可寫「程式支援／集中入口」；只有 `bedrock_capable=true` 才能寫 live enabled。 |
+| Competition Lambda / RPS / provider cache | `src/trustforge/lambda_handler.py`、`lambda_provider_cache.py`、`lambda_secret.py`、`deploy/competition-lambda-live-contract.json` | 可寫 Lambda contract / distributed Bedrock RPS / provider secret boundary 已有程式與測試；若未讀 AWS Console，不寫「production 已啟用」。 |
+| 台灣監管來源 adapters | `src/trustforge/ingestion/taiwan_regulatory.py`、`tw_datetime.py`、`safe_fetch.py` | 可寫 FSC / MOPS / TWSE / TPEx adapter 已接；BlockTempo 仍是待辦。 |
+| 外部來源主線 | `ingestion/whale_trades.py`、`etherscan.py`、`cmc.py`、`defillama.py` | 可寫 Whale Alert + Arkham、Etherscan、CoinMarketCap、DefiLlama 已有 connector；key-based source 未配置時降級，不寫成 live 成功。 |
+| EC2/nginx/TLS 部署 | `deploy/deploy_ec2.sh`、`deploy/nginx.conf`、`deploy/setup_tls.sh`、`deploy/cutover_switch.sh` | 可寫 production 路徑與回滾腳本存在；線上 health 需重驗後才寫已驗證。 |
+| DynamoDB cache / ledger / budget / lease | `ingestion/cache.py`、`ledger.py`、`budget_counter.py`、`rate_limit_store.py`、`idempotency_lease.py` | cache 線上 connected 可寫已驗證；其他 store 若未讀線上表，不寫「全部已啟用」。 |
+| SSM token / credential boundary | `ssm_params.py`、`whale_alert_secret.py`、`cmc_secret.py`、`etherscan_secret.py`、`deploy/put_runtime_tokens.sh` | 可寫 token 不進 repo／不進公開文件；不要輸出 token 值。 |
+| Hermes production audit / signed evidence | `hermes_audit.py`、`hermes_audit_contracts.py`、`hermes_audit_signing.py`、`scripts/hermes_production_audit.py` | 可寫有 production audit 與簽章證據鏈；若未跑 live audit，只寫 repo 支援。 |
+| API envelope / endpoints | `web.py`、`docs/api/openapi.yaml`、`frontend/src/lib/endpoints.ts` | 可寫 API 端點與 `{ok,data,error}`，並以 smoke 結果佐證。 |
+| 前端 SPA / 展示 UI | `frontend/src/App.tsx`、`frontend/src/pages/*.tsx`、`frontend/src/hermes/*`、`frontend/package.json` | 可寫 React/Vite 技術棧、右欄固定、圖表化／摺疊；UI 狀態需用 browser eye scan 驗證。 |
+| 本機品質 gate | `.githooks/pre-push`、`pyproject.toml`、`frontend/package.json`、`scripts/security_gate_push.py` | 可寫 gate 包含 backend tests、data contracts、stub scan、question bank、frontend test/lint/build、diff check。 |
+| Release governance | `docs/governance/PRE_PUSH_RELEASE_GATES.md`、`docs/RELEASE-DEPLOY-GOVERNANCE.md` | 可寫目前 release/deploy gate 是 controlled local process；不要寫 GitHub Actions 是 production release gate。 |
+| AI/agent handoff contract | `llms.txt`、`frontend/public/llms.txt`、`docs/api/openapi.yaml` | 可寫有機器可讀的一頁式契約與 OpenAPI；交付前需 live curl 確認端點有部署。 |
 
 ### 3. 可量化專案規模
 
-#### 134 個 Python 模組
+#### 1,837 個 git 追蹤檔
 
-以 `src/trustforge/**/*.py `實際檔案數計算。
+以目前 `develop` 的 `git ls-files` 計算。
 
-#### 223 個後端測試檔
+#### 約 369,717 行程式／設定／文件
 
-以 `tests/test_*.py `/ `*_test.py `實際檔案數計算。
+統計常見程式與設定副檔名（Python / TS / TSX / JS / JSON / YAML / shell / HTML / CSS / Rust），排除 `.git`、`.venv`、`node_modules`、build / cache 目錄。
 
-#### 57 個前端測試檔
+#### 394 個後端測試檔、6,259 個 test functions
 
-以 `frontend/src/**/*.test.* `實際檔案數計算。
-
-#### 984 個 git 追蹤檔
-
-以 `git ls-tree -r --name-only origin/main `計算；本輪未 checkout，避免覆蓋主 repo 既有未提交訓練資料。
+以 `tests/test_*.py` 與 AST 掃描計算；實際完整 gate 仍以 `.githooks/pre-push` 為準。
 
 ### 4. 文件真實性規則
 
