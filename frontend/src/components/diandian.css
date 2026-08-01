@@ -341,3 +341,215 @@
   .hermes-energy-station { min-width: 100px !important; }
 }
 
+
+/* ============================================
+   #1271 Right Rail: fixed top + scrollable body
+   ============================================ */
+.hermes-right-rail {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+.hermes-right-rail-fixed,
+.hermes-right-rail > :first-child {
+  flex-shrink: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 2 !important;
+  padding: 12px 16px !important;
+}
+.hermes-right-rail-scroll,
+.hermes-right-rail > :nth-child(n+2) {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  scrollbar-width: thin !important;
+  padding: 0 16px 16px !important;
+}
+.hermes-right-rail > :nth-child(n+2)::-webkit-scrollbar {
+  width: 4px;
+}
+.hermes-right-rail > :nth-child(n+2)::-webkit-scrollbar-thumb {
+  background: rgba(77, 216, 224, 0.3);
+  border-radius: 2px;
+}
+
+/* Left rail: narrower, 7 chars max */
+.hermes-left-rail {
+  width: clamp(160px, 14vw, 210px) !important;
+  flex-shrink: 0 !important;
+}
+.hermes-left-rail button,
+.hermes-left-rail label,
+.hermes-left-rail a {
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+/* Right rail: wider */
+.hermes-right-rail {
+  width: clamp(260px, 24vw, 380px) !important;
+}
+
+@media (max-width: 900px) {
+  .hermes-left-rail { width: auto !important; }
+  .hermes-right-rail { width: auto !important; }
+}
+
+/* ============================================
+   #1270 Collapsible sections (details/summary)
+   ============================================ */
+.trustforge-collapse {
+  border: 1px solid rgba(77, 216, 224, 0.2);
+  border-radius: 8px;
+  margin: 8px 0;
+  overflow: hidden;
+  background: rgba(10, 16, 24, 0.5);
+}
+.trustforge-collapse summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: #dce9f2;
+  background: rgba(77, 216, 224, 0.05);
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.trustforge-collapse summary::-webkit-details-marker { display: none; }
+.trustforge-collapse summary::before {
+  content: '▸';
+  color: #4dd8e0;
+  transition: transform 0.2s;
+}
+.trustforge-collapse[open] summary::before {
+  transform: rotate(90deg);
+}
+.trustforge-collapse summary:hover {
+  background: rgba(77, 216, 224, 0.1);
+}
+.trustforge-collapse[open] summary {
+  border-bottom: 1px solid rgba(77, 216, 224, 0.15);
+}
+.trustforge-collapse-content {
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(220, 233, 242, 0.85);
+}
+
+/* ============================================
+   #1270 Data visualization helpers
+   ============================================ */
+
+/* Progress bar for completeness */
+.trustforge-progress {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+.trustforge-progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+.trustforge-progress-fill.high { background: linear-gradient(90deg, #4dd8e0, #86efac); }
+.trustforge-progress-fill.mid { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.trustforge-progress-fill.low { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+/* Horizontal bar chart for trust scores */
+.trustforge-bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.trustforge-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.trustforge-bar-label {
+  width: 80px;
+  flex-shrink: 0;
+  color: rgba(220, 233, 242, 0.7);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trustforge-bar-track {
+  flex: 1;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.trustforge-bar-fill {
+  height: 100%;
+  border-radius: 7px;
+  background: linear-gradient(90deg, #4dd8e0, #67e8f9);
+  transition: width 0.4s ease;
+}
+.trustforge-bar-value {
+  width: 36px;
+  text-align: right;
+  color: #4dd8e0;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+/* Evidence table */
+.trustforge-evidence-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0;
+}
+.trustforge-evidence-table th {
+  text-align: left;
+  padding: 6px 8px;
+  color: #4dd8e0;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(77, 216, 224, 0.3);
+  font-size: 11px;
+}
+.trustforge-evidence-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: rgba(220, 233, 242, 0.8);
+}
+.trustforge-evidence-table tr:hover td {
+  background: rgba(77, 216, 224, 0.05);
+}
+
+/* Kind distribution (mini pie alternative - simple tags) */
+.trustforge-kind-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.trustforge-kind-tag {
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(77, 216, 224, 0.12);
+  color: #4dd8e0;
+  border: 1px solid rgba(77, 216, 224, 0.25);
+}
+.trustforge-kind-tag .count {
+  margin-left: 4px;
+  opacity: 0.7;
+}
