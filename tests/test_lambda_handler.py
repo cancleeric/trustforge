@@ -37,7 +37,7 @@ def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> di
 def test_competition_offline_hosted_rejects_non_allowlisted_routes(
     monkeypatch, method, path
 ):
-    monkeypatch.setenv("TRUSTFORGE_COMPETITION_OFFLINE_HOSTED", "1")
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "offline")
     event = _event(path)
     event["requestContext"]["http"].update({"method": method, "path": path})
 
@@ -49,13 +49,46 @@ def test_competition_offline_hosted_rejects_non_allowlisted_routes(
 
 @pytest.mark.parametrize("path", ["/", "/healthz"])
 def test_competition_offline_hosted_allows_get_root_and_health(monkeypatch, path):
-    monkeypatch.setenv("TRUSTFORGE_COMPETITION_OFFLINE_HOSTED", "1")
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "offline")
     event = _event(path)
     event["requestContext"]["http"].update({"method": "GET", "path": path})
 
     response = lambda_handler.handler(event)
 
     assert response["statusCode"] == 200
+
+
+def test_competition_offline_landing_is_truthful_and_has_no_analysis_cta(monkeypatch):
+    monkeypatch.setattr(lambda_handler, "_COMPETITION_MODE", "offline")
+
+    response = lambda_handler.handler(_event("/"))
+
+    assert "AWS 離線唯讀展示" in response["body"]
+    assert "不提供分析執行" in response["body"]
+    assert "/analyze" not in response["body"]
+
+
+def test_competition_function_requires_explicit_mode(monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "competition-trustforge-team11-offline")
+    monkeypatch.delenv("TRUSTFORGE_COMPETITION_MODE", raising=False)
+
+    with pytest.raises(RuntimeError, match="explicit offline/live mode"):
+        lambda_handler._competition_mode()
+
+
+def test_noncompetition_function_preserves_existing_routes(monkeypatch):
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "trustforge-demo")
+    monkeypatch.delenv("TRUSTFORGE_COMPETITION_MODE", raising=False)
+
+    assert lambda_handler._competition_mode() is None
+
+
+def test_secret_hydration_precedes_delayed_web_import():
+    source = __import__("inspect").getsource(lambda_handler)
+
+    assert source.index("hydrate_live_token()") < source.index(
+        'importlib.import_module(".web", __package__)'
+    )
 
 
 # ---------------------------------------------------------------------------

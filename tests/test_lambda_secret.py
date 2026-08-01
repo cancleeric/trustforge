@@ -13,8 +13,8 @@ class _SecretsClient:
         self.error = error
         self.calls: list[str] = []
 
-    def get_secret_value(self, *, SecretId: str):
-        self.calls.append(SecretId)
+    def get_secret_value(self, **request):
+        self.calls.append(request)
         if self.error is not None:
             raise self.error
         return self.response
@@ -24,6 +24,7 @@ class _SecretsClient:
 def _reset_secret_loader(monkeypatch):
     monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN_SECRET_ARN", raising=False)
     monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID", raising=False)
     monkeypatch.setattr(lambda_secret, "_hydrated", False)
     yield
     os.environ.pop("TRUSTFORGE_LIVE_TOKEN", None)
@@ -44,15 +45,18 @@ def test_secret_string_is_loaded_once_per_cold_start(monkeypatch):
 
     assert lambda_secret.hydrate_live_token(client=client) is True
     assert lambda_secret.hydrate_live_token(client=client) is True
-    assert client.calls == [arn]
+    assert client.calls == [{"SecretId": arn}]
     assert os.environ["TRUSTFORGE_LIVE_TOKEN"] == "private-value"
 
 
-@pytest.mark.parametrize("response", [{}, {"SecretBinary": b"x"}, {"SecretString": ""}, {"SecretString": "   "}])
+@pytest.mark.parametrize(
+    "response",
+    [None, [], {}, {"SecretBinary": b"x"}, {"SecretString": 7}, {"SecretString": []}, {"SecretString": ""}, {"SecretString": "   "}],
+)
 def test_missing_nonempty_secret_string_fails_closed(monkeypatch, response):
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_ARN", "arn:test")
 
-    with pytest.raises(RuntimeError, match="non-empty SecretString"):
+    with pytest.raises(RuntimeError, match="invalid response|non-empty SecretString"):
         lambda_secret.hydrate_live_token(client=_SecretsClient(response))
     assert "TRUSTFORGE_LIVE_TOKEN" not in os.environ
     assert lambda_secret._hydrated is False
@@ -74,3 +78,23 @@ def test_plaintext_and_secret_arn_cannot_coexist(monkeypatch):
 
     with pytest.raises(RuntimeError, match="must not be configured"):
         lambda_secret.hydrate_live_token(client=_SecretsClient())
+
+
+def test_version_id_is_pinned_for_rotation(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_ARN", "arn:test")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID", "version-2")
+    client = _SecretsClient({"SecretString": "rotated-value"})
+
+    assert lambda_secret.hydrate_live_token(client=client) is True
+    assert client.calls == [{"SecretId": "arn:test", "VersionId": "version-2"}]
+
+
+def test_token_value_is_not_emitted(monkeypatch, capsys, caplog):
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_ARN", "arn:test")
+    token = "never-print-this-value"
+
+    assert lambda_secret.hydrate_live_token(client=_SecretsClient({"SecretString": token}))
+    captured = capsys.readouterr()
+    assert token not in captured.out
+    assert token not in captured.err
+    assert all(token not in record.getMessage() for record in caplog.records)

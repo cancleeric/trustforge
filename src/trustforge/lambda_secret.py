@@ -12,6 +12,7 @@ from typing import Any
 
 
 _SECRET_ARN_ENV = "TRUSTFORGE_LIVE_TOKEN_SECRET_ARN"
+_SECRET_VERSION_ENV = "TRUSTFORGE_LIVE_TOKEN_SECRET_VERSION_ID"
 _TOKEN_ENV = "TRUSTFORGE_LIVE_TOKEN"
 _hydrated = False
 
@@ -41,7 +42,13 @@ def hydrate_live_token(*, client: Any | None = None) -> bool:
 
         client = boto3.client("secretsmanager")
 
-    response = client.get_secret_value(SecretId=secret_arn)
+    request = {"SecretId": secret_arn}
+    secret_version = os.environ.get(_SECRET_VERSION_ENV, "").strip()
+    if secret_version:
+        request["VersionId"] = secret_version
+    response = client.get_secret_value(**request)
+    if not isinstance(response, dict):
+        raise RuntimeError("configured live-token secret returned an invalid response")
     token = response.get("SecretString")
     if not isinstance(token, str) or not token.strip():
         raise RuntimeError("configured live-token secret has no non-empty SecretString")
@@ -49,4 +56,3 @@ def hydrate_live_token(*, client: Any | None = None) -> bool:
     os.environ[_TOKEN_ENV] = token
     _hydrated = True
     return True
-
