@@ -1,14 +1,16 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${TRUSTFORGE_HOME:-${0:A:h:h}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${TRUSTFORGE_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PYTHON="${TRUSTFORGE_PYTHON:-$ROOT/.venv/bin/python}"
 LABEL="com.hurricanesoft.trustforge-hourly-release-train"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 ENABLE=1
 EXECUTE=0
 
-if [[ -n "${BEDROCK_MODEL_ID-}" && ! "${BEDROCK_MODEL_ID}" =~ '^[A-Za-z0-9._:-]+$' ]]; then
+MODEL_ID_PATTERN='^[A-Za-z0-9._:-]+$'
+if [[ -n "${BEDROCK_MODEL_ID-}" && ! "${BEDROCK_MODEL_ID}" =~ $MODEL_ID_PATTERN ]]; then
   echo "BEDROCK_MODEL_ID contains invalid characters" >&2
   exit 2
 fi

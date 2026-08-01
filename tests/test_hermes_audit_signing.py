@@ -48,7 +48,7 @@ from trustforge.hermes_audit_signing import (
 )
 
 REGION = "ap-southeast-2"
-INSTANCE = "i-0152b70368358a81c"
+INSTANCE = "i-0" + "0" * 16
 
 
 def _digest(label: str) -> str:

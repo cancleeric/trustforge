@@ -73,7 +73,7 @@ Before any production read, use the exact target and output path:
 ```sh
 .venv/bin/python scripts/hermes_production_audit.py \
   --region ap-southeast-2 \
-  --instance-id i-0152b70368358a81c \
+  --instance-id <EC2_INSTANCE_ID> \
   --output-dir out/audits/hermes \
   --expected-release v0.27.37 \
   --dry-run
@@ -112,7 +112,7 @@ verification keys. Invoke the real audit as:
 ```sh
 .venv/bin/python scripts/hermes_production_audit.py \
   --region ap-southeast-2 \
-  --instance-id i-0152b70368358a81c \
+  --instance-id <EC2_INSTANCE_ID> \
   --output-dir out/audits/hermes \
   --expected-release v0.27.37 \
   --ceo-approval ceo-approval.json \

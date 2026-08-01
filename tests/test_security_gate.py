@@ -55,6 +55,43 @@ class TestSecretDetection:
         assert result.p0_count == 0
         assert result.p1_count == 0
 
+    def test_known_i18n_token_labels_are_not_p0(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "frontend/src/hermes/hermesI18n.tsx",
+            "shipGateNeedToken: '請先到管理頁解鎖 Admin Token。'\n"
+            "gasLabel: 'Gas token'\n",
+        )
+        result = scan(tmp_path)
+        assert result.p0_count == 0
+
+    def test_frontend_test_dummy_api_key_is_relaxed(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "frontend/src/lib/adminApi.test.ts",
+            "  api_key: 'must-not-be-accepted',\n",
+        )
+        result = scan(tmp_path)
+        assert result.p0_count == 0
+        assert result.p2_count >= 1
+
+    def test_arbitrary_frontend_test_secret_remains_p0(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "frontend/src/lib/other.test.ts",
+            "const payload = {api_key: 'real-looking-secret-value'}\n",
+        )
+        result = scan(tmp_path)
+        assert result.p0_count == 1
+
+    def test_dummy_words_cannot_hide_a_second_secret(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "frontend/src/lib/adminApi.test.ts",
+            "const payload = {api_key: 'must-not-be-accepted', secret: 'actual-secret-value'}\n",
+        )
+        assert scan(tmp_path).p0_count >= 1
+
 
 class TestInternalNetDetection:
     def test_localhost_in_source(self, tmp_path: Path) -> None:

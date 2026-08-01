@@ -88,12 +88,19 @@ def scan_training_data(training_dir: Path) -> TrainingDataScan:
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(path, flags)
             descriptor_stat = os.fstat(descriptor)
+            reread_entry_stat = path.lstat()
             if (
                 not stat.S_ISREG(descriptor_stat.st_mode)
                 or descriptor_stat.st_dev != entry_stat.st_dev
                 or descriptor_stat.st_ino != entry_stat.st_ino
                 or descriptor_stat.st_size != entry_stat.st_size
                 or descriptor_stat.st_mtime_ns != entry_stat.st_mtime_ns
+                or descriptor_stat.st_ctime_ns != entry_stat.st_ctime_ns
+                or reread_entry_stat.st_dev != entry_stat.st_dev
+                or reread_entry_stat.st_ino != entry_stat.st_ino
+                or reread_entry_stat.st_size != entry_stat.st_size
+                or reread_entry_stat.st_mtime_ns != entry_stat.st_mtime_ns
+                or reread_entry_stat.st_ctime_ns != entry_stat.st_ctime_ns
             ):
                 os.close(descriptor)
                 raise TrainingDataUnavailable("training data file changed during scan")
