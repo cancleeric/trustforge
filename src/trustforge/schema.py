@@ -92,6 +92,10 @@ class Evidence:
     # 空字串 = 尚未填寫。純 additive：預設空字串保 asdict round-trip 與所有
     # 呼叫端不受影響；本 PR 不消費此欄位（dark），僅定義 schema 位置。
     claim_id: str = ""
+    # Phase 0 dashboard: claim-level direction for honest pro/con trust averages.
+    # Append-only with an empty default so positional callers and legacy snapshots
+    # remain loadable.
+    direction: str = ""      # bullish | bearish | neutral | "" (legacy/unknown)
 
     def to_dict(self) -> dict:
         return asdict(self)

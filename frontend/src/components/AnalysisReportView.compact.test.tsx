@@ -68,24 +68,30 @@ describe('AnalysisReportView compact 模式（比較頁）', () => {
     expect(gaugeGrid).toBeTruthy()
   })
 
-  it('compact=true 時 stats grid 用 gap-1 而非 gap-2', () => {
-    const { container } = renderWithCompact(true)
-    const statsGrid = container.querySelector('.grid.grid-cols-3')!
-    expect(statsGrid.className).toContain('gap-1')
-    expect(statsGrid.className).not.toContain('gap-2')
-  })
-
-  it('compact=false 時 stats grid 用 gap-2', () => {
+  it('keeps the radar in the collapsed L3 trust tab', () => {
     const { container } = renderWithCompact(false)
-    const statsGrid = container.querySelector('.grid.grid-cols-3')!
-    expect(statsGrid.className).toContain('gap-2')
-    expect(statsGrid.className).not.toContain('gap-1')
-  })
-
-  it('shows the radar in the first-glance summary, outside closed technical details', () => {
-    const { container } = renderWithCompact(false)
-    expect(screen.getByText('radar-summary').closest('#technical-analysis')).toBeNull()
+    expect(screen.getByText('radar-summary').closest('#technical-analysis')).not.toBeNull()
     expect((container.querySelector('#technical-analysis') as HTMLDetailsElement).open).toBe(false)
+  })
+
+  it('shows the four-layer dashboard labels', () => {
+    renderWithCompact(false)
+    expect(screen.getByText(/L1 · Executive Summary/)).toBeInTheDocument()
+    expect(screen.getByText(/L2 · 正反證據對照/)).toBeInTheDocument()
+    expect(screen.getByText(/L3 · 深度面板/)).toBeInTheDocument()
+    expect(screen.getByText(/L4 ·/)).toBeInTheDocument()
+  })
+
+  it('shows relative freshness and evidence-kind counts in L1', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-01T00:07:00Z'))
+    try {
+      renderWithCompact(false)
+      expect(screen.getByText('更新於 7 分鐘前')).toBeInTheDocument()
+      expect(screen.getByText('news 1')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does not mount lazy evidence charts until the evidence details are opened', async () => {

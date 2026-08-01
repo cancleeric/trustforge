@@ -4,7 +4,6 @@ import ConfidenceGauge from './ConfidenceGauge'
 import TrustBreakdown from './TrustBreakdown'
 import FactsInferenceLadder from './FactsInferenceLadder'
 import KeyBasisList from './KeyBasisList'
-import CrossSourceSignalPanel from './CrossSourceSignalPanel'
 import InsightExplainabilityPanel from './InsightExplainabilityPanel'
 import HypothesisLedgerPanel from './HypothesisLedgerPanel'
 import EvidenceTable from './EvidenceTable'
@@ -21,11 +20,31 @@ import GlossaryTerm from './GlossaryTerm'
 import AnnotatedText from './AnnotatedText'
 import { useHermesI18n } from '../hermes/hermesI18n'
 import AssetIntrinsicShadowPanel from './AssetIntrinsicShadowPanel'
+import ProConPanel from './ProConPanel'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
 const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
 const EvidenceDistributionCharts = lazy(() => import('./EvidenceDistributionCharts'))
+
+type DeepDiveTab = 'trust' | 'reasoning' | 'risk'
+
+function relativeMinutes(timestamp: string): string {
+  const value = Date.parse(timestamp)
+  if (!Number.isFinite(value)) return '時間未知'
+  const minutes = Math.max(0, Math.floor((Date.now() - value) / 60_000))
+  if (minutes < 1) return '剛剛'
+  return `${minutes} 分鐘前`
+}
+
+function evidenceKindCounts(data: AnalyzeData): Array<[string, number]> {
+  const counts = new Map<string, number>()
+  for (const item of data.evidence) {
+    const kind = item.kind.trim() || 'unknown'
+    counts.set(kind, (counts.get(kind) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b))
+}
 
 /** 單份分析報告的完整渲染區塊——`AnalyzePage`（單幣）與 `ComparePage`
  * （雙幣並列，各自渲染一份 `report_a`/`report_b`）共用同一顆元件，兩邊
@@ -37,12 +56,13 @@ const EvidenceDistributionCharts = lazy(() => import('./EvidenceDistributionChar
 export default function AnalysisReportView({ data, heading, mode, compact }: { data: AnalyzeData; heading?: string; mode?: string; compact?: boolean }) {
   const { t } = useHermesI18n()
   const [evidenceOpen, setEvidenceOpen] = useState(false)
+  const [deepDiveTab, setDeepDiveTab] = useState<DeepDiveTab>('trust')
   // N71（CEO：「手動分析的報告要在哪裡下載？執行過程的 LOG 要在哪裡看」）：
   // 三顆下載鈕本來只在最底下那個預設收合的「技術細節」裡，跑完分析根本找不到。
   // 這裡在報告抬頭補一排永遠看得見的動作，外加一顆帶去執行過程面板的按鈕
   // （順手把 `<details>` 展開——不展開的話捲過去只會看到收合的標題列）。
   const openExecution = () => {
-    const details = document.getElementById('technical-analysis') as HTMLDetailsElement | null
+    const details = document.getElementById('evidence-list') as HTMLDetailsElement | null
     if (!details) return
     details.open = true
     details.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -51,6 +71,7 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
     agent: 'hermes', run_id: 'legacy-run', started_at: data.report.generated_at,
     elapsed_sec: 0, budget_sec: 900, nodes: [],
   }
+  const kindCounts = evidenceKindCounts(data)
   return (
     <div className="flex flex-col gap-4">
       <div className="border-b border-tf-border pb-4">
@@ -61,11 +82,12 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
             </span>
           )}
           <h2 className={`${compact ? 'text-base' : 'text-xl'} font-bold text-tf-text`}>{data.report.coin}</h2>
-          <DirectionBadge direction={data.report.direction} />
           <span className="font-mono text-xs text-tf-muted">run {data.execution?.run_id ?? 'legacy-run'}</span>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-tf-muted">
-          <span title={data.report.generated_at}>{t('arvGeneratedAtPrefix')}{formatTimestamp(data.report.generated_at)}</span>
+          <span title={`${t('arvGeneratedAtPrefix')}${formatTimestamp(data.report.generated_at)}`}>
+            更新於 {relativeMinutes(data.report.generated_at)}
+          </span>
           <span>{data.evidence.length}{t('arvEvidenceCountSuffix')}</span>
           <span>{t('arvVersionPrefix')}{data.version}</span>
           {mode === 'multi_source' && (
@@ -86,102 +108,106 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
         </div>
       </div>
 
-      <PlainLanguageResultSummary data={data} />
-
-      <AssetIntrinsicShadowPanel value={data.report.asset_intrinsic_assessment} />
-
-      <div className={`grid grid-cols-1 gap-4 ${compact ? '' : 'xl:grid-cols-[220px_minmax(0,1fr)]'}`}>
-        <ConfidenceGauge
-          calibratedConfidence={data.report.calibrated_confidence}
-          rawConfidence={data.report.confidence}
-          decisionState={data.report.decision_state}
-        />
-        <section className="hermes-clip border-l-2 border-tf-accent bg-tf-card p-4" aria-label={t('arvMarketConclusion')}>
-          <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">{t('arvMarketConclusion')}</p>
-          <p className="mt-2 text-base font-semibold leading-7 text-tf-text">
-            <AnnotatedText text={data.report.market_judgment} />
-          </p>
-          <div className={`mt-4 grid grid-cols-3 ${compact ? 'gap-1' : 'gap-2'} border-t border-tf-border pt-3 text-xs`}>
-            <div><p className="text-tf-muted">{t('arvFacts')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.facts.length}</p></div>
-            <div><p className="text-tf-muted">{t('arvInferences')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.inferences.length}</p></div>
-            <div><p className="text-tf-muted">{t('arvContrarianSignals')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.contrarian.length}</p></div>
-          </div>
-        </section>
-      </div>
-
-      <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
-        <TrustRadarChart radar={data.trust_radar} />
-      </Suspense>
-
-      <details id="technical-analysis" className="hermes-technical-details hermes-clip border border-tf-border bg-tf-card">
-        <summary>{t('arvTechnicalDetailsSummary')} <span>{t('arvTechnicalDetailsHint')}</span></summary>
-        <div className="flex flex-col gap-4 p-4">
-          <HermesExecutionPanel execution={data.execution} events={data.execution_log} report={data.report} evidence={data.evidence} />
-          <TrustBreakdown data={data.trust_components_aggregate} />
-          <TrustTrendSection coin={data.report.coin} />
+      <section aria-labelledby="executive-summary-title" className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">L1 · Executive Summary</p>
+          <DirectionBadge direction={data.report.direction} />
+          <span className="ml-auto text-xs text-tf-muted">{data.evidence.length} 筆證據</span>
+          {kindCounts.map(([kind, count]) => (
+            <span key={kind} className="rounded-full border border-tf-border px-2 py-0.5 text-xs text-tf-muted">{kind} {count}</span>
+          ))}
         </div>
-      </details>
+        <h3 id="executive-summary-title" className="sr-only">Executive Summary</h3>
+        <div className={`grid grid-cols-1 gap-4 ${compact ? '' : 'xl:grid-cols-[220px_minmax(0,1fr)]'}`}>
+          <ConfidenceGauge
+            calibratedConfidence={data.report.calibrated_confidence}
+            rawConfidence={data.report.confidence}
+            decisionState={data.report.decision_state}
+          />
+          <PlainLanguageResultSummary data={data} />
+        </div>
+      </section>
 
-      <details className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
-        <summary>展開詳細分析（{data.report.facts.length + data.report.inferences.length} 項推理、{data.report.contrarian.length} 項反方訊號）</summary>
-        <div className="flex flex-col gap-4">
-      <FactsInferenceLadder
+      <ProConPanel
         facts={data.report.facts}
-        inferences={data.report.inferences}
-        marketJudgment={data.report.market_judgment}
+        contrarian={data.report.contrarian}
+        evidence={data.evidence}
+        signal={data.report.cross_source_signal}
+        insights={data.report.insights}
+        compact={compact}
       />
 
-      <div id="key-basis"><KeyBasisList items={data.report.key_basis} /></div>
-
-      <CrossSourceSignalPanel signal={data.report.cross_source_signal} />
-
-      <InsightExplainabilityPanel insights={data.report.insights} />
-
-      <HypothesisLedgerPanel ledger={data.report.hypothesis_ledger} evidence={data.evidence} />
-
-      <PriceProvenancePanel priceProvenance={data.price_provenance} evidence={data.evidence} />
-
-      {data.report.limits.length > 0 && (
-        <div id="known-limits" className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-          <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvKnownLimits')}</h3>
-          <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
-            {data.report.limits.map((l, i) => (
-              <li key={i}><AnnotatedText text={l} /></li>
+      <details id="technical-analysis" className="hermes-technical-details hermes-clip border border-tf-border bg-tf-card">
+        <summary>L3 · 深度面板 <span>預設收合，依主題切換</span></summary>
+        <div className="flex flex-col gap-4 p-4">
+          <div role="tablist" aria-label="深度分析分類" className="flex flex-wrap gap-2 border-b border-tf-border pb-2">
+            {([
+              ['trust', '信任分數'],
+              ['reasoning', '推理依據'],
+              ['risk', '限制與反轉'],
+            ] as Array<[DeepDiveTab, string]>).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={deepDiveTab === id}
+                className={`rounded-md px-3 py-1.5 text-sm ${deepDiveTab === id ? 'bg-tf-accent text-white' : 'border border-tf-border text-tf-text2'}`}
+                onClick={() => setDeepDiveTab(id)}
+              >
+                {label}
+              </button>
             ))}
-          </ul>
-        </div>
-      )}
-
-      {data.report.could_flip.length > 0 && (
-        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-          <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvCouldFlip')}</h3>
-          <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
-            {data.report.could_flip.map((l, i) => (
-              <li key={i}><AnnotatedText text={l} /></li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {data.report.contrarian.length > 0 && (
-        <details className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card">
-          <summary>{t('arvContrarian')}（{data.report.contrarian.length}）</summary>
-          <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
-            {data.report.contrarian.map((l, i) => (
-              <li key={i}><AnnotatedText text={l} /></li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
+          </div>
+          {deepDiveTab === 'trust' && (
+            <div role="tabpanel" className="flex flex-col gap-4">
+              <TrustBreakdown data={data.trust_components_aggregate} />
+              <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
+                <TrustRadarChart radar={data.trust_radar} />
+              </Suspense>
+              <InsightExplainabilityPanel insights={data.report.insights} />
+            </div>
+          )}
+          {deepDiveTab === 'reasoning' && (
+            <div role="tabpanel" className="flex flex-col gap-4">
+              <FactsInferenceLadder facts={data.report.facts} inferences={data.report.inferences} marketJudgment={data.report.market_judgment} />
+              <div id="key-basis"><KeyBasisList items={data.report.key_basis} /></div>
+              <HypothesisLedgerPanel ledger={data.report.hypothesis_ledger} evidence={data.evidence} />
+            </div>
+          )}
+          {deepDiveTab === 'risk' && (
+            <div role="tabpanel" className="flex flex-col gap-4">
+              <AssetIntrinsicShadowPanel value={data.report.asset_intrinsic_assessment} />
+              <TrustTrendSection coin={data.report.coin} />
+              {data.report.limits.length > 0 && (
+                <div id="known-limits" className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
+                  <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvKnownLimits')}</h3>
+                  <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
+                    {data.report.limits.map((item, index) => <li key={index}><AnnotatedText text={item} /></li>)}
+                  </ul>
+                </div>
+              )}
+              {data.report.could_flip.length > 0 && (
+                <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
+                  <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvCouldFlip')}</h3>
+                  <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
+                    {data.report.could_flip.map((item, index) => <li key={index}><AnnotatedText text={item} /></li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </details>
 
       <details id="evidence-list" className="trustforge-collapse hermes-clip rounded-lg border border-tf-border bg-tf-card" onToggle={(event) => setEvidenceOpen(event.currentTarget.open)}>
-        <summary>{t('arvEvidenceList')}（{data.evidence.length}）</summary>
-        {evidenceOpen && <Suspense fallback={<LoadingState label="圖表載入中" />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>}
-        <EvidenceTable evidence={data.evidence} evidenceGroups={data.report.evidence_groups} />
+        <summary>L4 · {t('arvEvidenceList')}（{data.evidence.length}）</summary>
+        <div className="flex flex-col gap-4 p-4">
+          {evidenceOpen && <Suspense fallback={<LoadingState label="圖表載入中" />}><EvidenceDistributionCharts evidence={data.evidence} /></Suspense>}
+          <EvidenceTable evidence={data.evidence} evidenceGroups={data.report.evidence_groups} />
+          <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
+          <PriceProvenancePanel priceProvenance={data.price_provenance} evidence={data.evidence} />
+          <HermesExecutionPanel execution={data.execution} events={data.execution_log} report={data.report} evidence={data.evidence} />
+        </div>
       </details>
     </div>
   )
