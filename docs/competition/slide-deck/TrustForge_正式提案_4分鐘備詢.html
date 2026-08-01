@@ -13,7 +13,7 @@
 <p class="sub">依正式8頁提案簡報與實際程式碼整理｜先回答、再指證、最後說界線</p>
 <div class="notice"><b>答題節奏：</b>第一句直接回答；第二句指出畫面、交付物或程式證據；被追問時再展開限制。不要把簡報重新講一遍。</div>
 
-<h2>十一題核心備詢</h2>
+<h2>十四題核心備詢</h2>
 <section class="qa"><h3>1. 你們自行訓練的是什麼模型？</h3><p class="answer">我們自行訓練的是TrustForge信心校準模型，不是大型語言模型。它把分析當下的raw confidence與T+7等後續真實結果接合，再用Isotonic Regression校準成較符合歷史表現的信心。</p><p class="proof">calibration_model.py、modelhub_training.py、training JSONL與model artifact。</p><p class="boundary">它不生成市場文章、不取代Bedrock，也不等於價格預測模型。</p></section>
 
 <section class="qa"><h3>2. 為什麼不只使用AWS現成模型？</h3><p class="answer">AWS基礎模型擅長語意理解與生成，但不知道TrustForge的Evidence契約、來源可靠度與信心定義。自有校準模型能針對任務修正過度自信、跟上市場變化，並累積來源可靠度資料護城河。</p><p class="proof">Bedrock負責extract／stance／narrative；Trust Layer與calibration_model負責信任計算與校準。</p><p class="boundary">不是排斥AWS，而是把AWS基礎模型與自有任務模型放在不同責任層。</p></section>
@@ -36,8 +36,14 @@
 
 <section class="qa"><h3>11. 四份交付物如何證明是真實執行？</h3><p class="answer">四份檔案以同一個run_id與claim_id串接。Report的關鍵依據能回Evidence；Evidence保存來源與取得時間；Execution Log保存工具、資料模式、模型、成本與錯誤；Source／Config提供程式、設定、依賴鎖定與重現步驟。</p><p class="proof">report.md、evidence.json、execution_log.jsonl、GitHub Source／Config、artifact SHA-256。</p><p class="boundary">不能只用漂亮畫面證明執行；評審應能完成Report→Evidence→Log→Source交叉抽查。</p></section>
 
+<section class="qa"><h3>12. 「核心可替換」具體是什麼？</h3><p class="answer">Trust Kernel只接收標準化Claim並輸出信任結果；資料來源、模型、快取、監控與預算控制透過Protocol介面接入，因此更換外部服務時不必改寫核心評分規則。</p><p class="proof">trust/kernel.py的KernelInput／KernelOutput／run_kernel，以及ports.py的ModelProvider、SourceProvider、CacheProvider、ObservabilityProvider與BudgetProvider。</p><p class="boundary">目前kernel仍延遲載入scoring.py，架構測試將它列為待移除bridge；可以說已建立可替換邊界，不應說已百分之百完全解耦。</p></section>
+
+<section class="qa"><h3>13. 鯨魚動態如何影響分析？</h3><p class="answer">Whale Alert提供大額轉帳事件，Arkham補充實體與標籤歸因，Etherscan驗證鏈上交易，CoinMarketCap補充市值與流動性。這些資料會形成鏈上Evidence，與價格、新聞及其他來源交叉判讀。</p><p class="proof">ingestion/whale_trades.py、ingestion/etherscan.py、ingestion/cmc.py及test_whale_trades_arkham.py。</p><p class="boundary">巨鯨轉入交易所不是必然看空，也不會直接變成買賣建議；若憑證或live來源未啟用，必須在Execution Log標示cache／fixture／unavailable。</p></section>
+
+<section class="qa danger"><h3>14. 你們是否已完成碳盤查？Trust Kernel真的低於1秒嗎？</h3><p class="answer">目前沒有宣稱完成正式碳盤查，也沒有把低於1秒當成已驗證SLA。我們能證明的是核心評分採本機記憶體計算、正式路徑避免不必要的LLM呼叫，並記錄Bedrock token、成本、預算與快取使用。</p><p class="proof">trust/kernel.py的offline核心路徑、bedrock.py的token usage、budget_guard.py及ingestion/cache.py。</p><p class="boundary">沒有完整benchmark前不報固定延遲；沒有排放係數、組織邊界與查證流程前，不使用「ISO 14064對齊」或「已完成碳盤查」。</p></section>
+
 <h2>延伸高機率追問</h2><div class="grid"><div class="mini"><b>TrustScore能預測漲跌嗎？</b><br>不能這樣宣稱。它衡量資訊完整度、可溯源性與佐證品質，不提供報酬保證。</div><div class="mini"><b>來源互相矛盾怎麼辦？</b><br>保留正反證據、降低信心並列出could_flip，不把矛盾平均掉。</div><div class="mini"><b>HOYA BIT如何導入？</b><br>第一步在市場資訊頁加入完整度、Evidence與反轉條件；第二步累積來源歷史與校準資料；第三步以Trust Layer API整合研究工具。</div><div class="mini"><b>最大限制是什麼？</b><br>正式入口與外部資料受現場權限、網路與契約影響；SageMaker完整ECE比較尚未與ModelHub完全對齊。</div></div>
 
-<h2>禁止誇大</h2><div class="grid"><div class="mini"><b>不要說：</b>自己訓練大型語言模型<br><b>改成：</b>自行訓練信心校準模型</div><div class="mini"><b>不要說：</b>模型自動持續進化<br><b>改成：</b>候選版本經驗證與人工核准</div><div class="mini"><b>不要說：</b>每次都使用Bedrock<br><b>改成：</b>由Execution Log證明該次是否呼叫</div><div class="mini"><b>不要說：</b>所有資料都是即時<br><b>改成：</b>明示live／cache／fixture與限制</div></div>
+<h2>禁止誇大</h2><div class="grid"><div class="mini"><b>不要說：</b>自己訓練大型語言模型<br><b>改成：</b>自行訓練信心校準模型</div><div class="mini"><b>不要說：</b>模型自動持續進化<br><b>改成：</b>候選版本經驗證與人工核准</div><div class="mini"><b>不要說：</b>所有鯨魚資料都是即時<br><b>改成：</b>由Execution Log證明live／cache／fixture狀態</div><div class="mini"><b>不要說：</b>Trust Kernel保證低於1秒、已減碳70%或完成碳盤查<br><b>改成：</b>核心評分不依賴外部LLM，並以token、成本、預算及快取降低冗餘算力</div></div>
 <div class="footer">收尾：TrustForge不替使用者做投資決定；它讓每個結論的資料、證據、模型、限制與執行過程都能被追問。</div>
 </main></body></html>
