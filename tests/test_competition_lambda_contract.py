@@ -52,3 +52,15 @@ def test_live_activation_is_explicitly_blocked_but_fully_pinned():
 
 def test_contract_has_required_lifecycle_tags():
     assert set(CONTRACT["tags"]) == {"owner", "purpose", "cost-center", "expiry"}
+
+
+def test_rotation_runbook_does_not_claim_alias_level_reserved_concurrency():
+    runbook = (
+        Path(__file__).parents[1]
+        / "docs"
+        / "competition"
+        / "AWS-LAMBDA-DEPLOYMENT.md"
+    ).read_text()
+    assert "alias- or version-level reserved concurrency" in runbook
+    assert "old alias/version reserved concurrency" not in runbook
+    assert "old token is rejected through the deployment alias" in runbook

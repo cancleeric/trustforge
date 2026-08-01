@@ -7,9 +7,12 @@ import pytest
 from trustforge import lambda_secret
 
 
+_UNSET = object()
+
+
 class _SecretsClient:
-    def __init__(self, response=None, error: Exception | None = None):
-        self.response = response or {}
+    def __init__(self, response=_UNSET, error: Exception | None = None):
+        self.response = {} if response is _UNSET else response
         self.error = error
         self.calls: list[str] = []
 
