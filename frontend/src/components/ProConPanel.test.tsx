@@ -5,10 +5,10 @@ import type { Evidence } from '../lib/types'
 import ProConPanel from './ProConPanel'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
 
-function evidence(direction: string, trust: number): Evidence {
+function evidence(direction: string, trust: number, claim = `${direction} claim`): Evidence {
   return {
     source: `${direction}-source`, fetched_at: '2026-08-01T00:00:00Z',
-    content_reference: 'evidence', related_claim: 'claim', source_url: '', kind: 'news',
+    content_reference: 'evidence', related_claim: claim, source_url: '', kind: 'news',
     direction, trust, trust_components: {}, flags: [], info_flags: [],
   }
 }
@@ -17,9 +17,7 @@ describe('ProConPanel', () => {
   it('renders pro/con trust averages from claim direction', () => {
     render(
       <HermesI18nProvider><ProConPanel
-        facts={['ETF 資金流入']}
-        contrarian={['交易所供給增加']}
-        evidence={[evidence('bullish', 0.8), evidence('bullish', 0.6), evidence('bearish', 0.4)]}
+        evidence={[evidence('bullish', 0.8, 'ETF 資金流入'), evidence('bullish', 0.6, 'ETF 資金流入'), evidence('bearish', 0.4, '交易所供給增加')]}
         signal={null}
       /></HermesI18nProvider>,
     )
@@ -32,8 +30,6 @@ describe('ProConPanel', () => {
   it('places divergence and insufficient insights in unresolved area', () => {
     render(
       <HermesI18nProvider><ProConPanel
-        facts={[]}
-        contrarian={[]}
         evidence={[]}
         signal={{ type: 'divergence', summary: '價格與情緒背離' }}
         insights={[{

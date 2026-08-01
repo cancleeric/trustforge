@@ -156,8 +156,6 @@ export default function AnalysisReportView({ data, heading, mode, compact }: { d
       </section>
 
       <ProConPanel
-        facts={data.report.facts}
-        contrarian={data.report.contrarian}
         evidence={data.evidence}
         signal={data.report.cross_source_signal}
         insights={data.report.insights}

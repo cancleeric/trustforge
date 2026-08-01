@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
@@ -80,6 +80,21 @@ describe('AnalysisReportView compact 模式（比較頁）', () => {
     expect(screen.getByText(/L2 · 正反證據對照/)).toBeInTheDocument()
     expect(screen.getByText(/L3 · 深度面板/)).toBeInTheDocument()
     expect(screen.getByText(/L4 ·/)).toBeInTheDocument()
+  })
+
+  it('does not classify an objective bearish fact as bullish support', () => {
+    const data = makeData()
+    data.report.facts = ['交易所供給增加']
+    data.evidence = [{ ...data.evidence[0], direction: 'bearish', related_claim: '交易所供給增加' }]
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter><AnalysisReportView data={data} /></MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    const supporting = screen.getByRole('heading', { name: '▲ 支持／偏多' }).closest('section')!
+    const opposing = screen.getByRole('heading', { name: '▼ 反方／偏空' }).closest('section')!
+    expect(within(supporting).queryByText('交易所供給增加')).toBeNull()
+    expect(within(opposing).getByText('交易所供給增加')).toBeInTheDocument()
   })
 
   it('shows relative freshness and evidence-kind counts in L1', () => {

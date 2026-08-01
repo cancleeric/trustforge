@@ -12,6 +12,15 @@ function averageTrust(evidence: Evidence[], direction: 'bullish' | 'bearish'): s
   return (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2)
 }
 
+function directionalArguments(evidence: Evidence[], direction: 'bullish' | 'bearish'): string[] {
+  return [...new Set(
+    evidence
+      .filter((item) => item.direction === direction)
+      .map((item) => item.related_claim.trim() || item.content_reference.trim())
+      .filter(Boolean),
+  )]
+}
+
 function ArgumentColumn({
   title,
   tone,
@@ -48,15 +57,11 @@ function ArgumentColumn({
 }
 
 export default function ProConPanel({
-  facts,
-  contrarian,
   evidence,
   signal,
   insights,
   compact = false,
 }: {
-  facts: string[]
-  contrarian: string[]
   evidence: Evidence[]
   signal: CrossSourceSignal | null
   insights?: Insight[]
@@ -65,6 +70,8 @@ export default function ProConPanel({
   const { t } = useHermesI18n()
   const unresolved = (insights ?? []).filter((item) => item.coverage === 'insufficient')
   const hasDivergence = signal?.type === 'divergence'
+  const supporting = directionalArguments(evidence, 'bullish')
+  const opposing = directionalArguments(evidence, 'bearish')
 
   return (
     <section aria-labelledby="pro-con-title" className="flex flex-col gap-3">
@@ -79,14 +86,14 @@ export default function ProConPanel({
         <ArgumentColumn
           title={t('pcPro')}
           tone="var(--color-tf-good)"
-          items={facts}
+          items={supporting}
           trustLabel={t('pcTrustAvg', { value: averageTrust(evidence, 'bullish') })}
           empty={t('pcEmptyPro')}
         />
         <ArgumentColumn
           title={t('pcCon')}
           tone="var(--color-tf-bad)"
-          items={contrarian}
+          items={opposing}
           trustLabel={t('pcTrustAvg', { value: averageTrust(evidence, 'bearish') })}
           empty={t('pcEmptyCon')}
         />
