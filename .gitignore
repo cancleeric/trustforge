@@ -1,7 +1,9 @@
 __pycache__/
 *.py[cod]
-.venv/
-venv/
+# 不加尾斜線：worktree 常把 .venv 做成指向主 checkout 的 symlink，
+# `.venv/` 只匹配目錄，會讓那些 symlink 顯示為未追蹤。
+.venv
+venv
 *.egg-info/
 build/
 dist/
