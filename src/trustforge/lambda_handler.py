@@ -227,8 +227,17 @@ def handler(event, context=None):
                     web._analyze_enforce_caller_rate_limit(qs, client_ip)
                     from .lambda_provider_cache import refresh_provider_cache
                     for refresh_coin in refresh_coins:
-                        refresh_provider_cache(refresh_coin)
-
+                        outcome = refresh_provider_cache(refresh_coin)
+                        if set(outcome) != {
+                            "arkham-intel",
+                            "coinmarketcap-price",
+                            "etherscan-whale",
+                            "whale-alert",
+                        } or any(
+                            status not in {"cached", "refreshed"}
+                            for status, _count in outcome.values()
+                        ):
+                            raise RuntimeError("competition provider refresh failed closed")
                 if qtype == QuestionType.COMPARISON:
                     if _COMPETITION_MODE == "live":
                         result = web._do_comparison(

@@ -33,9 +33,12 @@ def test_offline_contract_has_no_secret_model_or_data_access():
     ]
 
 
-def test_live_activation_is_owner_authorized_but_pending_final_review():
+def test_live_activation_is_blocked_on_distributed_limiter():
     live = CONTRACT["live_activation"]
-    assert live["status"] == "owner-authorized-pending-final-ciso-review"
+    assert live["status"] == "blocked-bedrock-distributed-limiter"
+    assert live["activation_blockers"] == [
+        "Lambda Bedrock invocation remains disabled until a reviewed distributed <=1 RPS limiter is implemented"
+    ]
     assert live["contract"] == "deploy/competition-lambda-live-contract.json"
     assert live["region"] == "us-east-1"
     assert live["narrative_model_id"] == live["stance_model_id"]

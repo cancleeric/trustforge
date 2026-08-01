@@ -43,6 +43,15 @@ def test_missing_secret_arn_preserves_offline_contract():
     assert "TRUSTFORGE_LIVE_TOKEN" not in os.environ
 
 
+def test_live_mode_requires_all_five_pinned_secrets(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_COMPETITION_MODE", "live")
+    label, arn_env, version_env, _ = lambda_secret._SECRET_SPECS[0]
+    monkeypatch.setenv(arn_env, "arn:live-token")
+    monkeypatch.setenv(version_env, "version-1")
+    with pytest.raises(RuntimeError, match="all five pinned secrets"):
+        lambda_secret.hydrate_lambda_secrets(client=_SecretsClient())
+
+
 def test_secret_string_is_loaded_once_per_cold_start(monkeypatch):
     arn = "arn:aws:secretsmanager:us-east-1:850849012389:secret:competition-token"
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN_SECRET_ARN", arn)

@@ -1,5 +1,8 @@
 {
-  "status": "owner-authorized-pending-final-ciso-review",
+  "status": "blocked-bedrock-distributed-limiter",
+  "activation_blockers": [
+    "Lambda Bedrock invocation remains disabled until a reviewed distributed <=1 RPS limiter is implemented"
+  ],
   "account_id": "850849012389",
   "region": "us-east-1",
   "function_name": "competition-trustforge-team11-live",

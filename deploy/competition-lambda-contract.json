@@ -35,7 +35,10 @@
     "expiry": "2026-08-03"
   },
   "live_activation": {
-    "status": "owner-authorized-pending-final-ciso-review",
+    "status": "blocked-bedrock-distributed-limiter",
+    "activation_blockers": [
+      "Lambda Bedrock invocation remains disabled until a reviewed distributed <=1 RPS limiter is implemented"
+    ],
     "contract": "deploy/competition-lambda-live-contract.json",
     "region": "us-east-1",
     "narrative_model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
