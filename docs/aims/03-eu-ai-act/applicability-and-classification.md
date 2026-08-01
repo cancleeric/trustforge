@@ -63,9 +63,11 @@ Status: `pending legal approval`. This is neither a high-risk nor a non-high-ris
 
 Article 50 transparency is assessed independently from Article 6 risk classification. The following remain `not assessed`: whether users interact directly with an AI system; whether outputs are synthetic audio, image, video or text subject to marking or disclosure rules; whether an output is a deep fake or public-interest text; the provider's technical marking duties; and the deployer's disclosure duties. Product features, output modalities, audience, deployment context and actor allocation require exact-version evidence. An Article 50 result is not a limb of the high-risk classification decision.
 
+The Article 50(2) transition must be checked separately against Regulation (EU) 2026/1744 and the current consolidated Article 113 before any deployment checkpoint is approved. This draft records no operative Article 50(2) date until Compliance Counsel verifies the exact amended text.
+
 ## Actor and misuse boundaries
 
-- Article 25 provider transition requires a separate legal assessment of substantial modification, rebranding or changed intended purpose; it is not the same as customer misuse.
+- Article 25 provider transition is scoped to high-risk AI systems and requires a separate legal assessment of the statutory conditions, including placing a system on the market or putting it into service under one's own name or trademark, making a substantial modification, or changing the intended purpose of a system that was not classified as high-risk so that it becomes high-risk under Article 25(1)(c). It is not a generic transition rule for every AI system and is not the same as customer misuse.
 - Off-label actual use and reasonably foreseeable misuse are separate records. Neither automatically proves an Article 25 provider transition.
 - Articles 17 and 72 are assessed conditionally for a high-risk-system provider.
 - Article 26 deployer monitoring, use and escalation duties are assessed separately from provider controls.

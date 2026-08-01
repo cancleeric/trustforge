@@ -23,6 +23,7 @@ ISO/IEC 42001 AIMS 與 EU AI Act QMS 可能共用管理系統元件，但是否�
 | Claim | Authoritative source | Version／status | Accessed | Permitted reliance |
 |---|---|---|---|---|
 | Regulation (EU) 2024/1689 法規文字與條文 | EUR-Lex, CELEX `32024R1689`: https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689 | OJ text at canonical CELEX URL; amendments／consolidation must be reverified | 2026-08-01 | 可作 preliminary article mapping；正式決策前重驗版本 |
+| Regulation (EU) 2026/1744 修正法規 | EUR-Lex ELI: https://eur-lex.europa.eu/eli/reg/2026/1744/oj/eng | OJ amending text; current consolidation and legal interpretation still require verification | 2026-08-01 | 控制 amended Article 113 planning dates；Article 50(2) 與 Articles 102–110 仍待 exact-text legal verification |
 | EN 18286 bibliographic title, edition, publication and official status | Authoritative official source pending | Pending | 2026-08-01 | 不可主張已發布、正式名稱或條文內容 |
 | EN 18286 Official Journal citation／presumption of conformity | EUR-Lex OJ citation decision pending verification | No citation or presumption claimed | 2026-08-01 | 禁止 conformity／presumption claim |
 | EN 18286 clause text | Company-licensed authoritative copy pending | Not acquired | 2026-08-01 | 禁止由搜尋摘要或二手資料重建／引用條款 |
@@ -33,7 +34,7 @@ ISO/IEC 42001 AIMS 與 EU AI Act QMS 可能共用管理系統元件，但是否�
 - 本文件只能進行法規層與標準目的層的 preliminary mapping。
 - 條款級矩陣在合法取得標準全文前，一律標記 `awaiting licensed text`，不得標為 complete 或 conformant。
 - 標準書目、發布、official status、EU Official Journal 協調標準引用與 presumption of conformity 狀態均為 pending；目前不作任何 OJ citation 或 presumption 主張。
-- EU AI Act 時程僅作 planning checkpoint：Article 113 一般適用日為 2026-08-02；Article 6(1) 及相應義務為 2027-08-02。兩者都必須在使用前重驗 amendments、transitional provisions 與 Commission action，不得視為無條件結論。
+- EU AI Act 時程僅作 planning checkpoint：Regulation (EU) 2026/1744 修正 Article 113 後，Chapter III Sections 1–3 對 Article 6(2)／Annex III high-risk systems 的日期為 2027-12-02，對 Article 6(1)／Annex I high-risk systems 及其相應義務為 2028-08-02。舊有 2026-08-02／2027-08-02 frame 僅是歷史資料，不是 active checkpoint。Article 50(2) transition 與 Articles 102–110 的修正時程須由 Compliance Counsel 對 exact amended／consolidated text 另行驗證；本文不先指定日期。
 
 ## 3. TrustForge 預備分類
 
@@ -64,7 +65,7 @@ ISO/IEC 42001 AIMS 與 EU AI Act QMS 可能共用管理系統元件，但是否�
 - 是否存在 importer、distributor、white-label 或重大修改者；
 - 上游模型、資料提供者與雲端服務商的契約與證據責任。
 
-Article 25 的 provider transition（例如以自己名稱上市、重大修改或改變 intended purpose）須獨立判定，不與 off-label actual misuse 或 reasonably foreseeable misuse 混為一談。Articles 17／72 是 high-risk provider 的條件式義務；Article 26 deployer monitoring／escalation 與 Article 73 provider reporting 應分開建模。Article 50 另作 feature、output 與 deployer transparency assessment，不是 risk-classification limb。
+Article 25 的 provider transition 限於 high-risk AI system 的法定情境，須逐一判定以自己名稱／商標上市或投入使用、substantial modification，以及 Article 25(1)(c) 所述改變 intended purpose 而使原本非 high-risk 的系統成為 high-risk；它不是所有 AI system 的一般轉換規則，也不得與 off-label actual misuse 或 reasonably foreseeable misuse 混為一談。Articles 17／72 是 high-risk provider 的條件式義務；Article 26 deployer monitoring／escalation 與 Article 73 provider reporting 應分開建模。Article 50 另作 feature、output 與 deployer transparency assessment，不是 risk-classification limb。
 
 ## 4. Unverified governance observations
 
