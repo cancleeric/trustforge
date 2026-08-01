@@ -3,21 +3,17 @@
    ============================================ */
 
 /* --- Avatar Container --- */
+/* 放在左欄 (.hermes-glass.hermes-rail-split) 的內部右上角 */
 .diandian-container {
   position: absolute;
-  top: 8px;
-  left: calc(var(--hermes-rail, 0px) + clamp(120px, 13vw, 180px));
+  top: calc(var(--hermes-top, 44px) + 8px);
+  left: calc(var(--hermes-rail, 240px) - 56px);
   z-index: 50;
   cursor: pointer;
   transition: transform 0.2s ease;
 }
 @media (max-width: 900px) {
-  .diandian-container { left: auto; right: 12px; top: 8px; }
-}
-
-/* Position inside the left rail */
-.hermes-left-rail {
-  position: relative !important;
+  .diandian-container { left: auto; right: 12px; top: calc(var(--hermes-top, 44px) + 8px); }
 }
 .diandian-container:hover {
   transform: scale(1.1);
