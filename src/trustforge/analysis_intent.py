@@ -146,6 +146,8 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
         capability = CAPABILITY_REGISTRY.get(operation.type)
         if capability is None:
             raise IntentValidationError(f"unknown capability: {operation.type!r}")
+        if not _SAFE_ID.fullmatch(operation.output):
+            raise IntentValidationError(f"operation {operation.id!r} has an invalid output")
         if operation.output != capability.output and not operation.output.startswith(
             capability.output + "_"
         ):
@@ -153,6 +155,8 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
                 f"operation {operation.id!r} output is not owned by {operation.type!r}"
             )
         targets = set(operation.targets)
+        if len(targets) != len(operation.targets):
+            raise IntentValidationError(f"operation {operation.id!r} has duplicate targets")
         if not targets.issubset(capability.allowed_targets):
             raise IntentValidationError(
                 f"operation {operation.id!r} contains unsupported targets"
@@ -211,8 +215,14 @@ def evaluate_answer_coverage(
 IntentParser = Callable[[str, tuple[str, ...]], Mapping[str, object]]
 
 
-def _news_social_intent(assets: tuple[str, ...], *, parse_mode: str) -> AnalysisIntent:
-    operations = (
+def _news_social_intent(
+    assets: tuple[str, ...],
+    *,
+    include_freshness: bool,
+    include_manipulation_risk: bool,
+    parse_mode: str,
+) -> AnalysisIntent:
+    operations: list[IntentOperation] = [
         IntentOperation("news_sentiment", "sentiment_analysis", ("news",), "sentiment_news"),
         IntentOperation("social_sentiment", "sentiment_analysis", ("social",), "sentiment_social"),
         IntentOperation(
@@ -222,29 +232,28 @@ def _news_social_intent(assets: tuple[str, ...], *, parse_mode: str) -> Analysis
             "alignment",
             ("news_sentiment", "social_sentiment"),
         ),
-        IntentOperation(
+    ]
+    deliverables = ["sentiment_news", "sentiment_social", "alignment"]
+    if include_freshness:
+        operations.append(IntentOperation(
             "source_freshness",
             "freshness_assessment",
             ("news", "social"),
             "freshness",
-        ),
-        IntentOperation(
+        ))
+        deliverables.append("freshness")
+    if include_manipulation_risk:
+        operations.append(IntentOperation(
             "source_manipulation_risk",
             "manipulation_risk",
             ("news", "social"),
             "manipulation_risk",
-        ),
-    )
+        ))
+        deliverables.append("manipulation_risk")
     return AnalysisIntent(
         assets=assets,
-        operations=operations,
-        deliverables=(
-            "sentiment_news",
-            "sentiment_social",
-            "alignment",
-            "freshness",
-            "manipulation_risk",
-        ),
+        operations=tuple(operations),
+        deliverables=tuple(deliverables),
         matched_official_template="multi_source",
         parse_confidence=0.98,
         parse_mode=parse_mode,
@@ -259,7 +268,18 @@ def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisInten
     has_social = "社群" in question or "social" in lowered
     comparison_words = ("比對", "比較", "是否一致", "差異", "背離", "compare")
     if has_news and has_social and any(word in lowered for word in comparison_words):
-        return validate_intent(_news_social_intent(canonical_assets, parse_mode="deterministic"))
+        freshness_words = ("時效", "新鮮", "最新", "資料年齡", "freshness", "recency")
+        manipulation_words = ("操弄", "操縱", "水軍", "造假", "manipulation")
+        return validate_intent(
+            _news_social_intent(
+                canonical_assets,
+                include_freshness=any(word in lowered for word in freshness_words),
+                include_manipulation_risk=any(
+                    word in lowered for word in manipulation_words
+                ),
+                parse_mode="deterministic",
+            )
+        )
 
     if any(word in question for word in ("假設", "觀點", "支持與反對", "維持盤整")):
         intent = AnalysisIntent(
@@ -336,6 +356,8 @@ def compile_analysis_intent(
             parse_confidence=float(proposed.get("parse_confidence", 0.5)),
             parse_mode="llm",
         )
+        if intent.assets != canonical_assets:
+            raise IntentValidationError("LLM parser cannot replace caller-authorized assets")
         return validate_intent(intent)
     except (IntentValidationError, KeyError, TypeError, ValueError):
         fallback = deterministic_compile(question, canonical_assets)

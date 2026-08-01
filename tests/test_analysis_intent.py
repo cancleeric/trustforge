@@ -40,6 +40,18 @@ def test_official_template_is_not_a_support_whitelist():
     assert intent.operations[0].type == "market_synthesis"
 
 
+def test_news_social_comparison_only_requests_explicit_deliverables():
+    intent = compile_analysis_intent("比較 BTC 的新聞與社群情緒是否一致", ["BTC"])
+
+    assert intent.deliverables == (
+        "sentiment_news",
+        "sentiment_social",
+        "alignment",
+    )
+    assert "freshness" not in intent.deliverables
+    assert "manipulation_risk" not in intent.deliverables
+
+
 def test_llm_cannot_invent_capability_or_connector():
     def unsafe_parser(_question, _assets):
         return {
@@ -60,6 +72,27 @@ def test_llm_cannot_invent_capability_or_connector():
 
     assert intent.parse_mode == "deterministic_fallback"
     assert all(operation.type != "call_arbitrary_url" for operation in intent.operations)
+
+
+def test_llm_cannot_replace_caller_authorized_assets():
+    def asset_swapping_parser(_question, _assets):
+        return {
+            "assets": ["ETH"],
+            "operations": [
+                {
+                    "id": "market",
+                    "type": "market_synthesis",
+                    "targets": ["price"],
+                    "output": "market_summary",
+                }
+            ],
+            "deliverables": ["market_summary"],
+        }
+
+    intent = compile_analysis_intent("分析 BTC 價格", ["BTC"], llm_parser=asset_swapping_parser)
+
+    assert intent.assets == ("BTC",)
+    assert intent.parse_mode == "deterministic_fallback"
 
 
 def test_forward_dependency_fails_closed():
