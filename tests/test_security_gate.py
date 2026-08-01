@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import tempfile
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ import sys
 # 讓 import 找到 scripts/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from security_gate import Finding, ScanResult, scan, write_report  # type: ignore
+from security_gate_push import PushUpdate, ZERO_SHA, run as run_push_scan  # type: ignore
 
 
 def _write(tmp: Path, relpath: str, content: str) -> None:
@@ -170,6 +173,51 @@ def test_pre_push_runs_security_gate_fail_closed() -> None:
         encoding="utf-8",
     )
 
-    assert '"security gate"' in hook
-    assert "-m trustforge.cli security-gate" in hook
-    assert "--out out/pre-push" in hook
+    assert '"security gate (exact pushed commits)"' in hook
+    assert "scripts/security_gate_push.py" in hook
+    assert '--remote-name "${1:-}"' in hook
+
+
+def _git(repo: Path, *args: str) -> str:
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Security Gate Test",
+        "GIT_AUTHOR_EMAIL": "security-gate@example.invalid",
+        "GIT_COMMITTER_NAME": "Security Gate Test",
+        "GIT_COMMITTER_EMAIL": "security-gate@example.invalid",
+    }
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return completed.stdout.strip()
+
+
+def test_push_scan_uses_pushed_commits_not_checked_out_tree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _write(repo, "app.py", "print('clean')\n")
+    _git(repo, "add", "app.py")
+    _git(repo, "commit", "-q", "-m", "clean")
+    clean_sha = _git(repo, "rev-parse", "HEAD")
+
+    _write(repo, "app.py", "token = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ123456'\n")
+    _git(repo, "add", "app.py")
+    _git(repo, "commit", "-q", "-m", "secret")
+    secret_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "--detach", clean_sha)
+
+    clean_update = PushUpdate("refs/heads/clean", clean_sha, "refs/heads/clean", ZERO_SHA)
+    assert run_push_scan(repo, [clean_update], "", tmp_path / "clean-report") == 0
+
+    secret_update = PushUpdate(
+        "refs/heads/secret",
+        secret_sha,
+        "refs/heads/secret",
+        clean_sha,
+    )
+    assert run_push_scan(repo, [secret_update], "", tmp_path / "secret-report") == 1

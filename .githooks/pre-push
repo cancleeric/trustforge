@@ -56,6 +56,14 @@ run_gate() {
   fi
 }
 
+# Consume Git's pre-push ref tuples before any test process can read stdin.
+# Each new commit is scanned from its immutable Git tree, not from the current
+# checkout, so pushing another ref or a multi-commit range cannot bypass P0.
+run_gate \
+  "security gate (exact pushed commits)" \
+  env PYTHONPATH=src "$PYTHON" scripts/security_gate_push.py \
+    --repo . --remote-name "${1:-}" --out out/pre-push/security-gate-push
+
 # Node version gate (issue #660): Vite 8 bundled rolldown needs util.styleText (Node >=20.12).
 NODE_MIN_MAJOR=20
 NODE_MIN_MINOR=12
@@ -100,10 +108,6 @@ case "$PYTEST_WORKERS" in
 esac
 run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
 run_gate "YAML duplicate keys" "$PYTHON" scripts/check_yaml_duplicate_keys.py
-run_gate \
-  "security gate" \
-  env PYTHONPATH=src "$PYTHON" -m trustforge.cli security-gate \
-    --out out/pre-push
 run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json
 run_gate \
   "NF2 zero-capability host tests" \

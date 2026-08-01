@@ -1,0 +1,164 @@
+"""Scan the exact Git commits transferred by a pre-push hook.
+
+Git passes ref-update tuples on stdin as:
+``local_ref local_sha remote_ref remote_sha``.  Scanning the checked-out
+working tree is insufficient because callers may push another ref or a range
+whose earlier commits contain a secret.  This helper archives and scans every
+new commit before the push is allowed to continue.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import tarfile
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Iterable, TextIO
+
+from security_gate import ScanResult, scan, write_report
+
+
+ZERO_SHA = "0" * 40
+
+
+@dataclass(frozen=True)
+class PushUpdate:
+    local_ref: str
+    local_sha: str
+    remote_ref: str
+    remote_sha: str
+
+
+def parse_updates(lines: Iterable[str]) -> list[PushUpdate]:
+    updates: list[PushUpdate] = []
+    for line in lines:
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) != 4:
+            raise ValueError(f"invalid pre-push ref update: {line.rstrip()!r}")
+        updates.append(PushUpdate(*fields))
+    return updates
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def commits_for_updates(
+    repo: Path,
+    updates: Iterable[PushUpdate],
+    remote_name: str,
+) -> list[str]:
+    commits: list[str] = []
+    seen: set[str] = set()
+    for update in updates:
+        if update.local_sha == ZERO_SHA:  # deleted ref
+            continue
+        if update.remote_sha == ZERO_SHA:
+            args = ["rev-list", update.local_sha]
+            if remote_name:
+                args.extend(["--not", f"--remotes={remote_name}"])
+        else:
+            args = ["rev-list", f"{update.remote_sha}..{update.local_sha}"]
+        discovered = _git(repo, *args).splitlines()
+        # A new tag can point at a commit already reachable from the remote.
+        # Scan its target at least once even when the range is empty.
+        if not discovered:
+            discovered = [update.local_sha]
+        for commit in discovered:
+            if commit not in seen:
+                seen.add(commit)
+                commits.append(commit)
+    return commits
+
+
+def _safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    members: list[tarfile.TarInfo] = []
+    for member in archive.getmembers():
+        path = PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"unsafe path in git archive: {member.name!r}")
+        # Secret-bearing symlink targets are scanned as their tracked link text
+        # by Git history review; do not follow links outside the archive root.
+        if member.issym() or member.islnk():
+            continue
+        members.append(member)
+    return members
+
+
+def scan_commit(repo: Path, commit: str, out_dir: Path) -> ScanResult:
+    with tempfile.TemporaryDirectory(prefix="trustforge-security-push-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        archive_path = tmp / "commit.tar"
+        with archive_path.open("wb") as archive_file:
+            subprocess.run(
+                ["git", "-C", str(repo), "archive", "--format=tar", commit],
+                check=True,
+                stdout=archive_file,
+            )
+        tree = tmp / "tree"
+        tree.mkdir()
+        with tarfile.open(archive_path, "r") as archive:
+            archive.extractall(tree, members=_safe_members(archive))
+        result = scan(tree)
+        write_report(result, out_dir / commit)
+        return result
+
+
+def run(
+    repo: Path,
+    updates: list[PushUpdate],
+    remote_name: str,
+    out_dir: Path,
+) -> int:
+    if not updates:
+        head = _git(repo, "rev-parse", "HEAD")
+        # Direct/manual hook execution has no ref tuples.  Represent an empty
+        # range so commits_for_updates falls back to scanning HEAD exactly once.
+        updates = [PushUpdate("HEAD", head, "HEAD", head)]
+        remote_name = ""
+
+    commits = commits_for_updates(repo, updates, remote_name)
+    for commit in commits:
+        result = scan_commit(repo, commit, out_dir)
+        print(
+            f"[security-push] {commit[:12]}: "
+            f"P0={result.p0_count}, P1={result.p1_count}, P2={result.p2_count}",
+        )
+        if result.p0_count:
+            for finding in result.findings:
+                if finding.severity == "P0":
+                    print(
+                        f"[security-push] BLOCK {finding.file}:{finding.line} "
+                        f"({finding.pattern_name})",
+                        file=sys.stderr,
+                    )
+            return 1
+    return 0
+
+
+def main(argv: list[str] | None = None, stdin: TextIO = sys.stdin) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    parser.add_argument("--remote-name", default="")
+    parser.add_argument("--out", type=Path, default=Path("out/pre-push/security-gate-push"))
+    args = parser.parse_args(argv)
+    try:
+        updates = parse_updates(stdin)
+        return run(args.repo.resolve(), updates, args.remote_name, args.out)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"[security-push] FAILED: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
