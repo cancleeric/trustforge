@@ -63,6 +63,19 @@ describe('isStatusData / /api/status', () => {
     if (result.ok) expect(result.data).toEqual(data)
   })
 
+  it('analysis_flow 成本紀錄的 coin 為 null → 正常放行', async () => {
+    const data = validCostsData()
+    data.runs[0] = {
+      ...data.runs[0],
+      coin: null,
+      question_type: 'analysis_flow',
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<CostsData>('/api/costs', undefined, isCostsData)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.data.runs[0].coin).toBeNull()
+  })
+
   it('freshness.entries 元素 status 不是合法三態之一 → parse_error', async () => {
     const data = validStatusData()
     asMutable(data.freshness.entries[0]).status = 'unknown'
