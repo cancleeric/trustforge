@@ -163,7 +163,7 @@ export default function HermesLeftRail({
         <a href="/goals" className="hermes-nav-item" style={{ textDecoration: 'none' }}>
           {locale === 'zh-TW' ? '🎯 專案目標' : '🎯 Goals'}
         </a>
-        <a href="/carbon" className="hermes-nav-item" style={{ textDecoration: 'none' }}>
+        <a href="/carbon" className="hermes-nav-item" style={{ textDecoration: 'none' }} target="_blank" rel="noopener noreferrer">
           {locale === 'zh-TW' ? '🌱 碳足跡' : '🌱 Carbon'}
         </a>
         <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
