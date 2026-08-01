@@ -685,10 +685,8 @@ export default function HermesDashboard() {
             onReducedMotionToggle={toggleReducedMotion}
             onHelp={() => setOnboardingOpen(true)}
             onToggleShip={toggleShip}
-          />
-          <DiandianAvatar
-            isAnalyzing={phase === 'loading'}
-            onClick={() => setDiandianOnboardingOpen(true)}
+            diandianAnalyzing={phase === 'loading'}
+            onDiandianClick={() => setDiandianOnboardingOpen(true)}
           />
         </div>
 
