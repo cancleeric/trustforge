@@ -175,7 +175,7 @@ def test_pre_push_runs_security_gate_fail_closed() -> None:
 
     assert '"security gate (exact pushed commits)"' in hook
     assert "scripts/security_gate_push.py" in hook
-    assert '--remote-name "${1:-}"' in hook
+    assert '--remote-location "${2:-}"' in hook
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -221,3 +221,38 @@ def test_push_scan_uses_pushed_commits_not_checked_out_tree(tmp_path: Path) -> N
         clean_sha,
     )
     assert run_push_scan(repo, [secret_update], "", tmp_path / "secret-report") == 1
+
+
+def test_new_ref_uses_advertised_remote_not_stale_tracking_refs(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(remote.parent, "init", "--bare", "-q", str(remote))
+
+    _write(repo, "app.py", "print('base')\n")
+    _git(repo, "add", "app.py")
+    _git(repo, "commit", "-q", "-m", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "-q", str(remote), f"{base_sha}:refs/heads/main")
+
+    _write(repo, "secret.py", "password = 'actual-secret-value'\n")
+    _git(repo, "add", "secret.py")
+    _git(repo, "commit", "-q", "-m", "secret ancestor")
+    secret_sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "secret.py").unlink()
+    _write(repo, "app.py", "print('clean tip')\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "clean tip")
+    clean_tip = _git(repo, "rev-parse", "HEAD")
+
+    # A locally forged/stale remote-tracking ref must not exclude the secret
+    # ancestor; only refs advertised by the actual push destination may do so.
+    _git(repo, "update-ref", "refs/remotes/origin/stale", secret_sha)
+    update = PushUpdate(
+        "refs/heads/new-branch",
+        clean_tip,
+        "refs/heads/new-branch",
+        ZERO_SHA,
+    )
+    assert run_push_scan(repo, [update], str(remote), tmp_path / "stale-report") == 1

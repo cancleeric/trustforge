@@ -62,7 +62,7 @@ run_gate() {
 run_gate \
   "security gate (exact pushed commits)" \
   env PYTHONPATH=src "$PYTHON" scripts/security_gate_push.py \
-    --repo . --remote-name "${1:-}" --out out/pre-push/security-gate-push
+    --repo . --remote-location "${2:-}" --out out/pre-push/security-gate-push
 
 # Node version gate (issue #660): Vite 8 bundled rolldown needs util.styleText (Node >=20.12).
 NODE_MIN_MAJOR=20

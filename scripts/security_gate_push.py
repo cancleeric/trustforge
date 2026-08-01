@@ -56,17 +56,22 @@ def _git(repo: Path, *args: str) -> str:
 def commits_for_updates(
     repo: Path,
     updates: Iterable[PushUpdate],
-    remote_name: str,
+    remote_location: str,
 ) -> list[str]:
     commits: list[str] = []
     seen: set[str] = set()
+    advertised: list[str] | None = None
     for update in updates:
         if update.local_sha == ZERO_SHA:  # deleted ref
             continue
         if update.remote_sha == ZERO_SHA:
             args = ["rev-list", update.local_sha]
-            if remote_name:
-                args.extend(["--not", f"--remotes={remote_name}"])
+            if remote_location:
+                if advertised is None:
+                    output = _git(repo, "ls-remote", "--refs", remote_location)
+                    advertised = [line.split()[0] for line in output.splitlines() if line]
+                if advertised:
+                    args.extend(["--not", *advertised])
         else:
             args = ["rev-list", f"{update.remote_sha}..{update.local_sha}"]
         discovered = _git(repo, *args).splitlines()
@@ -117,7 +122,7 @@ def scan_commit(repo: Path, commit: str, out_dir: Path) -> ScanResult:
 def run(
     repo: Path,
     updates: list[PushUpdate],
-    remote_name: str,
+    remote_location: str,
     out_dir: Path,
 ) -> int:
     if not updates:
@@ -125,9 +130,9 @@ def run(
         # Direct/manual hook execution has no ref tuples.  Represent an empty
         # range so commits_for_updates falls back to scanning HEAD exactly once.
         updates = [PushUpdate("HEAD", head, "HEAD", head)]
-        remote_name = ""
+        remote_location = ""
 
-    commits = commits_for_updates(repo, updates, remote_name)
+    commits = commits_for_updates(repo, updates, remote_location)
     for commit in commits:
         result = scan_commit(repo, commit, out_dir)
         print(
@@ -149,12 +154,12 @@ def run(
 def main(argv: list[str] | None = None, stdin: TextIO = sys.stdin) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path.cwd())
-    parser.add_argument("--remote-name", default="")
+    parser.add_argument("--remote-location", default="")
     parser.add_argument("--out", type=Path, default=Path("out/pre-push/security-gate-push"))
     args = parser.parse_args(argv)
     try:
         updates = parse_updates(stdin)
-        return run(args.repo.resolve(), updates, args.remote_name, args.out)
+        return run(args.repo.resolve(), updates, args.remote_location, args.out)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"[security-push] FAILED: {exc}", file=sys.stderr)
         return 2
