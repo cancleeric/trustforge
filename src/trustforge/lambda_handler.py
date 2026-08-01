@@ -185,25 +185,23 @@ def handler(event, context=None):
             return _resp(200, "ok", "text/plain; charset=utf-8")
 
         if path in ("/analyze", "/analyze.json"):
-            # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
-            from .schema import QuestionType
-            qtype_raw = qs.get("type", ["multi_source"])[0]
-            qtype_invalid = False
             try:
-                qtype = QuestionType(qtype_raw)
-            except ValueError:
-                qtype_invalid = True
-                qtype = QuestionType.MULTI_SOURCE
+                # Question type is part of admission.  Reject it before caller
+                # rate limiting or any external provider refresh; never coerce
+                # an invalid value for admission and reject it only downstream.
+                from .schema import QuestionType
+                qtype_raw = qs.get("type", ["multi_source"])[0]
+                try:
+                    qtype = QuestionType(qtype_raw)
+                except ValueError as exc:
+                    raise ValueError(f"不支援的分析類型：{qtype_raw}") from exc
 
-            try:
                 # Competition Live 的 provider refresh 必須位於完整 admission
                 # gate 後：先驗 query/幣種，再對 caller 限流一次，才允許消耗
                 # 外部 provider quota。下游分析以 enforce_rate_limit=False 避免
                 # 同一請求被重複計數。非 competition Lambda 永不走此 refresh。
                 refresh_coins: tuple[str, ...] = ()
                 if _COMPETITION_MODE == "live":
-                    if qtype_invalid:
-                        raise ValueError("分析類型不在可選範圍內")
                     query = qs.get("q", [""])[0]
                     if len(query) > 1000:
                         raise ValueError(
