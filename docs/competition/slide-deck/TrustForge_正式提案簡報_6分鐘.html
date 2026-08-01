@@ -31,6 +31,13 @@ const slides=[...document.querySelectorAll('.slide')],bar=document.querySelector
 function show(n){slides[i].classList.remove('active');i=(n+slides.length)%slides.length;slides[i].classList.add('active');bar.style.width=((i+1)/slides.length*100)+'%';if(notes){console.clear();console.log(slides[i].querySelector('.notes')?.textContent)}}
 document.addEventListener('keydown',e=>{if(['ArrowRight',' ','PageDown'].includes(e.key)){e.preventDefault();show(i+1)}if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1)}if(e.key.toLowerCase()==='f'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}if(e.key.toLowerCase()==='n'){notes=!notes;console.clear();if(notes)console.log(slides[i].querySelector('.notes')?.textContent)}});
 document.addEventListener('click',e=>show(i+(e.clientX>innerWidth/2?1:-1)));bar.style.width=(100/slides.length)+'%';
+// AWS 架構圖：與競賽框架一致，入口採 App Runner（push-to-deploy）。
+const awsSlide=slides[4],awsContent=awsSlide?.querySelector('.content');
+if(awsContent){
+  const firstRow=awsContent.querySelector('.row');
+  if(firstRow){firstRow.querySelector('strong').textContent='AWS App Runner';firstRow.querySelector('span').textContent='HTTPS 入口與 push-to-deploy；承載 TrustForge 應用。';}
+  awsContent.insertAdjacentHTML('afterbegin','<div class="band" style="margin-top:0;margin-bottom:1.2vh"><span>使用者（瀏覽器）</span><b style="color:var(--gold)">→ HTTPS →</b><span>AWS App Runner</span><b style="color:var(--gold)">→</b><span>Bedrock／DynamoDB／S3</span><b style="color:var(--gold)">→</b><span>SageMaker 校準訓練</span></div>');
+}
 </script>
 </body>
 </html>
