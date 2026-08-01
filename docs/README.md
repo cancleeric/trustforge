@@ -5,7 +5,7 @@ Governance index:
 - [governance/PRE_PUSH_RELEASE_GATES.md](governance/PRE_PUSH_RELEASE_GATES.md) - Canonical pre-push-only policy: disabled GitHub Actions, mandatory `.githooks/pre-push`, PR evidence, reviewer `/codex-review`, security/cost review, and release boundary.
 
 > 本目錄為 TrustForge 的規劃、技術與交付文件索引。文件依生命週期/用途分區：
-> `competition/`（命題與交付規範）、`technical-docs/`（devlog 技術文件鏡像）、
+> `competition/`（命題與交付規範）、`technical-docs/`（Markdown 技術文件；`html/` 另存 HTML 版）、
 > `architecture/`（架構決策）、`plans/`（進行中的活計劃）、`qa/`（測試與研究發現）、
 > `design/`（既有設計資產）、`archive/plans/`（已執行完/被取代的一次性工作單，索引見該目錄 README）。
 >
@@ -38,14 +38,15 @@ Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certificatio
 | [competition/PROPOSAL.md](competition/PROPOSAL.md) | 競賽企劃書：產品定位、Demo 敘事腳本、評審價值故事 |
 | [competition/TEAM.md](competition/TEAM.md) | 團隊/角色分工 |
 
-## technical-docs/ — devlog 技術文件鏡像
+## technical-docs/ — 技術文件（Markdown 主版 + HTML 另存）
 
 | 文件 | 說明 |
 |------|------|
-| [technical-docs/README.md](technical-docs/README.md) | 從 `TrustForge-devlog/docs/` 匯入的技術文件索引；保留主要閱讀順序、首頁、佐證矩陣與舊編號 redirect 對照 |
-| [technical-docs/index.html](technical-docs/index.html) | 技術文件首頁（HTML 靜態站版本） |
-| [technical-docs/00-evidence-map.html](technical-docs/00-evidence-map.html) | 真實佐證矩陣，方便評審或交接者快速查核技術主張 |
-| [technical-docs/16-competition-submission.html](technical-docs/16-competition-submission.html) | 比賽投稿與交付口徑 |
+| [technical-docs/README.md](technical-docs/README.md) | 技術文件 Markdown 主索引；主 repo、GitHub review 與 `trustforge/README.md` 導覽以 Markdown 為主 |
+| [technical-docs/index.md](technical-docs/index.md) | 技術文件首頁（Markdown 版） |
+| [technical-docs/00-evidence-map.md](technical-docs/00-evidence-map.md) | 真實佐證矩陣，方便評審或交接者快速查核技術主張 |
+| [technical-docs/16-competition-submission.md](technical-docs/16-competition-submission.md) | 比賽投稿與交付口徑 |
+| [technical-docs/html/index.html](technical-docs/html/index.html) | HTML 靜態版另存入口；保留原 devlog 視覺版與舊編號 redirect |
 
 ## architecture/ — 架構決策
 
