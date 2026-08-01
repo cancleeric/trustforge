@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -24,6 +26,7 @@ _LOG = logging.getLogger(__name__)
 _MAX_PROPOSALS = 20
 _MAX_FIELD_BYTES = 4_096
 _MAX_REVIEW_INPUT_BYTES = 32_768
+_MAX_REVIEW_OUTPUT_TOKENS = 1_024
 
 
 class _ReviewBlocked(RuntimeError):
@@ -40,6 +43,34 @@ def _blocked_result(status: str, reason: str) -> dict:
         "reviews": [],
         "can_activate": False,
     }
+
+
+def _persist_review_outcome(result: dict, path: Path | None = None) -> dict:
+    """Append one fsync'd audit outcome without relying on replaceable latest state."""
+    destination = path or (REPO / "out" / "hermes-upgrade-review-runs.jsonl")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    outcome = {
+        "run_id": str(uuid.uuid4()),
+        "ts": iso_utc(time.time()),
+        **result,
+    }
+    payload = (json.dumps(outcome, ensure_ascii=False, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(destination, flags, 0o600)
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("review outcome append made no progress")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return outcome
 
 
 def _budgeted_complete(
@@ -96,9 +127,32 @@ def _budgeted_complete(
                 )
             raise _ReviewBlocked("review_failed", "bedrock_call_failed") from exc
 
-        tokens_in = int(response.input_tokens or 0)
-        tokens_out = int(response.output_tokens or 0)
-        cost_usd = estimate_cost(response.model_id, tokens_in, tokens_out)
+        try:
+            model_id = str(response.model_id).strip()
+            tokens_in = int(response.input_tokens)
+            tokens_out = int(response.output_tokens)
+            cost_usd = estimate_cost(model_id, tokens_in, tokens_out)
+            usage_is_certain = (
+                bool(model_id)
+                and tokens_in > 0
+                and tokens_out > 0
+                and math.isfinite(float(cost_usd))
+                and float(cost_usd) > 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            usage_is_certain = False
+        if not usage_is_certain:
+            # The provider may have accepted work even when its accounting
+            # metadata is absent or malformed. Conservatively charge local
+            # capacity and retain shared capacity for reconciliation.
+            budget_guard.record_unledgered_spend(reservation_value)
+            if shared_reservation:
+                budget_guard.mark_reservation_accounting_uncertain(reservation)
+            else:
+                release_safe = True
+            raise _ReviewBlocked(
+                "accounting_failed", "bedrock_usage_metadata_ambiguous"
+            )
         ledger_record = {
             "ts": iso_utc(now_fn()),
             "question_type": "hermes_upgrade_review",
@@ -106,7 +160,7 @@ def _budgeted_complete(
             "offline": False,
             "calls": [
                 {
-                    "model": response.model_id,
+                    "model": model_id,
                     "tokens_in": tokens_in,
                     "tokens_out": tokens_out,
                     "cost_usd": cost_usd,
@@ -244,6 +298,7 @@ def main() -> int:
     queue = UpgradeQueue()
     diagnostic, bindings = _bind_diagnostic(queue, diagnostic)
     config = BedrockConfig()
+    config.max_tokens = max(1, min(config.max_tokens, _MAX_REVIEW_OUTPUT_TOKENS))
     if not config.model_id:
         result = {
             "status": "waiting_model_configuration",
@@ -254,6 +309,7 @@ def main() -> int:
         client = BedrockClient(config=config, offline=False)
         result = _review_with_budget(diagnostic, client)
         result = _attach_review_bindings(result, bindings)
+    _persist_review_outcome(result)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

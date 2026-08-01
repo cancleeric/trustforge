@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import threading
 from decimal import Decimal
 from pathlib import Path
+
+import pytest
 
 from trustforge import ledger as ledger_module
 from trustforge.bedrock import LLMResult
@@ -296,3 +299,173 @@ def test_shared_primary_failure_local_fallback_cannot_release_reservation(monkey
     assert result["status"] == "accounting_failed"
     assert local_fallback == []
     assert released == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "reviewed",
+        "budget_denied",
+        "budget_unavailable",
+        "review_failed",
+        "accounting_failed",
+    ],
+)
+def test_each_review_outcome_is_append_only_and_fsynced(tmp_path, status):
+    reviewer = _load_reviewer()
+    path = tmp_path / "review-runs.jsonl"
+
+    first = reviewer._persist_review_outcome(
+        {"status": status, "reviews": [], "can_activate": False}, path
+    )
+    second = reviewer._persist_review_outcome(
+        {"status": status, "reviews": [], "can_activate": False}, path
+    )
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert rows[0]["run_id"] == first["run_id"]
+    assert rows[1]["run_id"] == second["run_id"]
+    assert rows[0]["run_id"] != rows[1]["run_id"]
+    assert all(row["status"] == status and row["ts"] for row in rows)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_missing_usage_retains_or_conservatively_charges_reservation(
+    monkeypatch, shared
+):
+    reviewer = _load_reviewer()
+    released: list[float] = []
+    unledgered: list[float] = []
+    uncertain: list[float] = []
+    backend = "dynamodb" if shared else "local"
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard, "budget_reservation_backend", lambda: backend
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "try_reserve_request_budget", lambda **_kwargs: 0.05
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "record_unledgered_spend", unledgered.append
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "mark_reservation_accounting_uncertain",
+        uncertain.append,
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+
+    class MissingUsageClient:
+        def complete(self, **_kwargs):
+            return LLMResult(
+                text='{"reviews": []}',
+                input_tokens=0,
+                output_tokens=0,
+                model_id=MODEL_ID,
+            )
+
+    result = reviewer._review_with_budget(_diagnostic(), MissingUsageClient())
+
+    assert result["status"] == "accounting_failed"
+    assert result["reason"] == "bedrock_usage_metadata_ambiguous"
+    assert unledgered == [0.05]
+    assert uncertain == ([0.05] if shared else [])
+    assert released == ([] if shared else [0.05])
+
+
+def test_bedrock_exception_is_durable_failure_candidate_and_never_releases_shared(
+    monkeypatch,
+):
+    reviewer = _load_reviewer()
+    released: list[float] = []
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard, "budget_reservation_backend", lambda: "dynamodb"
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "try_reserve_request_budget", lambda **_kwargs: 0.05
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard, "record_unledgered_spend", lambda _amount: None
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "mark_reservation_accounting_uncertain",
+        lambda _reservation: None,
+    )
+    monkeypatch.setattr(
+        reviewer.budget_guard,
+        "release_request_budget",
+        lambda amount, **_kwargs: released.append(amount),
+    )
+
+    class FailingClient:
+        def complete(self, **_kwargs):
+            raise RuntimeError("provider timeout after acceptance")
+
+    result = reviewer._review_with_budget(_diagnostic(), FailingClient())
+
+    assert result["status"] == "review_failed"
+    assert result["reason"] == "bedrock_call_failed"
+    assert released == []
+
+
+def test_concurrent_atomic_reservation_allows_only_one_bedrock_call(monkeypatch):
+    reviewer = _load_reviewer()
+    lock = threading.Lock()
+    reserved = False
+    calls: list[int] = []
+
+    monkeypatch.setattr(reviewer.budget_guard, "narrative_model_priced", lambda: True)
+    monkeypatch.setattr(
+        reviewer.budget_guard, "budget_reservation_backend", lambda: "dynamodb"
+    )
+
+    def reserve(**_kwargs):
+        nonlocal reserved
+        with lock:
+            if reserved:
+                return None
+            reserved = True
+            return 0.05
+
+    monkeypatch.setattr(reviewer.budget_guard, "try_reserve_request_budget", reserve)
+    monkeypatch.setattr(
+        reviewer.budget_guard, "release_request_budget", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(reviewer.ledger_module, "get_ledger", lambda: None)
+
+    class CountingClient:
+        def complete(self, **_kwargs):
+            calls.append(1)
+            return LLMResult(
+                text='{"reviews": []}',
+                input_tokens=10,
+                output_tokens=2,
+                model_id=MODEL_ID,
+            )
+
+    results: list[dict] = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(
+                reviewer._review_with_budget(_diagnostic(), CountingClient())
+            )
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(calls) == 1
+    assert sorted(result["status"] for result in results) == [
+        "accounting_failed",
+        "budget_denied",
+    ]
