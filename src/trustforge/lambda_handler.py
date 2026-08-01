@@ -11,10 +11,19 @@ live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶 `X-Live-Token` head
 from __future__ import annotations
 
 import json
+import importlib
 import logging
+import os
 from urllib.parse import urlencode
 
-from . import web
+from .lambda_secret import hydrate_live_token
+
+
+# Must run before importing ``web`` because it reads environment-backed
+# security defaults during module initialization.  A configured secret that
+# cannot be retrieved intentionally fails the Lambda cold start closed.
+hydrate_live_token()
+web = importlib.import_module(".web", __package__)
 from .ingestion.hoyabit import log_hoyabit_startup_status
 
 
@@ -46,10 +55,50 @@ def _resp(code, body, ctype):
     }
 
 
+def _competition_mode() -> str | None:
+    """Validate the deployment-bound mode for competition Lambda functions."""
+    function_name = os.getenv("AWS_LAMBDA_FUNCTION_NAME", "")
+    if not function_name.startswith("competition-trustforge-"):
+        return None
+    mode = os.getenv("TRUSTFORGE_COMPETITION_MODE", "").strip()
+    if mode not in {"offline", "live"}:
+        raise RuntimeError("competition Lambda requires an explicit offline/live mode")
+    return mode
+
+
+_COMPETITION_MODE = _competition_mode()
+
+
+def _offline_landing() -> str:
+    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrustForge — AWS 離線展示</title></head><body>
+<main><h1>TrustForge</h1><h2>AWS 離線唯讀展示</h2>
+<p>此競賽端點目前只驗證 AWS 部署與健康狀態，不提供分析執行。</p>
+<p>正式 Live 分析將在安全審查與現場題目確認後另行啟用。</p>
+<p><a href="/healthz">Health check</a></p></main></body></html>"""
+
+
 def handler(event, context=None):
     # Function URL（payload v2）：rawPath + queryStringParameters(dict[str,str])
     path = (event.get("rawPath")
             or event.get("requestContext", {}).get("http", {}).get("path", "/"))
+    method = (
+        event.get("requestContext", {}).get("http", {}).get("method", "GET")
+        or "GET"
+    ).upper()
+    if _COMPETITION_MODE == "offline" and (
+        method != "GET" or path not in ("/", "/healthz")
+    ):
+        return _resp(
+            404,
+            web.render_page(
+                web._render_error_card("找不到頁面", "此競賽離線展示端點未開放該路由。")
+            ),
+            "text/html; charset=utf-8",
+        )
+    if _COMPETITION_MODE == "offline" and path == "/":
+        return _resp(200, _offline_landing(), "text/html; charset=utf-8")
     raw_qs = event.get("queryStringParameters") or {}
     qs = {k: [v] for k, v in raw_qs.items()}  # 轉成 _do_analyze 期望的 list 形式
     # CISO hardening R3（#2a, issue #134）：Function URL headers 是
