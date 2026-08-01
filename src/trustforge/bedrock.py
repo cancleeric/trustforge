@@ -10,6 +10,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from .ledger import estimate_cost
@@ -132,15 +133,14 @@ _STANCE_FEWSHOT = [
 
 # Competition Bedrock hard limit (#1203): Amazon Bedrock calls must stay below
 # one request per second.  Keep this guard in the single Bedrock gateway so
-# narrative, stance, and structured-extraction calls share the same process-local
-# minimum interval.  Cross-process/Lambda concurrency still needs deployment-level
-# serialization or an external lease, but this removes the previous "currently
-# serial by accident" gap inside one runtime.
+# narrative, stance, and structured-extraction calls share the same host-local
+# canonical flock timestamp. Lambda fails closed; non-Lambda deployments must
+# remain single-host because this is intentionally not a distributed lease.
 _BEDROCK_MIN_INTERVAL_SEC = float(os.getenv("TRUSTFORGE_BEDROCK_MIN_INTERVAL_SEC", "1.0"))
 
 
 class BedrockRpsLimiter:
-    """Small process-local minimum-interval limiter for Bedrock invoke paths."""
+    """Cross-process minimum-interval limiter for Bedrock invoke paths."""
 
     def __init__(
         self,
@@ -148,24 +148,61 @@ class BedrockRpsLimiter:
         min_interval: float = _BEDROCK_MIN_INTERVAL_SEC,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        lock_path: str | os.PathLike[str] | None = None,
     ) -> None:
-        self.min_interval = max(0.0, float(min_interval))
+        self.min_interval = max(1.0, float(min_interval))
         self._monotonic = monotonic
         self._sleep = sleep
         self._lock = threading.Lock()
         self._last_call_at: float | None = None
+        injected_clock = monotonic is not time.monotonic or sleep is not time.sleep
+        default_lock = (
+            f"/tmp/trustforge-bedrock-rps-test-{id(self)}.lock"
+            if injected_clock
+            else "/tmp/trustforge-bedrock-rps.lock"
+        )
+        # Production always uses one canonical host-local path. ``lock_path`` is
+        # constructor-only test injection; environment cannot split the gate.
+        self._lock_path = Path(lock_path or default_lock)
+        if injected_clock and lock_path is None:
+            self._lock_path.unlink(missing_ok=True)
+        self._unsupported_lambda_runtime = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
     def acquire(self) -> None:
-        if self.min_interval <= 0:
-            return
+        if self._unsupported_lambda_runtime:
+            raise RuntimeError(
+                "Lambda Bedrock calls require a real shared distributed limiter"
+            )
+        try:
+            import fcntl
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Bedrock calls require host-local flock support"
+            ) from exc
         with self._lock:
-            now = self._monotonic()
-            if self._last_call_at is not None:
-                wait = self.min_interval - (now - self._last_call_at)
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                lock_file.seek(0)
+                raw = lock_file.read().strip()
+                try:
+                    last_call_at = float(raw) if raw else self._last_call_at
+                except ValueError as exc:
+                    raise RuntimeError("Bedrock limiter state is malformed") from exc
+                now = self._monotonic()
+                if last_call_at is not None and last_call_at > now:
+                    raise RuntimeError("Bedrock limiter timestamp is in the future")
+                wait = 0.0
+                if last_call_at is not None:
+                    wait = self.min_interval - (now - last_call_at)
                 if wait > 0:
                     self._sleep(wait)
                     now = self._monotonic()
-            self._last_call_at = now
+                self._last_call_at = now
+                lock_file.seek(0)
+                lock_file.truncate()
+                lock_file.write(f"{now:.9f}\n")
+                lock_file.flush()
 
 
 # One limiter per process so multiple BedrockClient instances do not bypass the
@@ -179,7 +216,7 @@ class BedrockConfig:
     # deployment regions to us-east-1 / us-west-2.  Keep env overrides for the
     # final on-site model announcement, but never default to ap-* / au.* profiles.
     region: str = os.getenv("AWS_REGION", "us-east-1")
-    model_id: str = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
+    model_id: str = os.getenv("BEDROCK_MODEL_ID", "")
     max_tokens: int = int(os.getenv("BEDROCK_MAX_TOKENS", "1024"))
     # Stance classifier uses a US cross-region inference profile by default so
     # zero-env production does not silently fail under us-east-1/us-west-2.

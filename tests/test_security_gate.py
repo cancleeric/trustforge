@@ -69,11 +69,28 @@ class TestSecretDetection:
         _write(
             tmp_path,
             "frontend/src/lib/adminApi.test.ts",
-            "const payload = {api_key: 'must-not-be-accepted'}\n",
+            "  api_key: 'must-not-be-accepted',\n",
         )
         result = scan(tmp_path)
         assert result.p0_count == 0
         assert result.p2_count >= 1
+
+    def test_arbitrary_frontend_test_secret_remains_p0(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "frontend/src/lib/other.test.ts",
+            "const payload = {api_key: 'real-looking-secret-value'}\n",
+        )
+        result = scan(tmp_path)
+        assert result.p0_count == 1
+
+    def test_dummy_words_cannot_hide_a_second_secret(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "frontend/src/lib/adminApi.test.ts",
+            "const payload = {api_key: 'must-not-be-accepted', secret: 'actual-secret-value'}\n",
+        )
+        assert scan(tmp_path).p0_count >= 1
 
 
 class TestInternalNetDetection:

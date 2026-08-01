@@ -15,8 +15,9 @@
    credentials.
 3. Populate and review the version-controlled
    `deploy/config/multi-angle-batch-sandbox.json`; it is committed disabled and
-   must name one exact account, caller ARN, table ARN, region, and budget config
-   version. The table must be dedicated to the proof, tagged
+   must pin SHA-256 digests for one exact account, caller ARN, and table ARN,
+   plus the region and budget config version. Never commit the raw identifiers.
+   The table must be dedicated to the proof, tagged
    `Environment=sandbox`, encrypted, PITR-enabled, and bootstrapped with exactly
    one batch of remaining capacity. Run
    `scripts/run_multi_angle_batch_sandbox.py --confirm-sandbox` once and retain
@@ -26,6 +27,25 @@
    separately reviewed sandbox data reset or a fresh dedicated table; the
    runner never resets counters or deletes records.
 4. Complete #884 worker integration and #885 reconciliation gates.
+
+### One-shot sandbox allowlist activation
+
+1. From the protected deployment environment, compute SHA-256 for the reviewed
+   values of `TRUSTFORGE_SANDBOX_ACCOUNT_ID`,
+   `TRUSTFORGE_SANDBOX_CALLER_ARN`, and `TRUSTFORGE_SANDBOX_TABLE_ARN`. Commit
+   only those three digests, set `enabled=true`, and obtain security review.
+   The caller must be the `trustforge-896-sandbox-runner` role and the table
+   must be exactly `trustforge-issue896-sandbox-3` in the reviewed account and
+   region.
+2. Supply the three raw values only through the protected runtime environment.
+   Run `scripts/run_multi_angle_batch_sandbox.py --confirm-sandbox`. The runner
+   verifies each value against the commit-bound digest before contacting
+   DynamoDB and then verifies STS identity, exact ARN, encryption, PITR, and
+   sandbox tag.
+3. Retain the receipt and CloudTrail evidence, immediately unset the three
+   runtime variables, and submit a follow-up reviewed commit restoring
+   `enabled=false` and blank digests. Never reuse the one-shot capacity without
+   a separately authorized reset/fresh table procedure.
 
 ## Migration
 

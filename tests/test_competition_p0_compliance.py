@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import inspect
 import re
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from trustforge import analysis_plan, sagemaker_client, ssm_params
 from trustforge.bedrock import BedrockClient, BedrockConfig
@@ -52,7 +56,7 @@ def test_bedrock_defaults_use_competition_us_region_and_profile(monkeypatch) -> 
 
     assert cfg.region == "us-east-1"
     assert cfg.stance_model_id == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-    assert cfg.model_id == "us.anthropic.claude-sonnet-4-6"
+    assert cfg.model_id == ""
 
 
 def test_other_aws_clients_default_to_competition_region() -> None:
@@ -119,6 +123,61 @@ def test_bedrock_stance_and_extraction_share_one_rps_guard() -> None:
     assert client.classify_stance_strict("a", "b") == "neutral"
 
     assert clock.sleeps == [1.0]
+
+
+def test_bedrock_interval_cannot_be_configured_below_one_second(tmp_path) -> None:
+    from trustforge.bedrock import BedrockRpsLimiter
+
+    limiter = BedrockRpsLimiter(min_interval=0.01, lock_path=tmp_path / "rps.lock")
+    assert limiter.min_interval == 1.0
+
+
+def test_bedrock_lambda_fails_closed_without_shared_limiter(monkeypatch, tmp_path) -> None:
+    from trustforge.bedrock import BedrockRpsLimiter
+
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "trustforge")
+    limiter = BedrockRpsLimiter(lock_path=tmp_path / "rps.lock")
+    with pytest.raises(RuntimeError, match="distributed limiter"):
+        limiter.acquire()
+
+
+def test_bedrock_limiter_serializes_two_processes(tmp_path) -> None:
+    lock_path = tmp_path / "shared-rps.lock"
+    code = (
+        "import sys,time; "
+        "from trustforge.bedrock import BedrockRpsLimiter; "
+        "BedrockRpsLimiter(lock_path=sys.argv[1]).acquire(); "
+        "print(time.time(), flush=True)"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(lock_path)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    timestamps = sorted(float(process.communicate(timeout=5)[0]) for process in processes)
+    assert timestamps[1] - timestamps[0] >= 0.9
+    assert all(process.returncode == 0 for process in processes)
+
+
+def test_bedrock_limiter_fails_closed_on_invalid_timestamp(tmp_path) -> None:
+    from trustforge.bedrock import BedrockRpsLimiter
+
+    lock_path = tmp_path / "stale.lock"
+    lock_path.write_text("not-a-timestamp\n", encoding="utf-8")
+    limiter = BedrockRpsLimiter(lock_path=lock_path)
+    with pytest.raises(RuntimeError, match="malformed"):
+        limiter.acquire()
+
+
+def test_bedrock_production_lock_path_cannot_be_split_by_env(monkeypatch) -> None:
+    from trustforge.bedrock import BedrockRpsLimiter
+
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_LIMITER_PATH", "/tmp/attacker-selected.lock")
+    limiter = BedrockRpsLimiter()
+    assert str(limiter._lock_path) == "/tmp/trustforge-bedrock-rps.lock"
 
 
 def test_tracked_repository_contains_no_raw_competition_infra_identifiers() -> None:

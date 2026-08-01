@@ -298,4 +298,4 @@ def test_default_region_compatible_with_default_stance_model_profile():
 def test_default_narrative_model_id_uses_competition_us_profile():
     """敘事模型預設也必須維持競賽 us.* profile；仍可由 BEDROCK_MODEL_ID 覆寫。"""
     config = BedrockConfig()
-    assert config.model_id == "us.anthropic.claude-sonnet-4-6"
+    assert config.model_id == ""

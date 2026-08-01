@@ -1,8 +1,8 @@
 {
   "enabled": false,
-  "account_id": "<ACCOUNT_ID>",
-  "caller_arn": "arn:aws:iam::<ACCOUNT_ID>:user/trustforge-896-sandbox-runner",
-  "table_arn": "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/trustforge-issue896-sandbox-3",
+  "account_id_sha256": "",
+  "caller_arn_sha256": "",
+  "table_arn_sha256": "",
   "region": "us-east-1",
   "config_version": "issue-896-v3"
 }

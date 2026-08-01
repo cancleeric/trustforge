@@ -14,7 +14,7 @@
         "dynamodb:DescribeContinuousBackups",
         "dynamodb:ListTagsOfResource"
       ],
-      "Resource": "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/trustforge-issue896-sandbox-3"
+      "Resource": "arn:aws:dynamodb:us-east-1:${aws:PrincipalAccount}:table/trustforge-issue896-sandbox-3"
     },
     {
       "Sid": "CallerIdentity",

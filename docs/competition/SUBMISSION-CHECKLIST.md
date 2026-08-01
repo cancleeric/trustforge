@@ -7,7 +7,7 @@
 - [ ] 確認無 production secret 留在 repo（`grep -r "sk-*" src/ --include="*.py"`）
 - [ ] 確認無 private IP / 內網 reference（`grep -r "192.168\|10\.0\|\.internal"`）
 - [ ] GCP Cloud Run credentials 不進版控（已在 .gitignore）
-- [ ] 前端 public Demo URL 可存取：http://3.106.220.68/
+- [ ] 前端 public Demo URL 可存取：由部署環境提供
 
 ## Part B — 交付件打包
 - [ ] `scripts/submission-pack.sh` 產出 `finale-submission.zip`

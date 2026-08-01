@@ -38,7 +38,6 @@ EXCLUDE_FILES = frozenset([
 # ── Secret scan 排除目錄（含 dummy token 的測試/deploy 腳本） ─────────
 SECRET_RELAXED_DIRS: list[re.Pattern[str]] = [
     re.compile(r"^tests/"),
-    re.compile(r".*\.test\.[jt]sx?$"),
     re.compile(r"^deploy/"),
     re.compile(r"^scripts/"),
     re.compile(r"^docs/"),
@@ -114,6 +113,12 @@ DEV_FILE_PATTERNS: list[re.Pattern[str]] = [
 def _is_known_false_positive_secret(relpath: str, line: str, pattern_name: str) -> bool:
     """Return True for UI labels / dummy test payloads that look like keys."""
     normalized = relpath.replace("\\", "/")
+    if (
+        pattern_name == "private_key"
+        and normalized == "src/trustforge/hermes_audit_contracts.py"
+        and "BEGIN(?: [A-Z]+)? PRIVATE KEY" in line
+    ):
+        return True
     if pattern_name != "hardcoded_secret":
         return False
     if normalized == "frontend/src/hermes/hermesI18n.tsx" and (
@@ -257,7 +262,16 @@ def scan(root: Path | None = None) -> ScanResult:
                 if m:
                     if _is_known_false_positive_secret(relpath, line, pattern_name):
                         continue
-                    severity = "P2" if is_secret_relaxed else "P0"
+                    exact_dummy_fixture = (
+                        relpath.replace("\\", "/")
+                        == "frontend/src/lib/adminApi.test.ts"
+                        and re.fullmatch(
+                            r"\s*api_key: ['\"]must-not-be-accepted['\"],\s*",
+                            line,
+                        )
+                        is not None
+                    )
+                    severity = "P2" if is_secret_relaxed or exact_dummy_fixture else "P0"
                     result.add(Finding(
                         severity=severity,
                         category="secret",
