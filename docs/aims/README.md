@@ -31,6 +31,9 @@
 - [支援控制](05-support/README.md)：能力、訓練、文件生命週期與內外溝通控制草案。
 - [生命週期控制矩陣](06-lifecycle/lifecycle-control-matrix.md)：設計、資料、開發、驗證、發布、運行、監測、事件、變更與退役控制草案。
 - [供應商與來源卡](07-suppliers/supplier-and-source-cards.md)：資料源、模型、工具、credential boundary 與 review 狀態草案。
+- [量測與監控](08-measurement/kpi-and-monitoring-register.md)：KPI、公式、來源、baseline、target 與缺值規則草案。
+- [內部稽核](09-audit/audit-programme-and-report.md)：audit programme、finding 欄位與獨立性要求草案。
+- [CAPA 與管理審查](10-capa/capa-register-and-management-review.md)：CAPA register、management review pack 與不宣稱有效性的結論邊界草案。
 
 ## 共通狀態語意
 
