@@ -99,12 +99,19 @@ def test_forward_dependency_fails_closed():
     intent = AnalysisIntent(
         assets=("BTC",),
         operations=(
+            IntentOperation("news_sentiment", "sentiment_analysis", ("news",), "sentiment_news"),
+            IntentOperation(
+                "social_sentiment",
+                "sentiment_analysis",
+                ("social",),
+                "sentiment_social",
+            ),
             IntentOperation(
                 "alignment",
                 "compare",
                 ("news_sentiment", "social_sentiment"),
                 "alignment",
-                ("news", "social"),
+                ("future_dependency",),
             ),
         ),
         deliverables=("alignment",),
@@ -116,6 +123,35 @@ def test_forward_dependency_fails_closed():
         assert "dependency" in str(exc)
     else:
         raise AssertionError("forward dependency must be rejected")
+
+
+def test_llm_compare_targets_must_have_upstream_producers():
+    def unbound_compare_parser(_question, _assets):
+        return {
+            "assets": ["BTC"],
+            "operations": [
+                {
+                    "id": "sentiment_alignment",
+                    "type": "compare",
+                    "targets": ["news_sentiment", "social_sentiment"],
+                    "output": "alignment",
+                }
+            ],
+            "deliverables": ["alignment"],
+            "parse_confidence": 1,
+        }
+
+    intent = compile_analysis_intent(
+        "比較 BTC 的新聞與社群情緒是否一致",
+        ["BTC"],
+        llm_parser=unbound_compare_parser,
+    )
+
+    assert intent.parse_mode == "deterministic_fallback"
+    assert [operation.id for operation in intent.operations[:2]] == [
+        "news_sentiment",
+        "social_sentiment",
+    ]
 
 
 def test_answer_coverage_never_treats_missing_or_unbound_answer_as_complete():

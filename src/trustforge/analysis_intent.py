@@ -126,6 +126,7 @@ class AnswerCoverage:
 _SAFE_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ASSET = re.compile(r"^[A-Z0-9]{2,12}$")
 _VALID_COVERAGE_STATUSES = {"answered", "insufficient_data", "unsupported", "failed"}
+_UPSTREAM_TARGET_REFS = frozenset({"news_sentiment", "social_sentiment"})
 
 
 def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
@@ -160,6 +161,11 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
         if not targets.issubset(capability.allowed_targets):
             raise IntentValidationError(
                 f"operation {operation.id!r} contains unsupported targets"
+            )
+        unbound_targets = _UPSTREAM_TARGET_REFS.intersection(targets) - seen
+        if unbound_targets:
+            raise IntentValidationError(
+                f"operation {operation.id!r} has unbound upstream targets"
             )
         if len(operation.targets) < capability.min_targets:
             raise IntentValidationError(f"operation {operation.id!r} has too few targets")
