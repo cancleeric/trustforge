@@ -18,6 +18,10 @@ _LOCAL_KEY_ENV = "CMC_PRO_API_KEY"
 _LOCAL_KEY_FILE_ENV = "TRUSTFORGE_CMC_API_KEY_FILE"
 _DEFAULT_PARAMETER = "/trustforge/production/cmc-api-key"
 _PARAMETER_RE = re.compile(r"^/[A-Za-z0-9_.\-/]{1,255}$")
+# Admin API and ingestion/scheduler can run in separate Python processes, so
+# admin-side invalidate_cache() cannot evict the scheduler's copy. Keep the
+# cache only long enough to absorb request bursts; every process rechecks SSM
+# within the same accepted stale-key window as Whale Alert (#1370).
 _CACHE_TTL_SECONDS = 15.0
 _USER_AGENT = "TrustForge/1.0 (CMC credential verification)"
 _VERIFY_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol=BTC"
