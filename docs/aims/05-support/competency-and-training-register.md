@@ -1,5 +1,16 @@
 # Competency and training register
 
+| Field | Value |
+|---|---|
+| Document ID | AIMS-SUPPORT-COMP-001 |
+| Version / status | 0.1-draft / draft, unapproved, non-effective |
+| Owner / approver | CEO assignment pending / CEO approval pending |
+| Approval record / effective date | pending / not-applicable (draft) |
+| Review cadence / next review | set on approval / set on approval |
+| Classification | internal-draft; personal data excluded |
+| Change summary / supersedes | establish role competency and training evidence register / not-applicable (initial draft) |
+| Repository path | `docs/aims/05-support/competency-and-training-register.md` |
+
 Status: **draft / unapproved / non-effective**
 
 Owner: CEO (assignment pending)

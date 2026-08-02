@@ -1,5 +1,16 @@
 # Document and communication control
 
+| Field | Value |
+|---|---|
+| Document ID | AIMS-SUPPORT-DOC-COMM-001 |
+| Version / status | 0.1-draft / draft, unapproved, non-effective |
+| Owner / approver | CEO assignment pending / CEO approval pending |
+| Approval record / effective date | pending / not-applicable (draft) |
+| Review cadence / next review | set on approval / set on approval |
+| Classification | internal-draft |
+| Change summary / supersedes | establish document lifecycle and communication-control contract / not-applicable (initial draft) |
+| Repository path | `docs/aims/05-support/document-and-communication-control.md` |
+
 Status: **draft / unapproved / non-effective**
 
 ## Controlled document metadata

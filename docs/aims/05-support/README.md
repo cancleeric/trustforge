@@ -1,5 +1,16 @@
 # AIMS support controls
 
+| Field | Value |
+|---|---|
+| Document ID | AIMS-SUPPORT-README-001 |
+| Version / status | 0.1-draft / draft, unapproved, non-effective |
+| Owner / approver | CEO assignment pending / CEO approval pending |
+| Approval record / effective date | pending / not-applicable (draft) |
+| Review cadence / next review | set on approval / set on approval |
+| Classification | internal-draft |
+| Change summary / supersedes | establish AIMS support-control index / not-applicable (initial draft) |
+| Repository path | `docs/aims/05-support/README.md` |
+
 Status: **draft / unapproved / non-effective**
 
 This directory defines the support-control evidence expected for TrustForge. It
