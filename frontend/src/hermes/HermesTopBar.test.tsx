@@ -11,7 +11,7 @@ function renderTopBar() {
     <MemoryRouter>
       <HermesI18nProvider>
         <HermesTopBar
-          version="v0.test · GALAXY"
+          version="v0.test"
           costLedger={1.25}
           trackedCount={5}
           tierCounts={{ healthy: 0, moderate: 5, danger: 0 }}
@@ -26,7 +26,7 @@ function renderTopBar() {
 describe('HermesTopBar', () => {
   it('shows identity and cost as display-only text', () => {
     renderTopBar()
-    expect(screen.getByText('v0.test · GALAXY')).toBeInTheDocument()
+    expect(screen.getByText('v0.test · dev')).toBeInTheDocument()
     expect(screen.getByText('$1.2500')).toBeInTheDocument()
   })
 
