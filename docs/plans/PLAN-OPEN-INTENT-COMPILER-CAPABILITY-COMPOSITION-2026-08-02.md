@@ -1,7 +1,7 @@
 # Open-intent compiler、能力組合與對題覆蓋閘開發計畫
 
-日期：2026-08-02  
-基線：`origin/develop` 6802b8ff  
+日期：2026-08-02
+基線：`origin/develop` 6802b8ff
 關聯：#965、#966、#948、#953
 
 ## 1. 問題與實跑證據
