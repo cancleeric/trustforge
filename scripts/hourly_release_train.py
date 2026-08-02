@@ -791,6 +791,7 @@ def execute(args: argparse.Namespace) -> Path:
     receipt = {"run_id": run_id, "started_at": started.isoformat(), "status": "running", "steps": []}
     try:
         require_competition_target()
+        main_only_mode = bool(getattr(args, "main_only", False))
         with lease():
             require_clean_root()
             run(["git", "fetch", "--prune", "origin"])
@@ -800,6 +801,7 @@ def execute(args: argparse.Namespace) -> Path:
             ).strip().split()
             main_only, develop_only = (int(value) for value in counts)
             receipt["divergence"] = {"main_only": main_only, "develop_only": develop_only}
+            receipt["release_scope"] = "main-only" if main_only_mode else "main-and-develop"
             main_sha_remote = run(["git", "rev-parse", "origin/main"], capture=True).strip()
             production_sha, production_digest = production_identity()
             receipt["production_before"] = {"git_sha": production_sha, "artifact_digest": production_digest}
@@ -820,7 +822,7 @@ def execute(args: argparse.Namespace) -> Path:
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
             if (
-                develop_only == 0
+                (main_only_mode or develop_only == 0)
                 and production_sha == main_sha_remote
                 and runtime_in_sync
                 and frontend_in_sync
@@ -844,13 +846,15 @@ def execute(args: argparse.Namespace) -> Path:
                 base = Path(temporary)
                 develop_tree = base / "develop"
                 main_tree = base / "main"
-                run(["git", "worktree", "add", "--detach", str(develop_tree), "origin/develop"])
                 try:
-                    gate(develop_tree)
-                    develop_sha = run(["git", "rev-parse", "HEAD"], cwd=develop_tree, capture=True).strip()
-                    receipt["steps"].append({"develop": develop_sha})
+                    develop_sha = ""
+                    if not main_only_mode:
+                        run(["git", "worktree", "add", "--detach", str(develop_tree), "origin/develop"])
+                        gate(develop_tree)
+                        develop_sha = run(["git", "rev-parse", "HEAD"], cwd=develop_tree, capture=True).strip()
+                        receipt["steps"].append({"develop": develop_sha})
                     run(["git", "worktree", "add", "--detach", str(main_tree), "origin/main"])
-                    if develop_only:
+                    if develop_only and not main_only_mode:
                         run(["git", "merge", "--no-edit", "--no-ff", develop_sha], cwd=main_tree)
                         release_version = bump_patch_version(main_tree)
                         run(
@@ -884,7 +888,7 @@ def execute(args: argparse.Namespace) -> Path:
                     release_branch = f"release/auto-{run_id[:8]}"
                     backup = require_backup_receipt(backup_command, run_id)
                     receipt["steps"].append({"backup_receipt": str(backup)})
-                    if develop_only:
+                    if develop_only and not main_only_mode:
                         run(
                             [
                                 # The exact develop and merged-main candidates already passed
@@ -892,6 +896,16 @@ def execute(args: argparse.Namespace) -> Path:
                                 "git", "-c", "core.hooksPath=/dev/null",
                                 "push", "--atomic", "origin",
                                 f"{main_sha}:refs/heads/main",
+                                f"{main_sha}:refs/heads/{release_branch}",
+                            ],
+                            cwd=main_tree,
+                        )
+                        receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
+                    elif main_only_mode:
+                        run(
+                            [
+                                "git", "-c", "core.hooksPath=/dev/null",
+                                "push", "origin",
                                 f"{main_sha}:refs/heads/{release_branch}",
                             ],
                             cwd=main_tree,
@@ -946,6 +960,11 @@ def execute(args: argparse.Namespace) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="allow pushes and production deployment")
+    parser.add_argument(
+        "--main-only",
+        action="store_true",
+        help="deploy origin/main without gating or merging origin/develop",
+    )
     args = parser.parse_args(argv)
     args.dry_run = not args.execute
     try:

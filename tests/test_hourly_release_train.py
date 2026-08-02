@@ -27,6 +27,18 @@ def test_competition_target_rejects_non_https_or_path(monkeypatch):
         train.require_competition_target()
 
 
+def test_cli_passes_explicit_main_only_scope(monkeypatch, tmp_path):
+    captured = []
+    monkeypatch.setattr(
+        train,
+        "execute",
+        lambda args: captured.append(args) or tmp_path / "receipt.json",
+    )
+    assert train.main(["--execute", "--main-only"]) == 0
+    assert captured[0].dry_run is False
+    assert captured[0].main_only is True
+
+
 def test_patch_bump_synchronizes_backend_and_frontend_versions(tmp_path):
     files = {
         "pyproject.toml": (
