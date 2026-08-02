@@ -296,7 +296,7 @@ REGION="$REGION" TRUSTFORGE_EC2_ROLE="$ROLE" \
   ./deploy/setup_whale_alert_ssm.sh
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-cloudwatch \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[\"Effect\":\"Allow\",\"Action\":\"cloudwatch:PutMetricData\",\"Resource\":\"*\"]}" >/dev/null
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"cloudwatch:PutMetricData\",\"Resource\":\"*\"}]}" >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-dynamodb \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
