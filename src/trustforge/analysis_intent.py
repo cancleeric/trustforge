@@ -126,7 +126,10 @@ class AnswerCoverage:
 _SAFE_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _ASSET = re.compile(r"^[A-Z0-9]{2,12}$")
 _VALID_COVERAGE_STATUSES = {"answered", "insufficient_data", "unsupported", "failed"}
-_UPSTREAM_TARGET_REFS = frozenset({"news_sentiment", "social_sentiment"})
+_UPSTREAM_TARGET_PRODUCERS = {
+    "news_sentiment": ("sentiment_analysis", "sentiment_news"),
+    "social_sentiment": ("sentiment_analysis", "sentiment_social"),
+}
 
 
 def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
@@ -140,6 +143,7 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
         raise IntentValidationError("parse_confidence must be between 0 and 1")
 
     seen: set[str] = set()
+    seen_operations: dict[str, IntentOperation] = {}
     outputs: set[str] = set()
     for operation in intent.operations:
         if not _SAFE_ID.fullmatch(operation.id) or operation.id in seen:
@@ -162,11 +166,17 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
             raise IntentValidationError(
                 f"operation {operation.id!r} contains unsupported targets"
             )
-        unbound_targets = _UPSTREAM_TARGET_REFS.intersection(targets) - seen
-        if unbound_targets:
-            raise IntentValidationError(
-                f"operation {operation.id!r} has unbound upstream targets"
-            )
+        for target in targets.intersection(_UPSTREAM_TARGET_PRODUCERS):
+            expected_type, expected_output = _UPSTREAM_TARGET_PRODUCERS[target]
+            producer = seen_operations.get(target)
+            if producer is None:
+                raise IntentValidationError(
+                    f"operation {operation.id!r} has unbound upstream targets"
+                )
+            if producer.type != expected_type or producer.output != expected_output:
+                raise IntentValidationError(
+                    f"operation {operation.id!r} has spoofed upstream targets"
+                )
         if len(operation.targets) < capability.min_targets:
             raise IntentValidationError(f"operation {operation.id!r} has too few targets")
         if capability.max_targets is not None and len(operation.targets) > capability.max_targets:
@@ -176,6 +186,7 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
                 f"operation {operation.id!r} has an unknown or forward dependency"
             )
         seen.add(operation.id)
+        seen_operations[operation.id] = operation
         outputs.add(operation.output)
 
     if not set(intent.deliverables).issubset(outputs):

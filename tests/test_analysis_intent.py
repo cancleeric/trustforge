@@ -154,6 +154,44 @@ def test_llm_compare_targets_must_have_upstream_producers():
     ]
 
 
+def test_llm_compare_targets_must_bind_expected_producer_type_and_output():
+    def spoofed_producer_parser(_question, _assets):
+        return {
+            "assets": ["BTC"],
+            "operations": [
+                {
+                    "id": "news_sentiment",
+                    "type": "market_synthesis",
+                    "targets": ["price"],
+                    "output": "market_summary",
+                },
+                {
+                    "id": "social_sentiment",
+                    "type": "sentiment_analysis",
+                    "targets": ["social"],
+                    "output": "sentiment_social",
+                },
+                {
+                    "id": "sentiment_alignment",
+                    "type": "compare",
+                    "targets": ["news_sentiment", "social_sentiment"],
+                    "output": "alignment",
+                },
+            ],
+            "deliverables": ["alignment"],
+            "parse_confidence": 1,
+        }
+
+    intent = compile_analysis_intent(
+        "比較 BTC 的新聞與社群情緒是否一致",
+        ["BTC"],
+        llm_parser=spoofed_producer_parser,
+    )
+
+    assert intent.parse_mode == "deterministic_fallback"
+    assert intent.operations[0].type == "sentiment_analysis"
+
+
 def test_answer_coverage_never_treats_missing_or_unbound_answer_as_complete():
     intent = compile_analysis_intent(QUESTION, ["BTC"])
     coverage = evaluate_answer_coverage(
