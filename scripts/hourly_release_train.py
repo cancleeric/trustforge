@@ -23,8 +23,8 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "out" / "release-train"
 PRODUCTION_ACCOUNT_ENV = "TRUSTFORGE_PRODUCTION_ACCOUNT_ID"
-PRODUCTION_REGION = "ap-southeast-2"
-PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
+PRODUCTION_REGION = os.getenv("TRUSTFORGE_PRODUCTION_REGION", "us-west-2")
+PRODUCTION_URL = os.getenv("TRUSTFORGE_PRODUCTION_URL", "https://34-220-226-162.nip.io").rstrip("/")
 VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)\Z")
 # main 引入 formal-run analysis-question handler 後，必須先完成生產配套
 # (DynamoDB table + caller/idempotency/retention secret + EC2 env) 並建立此 flag，
@@ -39,6 +39,13 @@ def production_account() -> str:
     if not re.fullmatch(r"[0-9]{12}", account):
         raise RuntimeError(f"{PRODUCTION_ACCOUNT_ENV} must be a 12-digit AWS account id")
     return account
+
+
+def require_competition_target() -> None:
+    if PRODUCTION_REGION not in {"us-west-2", "us-east-1"}:
+        raise RuntimeError("competition production region must be us-west-2 or us-east-1")
+    if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?", PRODUCTION_URL):
+        raise RuntimeError("competition production URL must be an HTTPS origin without a path")
 
 
 def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -783,6 +790,7 @@ def execute(args: argparse.Namespace) -> Path:
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
     receipt = {"run_id": run_id, "started_at": started.isoformat(), "status": "running", "steps": []}
     try:
+        require_competition_target()
         with lease():
             require_clean_root()
             run(["git", "fetch", "--prune", "origin"])
