@@ -90,6 +90,18 @@ TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，�
 - [`docs/architecture/AWS-ARCHITECTURE.md`](docs/architecture/AWS-ARCHITECTURE.md)
 - [`docs/technical-docs/02-architecture.md`](docs/technical-docs/02-architecture.md)（HTML 版：[`docs/technical-docs/html/02-architecture.html`](docs/technical-docs/html/02-architecture.html)）
 
+### 實際接入資料源
+
+README 上方的圖只列資料類型；目前 repository 內已接入或保留 adapter 的具體來源如下，實際執行時仍受環境變數、憑證、成本上限與 fail-closed 策略控制。
+
+| 類型 | 來源 | 用途 |
+|---|---|---|
+| 價格 / 市場資料 | HOYA BIT OHLCV、CoinGecko、CoinMarketCap、DefiLlama | 歷史價格、即時價格交叉佐證、DeFi TVL 與市場背景 |
+| 鏈上 / 大額轉帳 | Etherscan、Whale Alert、Arkham Intelligence | ETH 鯨魚交易與大額轉帳追蹤，供鏈上訊號與反方證據使用 |
+| 新聞 / RSS | News / RSS connectors | 市場敘事、事件脈絡與 sentiment 類 claim |
+| 監管 / 台灣來源 | FSC 金管會 VASP 公告、MOPS、TWSE、TPEx | 台灣監管公告、公開資訊觀測站與市場揭露資料 |
+| ESG / 碳足跡 | 碳足跡模組 | ESG 與能源/碳排相關證據補充 |
+
 ---
 
 ## Hermes Agent 能力
