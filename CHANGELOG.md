@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.27.52 — 2026-08-02
+
+- release: automatic version preparation.
+
 ## v0.27.51 — 2026-07-31
 
 - release: automatic version preparation.
