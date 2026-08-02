@@ -56,6 +56,8 @@ def _ensure_table(client, table: str) -> None:
     actual = [(item["AttributeName"], item["KeyType"]) for item in description["KeySchema"]]
     if actual != expected or description.get("BillingModeSummary", {}).get("BillingMode") != "PAY_PER_REQUEST":
         raise SystemExit("formal-run table schema/billing contract mismatch")
+    if description.get("SSEDescription", {}).get("Status") not in {"ENABLED", "ENABLING"}:
+        raise SystemExit("formal-run table encryption contract mismatch")
     ttl = client.describe_time_to_live(TableName=table).get("TimeToLiveDescription", {})
     if ttl.get("TimeToLiveStatus") not in {"ENABLED", "ENABLING"}:
         client.update_time_to_live(
@@ -68,6 +70,11 @@ def _ensure_table(client, table: str) -> None:
         TableName=table,
         PointInTimeRecoverySpecification={"PointInTimeRecoveryEnabled": True},
     )
+    recovery = client.describe_continuous_backups(TableName=table)["ContinuousBackupsDescription"]
+    if recovery.get("PointInTimeRecoveryDescription", {}).get("PointInTimeRecoveryStatus") not in {
+        "ENABLED", "ENABLING",
+    }:
+        raise SystemExit("formal-run table PITR contract mismatch")
 
 
 def _ensure_parameters(client, prefix: str) -> list[dict[str, object]]:
@@ -76,6 +83,8 @@ def _ensure_parameters(client, prefix: str) -> list[dict[str, object]]:
         name = f"{prefix}/{logical_name}"
         try:
             current = client.get_parameter(Name=name, WithDecryption=False)["Parameter"]
+            if current.get("Type") != "SecureString":
+                raise SystemExit(f"formal-run parameter type mismatch: {name}")
             result.append({"name": name, "version": current["Version"], "created": False})
             continue
         except ClientError as exc:

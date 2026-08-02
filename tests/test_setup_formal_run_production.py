@@ -31,7 +31,9 @@ class _Ssm:
     def get_parameter(self, *, Name, WithDecryption):
         if Name not in self.values:
             raise ClientError({"Error": {"Code": "ParameterNotFound"}}, "GetParameter")
-        return {"Parameter": {"Name": Name, "Version": self.values[Name]}}
+        return {"Parameter": {
+            "Name": Name, "Version": self.values[Name], "Type": "SecureString",
+        }}
 
     def put_parameter(self, *, Name, Description, Type, Value, Overwrite):
         assert Type == "SecureString" and Overwrite is False and len(Value) >= 32
@@ -61,6 +63,7 @@ def test_table_contract_enables_ttl_and_pitr():
                     {"AttributeName": "sk", "KeyType": "RANGE"},
                 ],
                 "BillingModeSummary": {"BillingMode": "PAY_PER_REQUEST"},
+                "SSEDescription": {"Status": "ENABLED"},
             }}
 
         def describe_time_to_live(self, *, TableName):
@@ -71,6 +74,13 @@ def test_table_contract_enables_ttl_and_pitr():
 
         def update_continuous_backups(self, **kwargs):
             calls.append(("pitr", kwargs))
+
+        def describe_continuous_backups(self, *, TableName):
+            return {"ContinuousBackupsDescription": {
+                "PointInTimeRecoveryDescription": {
+                    "PointInTimeRecoveryStatus": "ENABLED",
+                },
+            }}
 
     MODULE._ensure_table(Client(), "trustforge-formal-run")
     assert calls[0][1]["TimeToLiveSpecification"] == {
