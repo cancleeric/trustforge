@@ -50,20 +50,31 @@ TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，�
 ## 系統架構
 
 ```text
-多源輸入                    Trust Layer（核心）                  Agent 編排 / 輸出
-┌─────────────────┐       ┌────────────────────────┐       ┌─────────────────────┐
-│ HOYA BIT 行情    │       │ 1. Claim extraction     │       │ AWS Bedrock          │
-│ OHLCV 歷史資料   │       │ 2. Source reputation    │       │ - 信任加權融合        │
-│ News / RSS       │  ──▶  │ 3. Corroboration        │  ──▶  │ - 有引文敘事化        │
-│ Social / X       │       │ 4. Recency decay        │       │ - 反方證據與限制條件  │
-│ On-chain 訊號    │       │ 5. TrustScore per claim │       └──────────┬──────────┘
-│ Regulatory 公告  │       └────────────────────────┘                  │
-└─────────────────┘                                            ┌────────▼────────┐
-                                                               │ Web / CLI Demo   │
-                                                               │ Report + Evidence│
-                                                               │ Execution Log    │
-                                                               └─────────────────┘
+多源輸入（6 維 × 14+ 連接器）        Trust Layer（核心）                  Agent 編排 / 輸出
+┌─────────────────────────┐       ┌────────────────────────┐       ┌─────────────────────┐
+│ 價格：HOYA BIT OHLCV     │       │ 1. Claim extraction     │       │ AWS Bedrock          │
+│      CoinGecko / CMC     │       │ 2. Source reputation    │       │ - 信任加權融合        │
+│ 鏈上：Blockchain.com     │  ──▶  │ 3. Corroboration        │  ──▶  │ - 有引文敘事化        │
+│      Etherscan / Arkham  │       │ 4. Recency decay        │       │ - 反方證據與限制條件  │
+│      Whale Alert / DeFi  │       │ 5. TrustScore per claim │       └──────────┬──────────┘
+│ 新聞：11 個 RSS 來源     │       └────────────────────────┘                  │
+│ 社群：Reddit RSS          │                                            ┌────────▼────────┐
+│ 監管：SEC / 金管會 / TWSE │                                            │ Web / CLI Demo   │
+│ 情緒：Fear & Greed       │                                            │ Report + Evidence│
+└─────────────────────────┘                                            │ Execution Log    │
+                                                                        └─────────────────┘
 ```
+
+### 六維資料來源明細
+
+| 維度 | 已接入來源 | 信譽基準 |
+|------|-----------|---------|
+| 價格（Price） | HOYA BIT OHLCV、CoinGecko（價格/情緒/dev）、CoinMarketCap、DefiLlama | 0.85~0.95 |
+| 鏈上（On-chain） | Blockchain.com、Etherscan、Whale Alert、Arkham、mempool.space、Blockchair | 0.95 |
+| 新聞（News） | CoinDesk、Cointelegraph、Decrypt、BitcoinMagazine、CryptoSlate、Bitcoinist、NewsBTC、DailyHodl、TheBlock、UToday、Blockworks（共 11 個 RSS） | 0.65 |
+| 社群（Social） | Reddit RSS（r/CryptoCurrency、r/Bitcoin）、CryptoPanic | 0.35~0.50 |
+| 監管（Regulatory） | SEC EDGAR、FSC 金管會、MOPS 公開資訊觀測站、TWSE 臺灣證交所、TPEx 櫃買中心 | 0.90 |
+| 情緒（Sentiment） | Alternative.me Fear & Greed Index、CoinGecko Sentiment | 0.50 |
 
 詳見：
 
