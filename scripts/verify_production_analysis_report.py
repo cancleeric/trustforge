@@ -102,9 +102,15 @@ def verify_report(
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         query = urllib.parse.urlencode({"job_id": job_id})
-        job = _request_json(
-            f"{base_url.rstrip('/')}/api/analysis-job?{query}"
-        )
+        try:
+            job = _request_json(
+                f"{base_url.rstrip('/')}/api/analysis-job?{query}"
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                time.sleep(poll_seconds)
+                continue
+            raise
         state = job.get("state")
         if state == "completed":
             if not isinstance(job.get("result"), dict):
