@@ -29,6 +29,9 @@
 - [AI 系統／資產清冊](02-policy/ai-system-inventory.md)：最低欄位與 TrustForge 初始登錄。
 - [EU AI Act／EN 18286 overlay](03-eu-ai-act/README.md)：適用性、分類與四向矩陣；EN bibliographic／publication／official status、合法全文、產品／契約／部署事實及合規核准均待 authoritative evidence。#1265／PR-A 不代表父 issue #1264 全部完成。
 - [支援控制](05-support/README.md)：能力、訓練、文件生命週期與內外溝通控制草案。
+- [量測與監控](08-measurement/kpi-and-monitoring-register.md)：KPI、公式、來源、baseline、target 與缺值規則草案。
+- [內部稽核](09-audit/audit-programme-and-report.md)：audit programme、finding 欄位與獨立性要求草案。
+- [CAPA 與管理審查](10-capa/capa-register-and-management-review.md)：CAPA register、management review pack 與不宣稱有效性的結論邊界草案。
 
 ## 共通狀態語意
 
