@@ -4,17 +4,21 @@ import ThemeToggle from './ThemeToggle'
 import { getHealth } from '../lib/endpoints'
 import { useHermesI18n } from '../hermes/hermesI18n'
 
-// build 時由 CD workflow 注入（VITE_GIT_SHA，見 .github/workflows/deploy-frontend.yml），
-// 讓「線上 bundle 對應哪個 commit」可在畫面上直接確認；本機開發未設時 fallback 'dev'。
-const GIT_SHA = (import.meta.env.VITE_GIT_SHA || 'dev').slice(0, 7)
-const BUILD_VERSION = import.meta.env.VITE_RELEASE_VERSION || 'build'
+// Frontend identity is build-time metadata from frontend/package.json plus the
+// bundle commit. Backend /api/health is runtime identity and must not overwrite it.
+const FRONTEND_VERSION = import.meta.env.VITE_FRONTEND_VERSION || 'unversioned'
+const BUNDLE_GIT_SHA = import.meta.env.VITE_BUNDLE_GIT_SHA || import.meta.env.VITE_GIT_SHA || ''
+const BUNDLE_GIT_SHA_SHORT = import.meta.env.VITE_BUNDLE_GIT_SHA_SHORT || BUNDLE_GIT_SHA.slice(0, 7) || 'unversioned-sha'
 
 export default function Header() {
-  const [releaseVersion, setReleaseVersion] = useState(BUILD_VERSION)
+  const [backendVersion, setBackendVersion] = useState<string | null>(null)
   const { locale, setLocale, t } = useHermesI18n()
-  // 'build' = 沒注入 VITE_RELEASE_VERSION；'dev' = 後端沒走發版流程。兩者都是
-  // 哨兵值而非版號，見下方版號徽章的註解。
-  const isUnversioned = releaseVersion === 'build' || /^dev\b/.test(releaseVersion)
+  const isFrontendUnversioned = FRONTEND_VERSION === 'unversioned'
+  const isBundleShaMissing = BUNDLE_GIT_SHA_SHORT === 'unversioned-sha'
+  const backendLabel = backendVersion && !/^dev\b/.test(backendVersion)
+    ? `Backend ${backendVersion}`
+    : 'Backend unversioned'
+  const isVersionDegraded = isFrontendUnversioned || isBundleShaMissing || !backendVersion || /^dev\b/.test(backendVersion)
   const navItems = [
     { to: '/', label: 'HERMES' }, { to: '/plan', label: locale === 'zh-TW' ? '規劃' : 'PLAN' }, { to: '/analyze', label: t('analyze') },
     { to: '/compare', label: t('compare') }, { to: '/history', label: t('history') },
@@ -24,7 +28,7 @@ export default function Header() {
   useEffect(() => {
     const controller = new AbortController()
     void getHealth(controller.signal).then((response) => {
-      if (response.ok) setReleaseVersion(response.data.version)
+      if (response.ok) setBackendVersion(response.data.version)
     }).catch(() => {
       // Keep the build-time value visible if the health endpoint is briefly unavailable.
     })
@@ -88,16 +92,14 @@ export default function Header() {
         ))}
       </nav>
 
-      {/* 跟 HermesTopBar 同一個問題：`build`（未注入 VITE_RELEASE_VERSION）與
-          `dev`（後端沒走發版流程時 /api/health 的回值）都是哨兵值，不是版號。
-          用一般樣式印成「build · dev」會被讀成版本名叫 build。標成 amber 並
-          換一段說明文案，讓它讀起來是「這份 bundle 沒有版本資訊」的狀態。 */}
+      {/* Frontend bundle identity and backend runtime identity are intentionally
+          separate: /api/health can only describe the backend process. */}
       <span
-        title={isUnversioned ? t('hdrUnversionedTitle') : t('hdrDeployVersionTitle')}
+        title={isVersionDegraded ? t('hdrUnversionedTitle') : t('hdrDeployVersionTitle')}
         className={`self-center rounded border px-2 py-0.5 font-mono text-xs ${
-          isUnversioned ? 'border-tf-warn/50 text-tf-warn' : 'border-tf-muted/40 text-tf-muted'
+          isVersionDegraded ? 'border-tf-warn/50 text-tf-warn' : 'border-tf-muted/40 text-tf-muted'
         }`}
-      >{`${releaseVersion} · ${GIT_SHA}`}</span>
+      >{`Frontend ${FRONTEND_VERSION} · ${BUNDLE_GIT_SHA_SHORT} | ${backendLabel}`}</span>
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} className="self-center rounded border border-tf-border bg-transparent px-2 py-1 font-mono text-xs text-tf-muted hover:text-tf-text">
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>
