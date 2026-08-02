@@ -279,7 +279,15 @@ def _question_similarity(left: str, right: str) -> float:
 
 
 def _db_path(path: str | Path | None = None) -> Path:
-    return Path(path) if path is not None else Path(__file__).resolve().parents[2] / "out" / "trustforge.sqlite3"
+    if path is not None:
+        return Path(path)
+    shared = os.getenv("TRUSTFORGE_SHARED_ANALYSIS_DB_PATH", "").strip()
+    if shared:
+        candidate = Path(shared)
+        if not candidate.is_absolute():
+            raise ValueError("TRUSTFORGE_SHARED_ANALYSIS_DB_PATH must be absolute")
+        return candidate
+    return Path(__file__).resolve().parents[2] / "out" / "trustforge.sqlite3"
 
 
 @contextmanager
