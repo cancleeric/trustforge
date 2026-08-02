@@ -25,6 +25,8 @@ learning objective was assessed. Unknown facts remain `TBD` and are not inferred
 
 ## Evidence set
 
+- `document-lifecycle-trace.md`: draft -> review -> approved/obsolete trace fields
+and the first planned demonstration slot.
 - `competency-and-training-register.md`: role requirements, gaps, actions, owners,
   review dates, and training evidence.
 - `document-and-communication-control.md`: lifecycle, retention, access, obsolete
