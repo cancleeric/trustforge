@@ -8,9 +8,16 @@ describe('Header 版本徽章', () => {
     vi.unstubAllEnvs()
   })
 
-  it('VITE_GIT_SHA 有值時，版本徽章顯示 git sha 前 7 碼', async () => {
-    vi.stubEnv('VITE_GIT_SHA', 'abc1234def')
-    vi.stubEnv('VITE_RELEASE_VERSION', 'v9.9.9')
+  it('前端 bundle 版本與後端 runtime 版本分開顯示，且 health 不覆蓋前端版本', async () => {
+    vi.stubEnv('VITE_FRONTEND_VERSION', 'v0.27.51')
+    vi.stubEnv('VITE_BUNDLE_GIT_SHA', 'abc1234def5678')
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        data: { status: 'ok', version: 'v0.9.99', uptime_seconds: 12 },
+      }),
+    }) as unknown as typeof fetch
     vi.resetModules()
     const { default: Header } = await import('./Header')
     const { HermesI18nProvider } = await import('../hermes/hermesI18n')
@@ -21,13 +28,13 @@ describe('Header 版本徽章', () => {
       </MemoryRouter>
     )
 
-    const badge = screen.getByTitle('部署版本（release / git sha）')
-    expect(badge.textContent).toBe('v9.9.9 · abc1234')
+    expect(await screen.findByText('Frontend v0.27.51 · abc1234 | Backend v0.9.99')).toBeTruthy()
   })
 
-  it('VITE_GIT_SHA 未設定（空字串）時，版本徽章 fallback 顯示 dev', async () => {
-    vi.stubEnv('VITE_GIT_SHA', '')
-    vi.stubEnv('VITE_RELEASE_VERSION', 'v9.9.9')
+  it('frontend version 或 bundle SHA 缺失時顯示 degraded unversioned 狀態', async () => {
+    vi.stubEnv('VITE_FRONTEND_VERSION', '')
+    vi.stubEnv('VITE_BUNDLE_GIT_SHA', '')
+    global.fetch = vi.fn().mockRejectedValue(new Error('health unavailable')) as unknown as typeof fetch
     vi.resetModules()
     const { default: Header } = await import('./Header')
     const { HermesI18nProvider } = await import('../hermes/hermesI18n')
@@ -38,8 +45,8 @@ describe('Header 版本徽章', () => {
       </MemoryRouter>
     )
 
-    const badge = screen.getByTitle('部署版本（release / git sha）')
-    expect(badge.textContent).toBe('v9.9.9 · dev')
+    const badge = screen.getByTitle('這份前端 bundle 沒有版本資訊（未經發版流程建置），顯示的不是版號。')
+    expect(badge.textContent).toBe('Frontend unversioned · unversioned-sha | Backend unversioned')
   })
 })
 
