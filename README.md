@@ -1,5 +1,24 @@
 # TrustForge Hermes（信源熔爐）
 
+## 目前專案快照
+
+以下數字以本 README 更新時的 `origin/main`（`a3f0824b`）為準；重新計算方式寫在表格中，避免把舊版快照誤當成目前狀態。
+
+| 項目 | 狀態 |
+|------|------|
+| Canonical version | `0.27.51`（`src/trustforge/_version.py`、`frontend/package.json`） |
+| Tracked files | `1,913`（`git ls-files`） |
+| Tracked UTF-8 text lines | 約 `445,958` 行（程式、設定、Markdown、HTML、測試與腳本；以版控檔案實際換行數計算） |
+| Python test files | `403` 個（`tests/**/*.py`） |
+| Frontend test files | `86` 個（`frontend/**/*.{test,spec}.*`） |
+| 主要文件索引 | [`docs/README.md`](docs/README.md) |
+| 技術文件 | [`docs/architecture/`](docs/architecture/)；部署規範見 [`docs/RELEASE-DEPLOY-GOVERNANCE.md`](docs/RELEASE-DEPLOY-GOVERNANCE.md) |
+| 比賽交付文件 | [`docs/competition/`](docs/competition/) |
+
+> 測試檔案數與 release gate 的測試批次數不是同一個指標；gate 會依測試收集器與隔離規則重新分批執行。
+
+---
+
 > 加密市場分析 AI Agent — **多源資訊的信任提煉**
 >
 > 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽｜黑客組
