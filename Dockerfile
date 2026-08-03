@@ -13,9 +13,12 @@ COPY demo ./demo
 COPY docs/api ./docs/api
 COPY llms.txt ./llms.txt
 RUN pip install --no-cache-dir -e .
+RUN useradd --system --create-home --home-dir /home/trustforge --shell /usr/sbin/nologin trustforge \
+    && chown -R trustforge:trustforge /app
 
 ENV PORT=8080
 EXPOSE 8080
+USER trustforge
 # 健康檢查走 /healthz
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
   CMD python -c "import urllib.request,os;urllib.request.urlopen('http://127.0.0.1:'+os.getenv('PORT','8080')+'/healthz').read()" || exit 1
