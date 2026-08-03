@@ -499,6 +499,14 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                 "could_flip": {"type": "array"}, "contrarian": {"type": "array"},
                 "generated_at": {"type": "string"}, "direction": {"type": "string"},
                 "cross_source_signal": {"type": ["object", "null"]},
+                "source_kind_distribution": {
+                    "type": ["object", "null"],
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                },
+                "excluded_source_kind_counts": {
+                    "type": ["object", "null"],
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                },
                 "insights": {"type": ["array", "null"]},
                 "hypothesis_ledger": {"type": ["object", "null"]},
                 "calibrated_confidence": {"type": "number"},
