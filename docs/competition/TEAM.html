@@ -41,27 +41,27 @@
 
 <h2>隊名：中再參與</h2>
 <table>
-  <tr><th>成員</th><th>職務</th><th>主責分工</th></tr>
-  <tr><td>王英豪</td><td>隊長</td><td>核心開發（信任提煉引擎）</td></tr>
-  <tr><td>王榆翔（Nicholas）</td><td>副隊長</td><td>外框升級模組（資料連接器 + AWS + HOYA BIT）</td></tr>
+  <tr><th>成員</th><th>職務</th><th>分工</th></tr>
+  <tr><td>王英豪</td><td>隊長</td><td>主要開發（信任提煉引擎）</td></tr>
+  <tr><td>王榆翔（Nicholas）</td><td>副隊長</td><td>外框升級模組開發（資料連接器 + AWS + HOYA BIT）</td></tr>
   <tr><td>曾嵋婕</td><td>組長</td><td>專案指導</td></tr>
-  <tr><td>林子彤</td><td>團隊成員</td><td>使用者介面前端、專案企劃</td></tr>
+  <tr><td>林子彤</td><td>組員</td><td>使用者介面前端、專案企劃</td></tr>
 </table>
 <p class="sub">出品：HurricaneSoft（颶風軟體）</p>
 
 <h2>四隊分工總表</h2>
 <table>
-  <tr><th>隊</th><th>主責</th><th>副手</th><th>對應 codebase</th><th>內容</th></tr>
-  <tr><td><strong>核心</strong></td><td>王英豪（隊長）</td><td>—</td><td><code>src/trustforge/trust/</code><br><code>src/trustforge/agent/</code></td><td>信任提煉引擎（護城河，評審技術深度重點）</td></tr>
-  <tr><td><strong>外框升級模組</strong></td><td>王榆翔（副隊長）</td><td>—</td><td><code>src/trustforge/ingestion/</code></td><td>6 類資料連接器 + Bedrock 直連 + AWS 佈署 + HOYA BIT 對接</td></tr>
+  <tr><th>模組</th><th>負責人</th><th>協作人</th><th>對應 codebase</th><th>工作內容</th></tr>
+  <tr><td><strong>核心系統</strong></td><td>王英豪</td><td>—</td><td><code>src/trustforge/trust/</code><br><code>src/trustforge/agent/</code></td><td>主要開發：信任提煉引擎（護城河，評審技術深度重點）</td></tr>
+  <tr><td><strong>外框升級模組</strong></td><td>王榆翔</td><td>—</td><td><code>src/trustforge/ingestion/</code></td><td>6 類資料連接器 + Bedrock 直連 + AWS 佈署 + HOYA BIT 對接</td></tr>
   <tr><td><strong>前端 WebUI</strong></td><td>林子彤</td><td>曾嵋婕（設計方向）</td><td><code>frontend/src/</code></td><td>dashboard、信任橫條、證據卡、溯源面板——實作主力</td></tr>
   <tr><td><strong>專案指導與企劃</strong></td><td>曾嵋婕（組長）</td><td>林子彤（專案企劃、UI 落地）</td><td><code>docs/competition/</code><br><code>docs/pitch/</code></td><td>敘事、Demo 劇本、評審簡報、4 交付件統籌</td></tr>
 </table>
-<div class="note"><strong>分工原則</strong>：核心由隊長主責（信任層是差異化護城河）；外框升級模組由副隊長主責；前端與企劃協作——曾嵋婕提供專案指導與設計方向，林子彤負責前端實作與專案企劃。</div>
+<div class="note"><strong>分工原則</strong>：王英豪負責核心系統的主要開發；王榆翔負責外框升級模組；曾嵋婕提供專案指導與設計方向；林子彤負責前端實作與專案企劃。</div>
 
 <h2>各隊 owns 的檔案清單</h2>
 
-<h3>核心 — 王英豪（隊長）</h3>
+<h3>核心系統 — 王英豪</h3>
 <ul>
   <li><code>trust/scoring.py</code> — TrustScore 三維（來源信譽 + 交叉佐證 + 時效衰減）</li>
   <li><code>trust/conformal.py</code> — 分數校準</li>
@@ -71,7 +71,7 @@
   <li><code>agent/orchestrator.py</code> — 信任加權融合 + 帶溯源生成分析</li>
 </ul>
 
-<h3>外框升級模組 — 王榆翔（副隊長）</h3>
+<h3>外框升級模組 — 王榆翔</h3>
 <ul>
   <li><code>ingestion/news.py · onchain.py · prices.py · regulatory.py · social.py · coingecko.py</code></li>
   <li><code>ingestion/hoyabit.py</code> — <strong>HOYA BIT 企業數據對接（命題硬約束，追蹤 #167）</strong></li>
