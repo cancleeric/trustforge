@@ -10,11 +10,20 @@ SKILL_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_changes
 BEDROCK_RPS_BACKEND="${TRUSTFORGE_BEDROCK_RPS_BACKEND:-dynamodb}"
 BEDROCK_RPS_REGION="${TRUSTFORGE_BEDROCK_RPS_REGION:-us-east-1}"
 BEDROCK_RPS_TABLE="${TRUSTFORGE_BEDROCK_RPS_TABLE:-competition-trustforge-team11-budget}"
+FORMAL_RUN_TABLE="${TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE:-trustforge-formal-run}"
+TOKEN_SSM_PREFIX="${TRUSTFORGE_TOKEN_SSM_PREFIX:-/trustforge/runtime}"
+SHARED_ANALYSIS_DB_PATH="${TRUSTFORGE_SHARED_ANALYSIS_DB_PATH:-/var/lib/trustforge/analysis.sqlite3}"
 
 if [[ "$BEDROCK_RPS_BACKEND" != "dynamodb" ]] ||
    ! [[ "$BEDROCK_RPS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]] ||
    ! [[ "$BEDROCK_RPS_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]]; then
   echo "invalid canonical Bedrock RPS gate configuration" >&2
+  exit 2
+fi
+if ! [[ "$FORMAL_RUN_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]] ||
+   ! [[ "$TOKEN_SSM_PREFIX" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
+   ! [[ "$SHARED_ANALYSIS_DB_PATH" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
+  echo "invalid formal-run production configuration" >&2
   exit 2
 fi
 
@@ -48,6 +57,9 @@ Environment=BEDROCK_MODEL_ID=$MODEL
 Environment=TRUSTFORGE_BEDROCK_RPS_BACKEND=$BEDROCK_RPS_BACKEND
 Environment=TRUSTFORGE_BEDROCK_RPS_REGION=$BEDROCK_RPS_REGION
 Environment=TRUSTFORGE_BEDROCK_RPS_TABLE=$BEDROCK_RPS_TABLE
+Environment=TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE=$FORMAL_RUN_TABLE
+Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=$TOKEN_SSM_PREFIX
+Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=$SHARED_ANALYSIS_DB_PATH
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
@@ -93,6 +105,9 @@ Environment=BEDROCK_MODEL_ID=$MODEL
 Environment=TRUSTFORGE_BEDROCK_RPS_BACKEND=$BEDROCK_RPS_BACKEND
 Environment=TRUSTFORGE_BEDROCK_RPS_REGION=$BEDROCK_RPS_REGION
 Environment=TRUSTFORGE_BEDROCK_RPS_TABLE=$BEDROCK_RPS_TABLE
+Environment=TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE=$FORMAL_RUN_TABLE
+Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=$TOKEN_SSM_PREFIX
+Environment=TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=$SHARED_ANALYSIS_DB_PATH
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache

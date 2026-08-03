@@ -75,14 +75,24 @@ SKILL_CHANGE_LOG_PATH="${TRUSTFORGE_SKILL_CHANGE_LOG:-/var/lib/trustforge/skill_
 BEDROCK_RPS_BACKEND="${TRUSTFORGE_BEDROCK_RPS_BACKEND:-dynamodb}"
 BEDROCK_RPS_REGION="${TRUSTFORGE_BEDROCK_RPS_REGION:-us-east-1}"
 BEDROCK_RPS_TABLE="${TRUSTFORGE_BEDROCK_RPS_TABLE:-competition-trustforge-team11-budget}"
+FORMAL_RUN_TABLE="${TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE:-trustforge-formal-run}"
+TOKEN_SSM_PREFIX="${TRUSTFORGE_TOKEN_SSM_PREFIX:-/trustforge/runtime}"
+SHARED_ANALYSIS_DB_PATH="${TRUSTFORGE_SHARED_ANALYSIS_DB_PATH:-/var/lib/trustforge/analysis.sqlite3}"
 if [[ "$BEDROCK_RPS_BACKEND" != "dynamodb" ]] ||
    ! [[ "$BEDROCK_RPS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]] ||
    ! [[ "$BEDROCK_RPS_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]]; then
   echo "[activate] ERROR: invalid canonical Bedrock RPS gate configuration" >&2
   exit 2
 fi
+if ! [[ "$FORMAL_RUN_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]] ||
+   ! [[ "$TOKEN_SSM_PREFIX" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
+   ! [[ "$SHARED_ANALYSIS_DB_PATH" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
+  echo "[activate] ERROR: invalid formal-run production configuration" >&2
+  exit 2
+fi
 BEDROCK_RPS_RECONCILE_COMMAND="TRUSTFORGE_BEDROCK_RPS_BACKEND=${BEDROCK_RPS_BACKEND} TRUSTFORGE_BEDROCK_RPS_REGION=${BEDROCK_RPS_REGION} TRUSTFORGE_BEDROCK_RPS_TABLE=${BEDROCK_RPS_TABLE} bash deploy/reconcile_bedrock_rps_service_env.sh"
-BEDROCK_RPS_SCHEDULER_COMMAND="TRUSTFORGE_BEDROCK_RPS_BACKEND=${BEDROCK_RPS_BACKEND} TRUSTFORGE_BEDROCK_RPS_REGION=${BEDROCK_RPS_REGION} TRUSTFORGE_BEDROCK_RPS_TABLE=${BEDROCK_RPS_TABLE} bash deploy/install_hermes_scheduler.sh"
+FORMAL_RUN_RECONCILE_COMMAND="TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE=${FORMAL_RUN_TABLE} TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX} TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=${SHARED_ANALYSIS_DB_PATH} bash deploy/reconcile_formal_run_service_env.sh"
+BEDROCK_RPS_SCHEDULER_COMMAND="REGION=${REGION} TRUSTFORGE_BEDROCK_RPS_BACKEND=${BEDROCK_RPS_BACKEND} TRUSTFORGE_BEDROCK_RPS_REGION=${BEDROCK_RPS_REGION} TRUSTFORGE_BEDROCK_RPS_TABLE=${BEDROCK_RPS_TABLE} TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE=${FORMAL_RUN_TABLE} TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX} TRUSTFORGE_SHARED_ANALYSIS_DB_PATH=${SHARED_ANALYSIS_DB_PATH} bash deploy/install_hermes_scheduler.sh"
 if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
   echo "[activate] ERROR: TRUSTFORGE_TRAINING_DATA_DIR must be an absolute safe path" >&2
   exit 2
@@ -563,7 +573,7 @@ echo "[activate] artifact verified"
 # Step 5: Restart service (zero-downtime)
 echo "[activate] Step 5: restarting service..."
 RCMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$TARGET" \
-  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","'"$TRAINING_RECONCILE_COMMAND"'","'"$PREVIEW_RECONCILE_COMMAND"'","'"$BEDROCK_RPS_RECONCILE_COMMAND"'","'"$BEDROCK_RPS_SCHEDULER_COMMAND"'","TRUSTFORGE_SKILL_CHANGE_LOG='"$SKILL_CHANGE_LOG_PATH"' bash deploy/reconcile_skill_change_log.sh","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
+  --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","'"$MODEL_RECONCILE_COMMAND"'","'"$TRAINING_RECONCILE_COMMAND"'","'"$PREVIEW_RECONCILE_COMMAND"'","'"$BEDROCK_RPS_RECONCILE_COMMAND"'","'"$FORMAL_RUN_RECONCILE_COMMAND"'","'"$BEDROCK_RPS_SCHEDULER_COMMAND"'","TRUSTFORGE_SKILL_CHANGE_LOG='"$SKILL_CHANGE_LOG_PATH"' bash deploy/reconcile_skill_change_log.sh","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","systemctl try-restart trustforge-analysis-flow.service","'"$PREVIEW_READINESS_COMMAND"'","echo \"[activate] service restarted\""]' \
   --query 'Command.CommandId' --output text)
 if [ -z "$RCMDID" ] || [ "$RCMDID" = "None" ]; then
   echo "[activate] ERROR: restart send-command failed" >&2
