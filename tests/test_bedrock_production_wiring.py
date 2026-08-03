@@ -46,6 +46,7 @@ def test_lambda_ec2_activation_and_workers_share_exact_gate_identity() -> None:
 
     assert "reconcile_bedrock_rps_service_env.sh" in activation
     assert "install_hermes_scheduler.sh" in activation
+    assert 'BEDROCK_RPS_SCHEDULER_COMMAND="REGION=${REGION} ' in activation
     assert ".activation-bedrock-rps-units.bak" in activation
     assert "hermes-cycle.service trustforge-analysis-flow.service" in activation
 
