@@ -203,21 +203,17 @@ def angle_result_from_payload(mode: str, payload_json: str, *,
     if not isinstance(evidence_list, list):
         evidence_list = []
 
-    # key_basis 取前 3 條 claim 文字
-    key_basis_raw = report.get("key_basis", [])
-    key_basis = []
-    for item in key_basis_raw[:3]:
-        if isinstance(item, dict):
-            key_basis.append(item.get("claim", ""))
-        elif isinstance(item, str):
-            key_basis.append(item)
-
     # evidence sources 去重
     evidence_sources: set[str] = set()
     for ev in evidence_list:
         src = ev.get("source", "") if isinstance(ev, dict) else ""
         if src:
             evidence_sources.add(src)
+
+    # key_basis 最多三條；優先保留不同 evidence source 的 claim，避免同源前三條
+    # 擠掉後續異源證據。
+    key_basis_raw = report.get("key_basis", [])
+    key_basis = _select_diverse_key_basis(key_basis_raw, evidence_list)
 
     # qtype 容錯
     qtype_raw = report.get("question_type", "multi_source")
@@ -260,6 +256,73 @@ def angle_result_from_payload(mode: str, payload_json: str, *,
         completeness=completeness,
         missing_fields=missing_fields,
     )
+
+
+def _claim_text(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("claim", "")).strip()
+    if isinstance(item, str):
+        return item.strip()
+    return ""
+
+
+def _basis_source_signature(item: Any, evidence_list: list[Any]) -> tuple[str, ...]:
+    if not isinstance(item, dict):
+        return ()
+    raw_indexes = item.get("evidence_idx", [])
+    if isinstance(raw_indexes, int):
+        raw_indexes = [raw_indexes]
+    if not isinstance(raw_indexes, list):
+        return ()
+
+    sources: list[str] = []
+    for raw_index in raw_indexes:
+        if not isinstance(raw_index, int):
+            continue
+        if raw_index < 0 or raw_index >= len(evidence_list):
+            continue
+        evidence = evidence_list[raw_index]
+        if not isinstance(evidence, dict):
+            continue
+        source = str(evidence.get("source", "")).strip()
+        if source and source not in sources:
+            sources.append(source)
+    return tuple(sources)
+
+
+def _select_diverse_key_basis(key_basis_raw: Any, evidence_list: list[Any]) -> list[str]:
+    if not isinstance(key_basis_raw, list):
+        return []
+
+    selected: list[str] = []
+    selected_items: set[int] = set()
+    covered_sources: set[str] = set()
+
+    for index, item in enumerate(key_basis_raw):
+        if len(selected) >= 3:
+            break
+        text = _claim_text(item)
+        if not text:
+            continue
+        signature = _basis_source_signature(item, evidence_list)
+        if not signature:
+            continue
+        if set(signature).issubset(covered_sources):
+            continue
+        selected.append(text)
+        selected_items.add(index)
+        covered_sources.update(signature)
+
+    for index, item in enumerate(key_basis_raw):
+        if len(selected) >= 3:
+            break
+        if index in selected_items:
+            continue
+        text = _claim_text(item)
+        if text:
+            selected.append(text)
+
+    return selected
 
 
 # ---------------------------------------------------------------------------
