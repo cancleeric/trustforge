@@ -1,50 +1,48 @@
-| Field | Value |
-| --- | --- |
-| Document ID | AIMS-LIFE-SUP-001 |
-| Version / status | 0.1-draft / draft, unapproved, non-effective |
-| Owner / approver | CEO assignment pending / CEO approval pending |
-| Approval record / effective date | pending / not-applicable (draft) |
-| Review cadence / next review | set on approval / set on approval |
-| Classification | internal-draft |
-| Change summary / supersedes | establish supplier and source card draft / not-applicable (initial draft) |
+# AIMS 供應商與來源卡草案
+
+| 欄位 | 值 |
+|---|---|
+| 文件 ID | AIMS-SUP-001 |
+| 版本／狀態 | 0.1-draft／草案、未核准 |
+| Owner／核准者 | 待 supplier owner 指派／待 CEO、CISO、Compliance Counsel 核准 |
+| 核准紀錄／生效日 | pending／not-applicable（草案） |
+| Review / next review | 待核准時設定／待核准時設定 |
+| 分類 | internal-draft |
+| 變更摘要／取代文件 | 建立 data/model/vendor/source cards 草案／not-applicable（初版） |
 | Repository path | `docs/aims/07-suppliers/supplier-and-source-cards.md` |
 
-# Supplier And Source Cards
+Cards 僅記錄可查證資料。未知資料必須標 `unknown` 或 `todo`，不得由 README、issue 或口頭描述推論合約權利、資料授權、SLA、安全認證或控制有效性。
 
-This draft records only verifiable repository knowledge and review placeholders. Unknowns remain `unknown` or `todo`; this document must not be used to imply vendor approval, service availability, or compliance certification.
+## Card schema
 
-## Source Cards
+| 欄位 | 說明 |
+|---|---|
+| Card ID | stable ID |
+| Kind | model、cloud、market-data、news、on-chain、regulatory、internal |
+| Provider/source | legal/provider name when verified; otherwise unknown |
+| Purpose | TrustForge use case |
+| Permitted use evidence | contract, license, public terms or pending |
+| Data handled | data classes and PII status when verified |
+| Change trigger | contract, API, model, dataset, trust score or region change |
+| Risk links | risk IDs |
+| Lifecycle controls | control IDs |
+| Evidence URI | reviewer-repeatable source |
+| Status | 已實作／部分實作／僅計劃／不適用 |
 
-| Card ID | Source / supplier | Use in TrustForge | Credential boundary | Availability / degradation | Evidence URI | Status |
-| --- | --- | --- | --- | --- | --- | --- |
-| SUP-SRC-001 | HOYA BIT OHLCV | historical market data | unknown in this draft | history verified; live availability depends on runtime status | `README.md`; `docs/technical-docs/06-data-flow.md` | partial |
-| SUP-SRC-002 | CoinGecko | market, sentiment, developer activity | public/keyless path documented; exact plan unknown | cache/degrade behavior requires runtime evidence | `docs/technical-docs/02-architecture.md`; `docs/technical-docs/06-data-flow.md` | partial |
-| SUP-SRC-003 | CoinMarketCap | price cross-check | key-based; plaintext must not enter logs/responses | disabled or degraded when credential missing | `docs/technical-docs/00-evidence-map.md`; `docs/technical-docs/06-data-flow.md` | partial |
-| SUP-SRC-004 | Etherscan | ETH whale transaction evidence | key-based query; sensitive fields sanitized | unavailable when credential/rate limit fails | `docs/technical-docs/06-data-flow.md` | partial |
-| SUP-SRC-005 | Whale Alert / Arkham | large transfer and wallet-label evidence | key-based where applicable; no keys in URL/meta/log | stale-key and revocation behavior must be reviewed in linked security PRs | `docs/technical-docs/00-evidence-map.md`; GitHub PR review pending | partial |
-| SUP-SRC-006 | DefiLlama | DeFi TVL and price context | public API assumptions require confirmation | may legitimately return no TVL for unsupported assets | `docs/technical-docs/06-data-flow.md`; `docs/technical-docs/08-trust-algorithm.md` | partial |
-| SUP-SRC-007 | FSC / MOPS / TWSE / TPEx | Taiwan regulatory and market disclosure evidence | host allowlist and safe fetch boundary | fail closed or disclose unavailable source | `docs/technical-docs/00-evidence-map.md`; `docs/technical-docs/06-data-flow.md` | partial |
-| SUP-SRC-008 | AWS Bedrock | semantic/narrative model calls | provider credentials outside repo; budget controls required | fail closed when budget, pricing, or ledger is unavailable | `docs/architecture/ARCHITECTURE-OVERVIEW.puml`; cost-control PR evidence pending | partial |
+## Draft cards
 
-## Model And Tool Cards
+| Card ID | Kind | Provider/source | Purpose | Permitted use evidence | Data handled | Change trigger | Risk links | Lifecycle controls | Evidence URI | Status |
+|---|---|---|---|---|---|---|---|---|---|---|
+| AIMS-SUP-MODEL-0001 | model | AWS Bedrock provider exact model pending | AI-assisted market analysis and review support | pending contract/version evidence | prompts, analysis context; PII status pending | model ID/version/region/contract change | AIMS-RISK-0002, AIMS-RISK-0003 | AIMS-LIFE-CHG-001 | pending | 僅計劃 |
+| AIMS-SUP-DATA-0001 | market-data | defillama-price observed in issue evidence; provider terms pending | price context for BTC analysis | pending | market price data | API/source schema/trust score change | AIMS-RISK-0001 | AIMS-LIFE-DAT-001 | `https://github.com/cancleeric/trustforge/issues/1340` | 部分實作 |
+| AIMS-SUP-DATA-0002 | news | exact news sources pending | market news context | pending | public news metadata/content; license pending | source addition/removal/license change | AIMS-RISK-0001 | AIMS-LIFE-DAT-001 | pending | 僅計劃 |
+| AIMS-SUP-DATA-0003 | on-chain | exact on-chain providers pending | blockchain signal context | pending | public blockchain-derived metrics; terms pending | provider/schema/trust score change | AIMS-RISK-0001 | AIMS-LIFE-DAT-001 | pending | 僅計劃 |
+| AIMS-SUP-DATA-0004 | regulatory | exact regulatory sentiment sources pending | regulatory context | pending | public regulatory text/metadata; license pending | source jurisdiction or interpretation change | AIMS-RISK-0001, AIMS-RISK-0002 | AIMS-LIFE-DAT-001 | pending | 僅計劃 |
 
-| Card ID | Model / tool | Purpose | Known constraints | Required review before production reliance | Status |
-| --- | --- | --- | --- | --- | --- |
-| SUP-MDL-001 | Bedrock reviewer / narrative model | semantic review and narrative synthesis | cost and prompt-size limits must be enforced | cost/security review for unmetered autonomous calls | partial |
-| SUP-MDL-002 | HolyShield / Aegis scanners | local active and static security scan evidence | scanner false positives and missing ML dependencies must be triaged | security owner review and repeat scan evidence | partial |
-| SUP-MDL-003 | Calibration / trust scoring | source corroboration and score calibration | effectiveness evidence pending per release | independent validation and residual-risk review | planned |
+## Required controls before approval
 
-## Supplier Change Rules
-
-- New or materially changed source cards require owner, purpose, credential boundary, degradation path, and evidence URI before production reliance.
-- Vendor marketing, compliance, or certification claims must be reviewed by Compliance Counsel before external use.
-- Credentials, account identifiers, and private endpoint details must not be copied into supplier cards.
-- If runtime evidence conflicts with this draft, runtime evidence wins and this document must be updated or marked stale.
-
-## Open Reviews
-
-| Review | Required reviewer | Status |
-| --- | --- | --- |
-| Product/source fitness | gray or equivalent CPO reviewer | pending |
-| Security and credential boundary | harper or equivalent CISO reviewer | pending |
-| Independent tabletop replay | independent reviewer | pending |
+- legal right to use each source for TrustForge intended purpose
+- owner and review cadence for each material provider/source
+- change notification or monitoring trigger
+- incident escalation path for source outage, trust-score drop or license concern
+- evidence URI that a stranger can replay without private credentials unless access control is documented

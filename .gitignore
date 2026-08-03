@@ -27,7 +27,6 @@ out/
 .claude/
 .cli/
 .playwright-mcp/
-.kiro/settings/
 
 # JavaScript dependency trees and tool caches are reproducible local artifacts.
 /node_modules/
