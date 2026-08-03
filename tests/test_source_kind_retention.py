@@ -14,6 +14,7 @@ def _scored_claim(
     trust: float,
     *,
     source: str | None = None,
+    direction: str = "bullish",
 ) -> ScoredClaim:
     source_name = source or f"{kind}-source"
     doc = Document(
@@ -31,7 +32,7 @@ def _scored_claim(
             text=f"BTC {kind} claim {claim_id}",
             doc=doc,
             claim_type="fact",
-            direction="bullish",
+            direction=direction,
         ),
         trust=trust,
         components={"kind": 1.0},
@@ -93,3 +94,35 @@ def test_sparse_snapshot_does_not_fabricate_source_kind_coverage() -> None:
     assert {ev.kind for ev in evidence} == {"price"}
     assert report.source_kind_distribution == {"price": 1}
     assert report.excluded_source_kind_counts == {"price": 1}
+
+
+def test_contrarian_claim_is_not_promoted_as_supporting_representative() -> None:
+    price = _scored_claim("price-1", "price", 0.92)
+    news = _scored_claim("news-1", "news", 0.72)
+    bearish_onchain = _scored_claim(
+        "onchain-bearish-1",
+        "onchain",
+        0.88,
+        direction="bearish",
+    )
+    scored = [price, news, bearish_onchain]
+    brief = TrustedBrief(
+        query="分析 BTC 多源訊號",
+        supporting=[price, news],
+        contrarian=[bearish_onchain],
+        confidence=0.82,
+        calibrated_confidence=0.74,
+    )
+
+    report, evidence = _report(brief, scored)
+
+    supporting_evidence = [
+        ev for ev in evidence if ev.related_claim == "BTC 市場判斷"
+    ]
+    onchain_indices = {idx for idx, ev in enumerate(evidence) if ev.kind == "onchain"}
+    assert [ev.kind for ev in supporting_evidence] == ["price", "news"]
+    assert all("onchain-bearish-1" not in ev.claim_id for ev in supporting_evidence)
+    assert all(
+        not onchain_indices.intersection(basis.evidence_idx)
+        for basis in report.key_basis
+    )
