@@ -14,6 +14,16 @@ EXPECTED = {
     "TRUSTFORGE_BEDROCK_RPS_REGION": "us-east-1",
     "TRUSTFORGE_BEDROCK_RPS_TABLE": "competition-trustforge-team11-budget",
 }
+FORMAL_RUN_EXPECTED = {
+    "TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE": "trustforge-formal-run",
+    "TRUSTFORGE_TOKEN_SSM_PREFIX": "/trustforge/runtime",
+    "TRUSTFORGE_SHARED_ANALYSIS_DB_PATH": "/var/lib/trustforge/analysis.sqlite3",
+}
+FORMAL_RUN_VARIABLES = {
+    "TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE": "FORMAL_RUN_TABLE",
+    "TRUSTFORGE_TOKEN_SSM_PREFIX": "TOKEN_SSM_PREFIX",
+    "TRUSTFORGE_SHARED_ANALYSIS_DB_PATH": "SHARED_ANALYSIS_DB_PATH",
+}
 
 
 def _default(script: str, key: str) -> str:
@@ -43,11 +53,16 @@ def test_lambda_ec2_activation_and_workers_share_exact_gate_identity() -> None:
             "TRUSTFORGE_BEDROCK_RPS_TABLE": "BEDROCK_RPS_TABLE",
         }[key]
         assert scheduler.count(f"Environment={key}=${variable}") == 2
+    for key, value in FORMAL_RUN_EXPECTED.items():
+        assert _default(activation, key) == value
+        assert _default(scheduler, key) == value
 
     assert "reconcile_bedrock_rps_service_env.sh" in activation
-    assert "reconcile_formal_run_service_env.sh" in activation
+    assert "reconcile_formal_run_service_env.sh" not in activation
     assert "install_hermes_scheduler.sh" in activation
     assert 'BEDROCK_RPS_SCHEDULER_COMMAND="REGION=${REGION} ' in activation
+    for key, variable in FORMAL_RUN_VARIABLES.items():
+        assert f"Environment={key}=${variable}" in scheduler
     assert ".activation-bedrock-rps-units.bak" in activation
     assert "hermes-cycle.service trustforge-analysis-flow.service" in activation
 
