@@ -32,6 +32,15 @@
 | AIMS document control | AIMS Manager | Proposed; not appointed |
 | Final conformity decision | Authorized management and applicable conformity authority | Not authorized |
 
+## Overlay documents
+
+- [適用性與分類紀錄](applicability-and-classification.md)：intended purpose、operator role 與初步分類問題。
+- [四向 crosswalk](crosswalk.md)：EN 18286、EU AI Act、ISO/IEC 42001/AIMS 與 TrustForge evidence 骨架。
+- [EN 18286 / EU AI Act QMS overlay](en-18286-qms-overlay.md)：Phase 0-1 來源限制、角色評估、觸發條件與工作項。
+
+本目錄只保存 preliminary applicability evidence，不保存 EN 18286 標準全文，
+不宣稱 presumption of conformity、CE 標示、EU AI Act conformity 或任何認證。
+
 ## Issue boundary
 
 #1265／PR-A 只交付本目錄與分析文件的 preliminary framework。它不完成、關閉或代表父 issue #1264 的其餘 Phase 0–4 工作；#1264 只能依其自身驗收條件逐項 disposition。
