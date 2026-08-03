@@ -1,44 +1,54 @@
-# AIMS 生命週期控制矩陣草案
+# AIMS Lifecycle Control Matrix
 
-| 欄位 | 值 |
-|---|---|
-| 文件 ID | AIMS-LIFE-001 |
-| 版本／狀態 | 0.1-draft／草案、未核准 |
-| Owner／核准者 | 待 AIMS Manager 指派／待 CEO、CPO、CISO 核准 |
-| 核准紀錄／生效日 | pending／not-applicable（草案） |
-| Review / next review | 待核准時設定／待核准時設定 |
-| 分類 | internal-draft |
-| 變更摘要／取代文件 | 建立 AI lifecycle control matrix、oversight 與 tabletop 草案／not-applicable（初版） |
+| Field | Value |
+| --- | --- |
+| Document ID | AIMS-LIFE-001 |
+| Version / status | 0.2-draft / draft, unapproved, non-effective |
+| Owner / approver | Engineering owner pending / CEO, CPO, CISO approval pending |
+| Approval record / effective date | pending / not applicable (draft) |
+| Review cadence / next review | per material AI-system change and annually / set on approval |
+| Classification | internal draft |
+| Change summary / supersedes | expands issue #1243 lifecycle owners, evidence URIs, status and gap review / v0.1 draft |
 | Repository path | `docs/aims/06-lifecycle/lifecycle-control-matrix.md` |
 
-本文件回應 #1243。所有控制皆為 draft control definition；除非 evidence URI 指向已核准且可重演的證據，狀態不得高於 `部分實作`。
+This matrix describes lifecycle controls for TrustForge market-analysis AI behavior. It is a controlled draft and must not be used as a certification, conformity, or operational-effectiveness claim.
 
-| Control ID | Stage | Owner | Trigger | Input | Activity | Output | Evidence URI | Exception path | Status |
-|---|---|---|---|---|---|---|---|---|---|
-| AIMS-LIFE-DES-001 | Design | pending product owner | new feature, changed intended purpose, EU-facing deployment | requirements, intended-purpose draft, risk register | confirm purpose, prohibited uses, foreseeable misuse and oversight needs | design review record | pending | escalate to CPO/Compliance Counsel if purpose changes | 僅計劃 |
-| AIMS-LIFE-DAT-001 | Data acquisition | pending data owner | new source, source contract change, stale-data incident | source card, license, trust score, retention rule | verify source kind, permitted use, freshness and exclusion conditions | approved source card | `docs/aims/07-suppliers/supplier-and-source-cards.md` | mark source `unknown/todo` and exclude from claims if unverifiable | 僅計劃 |
-| AIMS-LIFE-DEV-001 | Development | pending engineering owner | code or prompt change affecting analysis behavior | issue, test plan, risk links | implement with tests and source-kind regression where applicable | PR and test evidence | pending PR URI | block release if evidence assembly regresses | 僅計劃 |
-| AIMS-LIFE-VAL-001 | Validation | pending QA owner | release candidate or risk-triggered test | test inventory, representative snapshots | verify sparse abstain and rich multi-source behavior | validation report | pending | open CAPA for P0/P1 failure | 僅計劃 |
-| AIMS-LIFE-REL-001 | Release | pending release owner | develop-to-main or production release | approvals, tests, SoA impacts | confirm no unsupported conformity claims and required reviewers | release checklist | pending | hold release; escalate missing security/legal approval | 僅計劃 |
-| AIMS-LIFE-OPS-001 | Operation | pending operations owner | scheduled analysis, formal run, incident | run ID, snapshot metadata, monitoring signals | monitor freshness, source distribution and evidence completeness | operations log | pending | incident workflow if output lacks evidence or crosses threshold | 僅計劃 |
-| AIMS-LIFE-MON-001 | Monitoring | pending AIMS Manager | KPI cadence or alert | KPI sources, audit findings, CAPA | update objectives and management-review pack | KPI report | `docs/aims/08-measurement/kpi-and-monitoring.md` | missing data counts as gap unless approved not-applicable | 僅計劃 |
-| AIMS-LIFE-INC-001 | Incident | pending CISO/CPO | P0/P1 incident, legal/security claim concern | incident record, risk, asset, affected output | containment, triage, owner assignment, customer/legal escalation decision | incident record and CAPA link | pending | CEO escalation for unresolved P0 | 僅計劃 |
-| AIMS-LIFE-CHG-001 | Change | pending engineering owner | model, data, supplier, purpose or high-risk trigger change | change request, risk and impact links | classify change, require reviewer set, update SoA | change decision | pending | Compliance Counsel review for EU role/classification changes | 僅計劃 |
-| AIMS-LIFE-RET-001 | Retirement | pending product owner | feature/source/model retirement | asset record, customer impact, retention obligations | stop use, archive evidence, update docs and customers if needed | retirement record | pending | CISO/legal review if evidence retention affected | 僅計劃 |
+## Lifecycle Controls
 
-## Human oversight
+| Stage | Control ID | Required control | Owner | Status | Evidence URI | Completion gap |
+| --- | --- | --- | --- | --- | --- | --- |
+| Design | AIMS-LIFE-DES-001 | Intended purpose, affected parties, prohibited claims, and user-impact assumptions are recorded before implementation | Product owner | partial implementation | `docs/aims/02-policy/ai-system-inventory.md`; `docs/aims/04-impact/impact-assessment.md` | owner approval and legal classification pending |
+| Data acquisition | AIMS-LIFE-DAT-001 | Source kinds, supplier identity, freshness, confidence, and exclusion rules are preserved through report generation | Engineering owner | partial implementation | `docs/aims/07-suppliers/supplier-and-source-cards.md`; issue #1340 | representative-claim preservation tests still tracked separately |
+| Development | AIMS-LIFE-DEV-001 | Changes link issue, branch, tests, evidence contract, and reviewer findings | Engineering owner | aligned draft | repository PR workflow and AGENTS gate | pre-push evidence must be attached per PR |
+| Validation | AIMS-LIFE-VAL-001 | Regression tests cover sparse-data abstain behavior, rich-data multi-source behavior, and evidence identity | QA owner | partial implementation | `tests/` and issue-specific PR evidence | validation matrix not yet approved |
+| Release | AIMS-LIFE-REL-001 | Release gate blocks unsupported external claims, missing reviewer evidence, and unresolved security/cost findings | Accountable executive | partial implementation | `.githooks/pre-push`; `.kiro/steering/pr-review-gate.md` | final production cutover outside this draft |
+| Operation | AIMS-LIFE-OPS-001 | Runtime jobs preserve job ID, run ID, execution log identity, evidence URI, and source distribution | Engineering owner | partial implementation | issue #1406; API/report artifacts | dual-asset orchestration remains open |
+| Monitoring | AIMS-LIFE-MON-001 | KPIs and source degradation are monitored with replayable evidence and explicit missing-data handling | AIMS manager | planned | `docs/aims/08-measurement/kpi-and-monitoring-register.md` | baselines and targets pending approval |
+| Incident | AIMS-LIFE-INC-001 | Material evidence-integrity, security, or external-claim incidents open finding/CAPA and communication record | Security owner | planned | `docs/aims/10-capa/capa-and-management-review.md` | incident log and owner assignment pending |
+| Change | AIMS-LIFE-CHG-001 | AI behavior changes require impact, risk, supplier, validation, and communication review before effective use | Engineering owner | aligned draft | this document; `docs/aims/03-risk/risk-methodology-and-register.md` | approval workflow pending |
+| Retirement | AIMS-LIFE-RET-001 | Retired model/source/control artifacts keep evidence URI, obsolete marker, retention and user-impact disposition | AIMS manager | planned | `docs/aims/05-support/document-lifecycle-trace.md` | no retired artifact sample yet |
 
-| Oversight point | Intervention authority | Escalation | Stop condition | Review condition |
-|---|---|---|---|---|
-| Pre-release analysis behavior change | product owner, QA owner | CPO/CISO for P1+ risk | missing tests, unsupported claims, unresolved P0/P1 | PR review and validation evidence |
-| Formal market-analysis output | designated reviewer | CPO for product claim, CISO for security incident | source-kind distribution absent when rich snapshot exists; evidence URI missing | run report and snapshot metadata |
-| EU AI Act or conformity-related statement | CPO and Compliance Counsel | CEO | no approved intended purpose, role or classification record | exact-commit legal/product approval |
-| Incident or CAPA closure | CISO/CPO/CEO based on risk type | CEO for overdue P0 | no root cause, correction, corrective action or effectiveness review | CAPA closure approval |
+## Oversight Points
 
-## Tabletop replay
+| Decision | Required reviewer | Evidence |
+| --- | --- | --- |
+| Pre-release analysis behavior change | Product owner and QA owner | test report, impact row, source-card update |
+| Formal market-analysis output template change | Independent reviewer | golden fixture or replay artifact |
+| EU AI Act, EN 18286, ISO certification, conformity, or CE-related statement | Compliance Counsel, CPO, CEO | legal source disposition and approved exact text |
+| Security-sensitive lifecycle change | CISO / security owner | threat review and resolved findings |
+| Cost-sensitive lifecycle change | Cost owner / Harper equivalent | budget admission evidence and cost limit review |
 
-| Tabletop ID | Scenario | Expected | Actual | Deviation | Evidence URI | Status |
-|---|---|---|---|---|---|---|
-| AIMS-TT-0001 | Formal BTC analysis has rich snapshot but report shows narrow source kinds | reviewer blocks release, opens risk/CAPA, links run ID and source-kind report | pending exercise | pending | pending run ID | 僅計劃 |
+## Gap Review
 
-The tabletop is intentionally not marked complete. A future run must record expected behavior, actual behavior, deviation, timestamps and exact evidence URI from a replayable TrustForge formal analysis.
+| Gap ID | Category | Gap | Disposition | Blocker |
+| --- | --- | --- | --- | --- |
+| AIMS-LIFE-GAP-001 | Owner/status | Several lifecycle controls have draft owners, not approved named people | delegated gap assessment | CEO role assignments |
+| AIMS-LIFE-GAP-002 | Evidence | Some controls cite planned issue/PR evidence instead of replayable runtime artifacts | certification preparation only | issue-specific implementation and tests |
+| AIMS-LIFE-GAP-003 | External assessment | No independent auditor has validated lifecycle effectiveness | delegated gap assessment | independent reviewer assignment |
+| AIMS-LIFE-GAP-004 | Public statements | External statements may overstate readiness if copied without status qualifiers | aligned with guardrail draft | Compliance Counsel approval |
+
+## Tabletop Scenario
+
+| Tabletop ID | Scenario | Expected evidence | Status |
+| --- | --- | --- | --- |
+| AIMS-TT-0001 | Formal BTC analysis has a rich snapshot but final report shows only narrow price-source claims | source-kind distribution, excluded-claim reason, risk row, regression test, reviewer finding disposition | planned; implementation issue #1340 remains separate |

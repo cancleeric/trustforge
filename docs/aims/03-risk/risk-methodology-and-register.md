@@ -1,72 +1,59 @@
-# AIMS 風險方法與登錄草案
+# AIMS Risk Methodology And Register
 
-| 欄位 | 值 |
-|---|---|
-| 文件 ID | AIMS-RISK-001 |
-| 版本／狀態 | 0.1-draft／草案、未核准 |
-| Owner／核准者 | 待 CEO 指派／待 CEO、CPO、CISO 與 Compliance Counsel 核准 |
-| 核准紀錄／生效日 | pending／not-applicable（草案） |
-| Review / next review | 待核准時設定／待核准時設定 |
-| 分類 | internal-draft |
-| 變更摘要／取代文件 | 建立風險方法、taxonomy、register 與處置介面草案／not-applicable（初版） |
+| Field | Value |
+| --- | --- |
+| Document ID | AIMS-RISK-001 |
+| Version / status | 0.2-draft / draft, unapproved, non-effective |
+| Owner / approver | Risk owner pending / CEO, CPO, CISO, Compliance Counsel approval pending |
+| Approval record / effective date | pending / not applicable (draft) |
+| Review cadence / next review | quarterly after approval and on material AI-system change / set on approval |
+| Classification | internal draft |
+| Change summary / supersedes | repairs and expands issue #1244 methodology, taxonomy, register and treatment fields / v0.1 draft |
 | Repository path | `docs/aims/03-risk/risk-methodology-and-register.md` |
 
-本文件回應 #1244。它只建立 TrustForge AIMS 風險工作的受控草案，不表示任何風險已被接受、控制已有效，或 EU AI Act / EN 18286 條款已完成法律判定。
+This document defines a draft AIMS risk method for TrustForge. It does not mean any risk is accepted, any control is effective, or any EU AI Act / EN 18286 classification has been legally determined.
 
-## 分級方法
+## Method
 
-| 欄位 | 草案規則 | 狀態 |
-|---|---|---|
-| Likelihood | 1 rare、2 unlikely、3 possible、4 likely、5 frequent；評分來源必須連 evidence URI | 僅計劃 |
-| Impact | 1 negligible、2 minor、3 moderate、4 major、5 severe；需分別描述 business、customer、individual、regulatory、security impact | 僅計劃 |
-| Inherent risk | `likelihood * impact`，未套用處置前評估 | 僅計劃 |
-| Residual risk | 套用已驗證控制後重評；草案控制不得降低分數 | 僅計劃 |
-| P0 | residual score >= 20，或任何未緩解 severe individual/regulatory/security impact | 僅計劃 |
-| P1 | residual score 12-19，或有明確客戶、法規、資安 exposure | 僅計劃 |
-| P2 | residual score 6-11 | 僅計劃 |
-| P3 | residual score 1-5 | 僅計劃 |
-
-## 升級、cadence 與接受權限
-
-| 條件 | 處置 | 接受權限 | Cadence |
-|---|---|---|---|
-| P0 | 立即 containment、CEO/CISO/CPO escalation、CAPA 開案 | CEO + 對應 owner；不得無期限 accepted | 每日直到降級或關閉 |
-| P1 | 指派 owner、期限、處置方案與 residual decision | CEO 或 delegated risk owner；Security/Legal 類需 CISO/Compliance Counsel | 每週 |
-| P2 | 納入 treatment plan 或 backlog，明確期限 | delegated risk owner | 每月 |
-| P3 | 監測或接受；需理由與 review date | delegated risk owner | 每季 |
-
-任何 accepted risk 都必須有 owner、期限、review date 與可撤銷條件。P0/P1 不得用 `accepted indefinitely`、`won't fix` 或缺 owner 的方式結案。
+| Dimension | Draft rule | Evidence requirement |
+| --- | --- | --- |
+| Likelihood | 1 rare, 2 unlikely, 3 possible, 4 likely, 5 frequent | cite incident, test, replay, scanner, issue, or expert review URI |
+| Impact | 1 negligible, 2 minor, 3 moderate, 4 major, 5 severe | describe customer, individual, regulatory, security, operational and business impact |
+| Inherent score | likelihood x impact before treatment | explicit rationale |
+| Residual score | likelihood x impact after implemented and verified controls | implemented-control evidence; `not scored` when evidence is pending |
+| Treatment | mitigate, avoid, transfer, accept, or monitor | owner, due date, review date, and revocation condition |
+| Acceptance | only accountable executive may accept residual risk; security/legal risks require CISO or counsel review | signed approval or PR/review URI |
 
 ## Taxonomy
 
-| 代碼 | 類別 | 範例來源 | 受影響對象 |
-|---|---|---|---|
-| RISK-MKT | 市場分析與錯誤決策 | 價格、新聞、on-chain、regulatory sentiment 解讀偏差 | 客戶、投資決策者 |
-| RISK-DATA | 資料品質與來源可靠度 | stale snapshot、低信任來源、source-kind imbalance | 客戶、分析 reviewer |
-| RISK-MODEL | 模型與 AI agent 行為 | hallucination、unsupported claim、overconfident summary | 客戶、內部操作人員 |
-| RISK-SEC | 安全與憑證 | secret exposure、stale credential cache、unauthorized admin action | HurricaneSoft、客戶 |
-| RISK-LEGAL | 法規與聲明 | EU role misclassification、unsupported conformity claim | HurricaneSoft、客戶、EU users |
-| RISK-OPS | 運維與事件 | failed job、missing evidence URI、broken release gate | HurricaneSoft |
-| RISK-SUP | 供應商與第三方 | Bedrock、資料 provider、雲端服務變更 | HurricaneSoft、客戶 |
+| Taxonomy ID | Area | Example scenarios | Affected parties |
+| --- | --- | --- | --- |
+| RISK-DATA | Data and evidence integrity | stale snapshot, low-trust source, source-kind imbalance, missing evidence URI | customers, analysis reviewer |
+| RISK-MODEL | Model and agent behavior | hallucination, unsupported synthesis, overconfident summary, authority leakage into prompt | customers, internal operators |
+| RISK-SEC | Security and credentials | secret exposure, stale credential cache, unauthorized admin action, scanner finding | HurricaneSoft, customers |
+| RISK-LEGAL | Legal and external claims | EU role misclassification, unsupported conformity/certification claim, proprietary text misuse | HurricaneSoft, customers, EU users |
+| RISK-OPS | Operations and release | failed job, broken release gate, unreplayable run artifact, rollback failure | HurricaneSoft |
+| RISK-SUP | Suppliers and third parties | Bedrock cost/provider change, data-provider outage, legal-source unavailability | HurricaneSoft, customers |
 
-## Draft risk register
+## Draft Risk Register
 
 | Risk ID | Source | Scenario | Affected parties | Owner | Due date | Inherent | Controls | Treatment | Residual | Status | Evidence URI |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| AIMS-RISK-0001 | #1340 | Rich BTC snapshots may collapse into narrow price-only evidence, hiding diverse source kinds | 客戶、分析 reviewer | pending | pending | 4 x 4 = 16 | Claim extraction tests and source-kind report are proposed; no effectiveness evidence in this draft | mitigate; code issue remains separate | not scored; no verified control | 僅計劃 | `https://github.com/cancleeric/trustforge/issues/1340` |
-| AIMS-RISK-0002 | #1264 | EU operator role or risk classification may be asserted before legal approval | HurricaneSoft、EU users、客戶 | pending Compliance Counsel | pending | 3 x 5 = 15 | EU overlay requires `pending` status and prohibits conformity claims | avoid unsupported claims; legal review required | not scored; no approval | 部分實作 | `docs/aims/03-eu-ai-act/` |
-| AIMS-RISK-0003 | #1243 | Human oversight intervention and stop criteria are not consistently evidenced through lifecycle stages | 客戶、內部 operator | pending AIMS Manager | pending | 3 x 4 = 12 | Lifecycle matrix and tabletop are proposed | mitigate through LIFE work package | not scored; draft only | 僅計劃 | `docs/aims/06-lifecycle/lifecycle-control-matrix.md` |
-| AIMS-RISK-0004 | #1245 | Audit or CAPA may be declared complete without independent auditor or closure approval | HurricaneSoft、客戶 | pending CEO | pending | 3 x 4 = 12 | Audit/CAPA schema prohibits self-audit and fake closure | readiness exercise only until auditor appointed | not scored; draft only | 僅計劃 | `docs/aims/09-audit/audit-programme.md` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| AIMS-RISK-0001 | #1340 | Rich market snapshots may collapse into narrow price-only evidence, hiding diverse source kinds. | customers, analysis reviewer | Product owner pending | pending | 4 x 4 = 16 | source-kind distribution and rich/sparse regression tests proposed | mitigate through implementation issue #1340 | not scored; control not verified | open | `https://github.com/cancleeric/trustforge/issues/1340` |
+| AIMS-RISK-0002 | #1264 | EU operator role, risk classification, or EN 18286 readiness may be asserted before licensed source and counsel approval. | HurricaneSoft, EU users, customers | Compliance Counsel pending | pending legal source access | 3 x 5 = 15 | EU overlay marks licensed text and counsel disposition blockers | avoid unsupported claims; continue gap assessment | not scored; legal approval pending | blocked | `docs/aims/03-eu-ai-act/en-18286-qms-overlay.md` |
+| AIMS-RISK-0003 | #1242 | AIMS personnel may rely on draft documents as completed training or approved competence evidence. | HurricaneSoft, customers | AIMS manager pending | pending | 3 x 4 = 12 | competency/training register separates planned, completed and verified | mitigate through role assignment and training evidence | not scored; training not complete | open | `docs/aims/05-support/competency-and-training-register.md` |
+| AIMS-RISK-0004 | #1245 | KPI or CAPA status may be reported as passing when evidence is missing. | HurricaneSoft, customers | AIMS manager pending | pending | 3 x 4 = 12 | monitoring rules require `not measured`; CAPA requires owner and due date | mitigate through management-review pack | not scored; baseline pending | open | `docs/aims/08-measurement/kpi-and-monitoring-register.md`; `docs/aims/10-capa/capa-and-management-review.md` |
+| AIMS-RISK-0005 | #1406 | Dual-asset comparison may spend for two formal child analyses without atomic budget admission or evidence-bound synthesis. | HurricaneSoft, customers | Engineering owner pending | pending implementation PR | 3 x 5 = 15 | issue requires all-or-none budget admission and evidence/claim-ID bounded synthesis | mitigate in feature implementation; security/cost review required | not scored; implementation pending | open | `https://github.com/cancleeric/trustforge/issues/1406` |
 
-## Traceability requirements
+## Risk Acceptance Rules
 
-- unique ID, source, affected parties, owner, due date, inherent risk, residual risk, controls, treatment, status and evidence URI
-- links to impacted asset, impact assessment row, lifecycle control, supplier card when applicable, audit finding or CAPA when applicable
-- explicit owner and deadline for every P0/P1 item
-- accepted-risk approver, review date and revocation condition when risk is accepted
+- Every P0/P1 accepted risk requires owner, due date, accountable-executive approval, review date, and revocation condition.
+- Security risks additionally require CISO review; legal/external-claim risks require Compliance Counsel review.
+- Lack of evidence is never a reason to mark a control not applicable. It remains a gap until evidence exists or a documented, approved rationale excludes it.
+- Accepted risks must be re-opened when the triggering assumption changes, evidence expires, or a related incident/finding occurs.
 
-## Review blockers
+## Review Blockers
 
-- AIMS-GOV scope, RACI, asset fields and risk-acceptance interface remain unapproved.
-- Compliance Counsel has not approved EU intended purpose, operator roles or risk classification.
-- Harper/gray/security/product review and independent adversarial review are still pending.
+- AIMS governance scope, role assignments, approval authority, and risk-acceptance thresholds remain draft.
+- Compliance Counsel has not approved EU intended purpose, operator role, risk classification, EN 18286 source status, or public claim wording.
+- Independent reviewer, harper/CISO, gray/CPO, and final adversarial review remain pending before this draft can become effective.
