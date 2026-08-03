@@ -1233,6 +1233,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     supporting_source_pool = [
         sc
         for sc in source_pool
+        if _matches_coin(sc.claim.doc, coin)
         if sc.claim.id not in contrarian_ids
         and (not supporting_directions or sc.claim.direction in supporting_directions)
     ]
@@ -1245,6 +1246,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     for sc in report_supporting:
         idx = _add_evidence(sc, judgment_tag)
         admitted_records.append((sc, judgment_tag, idx))
+        if idx_sc.get(idx) is not sc:
+            continue
         key_basis.append(BasisItem(
             claim=sc.claim.text,
             explanation=_loc.basis_explanation(
