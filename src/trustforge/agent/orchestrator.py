@@ -789,6 +789,66 @@ def _dedup_stance_pairs_by_source(pairs: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
+_MIN_RICH_SOURCE_KINDS = 3
+
+
+def _source_kind_distribution(scored: Iterable[ScoredClaim]) -> dict[str, int]:
+    distribution: dict[str, int] = {}
+    for sc in scored:
+        kind = (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        distribution[kind] = distribution.get(kind, 0) + 1
+    return distribution
+
+
+def _with_rich_source_kind_representatives(
+    supporting: list[ScoredClaim],
+    scored: list[ScoredClaim],
+    *,
+    support_threshold: float = 0.5,
+) -> list[ScoredClaim]:
+    """Keep representative valid claims from at least three source kinds."""
+    available_kinds = {
+        (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        for sc in scored
+        if sc.trust >= support_threshold
+    }
+    if len(available_kinds) < _MIN_RICH_SOURCE_KINDS:
+        return supporting
+
+    admitted_ids = {sc.claim.id for sc in supporting}
+    admitted_kinds = {
+        (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        for sc in supporting
+        if sc.trust >= support_threshold
+    }
+    if len(admitted_kinds) >= _MIN_RICH_SOURCE_KINDS:
+        return supporting
+
+    by_kind: dict[str, list[ScoredClaim]] = {}
+    for sc in scored:
+        if sc.trust < support_threshold:
+            continue
+        kind = (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        by_kind.setdefault(kind, []).append(sc)
+
+    enriched = list(supporting)
+    for kind in sorted(available_kinds - admitted_kinds):
+        candidates = sorted(
+            by_kind.get(kind, []),
+            key=lambda sc: (-sc.trust, sc.claim.id),
+        )
+        for candidate in candidates:
+            if candidate.claim.id in admitted_ids:
+                continue
+            enriched.append(candidate)
+            admitted_ids.add(candidate.claim.id)
+            admitted_kinds.add(kind)
+            break
+        if len(admitted_kinds) >= _MIN_RICH_SOURCE_KINDS:
+            break
+    return enriched
+
+
 def _distinct_source_labels(pairs: list[dict]) -> list[str]:
     """回傳 `pairs`（跨陣營，不分 bullish/bearish）涉及的來源顯示清單，供組
     user-visible summary 文字（`f"來源 {'、'.join(...)} 對同一議題..."`）用。
@@ -1167,7 +1227,14 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         idx_sc[idx] = sc
         return idx
 
-    for sc in brief.supporting:
+    source_pool = scored if scored is not None else [*brief.supporting, *brief.contrarian]
+    report_supporting = _with_rich_source_kind_representatives(
+        brief.supporting,
+        source_pool,
+    )
+    source_kind_distribution = _source_kind_distribution(source_pool)
+
+    for sc in report_supporting:
         idx = _add_evidence(sc, judgment_tag)
         admitted_records.append((sc, judgment_tag, idx))
         key_basis.append(BasisItem(
@@ -1617,6 +1684,13 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # 使用聚合後的 facts
     facts = aggregated_facts
 
+    admitted_source_kind_distribution = _source_kind_distribution(idx_sc.values())
+    excluded_source_kind_counts = {
+        kind: total - admitted_source_kind_distribution.get(kind, 0)
+        for kind, total in source_kind_distribution.items()
+        if total > admitted_source_kind_distribution.get(kind, 0)
+    }
+
     report = Report(
         coin=coin, question_type=qtype.value, question=query,
         market_judgment=market_judgment, facts=facts, inferences=inferences,
@@ -1626,6 +1700,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         generated_at=iso_utc(now_fn()),
         direction=direction,
         cross_source_signal=report_cross_signal,
+        source_kind_distribution=admitted_source_kind_distribution,
+        excluded_source_kind_counts=excluded_source_kind_counts,
         insights=report_insights,
         hypothesis_ledger=hypothesis_ledger,
         # W4 codex 對抗審第 2 輪 [HIGH-1]：結構化校準值＋三態，供 UI／
