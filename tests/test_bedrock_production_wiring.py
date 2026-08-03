@@ -58,8 +58,9 @@ def test_lambda_ec2_activation_and_workers_share_exact_gate_identity() -> None:
         assert _default(scheduler, key) == value
 
     assert "reconcile_bedrock_rps_service_env.sh" in activation
-    assert "reconcile_formal_run_service_env.sh" not in activation
+    assert "reconcile_formal_run_service_env.sh" in activation
     assert "install_hermes_scheduler.sh" in activation
+    assert 'FORMAL_RUN_RECONCILE_COMMAND="TRUSTFORGE_FORMAL_RUN_DYNAMODB_TABLE=${FORMAL_RUN_TABLE} ' in activation
     assert 'BEDROCK_RPS_SCHEDULER_COMMAND="REGION=${REGION} ' in activation
     for key, variable in FORMAL_RUN_VARIABLES.items():
         assert f"Environment={key}=${variable}" in scheduler
@@ -102,6 +103,33 @@ def test_reconcile_script_sets_all_three_primary_service_values(tmp_path: Path) 
     )
     rendered = service.read_text()
     for key, value in EXPECTED.items():
+        assert rendered.count(f"Environment={key}={value}") == 1
+
+
+def test_formal_run_reconcile_script_sets_primary_service_values(tmp_path: Path) -> None:
+    service = tmp_path / "trustforge.service"
+    service.write_text("[Service]\nEnvironment=PYTHONPATH=/opt/trustforge\n")
+    env = {
+        **os.environ,
+        **FORMAL_RUN_EXPECTED,
+        "TRUSTFORGE_SERVICE_FILE": str(service),
+    }
+    subprocess.run(
+        ["bash", str(ROOT / "deploy/reconcile_formal_run_service_env.sh")],
+        env=env,
+        check=True,
+    )
+    rendered = service.read_text()
+    for key, value in FORMAL_RUN_EXPECTED.items():
+        assert rendered.count(f"Environment={key}={value}") == 1
+
+    subprocess.run(
+        ["bash", str(ROOT / "deploy/reconcile_formal_run_service_env.sh")],
+        env=env,
+        check=True,
+    )
+    rendered = service.read_text()
+    for key, value in FORMAL_RUN_EXPECTED.items():
         assert rendered.count(f"Environment={key}={value}") == 1
 
     # Idempotent reconciliation must replace, not duplicate.
