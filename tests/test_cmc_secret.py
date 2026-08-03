@@ -130,6 +130,27 @@ def test_environment_fallback_only_when_ssm_parameter_is_not_enabled(monkeypatch
     )
 
 
+def test_cached_ssm_key_is_rechecked_after_bounded_revocation_window(monkeypatch):
+    fake = FakeSSM()
+    fake.value = "cached-cmc-key-1234567890"
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(cmc_secret, "_ssm_client", lambda: fake)
+    monkeypatch.setattr(cmc_secret.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setenv(
+        "TRUSTFORGE_CMC_SSM_PARAMETER",
+        "/trustforge/test/cmc-api-key",
+    )
+    cmc_secret.invalidate_cache()
+
+    assert cmc_secret.resolve_api_key() == ("cached-cmc-key-1234567890", "ssm")
+    fake.value = None
+    assert cmc_secret.resolve_api_key() == ("cached-cmc-key-1234567890", "ssm")
+
+    clock["now"] += cmc_secret._CACHE_TTL_SECONDS + 0.001
+
+    assert cmc_secret.resolve_api_key() == (None, "unconfigured")
+
+
 def test_secure_local_key_file_is_supported_without_exposing_value(
     monkeypatch, tmp_path
 ):
