@@ -26,6 +26,20 @@ ROOT = Path(__file__).resolve().parents[1]
 _PRICED_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
+def test_default_flow_path_uses_shared_production_projection(tmp_path, monkeypatch):
+    shared = tmp_path / "analysis.sqlite3"
+    monkeypatch.setenv("TRUSTFORGE_SHARED_ANALYSIS_DB_PATH", str(shared))
+    assert analysis_flow_module._db_path() == shared
+    with AnalysisFlow() as flow:
+        assert flow.path == shared
+
+
+def test_default_flow_path_rejects_relative_shared_projection(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_SHARED_ANALYSIS_DB_PATH", "relative.sqlite3")
+    with pytest.raises(ValueError, match="must be absolute"):
+        analysis_flow_module._db_path()
+
+
 def _docs() -> list[Document]:
     now = time.time()
     return [

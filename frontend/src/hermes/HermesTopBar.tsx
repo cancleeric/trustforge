@@ -4,6 +4,8 @@ import { TIER_COLOR } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import type { ServiceMonitorState } from '../pages/HermesDashboard'
 
+const GIT_SHA = (import.meta.env.VITE_GIT_SHA || 'dev').slice(0, 7)
+
 /** N70（CEO：「我們不要挑戰一般使用者」「能按的都移到左邊欄」「狀態要嘛放右欄
  *  要嘛放上方 做顯示 BAR 點了會打開」）：
  *
@@ -131,7 +133,7 @@ export default function HermesTopBar({
       <span
         title={isUnbuiltVersion ? t('versionDevHint') : undefined}
         style={{ fontSize: 10, color: isUnbuiltVersion ? 'var(--color-hermes-amber)' : 'var(--color-hermes-tx2)', border: `1px solid ${isUnbuiltVersion ? 'rgba(232,179,77,.4)' : 'var(--color-hermes-bd2)'}`, borderRadius: 4, padding: '2px 7px' }}
-      >{version}</span>
+      >{`${version} · ${GIT_SHA}`}</span>
       <span className="hermes-uplink-status" title={degradedMessage || undefined} aria-label={degradedMessage ? t('degradedState') : t('liveUplink')} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: degradedMessage ? 'var(--color-hermes-amber)' : 'var(--color-hermes-cyan)', background: degradedMessage ? 'rgba(232,179,77,.13)' : 'rgba(77,216,224,.13)', border: `1px solid ${degradedMessage ? 'rgba(232,179,77,.4)' : 'rgba(77,216,224,.4)'}`, borderRadius: 4, padding: '2px 8px' }}>
         <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: degradedMessage ? 'var(--color-hermes-amber)' : 'var(--color-hermes-cyan)', animation: 'hermes-pulse 1.8s infinite' }} />
         {/* N28: on very narrow phones (≤430px) the topbar has no room left

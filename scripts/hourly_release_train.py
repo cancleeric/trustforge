@@ -23,8 +23,8 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "out" / "release-train"
 PRODUCTION_ACCOUNT_ENV = "TRUSTFORGE_PRODUCTION_ACCOUNT_ID"
-PRODUCTION_REGION = "ap-southeast-2"
-PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
+PRODUCTION_REGION = os.getenv("TRUSTFORGE_PRODUCTION_REGION", "us-west-2")
+PRODUCTION_URL = os.getenv("TRUSTFORGE_PRODUCTION_URL", "https://34-220-226-162.nip.io").rstrip("/")
 VERSION_PATTERN = re.compile(r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)\Z")
 # main 引入 formal-run analysis-question handler 後，必須先完成生產配套
 # (DynamoDB table + caller/idempotency/retention secret + EC2 env) 並建立此 flag，
@@ -39,6 +39,13 @@ def production_account() -> str:
     if not re.fullmatch(r"[0-9]{12}", account):
         raise RuntimeError(f"{PRODUCTION_ACCOUNT_ENV} must be a 12-digit AWS account id")
     return account
+
+
+def require_competition_target() -> None:
+    if PRODUCTION_REGION not in {"us-west-2", "us-east-1"}:
+        raise RuntimeError("competition production region must be us-west-2 or us-east-1")
+    if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?", PRODUCTION_URL):
+        raise RuntimeError("competition production URL must be an HTTPS origin without a path")
 
 
 def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -783,6 +790,8 @@ def execute(args: argparse.Namespace) -> Path:
     run_id = started.strftime("%Y%m%dT%H%M%SZ")
     receipt = {"run_id": run_id, "started_at": started.isoformat(), "status": "running", "steps": []}
     try:
+        require_competition_target()
+        main_only_mode = bool(getattr(args, "main_only", False))
         with lease():
             require_clean_root()
             run(["git", "fetch", "--prune", "origin"])
@@ -792,6 +801,7 @@ def execute(args: argparse.Namespace) -> Path:
             ).strip().split()
             main_only, develop_only = (int(value) for value in counts)
             receipt["divergence"] = {"main_only": main_only, "develop_only": develop_only}
+            receipt["release_scope"] = "main-only" if main_only_mode else "main-and-develop"
             main_sha_remote = run(["git", "rev-parse", "origin/main"], capture=True).strip()
             production_sha, production_digest = production_identity()
             receipt["production_before"] = {"git_sha": production_sha, "artifact_digest": production_digest}
@@ -812,7 +822,7 @@ def execute(args: argparse.Namespace) -> Path:
                 receipt["finished_at"] = datetime.now(UTC).isoformat()
                 return record(receipt)
             if (
-                develop_only == 0
+                (main_only_mode or develop_only == 0)
                 and production_sha == main_sha_remote
                 and runtime_in_sync
                 and frontend_in_sync
@@ -836,13 +846,15 @@ def execute(args: argparse.Namespace) -> Path:
                 base = Path(temporary)
                 develop_tree = base / "develop"
                 main_tree = base / "main"
-                run(["git", "worktree", "add", "--detach", str(develop_tree), "origin/develop"])
                 try:
-                    gate(develop_tree)
-                    develop_sha = run(["git", "rev-parse", "HEAD"], cwd=develop_tree, capture=True).strip()
-                    receipt["steps"].append({"develop": develop_sha})
+                    develop_sha = ""
+                    if not main_only_mode:
+                        run(["git", "worktree", "add", "--detach", str(develop_tree), "origin/develop"])
+                        gate(develop_tree)
+                        develop_sha = run(["git", "rev-parse", "HEAD"], cwd=develop_tree, capture=True).strip()
+                        receipt["steps"].append({"develop": develop_sha})
                     run(["git", "worktree", "add", "--detach", str(main_tree), "origin/main"])
-                    if develop_only:
+                    if develop_only and not main_only_mode:
                         run(["git", "merge", "--no-edit", "--no-ff", develop_sha], cwd=main_tree)
                         release_version = bump_patch_version(main_tree)
                         run(
@@ -876,7 +888,7 @@ def execute(args: argparse.Namespace) -> Path:
                     release_branch = f"release/auto-{run_id[:8]}"
                     backup = require_backup_receipt(backup_command, run_id)
                     receipt["steps"].append({"backup_receipt": str(backup)})
-                    if develop_only:
+                    if develop_only and not main_only_mode:
                         run(
                             [
                                 # The exact develop and merged-main candidates already passed
@@ -884,6 +896,16 @@ def execute(args: argparse.Namespace) -> Path:
                                 "git", "-c", "core.hooksPath=/dev/null",
                                 "push", "--atomic", "origin",
                                 f"{main_sha}:refs/heads/main",
+                                f"{main_sha}:refs/heads/{release_branch}",
+                            ],
+                            cwd=main_tree,
+                        )
+                        receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
+                    elif main_only_mode:
+                        run(
+                            [
+                                "git", "-c", "core.hooksPath=/dev/null",
+                                "push", "origin",
                                 f"{main_sha}:refs/heads/{release_branch}",
                             ],
                             cwd=main_tree,
@@ -938,6 +960,11 @@ def execute(args: argparse.Namespace) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="allow pushes and production deployment")
+    parser.add_argument(
+        "--main-only",
+        action="store_true",
+        help="deploy origin/main without gating or merging origin/develop",
+    )
     args = parser.parse_args(argv)
     args.dry_run = not args.execute
     try:

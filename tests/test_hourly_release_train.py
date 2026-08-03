@@ -9,6 +9,36 @@ import pytest
 from scripts import hourly_release_train as train
 
 
+def test_competition_target_defaults_to_allowed_west_region_and_https_origin():
+    assert train.PRODUCTION_REGION == "us-west-2"
+    assert train.PRODUCTION_URL == "https://34-220-226-162.nip.io"
+    train.require_competition_target()
+
+
+def test_competition_target_rejects_disallowed_region(monkeypatch):
+    monkeypatch.setattr(train, "PRODUCTION_REGION", "ap-southeast-2")
+    with pytest.raises(RuntimeError, match="us-west-2 or us-east-1"):
+        train.require_competition_target()
+
+
+def test_competition_target_rejects_non_https_or_path(monkeypatch):
+    monkeypatch.setattr(train, "PRODUCTION_URL", "http://34-220-226-162.nip.io/path")
+    with pytest.raises(RuntimeError, match="HTTPS origin"):
+        train.require_competition_target()
+
+
+def test_cli_passes_explicit_main_only_scope(monkeypatch, tmp_path):
+    captured = []
+    monkeypatch.setattr(
+        train,
+        "execute",
+        lambda args: captured.append(args) or tmp_path / "receipt.json",
+    )
+    assert train.main(["--execute", "--main-only"]) == 0
+    assert captured[0].dry_run is False
+    assert captured[0].main_only is True
+
+
 def test_patch_bump_synchronizes_backend_and_frontend_versions(tmp_path):
     files = {
         "pyproject.toml": (
