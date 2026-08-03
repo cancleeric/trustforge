@@ -518,6 +518,32 @@ def _decision_codes(
     return ()
 
 
+def _select_kind_diverse_supporting(
+    claims: tuple[KernelScoredClaim, ...], *, limit: int = SUPPORTING_LIMIT,
+    target_kinds: int = 3,
+) -> tuple[KernelScoredClaim, ...]:
+    """Bound supporting claims without letting one source kind fill every slot."""
+    if len(claims) <= limit:
+        return claims
+    representatives: list[KernelScoredClaim] = []
+    seen_kinds: set[str] = set()
+    for claim in claims:
+        kind = claim.claim.document.kind
+        if kind not in seen_kinds:
+            representatives.append(claim)
+            seen_kinds.add(kind)
+            if len(representatives) == target_kinds:
+                break
+    if len(representatives) < target_kinds:
+        return claims[:limit]
+    reserved = {id(claim) for claim in representatives}
+    selected = representatives + [claim for claim in claims if id(claim) not in reserved]
+    selected = selected[:limit]
+    rank = {id(claim): index for index, claim in enumerate(claims)}
+    selected.sort(key=lambda claim: rank[id(claim)])
+    return tuple(selected)
+
+
 def aggregate_scored_claims(
     scored_claims: tuple[KernelScoredClaim, ...],
     *,
@@ -636,7 +662,7 @@ def aggregate_scored_claims(
         raw_confidence,
     )
     calibrated = interpolate_calibration(strength, resolved_calibration_table)
-    supporting = supporting_all[:SUPPORTING_LIMIT]
+    supporting = _select_kind_diverse_supporting(supporting_all)
     contrarian = contrarian_all[:CONTRARIAN_LIMIT]
     independent_sources = len(
         {canonical_source(sc.claim.document.source) for sc in supporting}

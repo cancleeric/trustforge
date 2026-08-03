@@ -69,11 +69,13 @@ describe('GlossaryTerm 新手模式白話提示（#847）', () => {
     fireEvent.pointerEnter(trigger.parentElement as HTMLElement)
     expect(screen.queryByRole('note')).not.toBeInTheDocument()  // 300ms 前不該浮
     act(() => { vi.advanceTimersByTime(320) })
-    expect(screen.getByRole('note')).toHaveTextContent(GLOSSARY_BY_ID.trustScore.tooltip!['zh-TW'])
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip).toHaveTextContent(GLOSSARY_BY_ID.trustScore.tooltip!['zh-TW'])
+    expect(trigger).toHaveAttribute('aria-describedby', tooltip.id)
 
     fireEvent.pointerLeave(trigger.parentElement as HTMLElement)
     act(() => { vi.advanceTimersByTime(200) })
-    expect(screen.queryByRole('note')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
   it('關掉新手模式就不浮——一般模式的畫面跟以前一模一樣', () => {
@@ -107,5 +109,9 @@ describe('GlossaryTerm 新手模式白話提示（#847）', () => {
       expect(term.tooltip.en.length).toBeGreaterThan(0)
       expect(term.tooltip.en).not.toMatch(/[一-鿿]/)
     }
+    const beginnerTerms = GLOSSARY_CATALOG.filter((term) => term.audiences.includes('beginner'))
+    expect(beginnerTerms).toHaveLength(20)
+    expect(beginnerTerms.every((term) => Boolean(term.tooltip))).toBe(true)
+    expect(beginnerTerms.every((term) => term.tooltip!['zh-TW'].length <= 15)).toBe(true)
   })
 })

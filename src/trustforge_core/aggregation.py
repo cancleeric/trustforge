@@ -42,6 +42,38 @@ _COIN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def _select_kind_diverse_supporting(
+    claims: list[KernelScoredClaim], *, limit: int = 10, target_kinds: int = 3
+) -> tuple[KernelScoredClaim, ...]:
+    """Keep the ranked cap while reserving room for representative source kinds.
+
+    ``claims`` is already relevance/trust ranked.  The first valid claim for up
+    to three distinct kinds is reserved, then remaining slots are filled in the
+    original order.  Sparse inputs and one/two-kind inputs therefore retain the
+    legacy order byte-for-byte; rich snapshots cannot be monopolized by one
+    high-volume kind merely because it occupies the first ten positions.
+    """
+    if len(claims) <= limit:
+        return tuple(claims)
+    representatives: list[KernelScoredClaim] = []
+    seen_kinds: set[str] = set()
+    for claim in claims:
+        kind = claim.claim.document.kind
+        if kind not in seen_kinds:
+            representatives.append(claim)
+            seen_kinds.add(kind)
+            if len(representatives) == target_kinds:
+                break
+    if len(representatives) < target_kinds:
+        return tuple(claims[:limit])
+    reserved = {id(claim) for claim in representatives}
+    selected = representatives + [claim for claim in claims if id(claim) not in reserved]
+    selected = selected[:limit]
+    rank = {id(claim): index for index, claim in enumerate(claims)}
+    selected.sort(key=lambda claim: rank[id(claim)])
+    return tuple(selected)
+
+
 def _exact_string(value: object, *, field: str) -> str:
     if type(value) is not str:
         raise ValueError(f"{field} must be an exact string")
@@ -225,7 +257,7 @@ def aggregate_scored_claims(
         trust_score=trust_score,
     )
     confidence = interpolate_calibration(strength, table)
-    supporting = tuple(all_supporting[:10])
+    supporting = _select_kind_diverse_supporting(all_supporting)
     contrarian = tuple(all_contrarian[:5])
     independent_sources = len(
         {canonical_source(item.claim.document.source) for item in supporting}

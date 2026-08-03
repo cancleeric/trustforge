@@ -13,6 +13,9 @@ DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
 BUDGET_BACKEND="${TRUSTFORGE_BUDGET_GUARD_BACKEND:-dynamodb}"
 CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
 COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
+BEDROCK_RPS_BACKEND="${TRUSTFORGE_BEDROCK_RPS_BACKEND:-dynamodb}"
+BEDROCK_RPS_REGION="${TRUSTFORGE_BEDROCK_RPS_REGION:-us-east-1}"
+BEDROCK_RPS_TABLE="${TRUSTFORGE_BEDROCK_RPS_TABLE:-competition-trustforge-team11-budget}"
 LEASE_BACKEND="${TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND:-dynamodb}"
 LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
 ATOMIC_BATCH_TABLE="${TRUSTFORGE_ATOMIC_BATCH_TABLE:-trustforge-multi-angle-batches}"
@@ -56,6 +59,18 @@ if [ -n "$DAILY_CAP" ] && ! [[ "$DAILY_CAP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
 fi
 if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "[ec2] ERROR: BEDROCK_MODEL_ID contains invalid characters" >&2
+  exit 1
+fi
+if [ "$BEDROCK_RPS_BACKEND" != "dynamodb" ]; then
+  echo "[ec2] ERROR: production Bedrock RPS backend must be dynamodb" >&2
+  exit 1
+fi
+if ! [[ "$BEDROCK_RPS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]; then
+  echo "[ec2] ERROR: invalid TRUSTFORGE_BEDROCK_RPS_REGION" >&2
+  exit 1
+fi
+if ! [[ "$BEDROCK_RPS_TABLE" =~ ^[A-Za-z0-9_.-]{3,255}$ ]]; then
+  echo "[ec2] ERROR: invalid TRUSTFORGE_BEDROCK_RPS_TABLE" >&2
   exit 1
 fi
 if ! [[ "$TRAINING_DATA_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
@@ -106,6 +121,9 @@ append_unit_env "Environment=TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER=${WHALE_ALERT_
 [ -n "$TOKEN_SSM_PREFIX" ] && append_unit_env "Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX}"
 append_unit_env "Environment=TRUSTFORGE_BUDGET_GUARD_BACKEND=${BUDGET_BACKEND}"
 append_unit_env "Environment=TRUSTFORGE_BUDGET_COUNTER_TABLE=${COUNTER_TABLE}"
+append_unit_env "Environment=TRUSTFORGE_BEDROCK_RPS_BACKEND=${BEDROCK_RPS_BACKEND}"
+append_unit_env "Environment=TRUSTFORGE_BEDROCK_RPS_REGION=${BEDROCK_RPS_REGION}"
+append_unit_env "Environment=TRUSTFORGE_BEDROCK_RPS_TABLE=${BEDROCK_RPS_TABLE}"
 append_unit_env "Environment=TRUSTFORGE_CW_METRICS=${CW_METRICS}"
 append_unit_env "Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=${LEASE_BACKEND}"
 append_unit_env "Environment=TRUSTFORGE_LEASE_TABLE=${LEASE_TABLE}"
@@ -129,7 +147,7 @@ ssm_env_cmd() {
   fi
 }
 
-UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")$(ssm_env_cmd TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND "$LEASE_BACKEND")$(ssm_env_cmd TRUSTFORGE_LEASE_TABLE "$LEASE_TABLE")"
+UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_BEDROCK_RPS_BACKEND "$BEDROCK_RPS_BACKEND")$(ssm_env_cmd TRUSTFORGE_BEDROCK_RPS_REGION "$BEDROCK_RPS_REGION")$(ssm_env_cmd TRUSTFORGE_BEDROCK_RPS_TABLE "$BEDROCK_RPS_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")$(ssm_env_cmd TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND "$LEASE_BACKEND")$(ssm_env_cmd TRUSTFORGE_LEASE_TABLE "$LEASE_TABLE")"
 UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd TRUSTFORGE_PREVIEW_ADMISSION_ENABLED "$PREVIEW_ADMISSION_ENABLED")"
 UNIT_ENV_RECONCILE_CMDS="${UNIT_ENV_RECONCILE_CMDS}$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_TABLE "$ATOMIC_BATCH_TABLE")$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_CONFIG_VERSION "$ATOMIC_BATCH_CONFIG_VERSION")$(ssm_env_cmd TRUSTFORGE_ATOMIC_BATCH_EXCLUSIVE "$ATOMIC_BATCH_EXCLUSIVE")$(ssm_env_cmd TRUSTFORGE_SHARED_ANALYSIS_DB_PATH "$SHARED_ANALYSIS_DB_PATH")$(ssm_env_cmd TRUSTFORGE_MULTI_ANGLE_DAILY_BUDGET_USD "$MULTI_ANGLE_DAILY_BUDGET_USD")"
 for key in "${PREVIEW_ENV_KEYS[@]}"; do
@@ -295,6 +313,12 @@ done
 
 if ! "$(dirname "$0")/setup_budget_guard_dynamodb.sh"; then
   echo "[ec2] ERROR: budget guard setup failed" >&2
+  exit 1
+fi
+if ! TRUSTFORGE_BEDROCK_RPS_REGION="$BEDROCK_RPS_REGION" \
+  TRUSTFORGE_BEDROCK_RPS_TABLE="$BEDROCK_RPS_TABLE" \
+  bash "$(dirname "$0")/setup_bedrock_rps_iam.sh"; then
+  echo "[ec2] ERROR: canonical Bedrock RPS gate IAM/setup failed" >&2
   exit 1
 fi
 if ! "$(dirname "$0")/setup_idempotency_lease_dynamodb.sh"; then
@@ -519,6 +543,7 @@ UNIT3
 systemctl daemon-reload
 systemctl enable --now trustforge.service
 systemctl enable --now fetch-scheduler.timer
+TRUSTFORGE_BEDROCK_RPS_BACKEND=${BEDROCK_RPS_BACKEND} TRUSTFORGE_BEDROCK_RPS_REGION=${BEDROCK_RPS_REGION} TRUSTFORGE_BEDROCK_RPS_TABLE=${BEDROCK_RPS_TABLE} bash /opt/trustforge/deploy/install_hermes_scheduler.sh
 EOF
 
 IID=$(aws ec2 run-instances --region "$REGION" --instance-type "$INSTANCE_TYPE" \

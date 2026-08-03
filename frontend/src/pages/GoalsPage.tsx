@@ -1,11 +1,15 @@
 import { useHermesI18n } from '../hermes/hermesI18n'
 
-export default function GoalsPage() {
+interface GoalsContentProps {
+  embedded?: boolean
+}
+
+export function GoalsContent({ embedded = false }: GoalsContentProps) {
   const { locale } = useHermesI18n()
   const isZh = locale === 'zh-TW'
 
   return (
-    <div style={{ maxWidth: 860, margin: '0 auto', padding: '32px 24px' }}>
+    <div style={{ maxWidth: 860, margin: '0 auto', padding: embedded ? '8px 4px 4px' : '32px 24px' }}>
       <h1 style={{ fontSize: 22, marginBottom: 8, color: 'var(--color-hermes-tx)' }}>
         {isZh ? '🎯 TrustForge 專案目標' : '🎯 TrustForge Project Goals'}
       </h1>
@@ -155,4 +159,8 @@ export default function GoalsPage() {
       </section>
     </div>
   )
+}
+
+export default function GoalsPage() {
+  return <GoalsContent />
 }
