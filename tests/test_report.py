@@ -39,6 +39,13 @@ def test_evidence_has_official_fields():
         assert d["content_reference"], "content_reference 不可空"
 
 
+def test_evidence_carries_claim_direction_for_dashboard():
+    """Phase 0 dashboard trust averages use the scored claim direction verbatim."""
+    _, evidence = _run()
+    assert evidence
+    assert all(e.direction in {"bullish", "bearish", "neutral"} for e in evidence)
+
+
 def test_price_evidence_is_traceable():
     """價格證據需帶交易對 + 區間，可回溯。"""
     _, evidence = _run()

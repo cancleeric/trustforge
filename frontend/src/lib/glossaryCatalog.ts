@@ -1,4 +1,4 @@
-export type GlossaryAudience = 'report' | 'popover' | 'help_center'
+export type GlossaryAudience = 'report' | 'popover' | 'help_center' | 'beginner'
 
 export type GlossaryTermId =
   | 'fdv'
@@ -28,6 +28,15 @@ export type GlossaryTermId =
   | 'immutable'
   | 'lineage'
   | 'weight'
+  | 'direction'
+  | 'ohlcv'
+  | 'onChainData'
+  | 'smartMoneyDivergence'
+  | 'evidenceList'
+  | 'contrarianEvidence'
+  | 'executionLog'
+  | 'bedrock'
+  | 'analysisBudget'
 
 /**
  * #847：新手模式的短版白話文，滑過去就看得到。
@@ -143,7 +152,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '綜合來源信譽、交叉佐證、資料時效與抗操縱能力的可信程度；不是價格漲跌機率。',
     tooltip: { 'zh-TW': '這條消息多可信，不是預測漲跌', en: 'How trustworthy this claim is — not a price call' },
     aliases: ['Trust Score'],
-    audiences: ['popover', 'help_center'],
+    audiences: ['popover', 'help_center', 'beginner'],
     where: '分析結果 · 執行台 · 歷史趨勢',
   },
   {
@@ -152,7 +161,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '本次可用資料是否足以支持判讀。完整度低代表證據不足，不代表風險較低。',
     tooltip: { 'zh-TW': '這次分析的資料夠不夠', en: 'Whether we had enough data this time' },
     aliases: [],
-    audiences: ['popover'],
+    audiences: ['popover', 'beginner'],
   },
   {
     term_id: 'reputation',
@@ -160,7 +169,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表來源過去可靠度與交叉核對後表現。',
     tooltip: { 'zh-TW': '這個來源過去靠不靠譜', en: 'How reliable this source has been' },
     aliases: [],
-    audiences: ['popover'],
+    audiences: ['popover', 'beginner'],
   },
   {
     term_id: 'corroboration',
@@ -168,7 +177,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表有多少彼此獨立來源支持同一說法。',
     tooltip: { 'zh-TW': '有幾個不相關的來源也這樣說', en: 'How many independent sources agree' },
     aliases: [],
-    audiences: ['popover'],
+    audiences: ['popover', 'beginner'],
   },
   {
     term_id: 'recency',
@@ -176,7 +185,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表資料距離現在有多久。',
     tooltip: { 'zh-TW': '資料多新，越舊分越低', en: 'How recent the data is — older scores lower' },
     aliases: [],
-    audiences: ['popover', 'help_center'],
+    audiences: ['popover', 'help_center', 'beginner'],
     where: '分析結果 · freshness',
   },
   {
@@ -185,14 +194,15 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '獨立 0-100 子分數，不是加權係數，也不應與其他軸相加；代表資料抵抗喊單、誇大承諾與協同行為的程度。',
     tooltip: { 'zh-TW': '有沒有被灌水或帶風向', en: 'Whether the data looks pumped or astroturfed' },
     aliases: [],
-    audiences: ['popover'],
+    audiences: ['popover', 'beginner'],
   },
   {
     term_id: 'divergence',
     label: '跨來源分歧',
     description: '不同來源對同一問題得出互相衝突的訊號；分歧越大，結論越需要保守解讀。',
+    tooltip: { 'zh-TW': '不同來源的消息互相打架', en: 'When different sources disagree' },
     aliases: [],
-    audiences: ['popover'],
+    audiences: ['popover', 'beginner'],
   },
   {
     term_id: 'proxy',
@@ -229,7 +239,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '同時比對多個交易所與資料源，交叉驗證後才給分，比單一來源更難被造假。',
     tooltip: { 'zh-TW': '同時看多個來源，不只看一家', en: 'Checks many sources, not just one' },
     aliases: ['Multi-source'],
-    audiences: ['popover', 'help_center'],
+    audiences: ['popover', 'help_center', 'beginner'],
     where: '分析結果 · 執行台 · 成本',
   },
   {
@@ -238,7 +248,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '資料新鮮度。TrustForge 會標出抓取時間與 stale 狀態，避免把舊資料當成即時訊號。',
     tooltip: { 'zh-TW': '資料抓回來多久了', en: 'How long ago the data was fetched' },
     aliases: ['新鮮度'],
-    audiences: ['popover', 'help_center'],
+    audiences: ['popover', 'help_center', 'beginner'],
     where: '分析結果 · 來源',
   },
   {
@@ -288,8 +298,9 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     term_id: 'lineage',
     label: '資料 lineage',
     description: '資料從來源、轉換到輸出的完整追蹤脈絡。',
-    aliases: [],
-    audiences: ['popover'],
+    tooltip: { 'zh-TW': '結論是怎麼一步步推出來的', en: 'How evidence leads to the conclusion' },
+    aliases: ['溯源鏈'],
+    audiences: ['popover', 'beginner'],
   },
   {
     term_id: 'weight',
@@ -297,7 +308,79 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     description: '不同訊號在綜合分數中的相對影響程度。',
     tooltip: { 'zh-TW': '各評分項目的重要程度比例', en: 'How much each factor counts toward the score' },
     aliases: [],
-    audiences: ['popover'],
+    audiences: ['popover', 'beginner'],
+  },
+  {
+    term_id: 'direction',
+    label: '偏多/偏空/中性',
+    description: '證據所呈現的近期方向分類；不是價格預測或買賣建議。',
+    tooltip: { 'zh-TW': '最近趨勢方向，不是買賣建議', en: 'Recent direction, not trading advice' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'ohlcv',
+    label: 'OHLCV',
+    description: '一段期間的開盤、最高、最低、收盤價格與成交量。',
+    tooltip: { 'zh-TW': '每天的開高低收＋成交量', en: 'Open, high, low, close, and volume' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'onChainData',
+    label: '鏈上數據',
+    description: '直接來自區塊鏈帳本、可由節點或區塊瀏覽器查驗的紀錄。',
+    tooltip: { 'zh-TW': '區塊鏈帳本紀錄，難造假', en: 'Verifiable blockchain ledger records' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'smartMoneyDivergence',
+    label: '聰明錢背離',
+    description: '大型或高資訊優勢地址的行為，與整體市場訊號呈現不同方向。',
+    tooltip: { 'zh-TW': '大戶動作跟市場方向不同', en: 'Large holders move against the market' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'evidenceList',
+    label: '證據清單',
+    description: '逐項列出結論所依據的來源、時間、內容參照與相關主張。',
+    tooltip: { 'zh-TW': '每個結論的原始出處', en: 'Original sources behind each conclusion' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'contrarianEvidence',
+    label: '反方證據',
+    description: '與目前主結論方向不一致、可能降低結論可信度或推翻結論的證據。',
+    tooltip: { 'zh-TW': '不支持主結論的訊號', en: 'Signals against the main conclusion' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'executionLog',
+    label: '執行紀錄',
+    description: '記錄系統實際執行的步驟、工具、耗時、錯誤與結果。',
+    tooltip: { 'zh-TW': '系統跑了什麼、花了多久', en: 'What ran and how long it took' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'bedrock',
+    label: 'Bedrock',
+    description: 'Amazon Bedrock；TrustForge 使用的 AWS 生成式 AI 推理服務。',
+    tooltip: { 'zh-TW': 'AWS AI引擎，負責寫成人話', en: 'AWS AI service that writes plain language' },
+    aliases: ['Amazon Bedrock'],
+    audiences: ['report', 'popover', 'beginner'],
+  },
+  {
+    term_id: 'analysisBudget',
+    label: '15 分鐘預算',
+    description: '單次正式分析允許使用的最長執行時間，超時必須停止或降級。',
+    tooltip: { 'zh-TW': '每次分析的時間上限', en: 'Time limit for each analysis' },
+    aliases: [],
+    audiences: ['report', 'popover', 'beginner'],
   },
 ])
 

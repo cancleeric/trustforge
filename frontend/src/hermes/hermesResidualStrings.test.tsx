@@ -203,6 +203,10 @@ describe('N26: zh-TW mode has no residual English strings', () => {
     expect(screen.getByText('持續運作引擎')).toBeInTheDocument()
     expect(screen.queryByText(/RUNNING/)).not.toBeInTheDocument()
     expect(screen.getByText(/運作中/)).toBeInTheDocument()
+    expect(screen.getByTestId('right-rail-trust-panel').style.background).toBe('transparent')
+    expect(screen.getByTestId('right-rail-trust-panel').style.border).toBe('')
+    expect(screen.getByTestId('right-rail-engine-panel').style.background).toBe('transparent')
+    expect(screen.getByTestId('right-rail-engine-panel').style.border).toBe('')
     // "risk · completed" must not leak — both halves localized
     expect(screen.queryByText('risk · completed')).not.toBeInTheDocument()
     expect(screen.getByText('風險評估 · 已完成')).toBeInTheDocument()

@@ -90,7 +90,7 @@ describe('glossary catalog — 結構完整性', () => {
   })
 
   it('audiences 為非空陣列，僅含合法值', () => {
-    const valid: string[] = ['report', 'popover', 'help_center']
+    const valid: string[] = ['report', 'popover', 'help_center', 'beginner']
     for (const term of GLOSSARY_CATALOG) {
       expect(term.audiences.length, `${term.term_id} audiences 為空`).toBeGreaterThan(0)
       for (const a of term.audiences) {

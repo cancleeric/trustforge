@@ -138,6 +138,7 @@ export default function GlossaryTerm({ term, label, compact }: Props) {
         type="button"
         aria-expanded={open}
         aria-controls={id}
+        aria-describedby={hoverOnly ? id : undefined}
         onClick={() => { clearHoverTimer(); setHovered(false); setOpen((value) => !value) }}
       >
         {label ?? entry.label}
@@ -155,7 +156,7 @@ export default function GlossaryTerm({ term, label, compact }: Props) {
           ref={popover}
           id={id}
           className={`tf-glossary-popover${hoverOnly ? ' is-hint' : ''}`}
-          role="note"
+          role={hoverOnly ? 'tooltip' : 'note'}
           style={popoverStyle}
           onClick={(event) => event.stopPropagation()}
           onPointerEnter={clearHoverTimer}

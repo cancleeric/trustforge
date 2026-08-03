@@ -96,6 +96,8 @@ export interface Evidence {
   related_claim: string
   source_url: string
   kind: string
+  /** Claim-level direction. Optional while legacy snapshots age out. */
+  direction?: 'bullish' | 'bearish' | 'neutral' | string
   trust: number
   trust_components: Record<string, number>
   /** 確定判定為操縱的紅旗，已反映在 trust 分數。 */

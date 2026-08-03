@@ -5347,7 +5347,7 @@ def _dedup_analyze_call(
 # (Evidence)` 任何欄位若不在這兩個集合裡，測試直接紅，不會悄悄放行。
 _EVIDENCE_PUBLIC_FIELDS = frozenset({
     "schema_version", "source", "fetched_at", "content_reference", "related_claim",
-    "source_url", "kind", "trust", "trust_components", "flags", "info_flags",
+    "source_url", "kind", "direction", "trust", "trust_components", "flags", "info_flags",
     "data_lineage",
     # #960 canonical claim identity (public join key, not sensitive).
     "claim_id",
