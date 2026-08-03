@@ -129,6 +129,8 @@ class Report:
     schema_version: str = REPORT_SCHEMA_VERSION
     direction: str = ""             # 結構化方向欄位（偏多/偏空/中性），由 build_report 填入
     cross_source_signal: dict | None = field(default=None)  # 跨源訊號背離/共識，由 orchestrator 填入
+    source_kind_distribution: dict[str, int] = field(default_factory=dict)
+    excluded_source_kind_counts: dict[str, int] = field(default_factory=dict)
     # Phase 1 獨特洞察層（#24/#15/#21/#72）：非顯而易見、可驗證的信任洞察清單
     # （聰明錢背離 / 操縱爆量 / 來源自我矛盾），由 `agent.orchestrator.build_report`
     # 呼叫 `trust.insights.detect_insights` 填入。每條洞察攜「兩個以上貢獻來源 +

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from jsonschema import Draft202012Validator
+
 from trustforge.data_contracts import (
     DOCUMENT_SCHEMA_VERSION,
     EVIDENCE_SCHEMA_VERSION,
@@ -11,7 +13,7 @@ from trustforge.data_contracts import (
 )
 from trustforge.ingestion.base import Document
 from trustforge.ingestion.cache import doc_from_dict, doc_to_dict
-from trustforge.schema import BasisItem, Evidence
+from trustforge.schema import BasisItem, Evidence, Report
 
 
 def test_versioned_payloads_round_trip_and_legacy_default() -> None:
@@ -30,6 +32,31 @@ def test_contracts_have_versions_and_report_contract() -> None:
     assert schemas["Evidence"]["properties"]["schema_version"]["const"] == EVIDENCE_SCHEMA_VERSION
     assert schemas["Report"]["properties"]["schema_version"]["const"] == REPORT_SCHEMA_VERSION
     assert "schema_version" in schemas["Report"]["required"]
+
+
+def test_report_contract_accepts_source_kind_retention_fields() -> None:
+    schemas = contract_schemas()
+    report = Report(
+        coin="BTC",
+        question_type="trend",
+        question="Will BTC rise?",
+        market_judgment="neutral",
+        facts=[],
+        inferences=[],
+        key_basis=[],
+        confidence=0.5,
+        limits=[],
+        could_flip=[],
+        contrarian=[],
+        generated_at="2026-08-03T00:00:00Z",
+        source_kind_distribution={"exchange": 2, "news": 1},
+        excluded_source_kind_counts={"social": 3},
+    )
+
+    Draft202012Validator(schemas["Report"]).validate(asdict(report))
+    properties = schemas["Report"]["properties"]
+    assert "source_kind_distribution" in properties
+    assert "excluded_source_kind_counts" in properties
 
 
 def test_compatibility_gate_detects_breaking_changes() -> None:

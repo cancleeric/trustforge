@@ -677,7 +677,7 @@ def _count_independent_sources(sources: Iterable[str | None]) -> int:
 
 
 def _detect_stance_pairs(
-    scored: list[ScoredClaim],
+    candidates: list[ScoredClaim],
     stance_fn: Callable[[str, str], str] | None,
 ) -> list[dict]:
     """掃描情緒類（news/social）主張中「不同來源 + 方向明確相反」的候選配對，
@@ -707,7 +707,7 @@ def _detect_stance_pairs(
         return []
 
     eligible = [
-        sc for sc in scored
+        sc for sc in candidates
         if sc.trust >= _STANCE_PAIR_MIN_TRUST and sc.claim.doc.kind in _SENTIMENT_KINDS
     ]
 
@@ -787,6 +787,66 @@ def _dedup_stance_pairs_by_source(pairs: list[dict]) -> dict[str, list[dict]]:
         seen[stance].add(key)
         result[stance].append(p)
     return result
+
+
+_MIN_RICH_SOURCE_KINDS = 3
+
+
+def _source_kind_distribution(scored: Iterable[ScoredClaim]) -> dict[str, int]:
+    distribution: dict[str, int] = {}
+    for sc in scored:
+        kind = (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        distribution[kind] = distribution.get(kind, 0) + 1
+    return distribution
+
+
+def _with_rich_source_kind_representatives(
+    supporting: list[ScoredClaim],
+    candidates: list[ScoredClaim],
+    *,
+    support_threshold: float = 0.5,
+) -> list[ScoredClaim]:
+    """Keep representative valid claims from at least three source kinds."""
+    available_kinds = {
+        (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        for sc in candidates
+        if sc.trust >= support_threshold
+    }
+    if len(available_kinds) < _MIN_RICH_SOURCE_KINDS:
+        return supporting
+
+    admitted_ids = {sc.claim.id for sc in supporting}
+    admitted_kinds = {
+        (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        for sc in supporting
+        if sc.trust >= support_threshold
+    }
+    if len(admitted_kinds) >= _MIN_RICH_SOURCE_KINDS:
+        return supporting
+
+    by_kind: dict[str, list[ScoredClaim]] = {}
+    for sc in candidates:
+        if sc.trust < support_threshold:
+            continue
+        kind = (sc.claim.doc.kind or "unknown").strip() or "unknown"
+        by_kind.setdefault(kind, []).append(sc)
+
+    enriched = list(supporting)
+    for kind in sorted(available_kinds - admitted_kinds):
+        candidates = sorted(
+            by_kind.get(kind, []),
+            key=lambda sc: (-sc.trust, sc.claim.id),
+        )
+        for candidate in candidates:
+            if candidate.claim.id in admitted_ids:
+                continue
+            enriched.append(candidate)
+            admitted_ids.add(candidate.claim.id)
+            admitted_kinds.add(kind)
+            break
+        if len(admitted_kinds) >= _MIN_RICH_SOURCE_KINDS:
+            break
+    return enriched
 
 
 def _distinct_source_labels(pairs: list[dict]) -> list[str]:
@@ -1167,9 +1227,27 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         idx_sc[idx] = sc
         return idx
 
-    for sc in brief.supporting:
+    source_pool = scored if scored is not None else [*brief.supporting, *brief.contrarian]
+    contrarian_ids = {sc.claim.id for sc in brief.contrarian}
+    supporting_directions = {sc.claim.direction for sc in brief.supporting}
+    supporting_source_pool = [
+        sc
+        for sc in source_pool
+        if _matches_coin(sc.claim.doc, coin)
+        if sc.claim.id not in contrarian_ids
+        and (not supporting_directions or sc.claim.direction in supporting_directions)
+    ]
+    report_supporting = _with_rich_source_kind_representatives(
+        brief.supporting,
+        supporting_source_pool,
+    )
+    source_kind_distribution = _source_kind_distribution(source_pool)
+
+    for sc in report_supporting:
         idx = _add_evidence(sc, judgment_tag)
         admitted_records.append((sc, judgment_tag, idx))
+        if idx_sc.get(idx) is not sc:
+            continue
         key_basis.append(BasisItem(
             claim=sc.claim.text,
             explanation=_loc.basis_explanation(
@@ -1617,6 +1695,13 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # 使用聚合後的 facts
     facts = aggregated_facts
 
+    admitted_source_kind_distribution = _source_kind_distribution(idx_sc.values())
+    excluded_source_kind_counts = {
+        kind: total - admitted_source_kind_distribution.get(kind, 0)
+        for kind, total in source_kind_distribution.items()
+        if total > admitted_source_kind_distribution.get(kind, 0)
+    }
+
     report = Report(
         coin=coin, question_type=qtype.value, question=query,
         market_judgment=market_judgment, facts=facts, inferences=inferences,
@@ -1626,6 +1711,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         generated_at=iso_utc(now_fn()),
         direction=direction,
         cross_source_signal=report_cross_signal,
+        source_kind_distribution=admitted_source_kind_distribution,
+        excluded_source_kind_counts=excluded_source_kind_counts,
         insights=report_insights,
         hypothesis_ledger=hypothesis_ledger,
         # W4 codex 對抗審第 2 輪 [HIGH-1]：結構化校準值＋三態，供 UI／
