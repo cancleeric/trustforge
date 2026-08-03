@@ -103,8 +103,10 @@ else
   echo "[fe-nginx] build 前端（npm ci && npm run build）…" >&2
   (
     cd frontend
-    export VITE_GIT_SHA="${VITE_GIT_SHA:-$(git rev-parse --short HEAD)}"
-    export VITE_RELEASE_VERSION="${VITE_RELEASE_VERSION:-v$(sed -n 's/^version = "\(.*\)"/\1/p' ../pyproject.toml)}"
+    bundle_sha="${VITE_BUNDLE_GIT_SHA:-$(git rev-parse HEAD)}"
+    export VITE_FRONTEND_VERSION="${VITE_FRONTEND_VERSION:-v$(node -p "require('./package.json').version")}"
+    export VITE_BUNDLE_GIT_SHA="$bundle_sha"
+    export VITE_BUNDLE_GIT_SHA_SHORT="${VITE_BUNDLE_GIT_SHA_SHORT:-${bundle_sha:0:7}}"
     npm ci && npm run build
   )
   if [ ! -d frontend/dist ]; then

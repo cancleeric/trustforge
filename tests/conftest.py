@@ -29,6 +29,16 @@ def _isolate_cost_ledger(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_bedrock_rps_limiter(tmp_path, monkeypatch):
+    """Keep Bedrock host-local RPS lock state isolated per test."""
+    from trustforge import bedrock
+
+    limiter = bedrock._DEFAULT_RPS_LIMITER
+    monkeypatch.setattr(limiter, "_lock_path", tmp_path / "bedrock-rps.lock")
+    monkeypatch.setattr(limiter, "_last_call_at", None)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_connector_cache(tmp_path, monkeypatch):
     """連接器快取（階段2 CachedSource/fetch_scheduler）測試隔離：預設寫入
     tmp_path，而非真實 repo 的 `out/connector_cache/`，且預設強制走本地

@@ -197,6 +197,29 @@ class TestAngleResultFromPayload:
         assert result.direction == "偏多"
         assert result.evidence_sources == {"x"}
 
+    def test_key_basis_prefers_diverse_evidence_sources(self):
+        payload = {
+            "report": {
+                "key_basis": [
+                    {"claim": "同源證據 A1", "evidence_idx": [0]},
+                    {"claim": "同源證據 A2", "evidence_idx": [1]},
+                    {"claim": "異源證據 B", "evidence_idx": [2]},
+                    {"claim": "異源證據 C", "evidence_idx": [3]},
+                ],
+            },
+            "evidence": [
+                {"source": "exchange-a"},
+                {"source": "exchange-a"},
+                {"source": "news-b"},
+                {"source": "research-c"},
+            ],
+        }
+
+        result = angle_result_from_payload("news", payload)
+
+        assert result.key_basis == ["同源證據 A1", "異源證據 B", "異源證據 C"]
+        assert result.evidence_sources == {"exchange-a", "news-b", "research-c"}
+
     @pytest.mark.parametrize("bad", [None, "bad", float("nan"), float("inf"), -1, 2])
     def test_invalid_confidence_is_safe_and_bounded(self, bad):
         result = angle_result_from_payload(

@@ -1,5 +1,24 @@
 # TrustForge Hermes（信源熔爐）
 
+## 目前專案快照
+
+以下數字以本 README 更新時的 `origin/main`（`a3f0824b`）為準；重新計算方式寫在表格中，避免把舊版快照誤當成目前狀態。
+
+| 項目 | 狀態 |
+|------|------|
+| Canonical version | `0.27.51`（`src/trustforge/_version.py`、`frontend/package.json`） |
+| Tracked files | `1,913`（`git ls-files`） |
+| Tracked UTF-8 text lines | 約 `445,958` 行（程式、設定、Markdown、HTML、測試與腳本；以版控檔案實際換行數計算） |
+| Python test files | `403` 個（`tests/**/*.py`） |
+| Frontend test files | `86` 個（`frontend/**/*.{test,spec}.*`） |
+| 主要文件索引 | [`docs/README.md`](docs/README.md) |
+| 技術文件 | [`docs/architecture/`](docs/architecture/)；部署規範見 [`docs/RELEASE-DEPLOY-GOVERNANCE.md`](docs/RELEASE-DEPLOY-GOVERNANCE.md) |
+| 比賽交付文件 | [`docs/competition/`](docs/competition/) |
+
+> 測試檔案數與 release gate 的測試批次數不是同一個指標；gate 會依測試收集器與隔離規則重新分批執行。
+
+---
+
 > 加密市場分析 AI Agent — **多源資訊的信任提煉**
 >
 > 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽｜黑客組
@@ -70,6 +89,18 @@ TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，�
 - [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)
 - [`docs/architecture/AWS-ARCHITECTURE.md`](docs/architecture/AWS-ARCHITECTURE.md)
 - [`docs/technical-docs/02-architecture.md`](docs/technical-docs/02-architecture.md)（HTML 版：[`docs/technical-docs/html/02-architecture.html`](docs/technical-docs/html/02-architecture.html)）
+
+### 實際接入資料源
+
+README 上方的圖只列資料類型；目前 repository 內已接入或保留 adapter 的具體來源如下，實際執行時仍受環境變數、憑證、成本上限與 fail-closed 策略控制。
+
+| 類型 | 來源 | 用途 |
+|---|---|---|
+| 價格 / 市場資料 | HOYA BIT OHLCV、CoinGecko、CoinMarketCap、DefiLlama | 歷史價格、即時價格交叉佐證、DeFi TVL 與市場背景 |
+| 鏈上 / 大額轉帳 | Etherscan、Whale Alert、Arkham Intelligence | ETH 鯨魚交易與大額轉帳追蹤，供鏈上訊號與反方證據使用 |
+| 新聞 / RSS | News / RSS connectors | 市場敘事、事件脈絡與 sentiment 類 claim |
+| 監管 / 台灣來源 | FSC 金管會 VASP 公告、MOPS、TWSE、TPEx | 台灣監管公告、公開資訊觀測站與市場揭露資料 |
+| ESG / 碳足跡 | 碳足跡模組 | ESG 與能源/碳排相關證據補充 |
 
 ---
 
