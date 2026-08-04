@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 
 import pytest
 
@@ -607,3 +608,29 @@ def test_budget_reservation_backend_public_semantics(monkeypatch, raw, expected)
     else:
         monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", raw)
     assert bg.budget_reservation_backend() == expected
+
+
+def test_unified_reservation_settlement_is_atomic_and_exact():
+    calls: list[tuple[object, Decimal]] = []
+
+    class Authority:
+        def settle(self, token, actual_cost):
+            calls.append((token, actual_cost))
+            return True
+
+    token = object()
+    lease = bg._UnifiedBudgetLease(0.05, token, Authority())
+
+    assert bg.settle_request_budget(lease, 0.0002, backend="dynamodb") is True
+    assert calls == [(token, Decimal("0.0002"))]
+
+
+@pytest.mark.parametrize("actual_cost", [-0.1, 0.051, math.inf, math.nan])
+def test_unified_reservation_rejects_invalid_settlement(actual_cost):
+    class Authority:
+        def settle(self, *_args):
+            raise AssertionError("invalid settlement must not reach authority")
+
+    lease = bg._UnifiedBudgetLease(0.05, object(), Authority())
+
+    assert bg.settle_request_budget(lease, actual_cost) is False
