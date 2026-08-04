@@ -475,3 +475,71 @@ def test_scrub_summary_handles_escaped_quotes_and_composite_secret_keys():
     assert _scrub_summary("status code=200") == "status code=200"
     ordinary_urls = "https://host/?status_code=200&country_code=TW"
     assert _scrub_summary(ordinary_urls) == ordinary_urls
+
+
+def test_execution_log_summary_fstrings_do_not_interpolate_sensitive_values():
+    """#1183 guard: public summaries must not grow secret-bearing f-strings."""
+
+    import ast
+
+    sensitive_markers = {
+        "api_key",
+        "apikey",
+        "auth",
+        "authorization",
+        "bearer",
+        "credential",
+        "key",
+        "password",
+        "passwd",
+        "pw",
+        "secret",
+        "token",
+        "url",
+        "wallet",
+    }
+    safe_exact_names = {
+        "cost_usd",
+        "input_tokens",
+        "output_tokens",
+        "manifest.token_budget",
+        "manifest.token_used",
+        "resolution.key",
+        "tokens_in",
+        "tokens_out",
+    }
+    safe_suffixes = ("_count", "_counts", "_id", "_ids", "_label", "_labels", "_latency")
+    violations: list[str] = []
+
+    def dotted_name(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            prefix = dotted_name(node.value)
+            return f"{prefix}.{node.attr}" if prefix else node.attr
+        if isinstance(node, ast.Subscript):
+            return dotted_name(node.value)
+        if isinstance(node, ast.Call):
+            return dotted_name(node.func)
+        return ast.unparse(node)
+
+    def is_safe_name(name: str) -> bool:
+        leaf = name.rsplit(".", 1)[-1]
+        return name in safe_exact_names or leaf in safe_exact_names or leaf.endswith(safe_suffixes)
+
+    for path in Path("src/trustforge").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            summary = next((kw.value for kw in call.keywords if kw.arg == "summary"), None)
+            if not isinstance(summary, ast.JoinedStr):
+                continue
+            for part in summary.values:
+                if not isinstance(part, ast.FormattedValue):
+                    continue
+                name = dotted_name(part.value)
+                normalized = name.lower().replace("-", "_")
+                pieces = [p for p in normalized.replace(".", "_").split("_") if p]
+                if any(marker in pieces for marker in sensitive_markers) and not is_safe_name(normalized):
+                    violations.append(f"{path}:{part.lineno}: summary interpolates {name}")
+
+    assert violations == []
