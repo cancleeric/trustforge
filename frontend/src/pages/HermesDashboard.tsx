@@ -651,7 +651,7 @@ export default function HermesDashboard() {
         <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} degradedMessage={globalError} beginnerMode={beginnerMode} trackedCount={model.coins.length} tierCounts={model.tierCounts} serviceMonitor={serviceMonitor} runtimeStatus={<AgentCoreStatusBadge locale={locale} />} />
+          <HermesTopBar costLedger={costLedger} version={runtimeVersion} degradedMessage={globalError} beginnerMode={beginnerMode} trackedCount={model.coins.length} tierCounts={model.tierCounts} serviceMonitor={serviceMonitor} runtimeStatus={<AgentCoreStatusBadge locale={locale} />} />
         </div>
 
         <HermesHeroTagline />

@@ -69,20 +69,31 @@ TrustForge 解決的是加密市場資訊的核心問題：**資訊量爆炸，�
 ## 系統架構
 
 ```text
-多源輸入                    Trust Layer（核心）                  Agent 編排 / 輸出
-┌─────────────────┐       ┌────────────────────────┐       ┌─────────────────────┐
-│ HOYA BIT 行情    │       │ 1. Claim extraction     │       │ AWS Bedrock          │
-│ OHLCV 歷史資料   │       │ 2. Source reputation    │       │ - 信任加權融合        │
-│ News / RSS       │  ──▶  │ 3. Corroboration        │  ──▶  │ - 有引文敘事化        │
-│ Social / X       │       │ 4. Recency decay        │       │ - 反方證據與限制條件  │
-│ On-chain 訊號    │       │ 5. TrustScore per claim │       └──────────┬──────────┘
-│ Regulatory 公告  │       └────────────────────────┘                  │
-└─────────────────┘                                            ┌────────▼────────┐
-                                                               │ Web / CLI Demo   │
-                                                               │ Report + Evidence│
-                                                               │ Execution Log    │
-                                                               └─────────────────┘
+多源輸入（6 維 × 14+ 連接器）        Trust Layer（核心）                  Agent 編排 / 輸出
+┌─────────────────────────┐       ┌────────────────────────┐       ┌─────────────────────┐
+│ 價格：HOYA BIT OHLCV     │       │ 1. Claim extraction     │       │ AWS Bedrock          │
+│      CoinGecko / CMC     │       │ 2. Source reputation    │       │ - 信任加權融合        │
+│ 鏈上：Blockchain.com     │  ──▶  │ 3. Corroboration        │  ──▶  │ - 有引文敘事化        │
+│      Etherscan / Arkham  │       │ 4. Recency decay        │       │ - 反方證據與限制條件  │
+│      Whale Alert / DeFi  │       │ 5. TrustScore per claim │       └──────────┬──────────┘
+│ 新聞：11 個 RSS 來源     │       └────────────────────────┘                  │
+│ 社群：Reddit RSS          │                                            ┌────────▼────────┐
+│ 監管：SEC / 金管會 / TWSE │                                            │ Web / CLI Demo   │
+│ 情緒：Fear & Greed       │                                            │ Report + Evidence│
+└─────────────────────────┘                                            │ Execution Log    │
+                                                                        └─────────────────┘
 ```
+
+### 六維資料來源明細
+
+| 維度 | 已接入來源 | 信譽基準 |
+|------|-----------|---------|
+| 價格（Price） | HOYA BIT OHLCV、CoinGecko（價格/情緒/dev）、CoinMarketCap、DefiLlama | 0.85~0.95 |
+| 鏈上（On-chain） | Blockchain.com、Etherscan、Whale Alert、Arkham、mempool.space、Blockchair | 0.95 |
+| 新聞（News） | CoinDesk、Cointelegraph、Decrypt、BitcoinMagazine、CryptoSlate、Bitcoinist、NewsBTC、DailyHodl、TheBlock、UToday、Blockworks（共 11 個 RSS） | 0.65 |
+| 社群（Social） | Reddit RSS（r/CryptoCurrency、r/Bitcoin）、CryptoPanic | 0.35~0.50 |
+| 監管（Regulatory） | SEC EDGAR、FSC 金管會、MOPS 公開資訊觀測站、TWSE 臺灣證交所、TPEx 櫃買中心 | 0.90 |
+| 情緒（Sentiment） | Alternative.me Fear & Greed Index、CoinGecko Sentiment | 0.50 |
 
 詳見：
 
@@ -285,11 +296,11 @@ GitHub 是主 repo；Gitea 為公司內部 Git 伺服器入口。不要在文件
 
 ## 團隊
 
-| 成員 | 角色 |
-|---|---|
-| 王英豪 | 隊長 |
-| 嵋婕 | 團隊成員 |
-| 林子彤 | 團隊成員 |
-| 王榆翔（Nicholas） | 團隊成員 |
+| 成員 | 學校／單位 | LinkedIn | 職務 | 分工 |
+|---|---|---|---|---|
+| 王英豪 | 颶風軟體有限公司 | [LinkedIn](https://www.linkedin.com/in/%E8%8B%B1%E8%B1%AA-%E7%8E%8B-8b399a73/) | 隊長 | 主要開發 |
+| 曾嵋婕 | 國立中正大學 | [LinkedIn](https://www.linkedin.com/in/%E5%B5%8B%E5%A9%95-%E6%9B%BE-6a2b11365/) | 組長 | 專案指導 |
+| 林子彤 | 中原大學 | [LinkedIn](https://www.linkedin.com/in/%E6%9E%97-%E5%BD%A4-17b435412/) | 企劃長 | 使用者介面前端、專案企劃 |
+| 王榆翔（Nicholas） | 中原大學 | [LinkedIn](https://www.linkedin.com/in/%E5%92%AA%E5%B8%B6%E5%AD%A3-%E4%BA%94%E8%9D%A6-654522426/) | 副隊長 | 外框升級模組開發 |
 
 詳見 [`docs/competition/TEAM.md`](docs/competition/TEAM.md)。
