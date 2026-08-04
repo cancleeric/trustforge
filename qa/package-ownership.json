@@ -73,6 +73,7 @@
     "README.md",
     "ROADMAP.md",
     "llms.txt",
+    "LICENSE",
     "opencode.json",
     "outputs/**"
   ],
