@@ -111,8 +111,8 @@ def main() -> int:
     parser.add_argument("--role", default="trustforge-ec2")
     args = parser.parse_args()
     _require_authorization(args.authorization)
-    if args.region not in {"us-west-2", "us-east-1"}:
-        raise SystemExit("competition production region is not allowed")
+    if args.region not in {"us-west-2", "us-east-1", "ap-southeast-2"}:
+        raise SystemExit("production region must be us-west-2, us-east-1, or ap-southeast-2")
     session = boto3.Session(region_name=args.region)
     account = session.client("sts").get_caller_identity()["Account"]
     dynamodb = session.client("dynamodb")

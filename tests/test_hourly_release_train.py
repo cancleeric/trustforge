@@ -16,8 +16,8 @@ def test_competition_target_defaults_to_allowed_west_region_and_https_origin():
 
 
 def test_competition_target_rejects_disallowed_region(monkeypatch):
-    monkeypatch.setattr(train, "PRODUCTION_REGION", "ap-southeast-2")
-    with pytest.raises(RuntimeError, match="us-west-2 or us-east-1"):
+    monkeypatch.setattr(train, "PRODUCTION_REGION", "eu-west-1")
+    with pytest.raises(RuntimeError, match="us-west-2, us-east-1, or ap-southeast-2"):
         train.require_competition_target()
 
 

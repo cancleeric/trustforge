@@ -42,8 +42,8 @@ def production_account() -> str:
 
 
 def require_competition_target() -> None:
-    if PRODUCTION_REGION not in {"us-west-2", "us-east-1"}:
-        raise RuntimeError("competition production region must be us-west-2 or us-east-1")
+    if PRODUCTION_REGION not in {"us-west-2", "us-east-1", "ap-southeast-2"}:
+        raise RuntimeError("production region must be us-west-2, us-east-1, or ap-southeast-2")
     if not re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?", PRODUCTION_URL):
         raise RuntimeError("competition production URL must be an HTTPS origin without a path")
 
