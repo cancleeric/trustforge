@@ -191,7 +191,7 @@ def gate(worktree: Path) -> None:
             command = [str(sandbox), "-p", profile, str(hook)]
         env = dict(git_env)
         for key in tuple(env):
-            if key.startswith(("AWS_", "GH_", "GITHUB_")):
+            if key.startswith(("AWS_", "GH_", "GITHUB_", "TRUSTFORGE_PRODUCTION_")):
                 env.pop(key)
         env["TRUSTFORGE_GATE_SANDBOX"] = "1"
         env["HOME"] = str(sandbox_root)
