@@ -1,48 +1,37 @@
-# AIMS 供應商與來源卡草案
+# AIMS Supplier And Source Cards
 
-| 欄位 | 值 |
-|---|---|
-| 文件 ID | AIMS-SUP-001 |
-| 版本／狀態 | 0.1-draft／草案、未核准 |
-| Owner／核准者 | 待 supplier owner 指派／待 CEO、CISO、Compliance Counsel 核准 |
-| 核准紀錄／生效日 | pending／not-applicable（草案） |
-| Review / next review | 待核准時設定／待核准時設定 |
-| 分類 | internal-draft |
-| 變更摘要／取代文件 | 建立 data/model/vendor/source cards 草案／not-applicable（初版） |
+| Field | Value |
+| --- | --- |
+| Document ID | AIMS-SUP-001 |
+| Version / status | 0.2-draft / draft, unapproved, non-effective |
+| Owner / approver | Supplier owner pending / CISO, CPO, Compliance Counsel approval pending |
+| Approval record / effective date | pending / not applicable (draft) |
+| Review cadence / next review | annual and on supplier/source change / set on approval |
+| Classification | internal draft; no secrets or proprietary provider terms |
+| Change summary / supersedes | expands issue #1243 supplier/source evidence cards / v0.1 draft |
 | Repository path | `docs/aims/07-suppliers/supplier-and-source-cards.md` |
 
-Cards 僅記錄可查證資料。未知資料必須標 `unknown` 或 `todo`，不得由 README、issue 或口頭描述推論合約權利、資料授權、SLA、安全認證或控制有效性。
+Supplier cards record the evidence TrustForge needs before external data, model, or infrastructure dependencies can be treated as controlled. They are not vendor certifications and do not copy external license text.
 
-## Card schema
+## Source And Supplier Register
 
-| 欄位 | 說明 |
-|---|---|
-| Card ID | stable ID |
-| Kind | model、cloud、market-data、news、on-chain、regulatory、internal |
-| Provider/source | legal/provider name when verified; otherwise unknown |
-| Purpose | TrustForge use case |
-| Permitted use evidence | contract, license, public terms or pending |
-| Data handled | data classes and PII status when verified |
-| Change trigger | contract, API, model, dataset, trust score or region change |
-| Risk links | risk IDs |
-| Lifecycle controls | control IDs |
-| Evidence URI | reviewer-repeatable source |
-| Status | 已實作／部分實作／僅計劃／不適用 |
+| Card ID | Supplier/source kind | Use in TrustForge | Owner | Status | Required evidence | Current evidence URI | Gap / blocker |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| AIMS-SUP-DATA-001 | Crypto market data APIs and CSV snapshots | price, OHLCV, market metrics, source-kind diversity | Product owner | partial implementation | source name, freshness, retention, exclusion reason, source-kind distribution | issue #1340; runtime snapshot examples in issue body | rich-source preservation test and report distribution evidence pending |
+| AIMS-SUP-NEWS-001 | News or narrative sources | low-confidence corroborating or contrarian claims | Product owner | planned | source kind, confidence boundary, excluded-claim rationale, copyright-safe snippets | issue #1340 | approved low-confidence handling and representative claim sampling pending |
+| AIMS-SUP-MODEL-001 | AWS Bedrock / LLM provider | synthesis and analysis narrative | Engineering owner | partial implementation | cost gate, prompt authority boundary, no secrets/URLs/trust-score authority delegated to model | issue #1342; issue #1406 | cost/security reviewer evidence needed for dual-child runs |
+| AIMS-SUP-INFRA-001 | GitHub and repository workflow | issue, PR, review, test and evidence traceability | AIMS manager | aligned draft | branch, commit, PR, reviewer request, diff/test evidence | repository metadata and PR workflow | reviewer assignment can be blocked by self-review rules |
+| AIMS-SUP-LEGAL-001 | Licensed standards and legal advice | EN 18286/EU AI Act clause-level review | Compliance Counsel | blocked | lawful licensed standard text, official bibliographic status, counsel disposition | issue #1264 | licensed authoritative text and counsel approval unavailable |
 
-## Draft cards
+## Broken-Link And Evidence Checks
 
-| Card ID | Kind | Provider/source | Purpose | Permitted use evidence | Data handled | Change trigger | Risk links | Lifecycle controls | Evidence URI | Status |
-|---|---|---|---|---|---|---|---|---|---|---|
-| AIMS-SUP-MODEL-0001 | model | AWS Bedrock provider exact model pending | AI-assisted market analysis and review support | pending contract/version evidence | prompts, analysis context; PII status pending | model ID/version/region/contract change | AIMS-RISK-0002, AIMS-RISK-0003 | AIMS-LIFE-CHG-001 | pending | 僅計劃 |
-| AIMS-SUP-DATA-0001 | market-data | defillama-price observed in issue evidence; provider terms pending | price context for BTC analysis | pending | market price data | API/source schema/trust score change | AIMS-RISK-0001 | AIMS-LIFE-DAT-001 | `https://github.com/cancleeric/trustforge/issues/1340` | 部分實作 |
-| AIMS-SUP-DATA-0002 | news | exact news sources pending | market news context | pending | public news metadata/content; license pending | source addition/removal/license change | AIMS-RISK-0001 | AIMS-LIFE-DAT-001 | pending | 僅計劃 |
-| AIMS-SUP-DATA-0003 | on-chain | exact on-chain providers pending | blockchain signal context | pending | public blockchain-derived metrics; terms pending | provider/schema/trust score change | AIMS-RISK-0001 | AIMS-LIFE-DAT-001 | pending | 僅計劃 |
-| AIMS-SUP-DATA-0004 | regulatory | exact regulatory sentiment sources pending | regulatory context | pending | public regulatory text/metadata; license pending | source jurisdiction or interpretation change | AIMS-RISK-0001, AIMS-RISK-0002 | AIMS-LIFE-DAT-001 | pending | 僅計劃 |
+| Check | Rule | Status |
+| --- | --- | --- |
+| Repository path links | Every cited local path must exist at review time. | planned; reviewer runs `test -e` or equivalent |
+| Issue/PR links | External issue/PR URIs must point to the TrustForge repository and remain readable by reviewers. | planned |
+| Evidence URI sufficiency | A source card cannot rely on an issue title alone when runtime behavior is claimed; replayable artifact or test evidence is required. | planned |
+| Public claim safety | Supplier cards may say `aligned draft`, `gap assessment`, or `preparation`; they must not state supplier certification, legal compliance, or CE readiness without explicit approval. | aligned draft |
 
-## Required controls before approval
+## Assessment Disposition
 
-- legal right to use each source for TrustForge intended purpose
-- owner and review cadence for each material provider/source
-- change notification or monitoring trigger
-- incident escalation path for source outage, trust-score drop or license concern
-- evidence URI that a stranger can replay without private credentials unless access control is documented
+TrustForge's current disposition for supplier/source controls is `aligned draft` for repository workflow controls, `partial implementation` for runtime evidence and model-provider controls, and `delegated gap assessment` for licensed legal-text controls. No row is marked certified or compliant.

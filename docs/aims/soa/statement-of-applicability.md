@@ -1,47 +1,52 @@
-# AIMS Statement of Applicability 與 Readiness 草案
+# AIMS Statement Of Applicability And Readiness Review
 
-| 欄位 | 值 |
-|---|---|
-| 文件 ID | AIMS-SOA-001 |
-| 版本／狀態 | 0.1-draft／草案、未核准 |
-| Owner／核准者 | 待 compliance owner 指派／待 CEO、Compliance Counsel、CISO、CPO 核准 |
-| 核准紀錄／生效日 | pending／not-applicable（草案） |
-| Review / next review | 待核准時設定／待核准時設定 |
-| 分類 | internal-draft |
-| 變更摘要／取代文件 | 建立 SoA、traceability 與 readiness gap review 草案／not-applicable（初版） |
+| Field | Value |
+| --- | --- |
+| Document ID | AIMS-SOA-001 |
+| Version / status | 0.2-draft / draft, unapproved, non-effective |
+| Owner / approver | Compliance owner pending / CEO, Compliance Counsel, CISO, CPO approval pending |
+| Approval record / effective date | pending / not applicable (draft) |
+| Review cadence / next review | annual and before certification assessment / set on approval |
+| Classification | internal draft |
+| Change summary / supersedes | expands issue #1246 SoA, evidence index and readiness gap review / v0.1 draft |
 | Repository path | `docs/aims/soa/statement-of-applicability.md` |
 
-本文件回應 #1246 並支援 #1264。Repo 不提交 ISO/IEC 42001 或 EN 18286 標準全文；合規 owner 必須以合法取得的最新版標準覆核後，才能把 control disposition 轉為有效。
+This draft supports issues #1246 and #1264. It does not copy ISO/IEC 42001 or EN 18286 text. A compliance owner must review a lawfully obtained current standard before any control disposition becomes effective.
 
-## SoA skeleton
+## Statement Of Applicability
 
-| SoA ID | Control / requirement area | Applicability | Rationale | Owner | Status | Evidence URI | Review dates |
-|---|---|---|---|---|---|---|---|
-| AIMS-SOA-0001 | Scope and document control | applicable draft | TrustForge AIMS docs require owner/status/evidence URI controls | pending AIMS Manager | 部分實作 | `docs/aims/README.md`; `docs/aims/02-policy/document-control.md` | pending |
-| AIMS-SOA-0002 | Risk management | applicable draft | AI market-analysis, legal, security and supplier risks are in scope | pending risk owner | 僅計劃 | `docs/aims/03-risk/risk-methodology-and-register.md` | pending |
-| AIMS-SOA-0003 | Impact assessment | applicable draft | output misuse, customers and EU users require impact review | pending CPO | 僅計劃 | `docs/aims/04-impact/impact-assessment.md` | pending |
-| AIMS-SOA-0004 | Lifecycle operation controls | applicable draft | controls are needed from design through retirement | pending AIMS Manager | 僅計劃 | `docs/aims/06-lifecycle/lifecycle-control-matrix.md` | pending |
-| AIMS-SOA-0005 | Supplier and source controls | applicable draft | models, cloud services and market data are material sources | pending supplier owner | 僅計劃 | `docs/aims/07-suppliers/supplier-and-source-cards.md` | pending |
-| AIMS-SOA-0006 | Measurement, audit and CAPA | applicable draft | readiness needs KPI, audit independence and corrective action tracking | pending CEO | 僅計劃 | `docs/aims/08-measurement/kpi-and-monitoring.md`; `docs/aims/09-audit/audit-programme.md`; `docs/aims/10-capa/capa-and-management-review.md` | pending |
-| AIMS-SOA-0007 | EU AI Act / EN 18286 overlay | conditional draft | role, classification and licensed EN text are pending | pending Compliance Counsel | 部分實作 | `docs/aims/03-eu-ai-act/README.md`; `docs/aims/03-eu-ai-act/crosswalk.md` | pending |
+| SoA ID | Requirement area | Applicability | Rationale | Owner | Disposition | Evidence URI | Review dates |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| AIMS-SOA-0001 | AIMS scope, stakeholders and system inventory | applicable draft | TrustForge operates AI-assisted market-analysis workflows that need bounded scope and affected-party records | AIMS manager pending | aligned draft | `docs/aims/01-scope/scope.md`; `docs/aims/02-policy/ai-system-inventory.md` | pending |
+| AIMS-SOA-0002 | Policy, roles, RACI and risk acceptance | applicable draft | AIMS decisions require accountable executive, product, security, compliance and audit roles | CEO pending | partial implementation | `docs/aims/02-policy/ai-policy.md`; `docs/aims/02-policy/roles-raci-and-risk-acceptance.md` | pending |
+| AIMS-SOA-0003 | Risk and impact assessment | applicable draft | AI outputs may affect customers, evidence integrity, security, legal claims and operating decisions | Risk owner pending | partial implementation | `docs/aims/03-risk/risk-methodology-and-register.md`; `docs/aims/04-impact/impact-assessment.md` | pending |
+| AIMS-SOA-0004 | Support: competence, training, communication and document control | applicable draft | Roles, training evidence and external claim controls are required before operation or assessment | AIMS manager pending | aligned draft | `docs/aims/05-support/competency-and-training-register.md`; `docs/aims/05-support/document-and-communication-control.md` | pending |
+| AIMS-SOA-0005 | AI lifecycle and supplier/source controls | applicable draft | Source/model/provider behavior must be traceable through design, validation, operation and retirement | Engineering owner pending | partial implementation | `docs/aims/06-lifecycle/lifecycle-control-matrix.md`; `docs/aims/07-suppliers/supplier-and-source-cards.md` | pending |
+| AIMS-SOA-0006 | Measurement, audit, CAPA and management review | applicable draft | Effectiveness claims require KPIs, independent audit, findings, CAPA and management decisions | Independent auditor pending | aligned draft | `docs/aims/08-measurement/kpi-and-monitoring-register.md`; `docs/aims/09-audit/audit-programme-and-report.md`; `docs/aims/10-capa/capa-and-management-review.md` | pending |
+| AIMS-SOA-0007 | EU AI Act / EN 18286 overlay | applicability pending | Intended purpose, operator role, risk classification and legal text status are not approved | Compliance Counsel pending | delegated gap assessment | `docs/aims/03-eu-ai-act/README.md`; `docs/aims/03-eu-ai-act/en-18286-qms-overlay.md` | pending licensed source |
 
-Excluded controls must have concrete rationale and approver. Lack of evidence alone is a gap, not a reason to mark a control not applicable.
+Excluded controls must include a concrete rationale and approver. Lack of evidence is a gap, not a reason to mark a control not applicable.
 
-## Traceability
+## Evidence Index
 
-| Control | Risk | Asset/source | Impact | Lifecycle | Audit/CAPA |
-|---|---|---|---|---|---|
-| AIMS-SOA-0002 | AIMS-RISK-0001..0004 | AI system inventory and supplier cards pending | AIMS-IMP-0001..0004 | AIMS-LIFE-* | AIMS-FIND-0001 / AIMS-CAPA-0001 |
-| AIMS-SOA-0005 | AIMS-RISK-0001, AIMS-RISK-0002 | AIMS-SUP-* | AIMS-IMP-0001, AIMS-IMP-0002 | AIMS-LIFE-DAT-001, AIMS-LIFE-CHG-001 | pending |
-| AIMS-SOA-0006 | AIMS-RISK-0004 | CAPA and audit records | AIMS-IMP-0004 | AIMS-LIFE-MON-001, AIMS-LIFE-INC-001 | AIMS-FIND-0001 / AIMS-CAPA-0001 |
+| Evidence set | Primary documents | Current status | Missing evidence |
+| --- | --- | --- | --- |
+| Governance baseline | `docs/aims/README.md`; `docs/aims/01-scope/scope.md`; `docs/aims/02-policy/roles-raci-and-risk-acceptance.md` | draft | named owners, approvals, effective dates |
+| Support package | `docs/aims/05-support/competency-and-training-register.md`; `docs/aims/05-support/document-and-communication-control.md`; `docs/aims/05-support/document-lifecycle-trace.md` | aligned draft | training completion/verification records, approver evidence |
+| Lifecycle package | `docs/aims/06-lifecycle/lifecycle-control-matrix.md`; `docs/aims/07-suppliers/supplier-and-source-cards.md` | partial implementation | runtime replay evidence and independent effectiveness review |
+| Measurement package | `docs/aims/08-measurement/kpi-and-monitoring-register.md`; `docs/aims/09-audit/audit-programme-and-report.md`; `docs/aims/10-capa/capa-and-management-review.md` | aligned draft | KPI baselines, first audit, CAPA effectiveness review |
+| EU AI Act overlay | `docs/aims/03-eu-ai-act/applicability-and-classification.md`; `docs/aims/03-eu-ai-act/en-18286-qms-overlay.md` | blocked / delegated gap assessment | licensed EN 18286 text, official bibliographic/OJ status, counsel disposition |
 
-## Readiness gap review
+## Readiness Gap Review
 
 | Gap ID | Category | Gap | Blocker | Disposition |
-|---|---|---|---|---|
-| AIMS-GAP-0001 | Owner / approval | Most owners, approvers and review dates remain pending | CEO assignment and governance approval | 委託 gap assessment |
-| AIMS-GAP-0002 | Legal text | EN 18286 licensed text is not acquired or mapped | company-licensed authoritative copy and Compliance Counsel | 委託 gap assessment |
-| AIMS-GAP-0003 | Evidence | Many controls have schema but no replayable runtime evidence | lifecycle/tabletop/audit execution | 進入認證準備前補證 |
-| AIMS-GAP-0004 | Independent review | Auditor, gray, harper, CEO and adversarial review evidence pending | reviewer appointment and exact-commit review | 委託 gap assessment |
+| --- | --- | --- | --- | --- |
+| AIMS-GAP-0001 | Owner / approval | Most owners, approvers, review dates and effective dates remain pending | CEO assignment and governance approval | delegated gap assessment |
+| AIMS-GAP-0002 | Legal text | EN 18286 licensed text and official status are not available in this repository | company-licensed authoritative copy and Compliance Counsel review | delegated gap assessment |
+| AIMS-GAP-0003 | Evidence | Several controls are documented but lack replayable runtime or audit evidence | issue-specific implementation PRs, tests and first audit | certification preparation |
+| AIMS-GAP-0004 | External assessment | No certification body or independent auditor has approved the AIMS | external assessment engagement | certification preparation |
+| AIMS-GAP-0005 | Public claims | External statements can become misleading if draft status is omitted | counsel-approved exact text and communication-control approval | aligned draft |
 
-Allowed dispositions are `aligned`, `委託 gap assessment`, and `進入認證準備`. This draft uses only gap-assessment and readiness language; it does not claim certification, conformity, presumption of conformity or CE readiness.
+## Disposition Boundary
+
+The allowed disposition values in this draft are `aligned draft`, `partial implementation`, `delegated gap assessment`, `certification preparation`, `blocked`, and `not applicable with approved rationale`. The values `certified`, `compliant`, `conformant`, `CE-ready`, or equivalent unqualified external claims are prohibited until the applicable legal, auditor and executive approvals exist.

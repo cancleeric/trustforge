@@ -1,41 +1,48 @@
+# AIMS Document Lifecycle Trace
+
 | Field | Value |
 | --- | --- |
 | Document ID | AIMS-SUPPORT-LIFE-TRACE-001 |
-| Version / status | 0.1-draft / draft, unapproved, non-effective |
-| Owner / approver | CEO assignment pending / CEO approval pending |
-| Approval record / effective date | pending / not-applicable (draft) |
-| Review cadence / next review | set on approval / set on approval |
-| Classification | internal-draft |
-| Change summary / supersedes | establish document lifecycle trace register / not-applicable (initial draft) |
+| Version / status | 0.2-draft / draft, unapproved, non-effective |
+| Owner / approver | AIMS manager pending / CEO approval pending |
+| Approval record / effective date | pending / not applicable (draft) |
+| Review cadence / next review | annual and on supersession / set on approval |
+| Classification | internal draft |
+| Change summary / supersedes | demonstrates controlled draft-review-approval-obsolete evidence fields for issue #1242 / v0.1 draft |
 | Repository path | `docs/aims/05-support/document-lifecycle-trace.md` |
 
-# Document Lifecycle Trace
+This trace demonstrates the evidence that must exist for a real AIMS document transition. The current repository can show the draft and review-request steps through PR evidence; it does not invent approval or obsolete records that have not happened.
 
-This register is the support-control evidence structure for issue #1242. It does not claim any controlled document has completed approval or obsolescence until the evidence URI and approver fields are populated.
+## Transition Requirements
 
-## Trace Requirements
-
-| Transition | Required evidence | Required approver | Failure rule |
+| Transition | Required evidence | Required approver | Status vocabulary |
 | --- | --- | --- | --- |
-| draft -> in-review | draft version, change rationale, reviewer list, review request URI | document owner | Git commit alone is not approval evidence. |
-| in-review -> approved | resolved findings, exact approved version, approval date, effective date, next review date | authorised approver | Missing approval keeps the document `draft / unapproved / non-effective`. |
-| approved -> obsolete | superseding version, obsolete marker, retention path, access decision | authorised approver | Obsolete documents cannot be used as current operating instruction. |
-| emergency correction | containment rationale, affected audience, follow-up review due date | accountable executive | Emergency use expires unless normal approval is completed. |
+| draft -> in review | draft version, change rationale, reviewer list, review request URI, affected document list | document owner | `in-review` |
+| in review -> approved | resolved findings, exact approved version, approval date, effective date, next review date | named approver from document metadata | `approved` |
+| approved -> obsolete | superseding document/version, obsolete marker, retention path, access decision | original approver or delegated AIMS manager | `obsolete` |
+| emergency correction | containment rationale, affected audience, follow-up review due date, retroactive approver | accountable executive | `emergency-corrected` until reviewed |
 
-## Initial Demonstration Slot
+## Demonstration Record
 
-| Field | Planned value |
+| Trace field | Value |
 | --- | --- |
 | Candidate document | `docs/aims/05-support/document-and-communication-control.md` |
-| Draft evidence URI | pending PR / commit URI |
-| In-review evidence URI | pending reviewer request and findings URI |
-| Approval evidence URI | pending authorised approval |
-| Obsolete evidence URI | pending after a superseding version exists |
-| Current status | planned; no lifecycle demonstration completed |
+| Draft evidence URI | this branch commit and issue-development PR for #1242 |
+| Review request URI | pending PR review request to `cancleeric`; legal/compliance/security reviewers pending |
+| Approval evidence URI | pending; document remains draft until a named approver approves exact content |
+| Obsolete evidence URI | pending; no superseding approved version exists |
+| Current lifecycle status | `in-review` once PR is opened; not approved and not effective |
 
-## Guardrails
+## Sample Future Obsolete Record
 
-- Do not copy private review notes or restricted evidence into this repository to make a trace look complete.
-- Do not mark training as `completed` without dated attendance or equivalent evidence.
-- Do not mark training as `verified` without objective assessment evidence.
-- External claims about certification, compliance, conformity, CE marking, or presumption of conformity require exact approved text and Compliance approval.
+| Field | Required future value |
+| --- | --- |
+| Superseded document ID | `AIMS-SUPPORT-DOC-COMM-001` |
+| Superseded version | exact approved version, not a branch name |
+| Replacement URI | path and commit/approval URI for replacement |
+| Retention decision | retain in repository history and controlled archive, or cite external archive URI |
+| Access decision | public, internal, restricted, or removed with legal basis |
+
+## Nonconforming Lifecycle Handling
+
+If a document is published externally, relied on in an audit, or referenced by a customer before approval evidence exists, the AIMS manager must open a finding and CAPA. The finding must cite the document path, publication channel, audience, containment action, and whether any external correction is required.
