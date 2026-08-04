@@ -146,6 +146,13 @@ _UPSTREAM_TARGET_PRODUCERS = {
     "asset_analysis_a": ("asset_analysis", "asset_report_a"),
     "asset_analysis_b": ("asset_analysis", "asset_report_b"),
 }
+_DUAL_ASSET_OPERATION_IDS = {
+    "asset_analysis_a",
+    "asset_analysis_b",
+    "comparison_synthesis",
+}
+_DUAL_ASSET_TYPES = {"asset_analysis", "comparison_synthesis"}
+_DUAL_ASSET_DELIVERABLES = ("asset_report_a", "asset_report_b", "comparison_summary")
 
 
 def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
@@ -204,6 +211,41 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
         seen.add(operation.id)
         seen_operations[operation.id] = operation
         outputs.add(operation.output)
+
+    has_dual_asset_plan = any(
+        operation.id in _DUAL_ASSET_OPERATION_IDS or operation.type in _DUAL_ASSET_TYPES
+        for operation in intent.operations
+    )
+    if has_dual_asset_plan:
+        expected_operations = (
+            IntentOperation(
+                "asset_analysis_a",
+                "asset_analysis",
+                ("asset",),
+                "asset_report_a",
+            ),
+            IntentOperation(
+                "asset_analysis_b",
+                "asset_analysis",
+                ("asset",),
+                "asset_report_b",
+            ),
+            IntentOperation(
+                "comparison_synthesis",
+                "comparison_synthesis",
+                ("asset_analysis_a", "asset_analysis_b"),
+                "comparison_summary",
+                ("asset_analysis_a", "asset_analysis_b"),
+            ),
+        )
+        if (
+            len(intent.assets) != 2
+            or intent.operations != expected_operations
+            or intent.deliverables != _DUAL_ASSET_DELIVERABLES
+        ):
+            raise IntentValidationError(
+                "dual asset comparison requires the authorized two-asset plan"
+            )
 
     if not set(intent.deliverables).issubset(outputs):
         raise IntentValidationError("every deliverable must be produced by the operation plan")
@@ -328,6 +370,19 @@ def _dual_asset_comparison_intent(
     )
 
 
+def _is_dual_asset_comparison_request(question: str, lowered: str) -> bool:
+    formal_analysis_phrases = (
+        "正式分析",
+        "分析結果",
+        "完整分析",
+        "formal analysis",
+        "official analysis",
+        "analysis result",
+        "analysis report",
+    )
+    return any(phrase in lowered or phrase in question for phrase in formal_analysis_phrases)
+
+
 def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisIntent:
     """Fail-safe parser for known compositional structures; never calls an LLM."""
     canonical_assets = tuple(dict.fromkeys(asset.strip().upper() for asset in assets if asset.strip()))
@@ -336,7 +391,12 @@ def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisInten
     has_social = "社群" in question or "social" in lowered
     comparison_words = ("比對", "比較", "是否一致", "差異", "背離", "compare")
     has_comparison = any(word in lowered for word in comparison_words)
-    if len(canonical_assets) == 2 and has_comparison and not (has_news and has_social):
+    if (
+        len(canonical_assets) == 2
+        and has_comparison
+        and _is_dual_asset_comparison_request(question, lowered)
+        and not (has_news and has_social)
+    ):
         return validate_intent(
             _dual_asset_comparison_intent(canonical_assets, parse_mode="deterministic")
         )
