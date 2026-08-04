@@ -22,7 +22,7 @@ Teams using external on-chain intelligence need to know which source claims can 
 ## Success Criteria
 
 - A non-engineering buyer can follow the demo path in under three minutes.
-- Every displayed source claim has provider, URL, terms, published time, retrieved time, content hash, raw payload reference, and source state.
+- Every displayed source claim has provider, URL, terms, published time, retrieved time, content hash, raw payload reference, normalization version, source state, asset scope, and non-ready state reason.
 - Credential-gated and blocked sources are visible rather than silently treated as ready.
 - Historical claims are backed by archives or explicitly marked archive-required.
 

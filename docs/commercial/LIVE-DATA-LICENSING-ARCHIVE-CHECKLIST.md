@@ -23,6 +23,8 @@ Every raw source Evidence item must include:
 - Raw payload reference.
 - Normalization version.
 - Source state.
+- Asset scope.
+- State reason when source state is `credential-gated`, `archive-required`, or `blocked`.
 
 ## Source States
 
