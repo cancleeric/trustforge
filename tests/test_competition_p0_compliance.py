@@ -190,9 +190,16 @@ def test_tracked_repository_contains_no_raw_competition_infra_identifiers() -> N
             "i-0152" + "b703" + "68358a81c",
         ]
     ))
+    # Only scan git-tracked files: the test guards against identifiers that
+    # would be committed to the repository, not local build/release artefacts
+    # under gitignored directories (out/, .venv, node_modules, …).
+    tracked = subprocess.check_output(
+        ["git", "ls-files"], cwd=ROOT, text=True
+    ).splitlines()
     offenders: list[str] = []
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or ".git" in path.parts:
+    for rel in tracked:
+        path = ROOT / rel
+        if not path.is_file():
             continue
         try:
             data = path.read_bytes()
@@ -202,7 +209,7 @@ def test_tracked_repository_contains_no_raw_competition_infra_identifiers() -> N
             continue
         text = data.decode("utf-8", errors="ignore")
         if forbidden.search(text):
-            offenders.append(str(path.relative_to(ROOT)))
+            offenders.append(rel)
     assert offenders == []
 
 
