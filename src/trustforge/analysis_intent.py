@@ -65,6 +65,20 @@ CAPABILITY_REGISTRY: dict[str, Capability] = {
         allowed_targets=frozenset({"evidence"}),
         min_targets=1,
     ),
+    "asset_analysis": Capability(
+        name="asset_analysis",
+        output="asset_report",
+        allowed_targets=frozenset({"asset"}),
+        min_targets=1,
+        max_targets=1,
+    ),
+    "comparison_synthesis": Capability(
+        name="comparison_synthesis",
+        output="comparison_summary",
+        allowed_targets=frozenset({"asset_analysis_a", "asset_analysis_b"}),
+        min_targets=2,
+        max_targets=2,
+    ),
 }
 
 
@@ -129,7 +143,23 @@ _VALID_COVERAGE_STATUSES = {"answered", "insufficient_data", "unsupported", "fai
 _UPSTREAM_TARGET_PRODUCERS = {
     "news_sentiment": ("sentiment_analysis", "sentiment_news"),
     "social_sentiment": ("sentiment_analysis", "sentiment_social"),
+    "asset_analysis_a": ("asset_analysis", "asset_report_a"),
+    "asset_analysis_b": ("asset_analysis", "asset_report_b"),
 }
+_DUAL_ASSET_OPERATION_IDS = {
+    "asset_analysis_a",
+    "asset_analysis_b",
+    "comparison_synthesis",
+}
+_DUAL_ASSET_TYPES = {"asset_analysis", "comparison_synthesis"}
+_DUAL_ASSET_DELIVERABLES = ("asset_report_a", "asset_report_b", "comparison_summary")
+
+
+def _contains_dual_asset_plan(operations: tuple[IntentOperation, ...]) -> bool:
+    return any(
+        operation.id in _DUAL_ASSET_OPERATION_IDS or operation.type in _DUAL_ASSET_TYPES
+        for operation in operations
+    )
 
 
 def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
@@ -188,6 +218,37 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
         seen.add(operation.id)
         seen_operations[operation.id] = operation
         outputs.add(operation.output)
+
+    if _contains_dual_asset_plan(intent.operations):
+        expected_operations = (
+            IntentOperation(
+                "asset_analysis_a",
+                "asset_analysis",
+                ("asset",),
+                "asset_report_a",
+            ),
+            IntentOperation(
+                "asset_analysis_b",
+                "asset_analysis",
+                ("asset",),
+                "asset_report_b",
+            ),
+            IntentOperation(
+                "comparison_synthesis",
+                "comparison_synthesis",
+                ("asset_analysis_a", "asset_analysis_b"),
+                "comparison_summary",
+                ("asset_analysis_a", "asset_analysis_b"),
+            ),
+        )
+        if (
+            len(intent.assets) != 2
+            or intent.operations != expected_operations
+            or intent.deliverables != _DUAL_ASSET_DELIVERABLES
+        ):
+            raise IntentValidationError(
+                "dual asset comparison requires the authorized two-asset plan"
+            )
 
     if not set(intent.deliverables).issubset(outputs):
         raise IntentValidationError("every deliverable must be produced by the operation plan")
@@ -277,14 +338,94 @@ def _news_social_intent(
     )
 
 
+def _dual_asset_comparison_intent(
+    assets: tuple[str, str],
+    *,
+    parse_mode: str,
+) -> AnalysisIntent:
+    return AnalysisIntent(
+        assets=assets,
+        operations=(
+            IntentOperation(
+                "asset_analysis_a",
+                "asset_analysis",
+                ("asset",),
+                "asset_report_a",
+            ),
+            IntentOperation(
+                "asset_analysis_b",
+                "asset_analysis",
+                ("asset",),
+                "asset_report_b",
+            ),
+            IntentOperation(
+                "comparison_synthesis",
+                "comparison_synthesis",
+                ("asset_analysis_a", "asset_analysis_b"),
+                "comparison_summary",
+                ("asset_analysis_a", "asset_analysis_b"),
+            ),
+        ),
+        deliverables=("asset_report_a", "asset_report_b", "comparison_summary"),
+        matched_official_template="dual_asset_comparison",
+        parse_confidence=0.96,
+        parse_mode=parse_mode,
+    )
+
+
+def _has_comparison_request(lowered: str) -> bool:
+    comparison_words = ("比對", "比較", "是否一致", "差異", "背離", "compare")
+    return any(word in lowered for word in comparison_words)
+
+
+def _is_dual_asset_comparison_request(question: str, lowered: str) -> bool:
+    formal_analysis_phrases = (
+        "正式分析",
+        "分析結果",
+        "完整分析",
+        "formal analysis",
+        "official analysis",
+        "analysis result",
+        "analysis report",
+    )
+    return _has_comparison_request(lowered) and any(
+        phrase in lowered or phrase in question for phrase in formal_analysis_phrases
+    )
+
+
+def _extract_market_targets(lowered: str) -> tuple[str, ...]:
+    return tuple(
+        target
+        for target, tokens in {
+            "price": ("價格", "price"),
+            "onchain": ("鏈上", "on-chain", "onchain"),
+            "news": ("新聞", "news"),
+            "social": ("社群", "social"),
+            "regulatory": ("監管", "regulatory"),
+        }.items()
+        if any(token in lowered for token in tokens)
+    )
+
+
 def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisIntent:
     """Fail-safe parser for known compositional structures; never calls an LLM."""
     canonical_assets = tuple(dict.fromkeys(asset.strip().upper() for asset in assets if asset.strip()))
     lowered = question.casefold()
     has_news = "新聞" in question or "news" in lowered
     has_social = "社群" in question or "social" in lowered
-    comparison_words = ("比對", "比較", "是否一致", "差異", "背離", "compare")
-    if has_news and has_social and any(word in lowered for word in comparison_words):
+    has_comparison = _has_comparison_request(lowered)
+    targets = _extract_market_targets(lowered)
+    if (
+        len(canonical_assets) == 2
+        and has_comparison
+        and _is_dual_asset_comparison_request(question, lowered)
+        and not targets
+        and not (has_news and has_social)
+    ):
+        return validate_intent(
+            _dual_asset_comparison_intent(canonical_assets, parse_mode="deterministic")
+        )
+    if has_news and has_social and has_comparison:
         freshness_words = ("時效", "新鮮", "最新", "資料年齡", "freshness", "recency")
         manipulation_words = ("操弄", "操縱", "水軍", "造假", "manipulation")
         return validate_intent(
@@ -310,17 +451,6 @@ def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisInten
         )
         return validate_intent(intent)
 
-    targets = tuple(
-        target
-        for target, tokens in {
-            "price": ("價格", "price"),
-            "onchain": ("鏈上", "on-chain", "onchain"),
-            "news": ("新聞", "news"),
-            "social": ("社群", "social"),
-            "regulatory": ("監管", "regulatory"),
-        }.items()
-        if any(token in lowered for token in tokens)
-    )
     intent = AnalysisIntent(
         assets=canonical_assets,
         operations=(
@@ -375,6 +505,18 @@ def compile_analysis_intent(
         )
         if intent.assets != canonical_assets:
             raise IntentValidationError("LLM parser cannot replace caller-authorized assets")
+        if _contains_dual_asset_plan(intent.operations) and not _is_dual_asset_comparison_request(
+            question, question.casefold()
+        ):
+            raise IntentValidationError(
+                "LLM dual asset comparison requires an explicit formal analysis request"
+            )
+        if _contains_dual_asset_plan(intent.operations) and _extract_market_targets(
+            question.casefold()
+        ):
+            raise IntentValidationError(
+                "LLM dual asset comparison cannot override an explicit market target"
+            )
         return validate_intent(intent)
     except (IntentValidationError, KeyError, TypeError, ValueError):
         fallback = deterministic_compile(question, canonical_assets)

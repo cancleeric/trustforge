@@ -52,6 +52,104 @@ def test_news_social_comparison_only_requests_explicit_deliverables():
     assert "manipulation_risk" not in intent.deliverables
 
 
+def test_dual_asset_comparison_compiles_ordered_child_plan():
+    intent = compile_analysis_intent("比較 BTC 與 ETH 的正式分析結果", ["BTC", "ETH"])
+
+    assert intent.assets == ("BTC", "ETH")
+    assert intent.matched_official_template == "dual_asset_comparison"
+    assert [operation.id for operation in intent.operations] == [
+        "asset_analysis_a",
+        "asset_analysis_b",
+        "comparison_synthesis",
+    ]
+    assert [operation.type for operation in intent.operations] == [
+        "asset_analysis",
+        "asset_analysis",
+        "comparison_synthesis",
+    ]
+    assert intent.operations[2].depends_on == (
+        "asset_analysis_a",
+        "asset_analysis_b",
+    )
+    assert intent.deliverables == (
+        "asset_report_a",
+        "asset_report_b",
+        "comparison_summary",
+    )
+
+
+def test_english_dual_asset_comparison_preserves_asset_order():
+    intent = compile_analysis_intent(
+        "compare ETH and BTC formal analysis reports",
+        ["ETH", "BTC"],
+    )
+
+    assert intent.assets == ("ETH", "BTC")
+    assert intent.matched_official_template == "dual_asset_comparison"
+    assert intent.deliverables[-1] == "comparison_summary"
+
+
+def test_non_two_asset_comparisons_do_not_compile_dual_asset_plan():
+    same_asset = compile_analysis_intent("比較 BTC 與 BTC", ["BTC", "BTC"])
+    missing_asset = compile_analysis_intent("比較 BTC 與", ["BTC"])
+    too_many_assets = compile_analysis_intent("比較 BTC ETH SOL", ["BTC", "ETH", "SOL"])
+
+    assert same_asset.matched_official_template != "dual_asset_comparison"
+    assert missing_asset.matched_official_template != "dual_asset_comparison"
+    assert too_many_assets.matched_official_template != "dual_asset_comparison"
+
+
+def test_targeted_two_asset_comparison_uses_market_synthesis_not_asset_plan():
+    price_intent = compile_analysis_intent("比較 BTC 與 ETH 價格差異", ["BTC", "ETH"])
+    english_price_intent = compile_analysis_intent("compare BTC and ETH price", ["BTC", "ETH"])
+    regulatory_intent = compile_analysis_intent("比較 BTC 與 ETH 監管差異", ["BTC", "ETH"])
+    formal_price_intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 價格正式分析",
+        ["BTC", "ETH"],
+    )
+    formal_english_price_intent = compile_analysis_intent(
+        "compare BTC and ETH price analysis report",
+        ["BTC", "ETH"],
+    )
+    formal_regulatory_intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 監管分析結果",
+        ["BTC", "ETH"],
+    )
+
+    assert price_intent.operations[0].type == "market_synthesis"
+    assert price_intent.operations[0].targets == ("price",)
+    assert english_price_intent.operations[0].type == "market_synthesis"
+    assert english_price_intent.operations[0].targets == ("price",)
+    assert regulatory_intent.operations[0].type == "market_synthesis"
+    assert regulatory_intent.operations[0].targets == ("regulatory",)
+    assert formal_price_intent.operations[0].type == "market_synthesis"
+    assert formal_price_intent.operations[0].targets == ("price",)
+    assert formal_english_price_intent.operations[0].type == "market_synthesis"
+    assert formal_english_price_intent.operations[0].targets == ("price",)
+    assert formal_regulatory_intent.operations[0].type == "market_synthesis"
+    assert formal_regulatory_intent.operations[0].targets == ("regulatory",)
+    assert price_intent.matched_official_template != "dual_asset_comparison"
+    assert english_price_intent.matched_official_template != "dual_asset_comparison"
+    assert regulatory_intent.matched_official_template != "dual_asset_comparison"
+    assert formal_price_intent.matched_official_template != "dual_asset_comparison"
+    assert formal_english_price_intent.matched_official_template != "dual_asset_comparison"
+    assert formal_regulatory_intent.matched_official_template != "dual_asset_comparison"
+
+
+def test_news_social_comparison_is_not_dual_asset_even_with_two_assets():
+    intent = compile_analysis_intent(
+        "比較 BTC 的 news 與 social 是否一致",
+        ["BTC", "ETH"],
+    )
+
+    assert intent.matched_official_template == "multi_source"
+    assert [operation.type for operation in intent.operations[:3]] == [
+        "sentiment_analysis",
+        "sentiment_analysis",
+        "compare",
+    ]
+
+
 def test_llm_cannot_invent_capability_or_connector():
     def unsafe_parser(_question, _assets):
         return {
@@ -93,6 +191,126 @@ def test_llm_cannot_replace_caller_authorized_assets():
 
     assert intent.assets == ("BTC",)
     assert intent.parse_mode == "deterministic_fallback"
+
+
+def test_llm_dual_asset_plan_requires_two_caller_authorized_assets():
+    def unauthorized_dual_asset_parser(_question, _assets):
+        return {
+            "assets": ["BTC"],
+            "operations": [
+                {
+                    "id": "asset_analysis_a",
+                    "type": "asset_analysis",
+                    "targets": ["asset"],
+                    "output": "asset_report_a",
+                },
+                {
+                    "id": "asset_analysis_b",
+                    "type": "asset_analysis",
+                    "targets": ["asset"],
+                    "output": "asset_report_b",
+                },
+                {
+                    "id": "comparison_synthesis",
+                    "type": "comparison_synthesis",
+                    "targets": ["asset_analysis_a", "asset_analysis_b"],
+                    "output": "comparison_summary",
+                    "depends_on": ["asset_analysis_a", "asset_analysis_b"],
+                },
+            ],
+            "deliverables": ["asset_report_a", "asset_report_b", "comparison_summary"],
+            "matched_official_template": "dual_asset_comparison",
+            "parse_confidence": 1,
+        }
+
+    intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 的正式分析結果",
+        ["BTC"],
+        llm_parser=unauthorized_dual_asset_parser,
+    )
+
+    assert intent.assets == ("BTC",)
+    assert intent.parse_mode == "deterministic_fallback"
+    assert intent.matched_official_template != "dual_asset_comparison"
+
+
+def test_llm_dual_asset_plan_requires_explicit_formal_analysis_request():
+    def dual_asset_parser(_question, _assets):
+        return {
+            "assets": ["BTC", "ETH"],
+            "operations": [
+                {
+                    "id": "asset_analysis_a",
+                    "type": "asset_analysis",
+                    "targets": ["asset"],
+                    "output": "asset_report_a",
+                },
+                {
+                    "id": "asset_analysis_b",
+                    "type": "asset_analysis",
+                    "targets": ["asset"],
+                    "output": "asset_report_b",
+                },
+                {
+                    "id": "comparison_synthesis",
+                    "type": "comparison_synthesis",
+                    "targets": ["asset_analysis_a", "asset_analysis_b"],
+                    "output": "comparison_summary",
+                    "depends_on": ["asset_analysis_a", "asset_analysis_b"],
+                },
+            ],
+            "deliverables": ["asset_report_a", "asset_report_b", "comparison_summary"],
+            "matched_official_template": "dual_asset_comparison",
+            "parse_confidence": 1,
+        }
+
+    formal_intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 的正式分析結果",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+    price_intent = compile_analysis_intent(
+        "compare BTC and ETH price",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+    regulatory_intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 監管差異",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+    non_comparison_formal_intent = compile_analysis_intent(
+        "請給 BTC 與 ETH 的正式分析結果",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+    formal_price_intent = compile_analysis_intent(
+        "compare BTC and ETH price analysis report",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+    formal_regulatory_intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 監管分析結果",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+
+    assert formal_intent.parse_mode == "llm"
+    assert formal_intent.matched_official_template == "dual_asset_comparison"
+    assert price_intent.parse_mode == "deterministic_fallback"
+    assert price_intent.operations[0].type == "market_synthesis"
+    assert price_intent.operations[0].targets == ("price",)
+    assert regulatory_intent.parse_mode == "deterministic_fallback"
+    assert regulatory_intent.operations[0].type == "market_synthesis"
+    assert regulatory_intent.operations[0].targets == ("regulatory",)
+    assert formal_price_intent.parse_mode == "deterministic_fallback"
+    assert formal_price_intent.operations[0].type == "market_synthesis"
+    assert formal_price_intent.operations[0].targets == ("price",)
+    assert formal_regulatory_intent.parse_mode == "deterministic_fallback"
+    assert formal_regulatory_intent.operations[0].type == "market_synthesis"
+    assert formal_regulatory_intent.operations[0].targets == ("regulatory",)
+    assert non_comparison_formal_intent.parse_mode == "deterministic_fallback"
+    assert non_comparison_formal_intent.matched_official_template != "dual_asset_comparison"
 
 
 def test_forward_dependency_fails_closed():
