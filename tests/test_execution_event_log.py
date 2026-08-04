@@ -296,22 +296,25 @@ def test_to_public_events_projects_curated_params_per_item():
     assert all(set(e) <= PUBLIC_EVENT_FIELDS | {"params"} for e in out)
 
 
-def test_scrub_summary_is_best_effort_and_misses_arbitrary_secrets():
+def test_scrub_summary_covers_secret_assignment_forms_but_not_arbitrary_free_text():
     """#943 (Low, defense-in-depth limitation): ``_scrub_summary`` only catches
-    *structured* token-like patterns (URL ``?token=``, bearer, ``header:``, long
-    hex). An arbitrary prefixless secret in free-text is NOT scrubbed — which is
-    exactly why the allowlist (deny-by-default) is the PRIMARY defense, not scrub.
+    *structured* token-like patterns. Secret-marker assignments are scrubbed, but
+    arbitrary prefixless secrets in free-text are not — which is exactly why the
+    allowlist (deny-by-default) is the PRIMARY defense, not scrub.
     """
     event = {
         "ts": "t",
         "elapsed_sec": 0.1,
         "tool": "x",
-        "summary": "fetched with key=sk_live_abc123 then logged pw=hunter2",
+        "summary": (
+            "fetched with key=sk_live_abc123 then logged pw=hunter2 "
+            "while opaque-value-remains-prefixless"
+        ),
     }
     public = to_public_event_dict(event)
-    # scrub did not catch the bare ``key=`` / ``pw=`` secrets (no structured marker)
-    assert "sk_live_abc123" in public["summary"]
-    assert "hunter2" in public["summary"]
+    assert "sk_live_abc123" not in public["summary"]
+    assert "hunter2" not in public["summary"]
+    assert "opaque-value-remains-prefixless" in public["summary"]
     # ...but the allowlist still dropped all param *values* (only the empty
     # hermes context survives — deny-by-default keeps the bare secrets out).
     assert public["params"] == {"hermes": {}}
@@ -377,18 +380,14 @@ def test_scrub_summary_covers_all_secret_marker_colon_forms():
         assert marker in scrubbed
 
 
-def test_scrub_summary_known_residual_eq_base64_short_hex_allowlist_still_holds():
-    """#943 characterization（harper/CISO merge 條件）：documenting the KNOWN
-    residual that ``_scrub_summary`` does NOT cover, while pinning that the
-    allowlist remains the effective control — main control is the allowlist.
+def test_scrub_summary_hardens_assignment_base64_and_short_hex_residuals():
+    """#1183: harden known summary residuals while retaining the allowlist.
 
     將 codex 點名、今日 scrub 不覆蓋的形樣整批放進 ``summary``：
-      * ``=``-form（``key=``/``pw=``）—— 無結構化 marker 前綴；
-      * base64-like blob —— 非認得的 token-like pattern；
-      * <32-char hex（``abc1def2`` 僅 8 字元）—— 低於 long-hex（≥32）門檻。
-    這些是已知殘餘，追蹤於 summary-hardening follow-up issue。**主防線是 deny-by-default
-    allowlist**：同一 event 的敏感 param 值一律被丟棄（斷言 A）；本測試誠實記錄 scrub 邊界
-    現狀（斷言 B），而非假裝 scrub 抓得到這些形樣。
+      * ``=``-form（``key=``/``pw=``）；
+      * standard padded base64 blob；
+      * secret-marker assignment 中的 <32-char hex。
+    **主防線仍是 deny-by-default allowlist**：同一 event 的敏感 param 值一律被丟棄。
     """
     event = {
         "ts": "t",
@@ -405,8 +404,10 @@ def test_scrub_summary_known_residual_eq_base64_short_hex_allowlist_still_holds(
             "source": "coinapi",
             "coin": "BTC",
         },
-        # codex 點名的不可 scrub 形樣（已知殘餘，追蹤於 summary-hardening follow-up）
-        "summary": "key=sk_live_abc123 pw=hunter2 blob=$(base64-ish) short=abc1def2",
+        "summary": (
+            "key=sk_live_abc123 pw='hunter2' "
+            "blob=U29tZVNlY3JldFZhbHVlMTIzNA== token=abc1def2"
+        ),
     }
     public = to_public_event_dict(event)
     blob = json.dumps(public, ensure_ascii=False)
@@ -428,15 +429,49 @@ def test_scrub_summary_known_residual_eq_base64_short_hex_allowlist_still_holds(
     assert public["params"]["source"] == "coinapi"
     assert public["params"]["coin"] == "BTC"
 
-    # 斷言 B（誠實殘餘 characterization）：summary scrub 今日「不覆蓋」=form / base64 /
-    # <32hex —— 這些值仍在公開 summary 中（記錄現狀，非期望終態）。追蹤於 summary-hardening
-    # follow-up issue；在該 follow-up 補上 scrub 覆蓋前，勿把這些翻成 `not in`。
-    for residual in (
-        "key=sk_live_abc123",
-        "pw=hunter2",
-        "blob=$(base64-ish)",
-        "short=abc1def2",
+    for secret in (
+        "sk_live_abc123",
+        "hunter2",
+        "U29tZVNlY3JldFZhbHVlMTIzNA==",
+        "abc1def2",
     ):
-        assert residual in public["summary"], (
-            f"殘餘 summary 形樣意外被 scrub —— 請更新此 characterization: {residual!r}"
-        )
+        assert secret not in public["summary"], f"summary secret leaked: {secret!r}"
+    assert public["summary"].count(REDACTED) == 4
+
+
+def test_scrub_summary_preserves_non_secret_assignments_and_unpadded_prose():
+    summary = (
+        "status=completed count=12 source=coinapi "
+        "ordinaryIdentifierWithoutBase64Padding"
+    )
+
+    assert _scrub_summary(summary) == summary
+
+
+def test_scrub_summary_handles_escaped_quotes_and_composite_secret_keys():
+    summary = (
+        r'password="prefix\"DOUBLE_SECRET" '
+        r"client_secret='prefix\'SINGLE_SECRET' "
+        "refresh_token=REFRESH_SECRET "
+        "url=https://host/?service_access_token=QUERY_SECRET "
+        "callback=https://host/?code=OAUTH_CODE_SECRET "
+        "client.secret: COLON_SECRET"
+    )
+
+    scrubbed = _scrub_summary(summary)
+
+    for secret in (
+        "DOUBLE_SECRET",
+        "SINGLE_SECRET",
+        "REFRESH_SECRET",
+        "QUERY_SECRET",
+        "OAUTH_CODE_SECRET",
+        "COLON_SECRET",
+    ):
+        assert secret not in scrubbed
+    assert scrubbed.count(REDACTED) == 6
+
+    # ``code`` is URL-specific: ordinary diagnostics must remain readable.
+    assert _scrub_summary("status code=200") == "status code=200"
+    ordinary_urls = "https://host/?status_code=200&country_code=TW"
+    assert _scrub_summary(ordinary_urls) == ordinary_urls

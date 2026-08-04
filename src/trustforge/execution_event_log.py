@@ -209,11 +209,25 @@ def _public_params(event: dict) -> dict:
 # （api_key/apikey/auth/authorization/credential/password/secret/token 全數納入），
 # 並補 passwd/access_token/key 等常見短別名以與上方 URL query-param scrub 覆蓋面
 # 一致——避免 ``token: SECRET`` / ``auth: SECRET`` 等 colon 形樣原樣外露。
-_COLON_SECRET_KEY_ALT = "|".join(_SECRET_KEY_MARKERS + ("passwd", "access_token", "key"))
+_COLON_SECRET_KEY_ALT = "|".join(
+    _SECRET_KEY_MARKERS + ("passwd", "pw", "access_token", "key")
+)
+# Match the same marker semantics inside composite names that ``_is_secret_key``
+# recognises (for example ``client_secret`` and ``refresh-token``).  Components
+# must be separator-delimited so innocent names such as ``monkey`` do not match
+# the short ``key`` marker.
+_STRUCTURED_SECRET_KEY = (
+    rf"(?:[A-Za-z0-9]+[._-])*(?:{_COLON_SECRET_KEY_ALT})"
+    r"(?:[._-][A-Za-z0-9]+)*"
+)
+# OAuth ``code`` is sensitive only as the exact URL parameter name.  Letting it
+# participate in composite expansion would incorrectly redact ordinary
+# ``status_code`` / ``country_code`` diagnostics.
+_URL_STRUCTURED_SECRET_KEY = rf"(?:code|{_STRUCTURED_SECRET_KEY})"
 _TOKEN_LIKE_PATTERNS = (
     # URL query param：?token=... / &api_key=... / ?access_token=... —— 保留前綴只遮值。
     re.compile(
-        r"([?&](?:token|apikey|api_key|access_token|secret|password|passwd|code|auth|credential)=)[^&#\s]+",
+        rf"([?&]{_URL_STRUCTURED_SECRET_KEY}=)[^&#\s]+",
         re.IGNORECASE,
     ),
     # ``bearer <token>``
@@ -221,8 +235,24 @@ _TOKEN_LIKE_PATTERNS = (
     # header / ``key: value``：authorization: ... / password: ... / token: ... ——
     # key 名集合對齊 _SECRET_KEY_MARKERS（經 _COLON_SECRET_KEY_ALT 展開）。
     re.compile(
-        rf"((?:{_COLON_SECRET_KEY_ALT}):\s*)[^\s,;]+",
+        rf"({_STRUCTURED_SECRET_KEY}:\s*)[^\s,;]+",
         re.IGNORECASE,
+    ),
+    # Assignment form outside URL query strings: ``key=value`` / ``pw='value'``.
+    # Requiring a recognised secret marker avoids redacting ordinary ``name=value``
+    # diagnostics.  URL query forms are handled by the first pattern above.
+    re.compile(
+        rf"((?<![?&A-Za-z0-9_]){_STRUCTURED_SECRET_KEY}\s*=\s*)"
+        r'(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'
+        r"'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s,;]+)",
+        re.IGNORECASE,
+    ),
+    # Standard padded base64 blobs (minimum 16 encoded characters).  Padding is
+    # required deliberately so ordinary identifiers/prose are not over-redacted.
+    re.compile(
+        r"(?<![A-Za-z0-9+/])(?:[A-Za-z0-9+/]{4}){3,}"
+        r"(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)"
+        r"(?![A-Za-z0-9+/=])"
     ),
     # 長 hex（≥32）：JWT segment / SHA256 / API key hex。
     re.compile(r"\b[0-9a-fA-F]{32,}\b"),
@@ -237,12 +267,10 @@ def _scrub_summary(summary: Any) -> Any:
     第二層 defense-in-depth，處理 ``summary`` 本身誤帶 secret 的邊角，**絕不能取代
     allowlist**。
 
-    今日**不覆蓋**的形樣（已知殘餘，追蹤於 summary-hardening follow-up issue）：
-      * ``=``-form —— ``key=value`` / ``pw=value`` 等無結構化 marker 前綴的賦值式；
-      * base64-like blob —— 非認得的 token-like pattern；
-      * <32 字元 hex —— 低於 long-hex（≥32）門檻（如 8 字元 ``abc1def2``）。
-    （覆蓋的形樣見 :data:`_TOKEN_LIKE_PATTERNS`：URL ``?token=``、``bearer``、
-    ``key: value`` colon-form、≥32 long-hex。）
+    覆蓋的形樣見 :data:`_TOKEN_LIKE_PATTERNS`：URL ``?token=``、``bearer``、
+    ``key: value`` colon-form、secret-marker ``key=value`` assignment、標準 padded
+    base64，以及 ≥32 long-hex。短 hex 若位於 secret-marker assignment 中，也會由
+    assignment 規則遮蔽；無 marker 的任意 free text 仍不可能由 regex 完整辨識。
 
     非 str 輸入原樣回傳（投影層不對型別做強轉）。
     """
