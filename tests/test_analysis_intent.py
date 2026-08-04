@@ -52,6 +52,64 @@ def test_news_social_comparison_only_requests_explicit_deliverables():
     assert "manipulation_risk" not in intent.deliverables
 
 
+def test_dual_asset_comparison_compiles_ordered_child_plan():
+    intent = compile_analysis_intent("比較 BTC 與 ETH 的正式分析結果", ["BTC", "ETH"])
+
+    assert intent.assets == ("BTC", "ETH")
+    assert intent.matched_official_template == "dual_asset_comparison"
+    assert [operation.id for operation in intent.operations] == [
+        "asset_analysis_a",
+        "asset_analysis_b",
+        "comparison_synthesis",
+    ]
+    assert [operation.type for operation in intent.operations] == [
+        "asset_analysis",
+        "asset_analysis",
+        "comparison_synthesis",
+    ]
+    assert intent.operations[2].depends_on == (
+        "asset_analysis_a",
+        "asset_analysis_b",
+    )
+    assert intent.deliverables == (
+        "asset_report_a",
+        "asset_report_b",
+        "comparison_summary",
+    )
+
+
+def test_english_dual_asset_comparison_preserves_asset_order():
+    intent = compile_analysis_intent("compare ETH and BTC", ["ETH", "BTC"])
+
+    assert intent.assets == ("ETH", "BTC")
+    assert intent.matched_official_template == "dual_asset_comparison"
+    assert intent.deliverables[-1] == "comparison_summary"
+
+
+def test_non_two_asset_comparisons_do_not_compile_dual_asset_plan():
+    same_asset = compile_analysis_intent("比較 BTC 與 BTC", ["BTC", "BTC"])
+    missing_asset = compile_analysis_intent("比較 BTC 與", ["BTC"])
+    too_many_assets = compile_analysis_intent("比較 BTC ETH SOL", ["BTC", "ETH", "SOL"])
+
+    assert same_asset.matched_official_template != "dual_asset_comparison"
+    assert missing_asset.matched_official_template != "dual_asset_comparison"
+    assert too_many_assets.matched_official_template != "dual_asset_comparison"
+
+
+def test_news_social_comparison_is_not_dual_asset_even_with_two_assets():
+    intent = compile_analysis_intent(
+        "比較 BTC 的 news 與 social 是否一致",
+        ["BTC", "ETH"],
+    )
+
+    assert intent.matched_official_template == "multi_source"
+    assert [operation.type for operation in intent.operations[:3]] == [
+        "sentiment_analysis",
+        "sentiment_analysis",
+        "compare",
+    ]
+
+
 def test_llm_cannot_invent_capability_or_connector():
     def unsafe_parser(_question, _assets):
         return {
