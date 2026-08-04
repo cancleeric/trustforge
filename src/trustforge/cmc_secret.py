@@ -18,7 +18,7 @@ _LOCAL_KEY_ENV = "CMC_PRO_API_KEY"
 _LOCAL_KEY_FILE_ENV = "TRUSTFORGE_CMC_API_KEY_FILE"
 _DEFAULT_PARAMETER = "/trustforge/production/cmc-api-key"
 _PARAMETER_RE = re.compile(r"^/[A-Za-z0-9_.\-/]{1,255}$")
-_CACHE_TTL_SECONDS = 300.0
+_CACHE_TTL_SECONDS = 15.0
 _USER_AGENT = "TrustForge/1.0 (CMC credential verification)"
 _VERIFY_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol=BTC"
 
