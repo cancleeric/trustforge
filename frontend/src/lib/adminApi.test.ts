@@ -11,11 +11,13 @@ import {
   getAdminAudit,
   getAdminBackendProviders,
   getAdminConfig,
+  getCmcCredentialStatus,
   getWhaleAlertCredentialStatus,
   putAdminConfig,
   setAdminBackendProvider,
   setAllAdminBackendProviders,
   updateWhaleAlertCredential,
+  updateCmcCredential,
 } from './endpoints'
 import type { AdminConfigData } from './types'
 
@@ -128,6 +130,51 @@ describe('Whale Alert Admin API', () => {
 
     const result = await getWhaleAlertCredentialStatus('admin-token')
 
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+})
+
+describe('CoinMarketCap Admin API', () => {
+  it('keeps the key in an authenticated no-store body and never returns plaintext', async () => {
+    const key = 'write-only-cmc-key-123456'
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        ok: true,
+        data: { configured: true, source: 'ssm', last_verified_at: null },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await updateCmcCredential('admin-token', 'set', key)
+
+    expect(result.ok).toBe(true)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('/api/admin/cmc')
+    expect(String(url)).not.toContain(key)
+    expect(init.cache).toBe('no-store')
+    expect(init.headers).toMatchObject({ 'X-Admin-Token': 'admin-token' })
+    expect(init.body).toBe(JSON.stringify({ action: 'set', api_key: key }))
+    expect(JSON.stringify(result)).not.toContain(key)
+  })
+
+  it('rejects a status response that includes plaintext', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          ok: true,
+          data: {
+            configured: true,
+            source: 'ssm',
+            last_verified_at: null,
+            api_key: 'must-not-be-accepted',
+          },
+        }),
+      ),
+    )
+
+    const result = await getCmcCredentialStatus('admin-token')
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error.code).toBe('parse_error')
   })

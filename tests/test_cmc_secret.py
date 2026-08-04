@@ -355,3 +355,26 @@ def test_verify_connection_rejects_bad_schema(monkeypatch):
 
     with pytest.raises(RuntimeError):
         cmc_secret.verify_connection(fetcher=fetcher)
+
+
+def test_ssm_cache_rechecks_within_revocation_window(monkeypatch):
+    """Separate scheduler process cache must stop using an SSM key after 15s."""
+    fake = FakeSSM()
+    fake.value = "cached-cmc-key-1234567890"
+    clock = {"now": 1000.0}
+    monkeypatch.setenv(
+        "TRUSTFORGE_CMC_SSM_PARAMETER", "/trustforge/test/cmc-api-key"
+    )
+    monkeypatch.setattr(cmc_secret, "_ssm_client", lambda: fake)
+    monkeypatch.setattr(cmc_secret.time, "monotonic", lambda: clock["now"])
+    monkeypatch.delenv("TRUSTFORGE_CMC_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("CMC_PRO_API_KEY", raising=False)
+    cmc_secret.invalidate_cache()
+
+    assert cmc_secret.resolve_api_key() == ("cached-cmc-key-1234567890", "ssm")
+    fake.value = None
+    clock["now"] += 14.9
+    assert cmc_secret.resolve_api_key() == ("cached-cmc-key-1234567890", "ssm")
+
+    clock["now"] += 0.2
+    assert cmc_secret.resolve_api_key() == (None, "unconfigured")

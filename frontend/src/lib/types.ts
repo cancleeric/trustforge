@@ -818,6 +818,8 @@ export interface WhaleAlertCredentialStatus {
   last_verified_at: string | null
 }
 
+export type CmcCredentialStatus = WhaleAlertCredentialStatus
+
 export type BackendProviderKey =
   | 'memory'
   | 'policy'

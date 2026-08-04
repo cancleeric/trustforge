@@ -59,6 +59,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 from . import admin_config
 from . import backend_registry
+from . import cmc_secret
 from . import rate_limit_store
 from . import ssm_params
 from . import whale_alert_secret
@@ -8446,6 +8447,18 @@ def _handle_api_admin_whale_alert_get() -> tuple[int, str]:
     return 200, _json_envelope_ok(state)
 
 
+def _handle_api_admin_cmc_get() -> tuple[int, str]:
+    """Return masked CoinMarketCap credential state; never return plaintext."""
+    try:
+        state = cmc_secret.status().as_dict()
+    except Exception:
+        logging.error("TrustForge CoinMarketCap credential status unavailable")
+        return 502, _json_envelope_err(
+            "upstream_error", "CoinMarketCap API 設定狀態暫時無法讀取"
+        )
+    return 200, _json_envelope_ok(state)
+
+
 def _whale_alert_admin_transport_is_secure(headers) -> bool:
     """Whale Alert 憑證管理端點整體 TLS-only gate（與 `_live_token_over_insecure_transport`
     同立場）：`TRUST_PROXY` 開且 nginx 忠實轉發的 `X-Forwarded-Proto=https` 才放行；
@@ -8499,6 +8512,53 @@ def _handle_api_admin_whale_alert_post(headers, rfile, client_ip: str) -> tuple[
         )
     logging.info(
         "TrustForge Whale Alert credential audit action=%s result=success client_ip=%s",
+        action, client_ip,
+    )
+    return 200, _json_envelope_ok(state.as_dict())
+
+
+def _handle_api_admin_cmc_post(headers, rfile, client_ip: str) -> tuple[int, str]:
+    """Manage the write-only CMC key behind the same TLS/admin gate as Whale Alert."""
+    if not _whale_alert_admin_transport_is_secure(headers):
+        return 426, _json_envelope_err(
+            "upgrade_required",
+            "CoinMarketCap 憑證管理端點須經 HTTPS（TLS 反代）；本服務預設不開放明文連線管理 secret。"
+            "請透過 nginx TLS 反代並設 TRUSTFORGE_TRUST_PROXY=1。",
+        )
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error
+    assert payload is not None
+    action = payload.get("action")
+    allowed = {
+        "set": {"action", "api_key"},
+        "clear": {"action"},
+        "test": {"action"},
+    }
+    if (
+        not isinstance(action, str)
+        or action not in allowed
+        or set(payload) != allowed[action]
+    ):
+        return 400, _json_envelope_err(
+            "bad_request", "action 必須是 set、clear 或 test，且不得帶額外欄位"
+        )
+    try:
+        if action == "set":
+            state = cmc_secret.put_api_key(payload["api_key"])
+        elif action == "clear":
+            state = cmc_secret.clear_api_key()
+        else:
+            state = cmc_secret.verify_connection()
+    except ValueError:
+        return 400, _json_envelope_err("bad_request", "CoinMarketCap API key 格式無效")
+    except Exception:
+        logging.error("TrustForge CoinMarketCap credential action failed: %s", action)
+        return 502, _json_envelope_err(
+            "upstream_error", "CoinMarketCap API 設定操作失敗，請稍後再試"
+        )
+    logging.info(
+        "TrustForge CoinMarketCap credential audit action=%s result=success client_ip=%s",
         action, client_ip,
     )
     return 200, _json_envelope_ok(state.as_dict())
@@ -9112,6 +9172,9 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/admin/whale-alert":
                     code, body = _handle_api_admin_whale_alert_get()
                     return self._send(code, body, "application/json; charset=utf-8")
+                if u.path == "/api/admin/cmc":
+                    code, body = _handle_api_admin_cmc_get()
+                    return self._send(code, body, "application/json; charset=utf-8")
                 if u.path == "/api/admin/backend-providers":
                     code, body = _handle_api_admin_backend_providers_get()
                     return self._send(code, body, "application/json; charset=utf-8")
@@ -9590,6 +9653,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(code, body, "application/json; charset=utf-8")
             if u.path == "/api/admin/whale-alert":
                 code, body = _handle_api_admin_whale_alert_post(
+                    getattr(self, "headers", {}), self.rfile, client_ip
+                )
+                return self._send(code, body, "application/json; charset=utf-8")
+            if u.path == "/api/admin/cmc":
+                code, body = _handle_api_admin_cmc_post(
                     getattr(self, "headers", {}), self.rfile, client_ip
                 )
                 return self._send(code, body, "application/json; charset=utf-8")
