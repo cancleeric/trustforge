@@ -373,6 +373,11 @@ def _dual_asset_comparison_intent(
     )
 
 
+def _has_comparison_request(lowered: str) -> bool:
+    comparison_words = ("比對", "比較", "是否一致", "差異", "背離", "compare")
+    return any(word in lowered for word in comparison_words)
+
+
 def _is_dual_asset_comparison_request(question: str, lowered: str) -> bool:
     formal_analysis_phrases = (
         "正式分析",
@@ -383,7 +388,9 @@ def _is_dual_asset_comparison_request(question: str, lowered: str) -> bool:
         "analysis result",
         "analysis report",
     )
-    return any(phrase in lowered or phrase in question for phrase in formal_analysis_phrases)
+    return _has_comparison_request(lowered) and any(
+        phrase in lowered or phrase in question for phrase in formal_analysis_phrases
+    )
 
 
 def _extract_market_targets(lowered: str) -> tuple[str, ...]:
@@ -406,8 +413,7 @@ def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisInten
     lowered = question.casefold()
     has_news = "新聞" in question or "news" in lowered
     has_social = "社群" in question or "social" in lowered
-    comparison_words = ("比對", "比較", "是否一致", "差異", "背離", "compare")
-    has_comparison = any(word in lowered for word in comparison_words)
+    has_comparison = _has_comparison_request(lowered)
     targets = _extract_market_targets(lowered)
     if (
         len(canonical_assets) == 2

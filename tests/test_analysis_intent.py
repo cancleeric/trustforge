@@ -279,6 +279,11 @@ def test_llm_dual_asset_plan_requires_explicit_formal_analysis_request():
         ["BTC", "ETH"],
         llm_parser=dual_asset_parser,
     )
+    non_comparison_formal_intent = compile_analysis_intent(
+        "請給 BTC 與 ETH 的正式分析結果",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
     formal_price_intent = compile_analysis_intent(
         "compare BTC and ETH price analysis report",
         ["BTC", "ETH"],
@@ -304,6 +309,8 @@ def test_llm_dual_asset_plan_requires_explicit_formal_analysis_request():
     assert formal_regulatory_intent.parse_mode == "deterministic_fallback"
     assert formal_regulatory_intent.operations[0].type == "market_synthesis"
     assert formal_regulatory_intent.operations[0].targets == ("regulatory",)
+    assert non_comparison_formal_intent.parse_mode == "deterministic_fallback"
+    assert non_comparison_formal_intent.matched_official_template != "dual_asset_comparison"
 
 
 def test_forward_dependency_fails_closed():
