@@ -2167,6 +2167,16 @@
           }
         ]
       },
+      "excluded_source_kind_counts": {
+        "additionalProperties": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": [
+          "object",
+          "null"
+        ]
+      },
       "facts": {
         "items": {
           "type": "string"
@@ -2262,6 +2272,16 @@
       },
       "schema_version": {
         "const": "1.1.0"
+      },
+      "source_kind_distribution": {
+        "additionalProperties": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": [
+          "object",
+          "null"
+        ]
       },
       "term_annotations": {
         "items": {
