@@ -2,15 +2,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator, ValidationError
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "docs/contracts/commercial-onchain-evidence-contract-v1.json"
 FIXTURE_PATH = ROOT / "tests/fixtures/commercial/onchain_risk_evidence.json"
+RFC3339_FORMAT_CHECKER = FormatChecker()
+
+
+@RFC3339_FORMAT_CHECKER.checks("date-time", raises=ValueError)
+def _is_calendar_valid_rfc3339_datetime(value: object) -> bool:
+    if not isinstance(value, str):
+        return True
+
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    datetime.fromisoformat(normalized)
+    return True
 
 
 def _canonical_hash(payload: object) -> str:
@@ -22,7 +34,7 @@ def _canonical_hash(payload: object) -> str:
 def evidence_contract_validator() -> Draft202012Validator:
     schema = json.loads(CONTRACT_PATH.read_text())
     Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(schema)
+    return Draft202012Validator(schema, format_checker=RFC3339_FORMAT_CHECKER)
 
 
 def test_commercial_onchain_fixture_evidence_matches_contract(
@@ -63,6 +75,27 @@ def test_commercial_onchain_contract_rejects_invalid_source_state(
 ) -> None:
     evidence = json.loads(FIXTURE_PATH.read_text())[0]["evidence"]
     invalid = {**evidence, "source_state": "live-but-unreviewed"}
+
+    with pytest.raises(ValidationError):
+        evidence_contract_validator.validate(invalid)
+
+
+@pytest.mark.parametrize("timestamp_field", ("published_at", "retrieved_at"))
+@pytest.mark.parametrize(
+    "invalid_timestamp",
+    (
+        "not-a-date-time",
+        "2026-13-99T99:99:99Z",
+        "2026-02-30T00:00:00Z",
+    ),
+)
+def test_commercial_onchain_contract_rejects_invalid_lineage_timestamps(
+    evidence_contract_validator: Draft202012Validator,
+    timestamp_field: str,
+    invalid_timestamp: str,
+) -> None:
+    evidence = json.loads(FIXTURE_PATH.read_text())[0]["evidence"]
+    invalid = {**evidence, timestamp_field: invalid_timestamp}
 
     with pytest.raises(ValidationError):
         evidence_contract_validator.validate(invalid)
