@@ -548,6 +548,13 @@ def test_execution_log_summary_fstrings_do_not_interpolate_sensitive_values():
             if any(marker in pieces for marker in sensitive_markers) and not is_safe_name(normalized):
                 violations.append(f"{path}:{part.lineno}: summary interpolates {name}")
 
+    for expr in ("params['api_key']", "payload['secret']", "config['wallet']"):
+        name = dotted_name(ast.parse(expr, mode="eval").body)
+        normalized = name.lower().replace("-", "_")
+        pieces = [p for p in normalized.replace(".", "_").split("_") if p]
+        assert any(marker in pieces for marker in sensitive_markers), expr
+        assert not is_safe_name(normalized), expr
+
     def inspect_scope(path: Path, node: ast.AST) -> None:
         summary_assignments: dict[str, ast.JoinedStr] = {}
         for stmt in getattr(node, "body", []):
