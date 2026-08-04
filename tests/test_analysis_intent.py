@@ -213,6 +213,62 @@ def test_llm_dual_asset_plan_requires_two_caller_authorized_assets():
     assert intent.matched_official_template != "dual_asset_comparison"
 
 
+def test_llm_dual_asset_plan_requires_explicit_formal_analysis_request():
+    def dual_asset_parser(_question, _assets):
+        return {
+            "assets": ["BTC", "ETH"],
+            "operations": [
+                {
+                    "id": "asset_analysis_a",
+                    "type": "asset_analysis",
+                    "targets": ["asset"],
+                    "output": "asset_report_a",
+                },
+                {
+                    "id": "asset_analysis_b",
+                    "type": "asset_analysis",
+                    "targets": ["asset"],
+                    "output": "asset_report_b",
+                },
+                {
+                    "id": "comparison_synthesis",
+                    "type": "comparison_synthesis",
+                    "targets": ["asset_analysis_a", "asset_analysis_b"],
+                    "output": "comparison_summary",
+                    "depends_on": ["asset_analysis_a", "asset_analysis_b"],
+                },
+            ],
+            "deliverables": ["asset_report_a", "asset_report_b", "comparison_summary"],
+            "matched_official_template": "dual_asset_comparison",
+            "parse_confidence": 1,
+        }
+
+    formal_intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 的正式分析結果",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+    price_intent = compile_analysis_intent(
+        "compare BTC and ETH price",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+    regulatory_intent = compile_analysis_intent(
+        "比較 BTC 與 ETH 監管差異",
+        ["BTC", "ETH"],
+        llm_parser=dual_asset_parser,
+    )
+
+    assert formal_intent.parse_mode == "llm"
+    assert formal_intent.matched_official_template == "dual_asset_comparison"
+    assert price_intent.parse_mode == "deterministic_fallback"
+    assert price_intent.operations[0].type == "market_synthesis"
+    assert price_intent.operations[0].targets == ("price",)
+    assert regulatory_intent.parse_mode == "deterministic_fallback"
+    assert regulatory_intent.operations[0].type == "market_synthesis"
+    assert regulatory_intent.operations[0].targets == ("regulatory",)
+
+
 def test_forward_dependency_fails_closed():
     intent = AnalysisIntent(
         assets=("BTC",),

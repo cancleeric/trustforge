@@ -155,6 +155,13 @@ _DUAL_ASSET_TYPES = {"asset_analysis", "comparison_synthesis"}
 _DUAL_ASSET_DELIVERABLES = ("asset_report_a", "asset_report_b", "comparison_summary")
 
 
+def _contains_dual_asset_plan(operations: tuple[IntentOperation, ...]) -> bool:
+    return any(
+        operation.id in _DUAL_ASSET_OPERATION_IDS or operation.type in _DUAL_ASSET_TYPES
+        for operation in operations
+    )
+
+
 def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
     if not intent.assets or any(not _ASSET.fullmatch(asset) for asset in intent.assets):
         raise IntentValidationError("assets must contain canonical uppercase symbols")
@@ -212,11 +219,7 @@ def validate_intent(intent: AnalysisIntent) -> AnalysisIntent:
         seen_operations[operation.id] = operation
         outputs.add(operation.output)
 
-    has_dual_asset_plan = any(
-        operation.id in _DUAL_ASSET_OPERATION_IDS or operation.type in _DUAL_ASSET_TYPES
-        for operation in intent.operations
-    )
-    if has_dual_asset_plan:
+    if _contains_dual_asset_plan(intent.operations):
         expected_operations = (
             IntentOperation(
                 "asset_analysis_a",
@@ -491,6 +494,12 @@ def compile_analysis_intent(
         )
         if intent.assets != canonical_assets:
             raise IntentValidationError("LLM parser cannot replace caller-authorized assets")
+        if _contains_dual_asset_plan(intent.operations) and not _is_dual_asset_comparison_request(
+            question, question.casefold()
+        ):
+            raise IntentValidationError(
+                "LLM dual asset comparison requires an explicit formal analysis request"
+            )
         return validate_intent(intent)
     except (IntentValidationError, KeyError, TypeError, ValueError):
         fallback = deterministic_compile(question, canonical_assets)
