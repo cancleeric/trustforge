@@ -70,6 +70,7 @@ Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certificatio
 
 | 文件 | 說明 |
 |------|------|
+| [plans/PLAN-POST-COMPETITION-COMMERCIALIZATION-2026-08-04.md](plans/PLAN-POST-COMPETITION-COMMERCIALIZATION-2026-08-04.md) | 賽後商用化開發計劃：鏈上風控 MVP、trust-first 工程底座、POC 交付包與 ≤12h issue 拆解／相依性 |
 | [plans/WORLD-FIRST-MASTER-PLAN.md](plans/WORLD-FIRST-MASTER-PLAN.md) | **三軸+Axis D master 世界第一開發計劃（總綱，唯一權威，v3 2026-07-03 精簡權威版）**：最終標準宣言（多護城核心疊起來）+ A LIVE 現況表（grep/curl/pytest 逐項實證）+ B 三軸現況＋新 Axis D 多核心擴充 + C 誠實資料卡/gated 清單 + D 下一步連環疊核心序。仍有未執行項（商業級 UI 4 項狀態需覆核、Axis D #3/#4 等），持續更新中 |
 | [plans/DEV-PLAN.md](plans/DEV-PLAN.md) | 開發計劃：分階段 Backlog、必做 vs 加分、里程碑。**仍有未執行 backlog**：P0-4 HOYA BIT 企業數據連接器，等 7/13 工作坊取得 API 規格後才能接 |
 | [plans/CEO-ISSUE-PR-DEVELOPMENT-SWEEP-2026-07-17.md](plans/CEO-ISSUE-PR-DEVELOPMENT-SWEEP-2026-07-17.md) | CEO issue/PR 處理計劃：#218 release gate、#207/#209/#215 evidence 同步；每小時 sweep 只產生待互動式 CEO 審查的建議，不自行派工、merge 或 deploy |
@@ -107,6 +108,7 @@ Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certificatio
 | [plans/AI-AGENT-CONTEXT-GAP-AUDIT-2026-07-27.md](plans/AI-AGENT-CONTEXT-GAP-AUDIT-2026-07-27.md) | AI Agent 新手脈絡三模組缺口稽核：已落地證據、未達標項、P0/P1/P2 改善順序與驗證紀錄 |
 | [reports/OUTER-FRAMEWORK-UPGRADE-GOVERNANCE-2026-07-27.md](reports/OUTER-FRAMEWORK-UPGRADE-GOVERNANCE-2026-07-27.md) | 外框模組與升級治理：31 個控制面模組、5 個 policy family、sandbox、人審 gate、active pointer 與 rollback 邊界 |
 | [reports/FIRST-PRINCIPLES-REVIEW-2026-07-27.md](reports/FIRST-PRINCIPLES-REVIEW-2026-07-27.md) | 第一性原理審視報告：Evidence-first 閉環、真正護城河、主要風險、不可變原則與 P0/P1/P2 建議路線 |
+| [reports/POST-COMPETITION-COMMERCIALIZATION-ANALYSIS-2026-08-04.md](reports/POST-COMPETITION-COMMERCIALIZATION-ANALYSIS-2026-08-04.md) | 賽後商用化分析：信任校準層定位、鏈上風控 MVP、顧問＋POC 導入路線與 trust-first 產品化風險 |
 | [reports/HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-GAP-2026-07-29.md](reports/HERMES-LEVEL-MEMORY-SKILL-CAPABILITY-GAP-2026-07-29.md) | Hermes 等級 Memory / Skill 能力缺口報告：Memory OS、Skill Registry、Context Builder、Tool Capability Registry 與 Agent OS UI 路線圖 |
 | [reports/REPORT-2026-07-23-hardcoded-paths-portability.md](reports/REPORT-2026-07-23-hardcoded-paths-portability.md) | 本機排程硬編碼路徑事故：#518／PR #536 根治、審查證據、未執行真機驗收與剩餘 freshness 告警風險 |
 
