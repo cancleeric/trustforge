@@ -19,7 +19,13 @@ _LOCAL_KEY_ENV = "WHALE_ALERT_API_KEY"
 _LOCAL_KEY_FILE_ENV = "TRUSTFORGE_WHALE_ALERT_API_KEY_FILE"
 _DEFAULT_PARAMETER = "/trustforge/production/whale-alert-api-key"
 _PARAMETER_RE = re.compile(r"^/[A-Za-z0-9_.\-/]{1,255}$")
-_CACHE_TTL_SECONDS = 300.0
+# Revocation safety bound (#1170): the admin and ingestion services are separate
+# processes, so an in-process invalidate_cache() cannot evict the scheduler's
+# copy. Keep the cache only long enough to absorb request bursts; every process
+# rechecks SSM within 15 seconds. This is a bounded stopgap pending a shared
+# generation/epoch contract and reduces the former worst-case stale-key window
+# from five minutes without changing fail-closed SSM error handling.
+_CACHE_TTL_SECONDS = 15.0
 _USER_AGENT = "TrustForge/1.0 (WhaleAlert credential verification)"
 _VERIFY_URL = "https://api.whale-alert.io/v1/transactions"
 

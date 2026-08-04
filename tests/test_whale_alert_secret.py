@@ -203,6 +203,29 @@ def test_ssm_non_parameter_not_found_error_fails_closed(monkeypatch):
     assert whale_alert_secret.resolve_api_key() == (None, "unavailable")
 
 
+def test_cached_ssm_key_is_rechecked_within_revocation_window(monkeypatch):
+    """A separate ingestion process cannot retain a cleared key for five minutes."""
+    fake = FakeSSM()
+    fake.value = "cached-whale-key-1234567890"
+    now = [100.0]
+    monkeypatch.setattr(whale_alert_secret, "_ssm_client", lambda: fake)
+    monkeypatch.setattr(whale_alert_secret.time, "monotonic", lambda: now[0])
+    monkeypatch.setenv(
+        "TRUSTFORGE_WHALE_ALERT_SSM_PARAMETER", "/trustforge/test/whale-alert-api-key"
+    )
+    monkeypatch.delenv("TRUSTFORGE_WHALE_ALERT_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("WHALE_ALERT_API_KEY", raising=False)
+    whale_alert_secret.invalidate_cache()
+
+    assert whale_alert_secret.resolve_api_key() == (fake.value, "ssm")
+    fake.value = None  # another process/admin deleted the parameter
+    now[0] += whale_alert_secret._CACHE_TTL_SECONDS - 0.01
+    assert whale_alert_secret.resolve_api_key()[0] is not None
+    now[0] += 0.02
+    assert whale_alert_secret.resolve_api_key() == (None, "unconfigured")
+    assert whale_alert_secret._CACHE_TTL_SECONDS <= 15.0
+
+
 def test_put_api_key_raises_when_round_trip_drifts(monkeypatch):
     """gray 補測：put_api_key 寫入後 resolve 回的值 != 寫入值（SSM 端 drift）
     → RuntimeError，憑證未靜默啟用錯誤值。"""
