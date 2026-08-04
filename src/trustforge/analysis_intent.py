@@ -386,6 +386,20 @@ def _is_dual_asset_comparison_request(question: str, lowered: str) -> bool:
     return any(phrase in lowered or phrase in question for phrase in formal_analysis_phrases)
 
 
+def _extract_market_targets(lowered: str) -> tuple[str, ...]:
+    return tuple(
+        target
+        for target, tokens in {
+            "price": ("價格", "price"),
+            "onchain": ("鏈上", "on-chain", "onchain"),
+            "news": ("新聞", "news"),
+            "social": ("社群", "social"),
+            "regulatory": ("監管", "regulatory"),
+        }.items()
+        if any(token in lowered for token in tokens)
+    )
+
+
 def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisIntent:
     """Fail-safe parser for known compositional structures; never calls an LLM."""
     canonical_assets = tuple(dict.fromkeys(asset.strip().upper() for asset in assets if asset.strip()))
@@ -394,10 +408,12 @@ def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisInten
     has_social = "社群" in question or "social" in lowered
     comparison_words = ("比對", "比較", "是否一致", "差異", "背離", "compare")
     has_comparison = any(word in lowered for word in comparison_words)
+    targets = _extract_market_targets(lowered)
     if (
         len(canonical_assets) == 2
         and has_comparison
         and _is_dual_asset_comparison_request(question, lowered)
+        and not targets
         and not (has_news and has_social)
     ):
         return validate_intent(
@@ -429,17 +445,6 @@ def deterministic_compile(question: str, assets: Iterable[str]) -> AnalysisInten
         )
         return validate_intent(intent)
 
-    targets = tuple(
-        target
-        for target, tokens in {
-            "price": ("價格", "price"),
-            "onchain": ("鏈上", "on-chain", "onchain"),
-            "news": ("新聞", "news"),
-            "social": ("社群", "social"),
-            "regulatory": ("監管", "regulatory"),
-        }.items()
-        if any(token in lowered for token in tokens)
-    )
     intent = AnalysisIntent(
         assets=canonical_assets,
         operations=(
@@ -499,6 +504,12 @@ def compile_analysis_intent(
         ):
             raise IntentValidationError(
                 "LLM dual asset comparison requires an explicit formal analysis request"
+            )
+        if _contains_dual_asset_plan(intent.operations) and _extract_market_targets(
+            question.casefold()
+        ):
+            raise IntentValidationError(
+                "LLM dual asset comparison cannot override an explicit market target"
             )
         return validate_intent(intent)
     except (IntentValidationError, KeyError, TypeError, ValueError):
