@@ -45,6 +45,7 @@ def test_commercial_onchain_fixture_evidence_matches_contract(
     assert {fixture["evidence"]["source_state"] for fixture in fixtures} == {
         "ready",
         "credential-gated",
+        "archive-required",
         "blocked",
     }
     for fixture in fixtures:
@@ -63,11 +64,59 @@ def test_commercial_onchain_contract_rejects_missing_lineage_fields(
 ) -> None:
     evidence = json.loads(FIXTURE_PATH.read_text())[0]["evidence"]
 
-    for field in ("content_hash", "raw_payload_reference", "license_or_terms"):
+    for field in (
+        "content_hash",
+        "raw_payload_reference",
+        "license_or_terms",
+        "asset_scope",
+    ):
         invalid = dict(evidence)
         invalid.pop(field)
         with pytest.raises(ValidationError):
             evidence_contract_validator.validate(invalid)
+
+
+def test_commercial_onchain_contract_rejects_incomplete_https_source_url(
+    evidence_contract_validator: Draft202012Validator,
+) -> None:
+    evidence = json.loads(FIXTURE_PATH.read_text())[0]["evidence"]
+    invalid = dict(evidence)
+    invalid["source_url"] = "https://"
+
+    with pytest.raises(ValidationError):
+        evidence_contract_validator.validate(invalid)
+
+
+@pytest.mark.parametrize(
+    "source_state",
+    (
+        "credential-gated",
+        "archive-required",
+        "blocked",
+    ),
+)
+def test_commercial_onchain_contract_requires_state_reason_for_non_ready_sources(
+    evidence_contract_validator: Draft202012Validator,
+    source_state: str,
+) -> None:
+    evidence = json.loads(FIXTURE_PATH.read_text())[0]["evidence"]
+    invalid = dict(evidence)
+    invalid["source_state"] = source_state
+    invalid.pop("state_reason", None)
+
+    with pytest.raises(ValidationError):
+        evidence_contract_validator.validate(invalid)
+
+
+def test_commercial_onchain_contract_allows_ready_source_without_state_reason(
+    evidence_contract_validator: Draft202012Validator,
+) -> None:
+    evidence = json.loads(FIXTURE_PATH.read_text())[0]["evidence"]
+    valid = dict(evidence)
+    valid["source_state"] = "ready"
+    valid.pop("state_reason", None)
+
+    evidence_contract_validator.validate(valid)
 
 
 def test_commercial_onchain_contract_rejects_invalid_source_state(

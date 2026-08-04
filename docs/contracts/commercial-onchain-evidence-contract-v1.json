@@ -13,7 +13,8 @@
     "content_hash",
     "raw_payload_reference",
     "normalization_version",
-    "source_state"
+    "source_state",
+    "asset_scope"
   ],
   "properties": {
     "schema_version": {
@@ -25,7 +26,8 @@
     },
     "source_url": {
       "type": "string",
-      "pattern": "^https://"
+      "format": "uri",
+      "pattern": "^https://[^\\s/]+(?:/.*)?$"
     },
     "published_at": {
       "type": "string",
@@ -73,5 +75,28 @@
       ]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source_state": {
+            "enum": [
+              "credential-gated",
+              "archive-required",
+              "blocked"
+            ]
+          }
+        },
+        "required": [
+          "source_state"
+        ]
+      },
+      "then": {
+        "required": [
+          "state_reason"
+        ]
+      }
+    }
+  ],
   "additionalProperties": false
 }

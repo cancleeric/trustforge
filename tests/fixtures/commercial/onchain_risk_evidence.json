@@ -99,5 +99,29 @@
       "state_reason": "Live provider availability is not claimed by this fixture.",
       "asset_scope": "transaction"
     }
+  },
+  {
+    "name": "arkham_archive_required_state",
+    "payload": {
+      "provider": "arkham",
+      "source_state": "archive-required",
+      "reason": "fixture documents archive retrieval boundary only",
+      "archived_url": "https://webcache.example.test/arkham/demo-whale-001",
+      "sample": "synthetic-contract-fixture"
+    },
+    "evidence": {
+      "schema_version": "commercial-onchain-evidence-v1",
+      "provider": "Arkham fixture",
+      "source_url": "https://intel.arkhamintelligence.com/explorer/address/demo-whale-001",
+      "published_at": "2026-07-31T00:00:00Z",
+      "retrieved_at": "2026-08-04T00:00:00Z",
+      "license_or_terms": "Archive-required; live buyer display must show archive retrieval gap.",
+      "content_hash": "9d5c4c78ee6dd31455c5b865b7d70f9a4773fc099b0fa9b8fe763f8daf814692",
+      "raw_payload_reference": "tests/fixtures/commercial/onchain_risk_evidence.json#/4/payload",
+      "normalization_version": "onchain-risk-normalizer-v1",
+      "source_state": "archive-required",
+      "state_reason": "Historical source evidence requires archive retrieval before buyer display.",
+      "asset_scope": "wallet"
+    }
   }
 ]
