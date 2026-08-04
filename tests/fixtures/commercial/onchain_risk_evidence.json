@@ -1,0 +1,127 @@
+[
+  {
+    "name": "arkham_ready_wallet_sample",
+    "payload": {
+      "address": "demo-whale-001",
+      "chain": "ethereum",
+      "labels": [
+        "centralized-exchange"
+      ],
+      "risk_indicators": [
+        {
+          "kind": "large-inflow",
+          "severity": "medium",
+          "observed_at": "2026-07-31T12:00:00Z"
+        }
+      ],
+      "sample": "synthetic-contract-fixture"
+    },
+    "evidence": {
+      "schema_version": "commercial-onchain-evidence-v1",
+      "provider": "Arkham fixture",
+      "source_url": "https://intel.arkhamintelligence.com/explorer/address/demo-whale-001",
+      "published_at": "2026-07-31T12:00:00Z",
+      "retrieved_at": "2026-08-04T00:00:00Z",
+      "license_or_terms": "Fixture only; live use requires provider terms review.",
+      "content_hash": "69ecb2f151d79ad6b241ed481dee15c10d2297402496b2fae850225133621579",
+      "raw_payload_reference": "tests/fixtures/commercial/onchain_risk_evidence.json#/0/payload",
+      "normalization_version": "onchain-risk-normalizer-v1",
+      "source_state": "ready",
+      "asset_scope": "wallet"
+    }
+  },
+  {
+    "name": "whale_alert_ready_transaction_sample",
+    "payload": {
+      "transaction_hash": "demo-tx-001",
+      "asset": "BTC",
+      "amount_usd": 1250000,
+      "direction": "exchange-outflow",
+      "observed_at": "2026-07-31T12:02:00Z",
+      "sample": "synthetic-contract-fixture"
+    },
+    "evidence": {
+      "schema_version": "commercial-onchain-evidence-v1",
+      "provider": "Whale Alert fixture",
+      "source_url": "https://whale-alert.io/transaction/demo-tx-001",
+      "published_at": "2026-07-31T12:02:00Z",
+      "retrieved_at": "2026-08-04T00:00:00Z",
+      "license_or_terms": "Fixture only; live use requires provider terms review.",
+      "content_hash": "fdc3966665b5d4fbf59714a08fdbd180aea399b8ae647b8a692790ea18db0ed5",
+      "raw_payload_reference": "tests/fixtures/commercial/onchain_risk_evidence.json#/1/payload",
+      "normalization_version": "onchain-risk-normalizer-v1",
+      "source_state": "ready",
+      "asset_scope": "transaction"
+    }
+  },
+  {
+    "name": "arkham_credential_gated_state",
+    "payload": {
+      "provider": "arkham",
+      "source_state": "credential-gated",
+      "reason": "fixture documents credential boundary only",
+      "sample": "synthetic-contract-fixture"
+    },
+    "evidence": {
+      "schema_version": "commercial-onchain-evidence-v1",
+      "provider": "Arkham fixture",
+      "source_url": "https://intel.arkhamintelligence.com/",
+      "published_at": "2026-07-31T00:00:00Z",
+      "retrieved_at": "2026-08-04T00:00:00Z",
+      "license_or_terms": "Credential-gated; do not call live API until reviewed.",
+      "content_hash": "9307c14db587d7e6c5cf8c984fefa6f462f932bfb16d4d4380024c67bf84ae68",
+      "raw_payload_reference": "tests/fixtures/commercial/onchain_risk_evidence.json#/2/payload",
+      "normalization_version": "onchain-risk-normalizer-v1",
+      "source_state": "credential-gated",
+      "state_reason": "API credentials are not available in this fixture.",
+      "asset_scope": "entity"
+    }
+  },
+  {
+    "name": "whale_alert_blocked_state",
+    "payload": {
+      "provider": "whale-alert",
+      "source_state": "blocked",
+      "reason": "fixture documents unavailable live source only",
+      "sample": "synthetic-contract-fixture"
+    },
+    "evidence": {
+      "schema_version": "commercial-onchain-evidence-v1",
+      "provider": "Whale Alert fixture",
+      "source_url": "https://whale-alert.io/",
+      "published_at": "2026-07-31T00:00:00Z",
+      "retrieved_at": "2026-08-04T00:00:00Z",
+      "license_or_terms": "Blocked until provider terms, budget, and API availability are reviewed.",
+      "content_hash": "64b2960c9071eb2e331146cf2656761af232db3050923da6e01734664a98d44b",
+      "raw_payload_reference": "tests/fixtures/commercial/onchain_risk_evidence.json#/3/payload",
+      "normalization_version": "onchain-risk-normalizer-v1",
+      "source_state": "blocked",
+      "state_reason": "Live provider availability is not claimed by this fixture.",
+      "asset_scope": "transaction"
+    }
+  },
+  {
+    "name": "arkham_archive_required_state",
+    "payload": {
+      "provider": "arkham",
+      "source_state": "archive-required",
+      "reason": "fixture documents archive retrieval boundary only",
+      "archived_url": "https://webcache.example.test/arkham/demo-whale-001",
+      "sample": "synthetic-contract-fixture"
+    },
+    "evidence": {
+      "schema_version": "commercial-onchain-evidence-v1",
+      "provider": "Arkham fixture",
+      "source_url": "https://intel.arkhamintelligence.com/explorer/address/demo-whale-001",
+      "published_at": "2026-07-31T00:00:00Z",
+      "retrieved_at": "2026-08-04T00:00:00Z",
+      "license_or_terms": "Archive-required; live buyer display must show archive retrieval gap.",
+      "content_hash": "9d5c4c78ee6dd31455c5b865b7d70f9a4773fc099b0fa9b8fe763f8daf814692",
+      "raw_payload_reference": "tests/fixtures/commercial/onchain_risk_evidence.json#/4/payload",
+      "normalization_version": "onchain-risk-normalizer-v1",
+      "source_state": "archive-required",
+      "state_reason": "Historical source evidence requires archive retrieval before buyer display.",
+      "asset_scope": "wallet"
+    }
+  }
+]

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trustforge.local/contracts/commercial-onchain-evidence/1.0.0",
+  "title": "TrustForge Commercial On-Chain Evidence Contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "provider",
+    "source_url",
+    "published_at",
+    "retrieved_at",
+    "license_or_terms",
+    "content_hash",
+    "raw_payload_reference",
+    "normalization_version",
+    "source_state",
+    "asset_scope"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commercial-onchain-evidence-v1"
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://[^\\s/]+(?:/.*)?$"
+    },
+    "published_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "retrieved_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "license_or_terms": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "raw_payload_reference": {
+      "type": "string",
+      "minLength": 1
+    },
+    "normalization_version": {
+      "type": "string",
+      "pattern": "^onchain-risk-normalizer-v[0-9]+$"
+    },
+    "source_state": {
+      "enum": [
+        "ready",
+        "credential-gated",
+        "archive-required",
+        "blocked"
+      ]
+    },
+    "state_reason": {
+      "type": "string"
+    },
+    "asset_scope": {
+      "enum": [
+        "token",
+        "wallet",
+        "transaction",
+        "entity"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source_state": {
+            "enum": [
+              "credential-gated",
+              "archive-required",
+              "blocked"
+            ]
+          }
+        },
+        "required": [
+          "source_state"
+        ]
+      },
+      "then": {
+        "required": [
+          "state_reason"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}
