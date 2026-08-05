@@ -116,6 +116,41 @@ describe('EvidenceTable', () => {
     expect(screen.queryByText('E0')).not.toBeInTheDocument()
   })
 
+  it('can restore grouped mode after sorting grouped evidence', () => {
+    render(<EvidenceTable evidence={evidence} evidenceGroups={groupedEvidence} />, { wrapper: Wrapper })
+    expect(screen.getByText('3 筆觀測')).toBeInTheDocument()
+    expect(screen.queryByText('E0')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '摘要' }))
+    expect(screen.queryByText('3 筆觀測')).not.toBeInTheDocument()
+    expect(screen.getByText('E0')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '清除排序並回到分組檢視' }))
+    expect(screen.getByText('3 筆觀測')).toBeInTheDocument()
+    expect(screen.getByLabelText('上升趨勢')).toBeInTheDocument()
+    expect(screen.queryByText('E0')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '摘要' }))
+    fireEvent.click(screen.getByRole('button', { name: /摘要/ }))
+    expect(screen.getByText('E0')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '清除排序並回到分組檢視' }))
+    expect(screen.getByText('3 筆觀測')).toBeInTheDocument()
+  })
+
+  it('keeps duplicate summaries stable when summary sort direction changes', () => {
+    const duplicateSummaryEvidence: Evidence[] = [
+      makeEvidence({ source: 'source-a', content_reference: '同摘要', trust: 0.7 }),
+      makeEvidence({ source: 'source-b', content_reference: '同摘要', trust: 0.8 }),
+      makeEvidence({ source: 'source-c', content_reference: '另一摘要', trust: 0.9 }),
+    ]
+    const { container } = render(<EvidenceTable evidence={duplicateSummaryEvidence} />, { wrapper: Wrapper })
+    fireEvent.click(screen.getByRole('button', { name: '摘要' }))
+    fireEvent.click(screen.getByRole('button', { name: /摘要/ }))
+
+    const rows = Array.from(container.querySelectorAll('tbody tr'))
+    expect(rows.map((row) => row.textContent?.match(/E\d/)?.[0])).toEqual(['E0', 'E1', 'E2'])
+  })
+
   it('sorts the flat table by trust without changing evidence identities', () => {
     const { container } = render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })
     fireEvent.click(screen.getByRole('button', { name: '信任分' }))

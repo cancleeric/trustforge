@@ -202,13 +202,20 @@ export default function EvidenceTable({
     if (sort === 'default') return a.idx - b.idx
     const direction = descending ? -1 : 1
     if (sort === 'source') return direction * a.ev.source.localeCompare(b.ev.source)
-    if (sort === 'summary') return direction * (compareDeterministicText(a.ev.content_reference, b.ev.content_reference) || a.idx - b.idx)
+    if (sort === 'summary') {
+      const summaryOrder = compareDeterministicText(a.ev.content_reference, b.ev.content_reference)
+      return summaryOrder === 0 ? a.idx - b.idx : direction * summaryOrder
+    }
     if (sort === 'trust') return direction * (a.ev.trust - b.ev.trust)
     return direction * (Date.parse(a.ev.fetched_at) - Date.parse(b.ev.fetched_at))
   }), [descending, evidence, sort])
   const chooseSort = (next: typeof sort) => {
     if (sort === next) setDescending((value) => !value)
     else { setSort(next); setDescending(next === 'trust' || next === 'time') }
+  }
+  const restoreGroupedView = () => {
+    setSort('default')
+    setDescending(true)
   }
   const sortLabel = (key: typeof sort) => sort === key ? (descending ? ' ▼' : ' ▲') : ''
 
@@ -221,7 +228,21 @@ export default function EvidenceTable({
             <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('source')}>來源{sortLabel('source')}</button></th>
             <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('summary')}>摘要{sortLabel('summary')}</button></th>
             <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('time')}>時間{sortLabel('time')}</button></th>
-            <th className="px-3 py-2 font-medium"><button type="button" onClick={() => chooseSort('trust')}>信任分{sortLabel('trust')}</button></th>
+            <th className="px-3 py-2 font-medium">
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => chooseSort('trust')}>信任分{sortLabel('trust')}</button>
+                {groups.length > 0 && sort !== 'default' && (
+                  <button
+                    type="button"
+                    onClick={restoreGroupedView}
+                    className="rounded border border-tf-border px-1.5 py-0.5 text-[0.68rem] text-tf-muted hover:text-tf-text"
+                    aria-label="清除排序並回到分組檢視"
+                  >
+                    回分組
+                  </button>
+                )}
+              </div>
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-tf-border">
