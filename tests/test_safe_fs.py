@@ -1,9 +1,11 @@
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
 from trustforge.safe_fs import (
+    SafePathError,
     pinned_directory,
     read_regular_file,
     write_atomic,
@@ -159,6 +161,31 @@ def test_nested_directory_creation_fsyncs_each_new_parent_entry(tmp_path, monkey
         assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
     assert nested.is_dir()
     assert directory_fsyncs >= 3
+
+
+def test_pinned_directory_allows_platform_tmp_symlink_root():
+    linked_tmp = Path("/tmp")
+    if not linked_tmp.is_symlink():
+        pytest.skip("/tmp is not a platform symlink on this host")
+
+    nested = linked_tmp / "trustforge-safe-fs-platform-tmp"
+    with pinned_directory(nested, create=True) as descriptor:
+        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+    assert nested.resolve().is_dir()
+
+
+def test_pinned_directory_rejects_user_controlled_intermediate_symlink(tmp_path):
+    trusted = tmp_path / "trusted"
+    attacker = tmp_path / "attacker"
+    trusted.mkdir()
+    attacker.mkdir()
+    os.symlink(attacker, trusted / "link", target_is_directory=True)
+
+    with pytest.raises(SafePathError):
+        with pinned_directory(trusted / "link" / "created", create=True):
+            pass
+
+    assert not (attacker / "created").exists()
 
 
 def test_nested_directory_creation_fsync_failure_propagates(tmp_path, monkeypatch):

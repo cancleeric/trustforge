@@ -18,10 +18,18 @@ def _directory_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
+def _canonicalize_platform_directory_alias(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    parts = absolute.parts
+    if len(parts) > 1 and parts[1] == "tmp" and Path("/tmp").is_symlink():
+        return Path(os.path.realpath("/tmp")).joinpath(*parts[2:])
+    return absolute
+
+
 @contextlib.contextmanager
 def pinned_directory(path: Path, *, create: bool = False) -> Iterator[int]:
     """Pin every directory component and yield the final directory descriptor."""
-    absolute = Path(os.path.abspath(path))
+    absolute = _canonicalize_platform_directory_alias(path)
     descriptor = os.open(absolute.anchor, _directory_flags())
     try:
         for component in absolute.parts[1:]:
