@@ -45,6 +45,12 @@ def _manual_approval_preserved(result: Mapping[str, Any]) -> bool:
     )
 
 
+def _with_manual_approval_defaults(result: dict[str, Any]) -> dict[str, Any]:
+    result.setdefault("automatic_apply", False)
+    result.setdefault("requires_human_approval", True)
+    return result
+
+
 def _summary_result(
     *,
     provider: Provider,
@@ -102,15 +108,17 @@ def _submit_one(
                 )
             )
     except Exception as exc:
-        return _summary_result(
+        result = _summary_result(
             provider=provider,
             coin=coin,
             status="error",
             reason=f"{type(exc).__name__}: {exc}",
         )
+        return _with_manual_approval_defaults(result)
 
     raw.setdefault("coin", coin)
     raw["provider"] = provider
+    raw = _with_manual_approval_defaults(raw)
     status = str(raw.get("status", "error"))
     if status not in TERMINAL_STATUSES:
         raw["status"] = "error"

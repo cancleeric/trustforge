@@ -62,6 +62,28 @@ def test_sagemaker_dry_run_batches_all_requested_coins(tmp_path):
     assert report["summary"] == {"dry_run": 2}
 
 
+def test_missing_governance_flags_are_normalized_to_safe_defaults(tmp_path):
+    def submitter(coin, **kwargs):
+        return {
+            "coin": coin,
+            "status": "dry_run",
+        }
+
+    report = run_training_trigger(
+        provider="modelhub",
+        coins=("BTC",),
+        training_dir=tmp_path / "training",
+        out_dir=tmp_path / "out",
+        dry_run=True,
+        modelhub_submitter=submitter,
+    )
+
+    assert report["status"] == "ok"
+    assert report["summary"] == {"dry_run": 1}
+    assert report["results"][0]["automatic_apply"] is False
+    assert report["results"][0]["requires_human_approval"] is True
+
+
 def test_modelhub_live_requires_req_no_per_coin(monkeypatch, tmp_path):
     calls = []
 
