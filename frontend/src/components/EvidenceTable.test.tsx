@@ -129,11 +129,9 @@ describe('EvidenceTable', () => {
   it.each([
     ['來源', ['E3', 'E0', 'E1', 'E2']],
     ['時間', ['E0', 'E1', 'E2', 'E3']],
-    // #1352: content_reference mixes CJK ('算力') and Latin ('ETF'). The
-    // component sorts with localeCompare, whose CJK-vs-Latin ordering follows
-    // the ICU collation of the running Node version (ICU 77 / Node 25 places
-    // 算 before E). Pin the order this environment actually produces; a future
-    // round should make the sort reproducible across ICU versions.
+    // #1441: content_reference mixes CJK ('算力') and Latin ('ETF'). The
+    // component uses an explicit comparator instead of localeCompare so the
+    // order is stable across Node/ICU versions.
     ['摘要', ['E0', 'E1', 'E2', 'E3']],
   ])('sorts by %s deterministically', (column, expected) => {
     const { container } = render(<EvidenceTable evidence={evidence} />, { wrapper: Wrapper })

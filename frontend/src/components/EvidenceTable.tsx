@@ -12,6 +12,22 @@ function trustColor(trust: number): string {
   return 'var(--color-tf-good)'
 }
 
+function compareDeterministicText(a: string, b: string): number {
+  const aCjkFirst = /^[\u3400-\u9fff]/u.test(a) ? 0 : 1
+  const bCjkFirst = /^[\u3400-\u9fff]/u.test(b) ? 0 : 1
+  if (aCjkFirst !== bCjkFirst) return aCjkFirst - bCjkFirst
+
+  const max = Math.max(a.length, b.length)
+  for (let i = 0; i < max; i += 1) {
+    const aCode = a.codePointAt(i)
+    const bCode = b.codePointAt(i)
+    if (aCode === undefined) return -1
+    if (bCode === undefined) return 1
+    if (aCode !== bCode) return aCode - bCode
+  }
+  return 0
+}
+
 function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
   const isLow = ev.trust < 0.3
   const href = safeHref(ev.source_url)
@@ -186,7 +202,7 @@ export default function EvidenceTable({
     if (sort === 'default') return a.idx - b.idx
     const direction = descending ? -1 : 1
     if (sort === 'source') return direction * a.ev.source.localeCompare(b.ev.source)
-    if (sort === 'summary') return direction * a.ev.content_reference.localeCompare(b.ev.content_reference)
+    if (sort === 'summary') return direction * (compareDeterministicText(a.ev.content_reference, b.ev.content_reference) || a.idx - b.idx)
     if (sort === 'trust') return direction * (a.ev.trust - b.ev.trust)
     return direction * (Date.parse(a.ev.fetched_at) - Date.parse(b.ev.fetched_at))
   }), [descending, evidence, sort])
