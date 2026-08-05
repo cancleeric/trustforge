@@ -4,6 +4,8 @@
 > Scope: `agent-platform-kit`, `trustforge-core`, and `trustforge-app` boundary
 > Baseline: TrustForge v0.17.2 (`27fe4c5`)
 > Status: architecture direction recommended; extraction not implemented
+> Update: 2026-08-05 adds Gyre as the second real consumer and maps the
+> extraction target to Brain Cloud shared runtime gates.
 
 ## Executive summary
 
@@ -29,6 +31,11 @@ about both the reusable agent platform and the TrustForge trust domain.
 AgentCore should be treated as a replaceable agent runtime adapter. Bedrock is
 primarily a model provider. Neither belongs in the TrustForge deterministic
 core.
+
+Gyre is now the second real consumer candidate. That changes the extraction
+standard: reusable pieces may move toward Brain Cloud only when they serve both
+TrustForge market research and Gyre social/operations workflows without carrying
+either product's domain semantics.
 
 ## Why this is feasible
 
@@ -107,6 +114,41 @@ Own product assembly and TrustForge-specific workflows:
 - TrustForge module catalog and operator views
 - Adapter selection and dependency construction
 
+### `brain-cloud-runtime`
+
+`agent-platform-kit` may become the Brain Cloud shared runtime after the
+in-monorepo gates pass. Brain Cloud may own generic mechanisms:
+
+- Session, plan, task, and memory-loop orchestration.
+- MCP client wiring, tool registry, and skill registry mechanics.
+- Provider and runtime resolution, including null/fake contract adapters.
+- Approval, policy, budget, security, and idempotency gate interfaces.
+- Execution event, telemetry, upgrade review, and rollback primitives.
+- Compatibility fixtures that prove both TrustForge and Gyre can consume the
+  same generic contracts.
+
+Brain Cloud must not own TrustForge market semantics, Gyre social/operations
+semantics, product prompts, product report schemas, product source connectors,
+or production deployment authority.
+
+## Second-consumer contract proof
+
+The extraction proof is no longer "TrustForge can be split into neat
+directories." The proof is that TrustForge and Gyre can both consume the same
+runtime mechanism while keeping their product contracts separate.
+
+| Contract area | Generic Brain Cloud contract | TrustForge-owned contract | Gyre-owned contract |
+|---|---|---|---|
+| Runtime entry | session/task execution envelope, cancellation, retry, trace IDs | market analysis request, run scope, Trust Kernel handoff | social/operations workflow request and campaign/task state |
+| Provider wiring | `resolve_providers()` style registry and selected provider identity | allowed model/provider policy for TrustForge runs | allowed model/provider policy for Gyre workflows |
+| Tools and skills | registry lifecycle, capability metadata, approval hooks | crypto/market connectors and TrustForge skill families | Gyre channel, content, social, and operations tools |
+| Events and telemetry | event schema, severity, timing, correlation IDs | Hermes/TrustForge projector and report lineage | Gyre projector and operations dashboard lineage |
+| Policy and rollback | generic stage/approve/activate/rollback state machine | TrustForge module catalog and release authority | Gyre module catalog and release authority |
+
+The gate passes only when the shared contract can be exercised by both
+consumers without adding `coin`, `stance`, `Evidence`, `Report`, Hermes node
+names, Gyre campaign semantics, or social-platform terms to the generic layer.
+
 ## Important boundary corrections
 
 ### Separate agent runtime from model provider
@@ -160,11 +202,37 @@ Several apparently generic components still carry product semantics:
 | Execution log | Implemented | Hermes-specific |
 | Independent packages | Not present | Planned |
 
+## Incremental migration rule
+
+Extraction must stay incremental and reversible:
+
+1. Enforce import boundaries before moving files.
+2. Route production provider/runtime wiring through the resolver before adding
+   more adapters.
+3. Remove domain-shaped fields from generic contracts before publishing any
+   Brain Cloud package.
+4. Make `run_kernel()` the only TrustForge application-to-core entry before
+   moving trust-domain computation.
+5. Add Gyre as a contract-proof consumer before claiming a shared runtime API.
+6. Keep versioning, compatibility, and rollback plans in place before any
+   package move or repository split.
+
+This maps to the open phase issues:
+
+| Phase | Issue | Gate | Acceptance focus |
+|---|---|---|---|
+| Import boundaries | #1445 | G1 | `kit`, `core`, and `app` imports are enforced |
+| Provider/runtime wiring | #1446 | G2 | production wiring uses provider/runtime resolution |
+| Domain decoupling | #1447 | G3 | generic contracts have no TrustForge or Gyre domain leakage |
+| `run_kernel()` exclusive entry | #1442 | G4 | TrustForge deterministic core is accessed through golden-vector gates |
+| Brain Cloud adapter + Gyre proof | #1443 | G4+G5 | shared runtime contract is consumed by TrustForge and Gyre |
+| Versioning + rollback | #1444 | G6 | compatibility, release, and rollback rules are documented |
+
 ## Main risks
 
-1. **Premature abstraction.** TrustForge is currently the only confirmed
-   consumer. Publishing too early could freeze domain-specific APIs as generic
-   contracts.
+1. **Premature abstraction.** Gyre is a second consumer candidate, but it is not
+   a license to publish early. Publishing before the Gyre proof could still
+   freeze one product's APIs as generic contracts.
 2. **Directory-only separation.** Moving files without changing production
    imports would create three names but retain one coupled system.
 3. **Semantic leakage.** Coin, stance, Evidence, Hermes, and trust-policy terms
@@ -173,8 +241,8 @@ Several apparently generic components still carry product semantics:
    unless golden vectors compare old and new outputs exactly.
 5. **Operational regression.** Budget, security, idempotency, and rollback
    controls must remain fail-closed during migration.
-6. **Versioning overhead.** Splitting repositories before a second consumer
-   exists adds release coordination without proving reuse.
+6. **Versioning overhead.** Splitting repositories before the Gyre proof and
+   rollback gate pass adds release coordination without proving reuse.
 
 ## Feasibility decision
 
@@ -187,8 +255,8 @@ Proceed under these conditions:
 4. Preserve exact TrustForge outputs through golden and regression tests.
 5. Keep GitHub Actions production deployment disabled; deployment remains a
    separate, explicitly authorized release operation.
-6. Publish or move `agent-platform-kit` only after a second real project proves
-   the API.
+6. Publish or move `agent-platform-kit` only after Gyre proves the API as a
+   second real consumer and the compatibility/rollback gate passes.
 
 Estimated delivery size is **12-22 focused PRs** across provider/runtime,
 platform governance, kernel separation, and application composition.
