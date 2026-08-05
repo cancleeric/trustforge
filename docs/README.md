@@ -54,7 +54,7 @@ Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certificatio
 |------|------|
 | [architecture/architecture-overview.html](architecture/architecture-overview.html) | 人類閱讀版架構頁：系統總覽、Kernel 邊界、升級控制、跨專案 Agent Platform 抽取邊界，內嵌四張 SVG 圖 |
 | [architecture/ARCHITECTURE-OVERVIEW.md](architecture/ARCHITECTURE-OVERVIEW.md) | 架構圖技術註記與 PlantUML/SVG/PNG 來源索引 |
-| [architecture/AGENT-PLATFORM-EXTRACTION-FEASIBILITY-2026-07-22.md](architecture/AGENT-PLATFORM-EXTRACTION-FEASIBILITY-2026-07-22.md) | AgentCore／Bedrock 定位、三套件拆分可行性、現況耦合與風險評估 |
+| [architecture/AGENT-PLATFORM-EXTRACTION-FEASIBILITY-2026-07-22.md](architecture/AGENT-PLATFORM-EXTRACTION-FEASIBILITY-2026-07-22.md) | AgentCore／Bedrock 定位、三套件拆分可行性、Gyre 第二 consumer 與 Brain Cloud shared runtime gate、現況耦合與風險評估 |
 | [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md) | 三層管線與信任演算法設計 |
 | [architecture/AWS-ARCHITECTURE.md](architecture/AWS-ARCHITECTURE.md) | AWS 服務架構（決賽簡報用），含前後端分離對外拓樸 |
 | [architecture/BACKFILL-SYSTEM.md](architecture/BACKFILL-SYSTEM.md) | 歷史回填系統：5年 OHLCV 逐日 replay，三層啟停控制 |
