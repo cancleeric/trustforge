@@ -1,11 +1,14 @@
 import os
 import stat
+import shutil
+import uuid
 from pathlib import Path
 
 import pytest
 
 from trustforge.safe_fs import (
     SafePathError,
+    _canonicalize_platform_directory_alias,
     pinned_directory,
     read_regular_file,
     write_atomic,
@@ -163,15 +166,33 @@ def test_nested_directory_creation_fsyncs_each_new_parent_entry(tmp_path, monkey
     assert directory_fsyncs >= 3
 
 
+def test_platform_tmp_alias_canonicalization_is_deterministic(monkeypatch):
+    def fake_is_symlink(path: Path) -> bool:
+        return path == Path("/tmp")
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+    monkeypatch.setattr("trustforge.safe_fs.os.path.realpath", lambda path: "/private/tmp")
+
+    assert _canonicalize_platform_directory_alias(Path("/tmp/trustforge/out")) == Path(
+        "/private/tmp/trustforge/out"
+    )
+    assert _canonicalize_platform_directory_alias(Path("/var/tmp/trustforge")) == Path(
+        "/var/tmp/trustforge"
+    )
+
+
 def test_pinned_directory_allows_platform_tmp_symlink_root():
     linked_tmp = Path("/tmp")
     if not linked_tmp.is_symlink():
         pytest.skip("/tmp is not a platform symlink on this host")
 
-    nested = linked_tmp / "trustforge-safe-fs-platform-tmp"
-    with pinned_directory(nested, create=True) as descriptor:
-        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
-    assert nested.resolve().is_dir()
+    nested = linked_tmp / f"trustforge-safe-fs-platform-tmp-{uuid.uuid4().hex}"
+    try:
+        with pinned_directory(nested, create=True) as descriptor:
+            assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        assert nested.resolve().is_dir()
+    finally:
+        shutil.rmtree(nested, ignore_errors=True)
 
 
 def test_pinned_directory_rejects_user_controlled_intermediate_symlink(tmp_path):
