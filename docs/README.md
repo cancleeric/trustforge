@@ -70,6 +70,7 @@ Counsel 核准，不代表 EU AI Act conformity、CE marking 或 EN certificatio
 
 | 文件 | 說明 |
 |------|------|
+| [plans/COMMERCIAL-MVP-ONCHAIN-RISK-SCOPE-2026-08-05.md](plans/COMMERCIAL-MVP-ONCHAIN-RISK-SCOPE-2026-08-05.md) | #1423 第一個商用 MVP 邊界：鏈上風險信任校準的輸入、輸出、非目標與 3 分鐘 buyer demo path |
 | [plans/PLAN-POST-COMPETITION-COMMERCIALIZATION-2026-08-04.md](plans/PLAN-POST-COMPETITION-COMMERCIALIZATION-2026-08-04.md) | 賽後商用化開發計劃：鏈上風控 MVP、trust-first 工程底座、POC 交付包與 ≤12h issue 拆解／相依性 |
 | [plans/WORLD-FIRST-MASTER-PLAN.md](plans/WORLD-FIRST-MASTER-PLAN.md) | **三軸+Axis D master 世界第一開發計劃（總綱，唯一權威，v3 2026-07-03 精簡權威版）**：最終標準宣言（多護城核心疊起來）+ A LIVE 現況表（grep/curl/pytest 逐項實證）+ B 三軸現況＋新 Axis D 多核心擴充 + C 誠實資料卡/gated 清單 + D 下一步連環疊核心序。仍有未執行項（商業級 UI 4 項狀態需覆核、Axis D #3/#4 等），持續更新中 |
 | [plans/DEV-PLAN.md](plans/DEV-PLAN.md) | 開發計劃：分階段 Backlog、必做 vs 加分、里程碑。**仍有未執行 backlog**：P0-4 HOYA BIT 企業數據連接器，等 7/13 工作坊取得 API 規格後才能接 |
