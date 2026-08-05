@@ -187,6 +187,8 @@ function EvidenceGroupRow({ group, evidence }: { group: EvidenceGroup; evidence:
   )
 }
 
+type EvidenceSort = 'default' | 'source' | 'summary' | 'trust' | 'time'
+
 export default function EvidenceTable({
   evidence,
   evidenceGroups,
@@ -194,8 +196,11 @@ export default function EvidenceTable({
   evidence: Evidence[]
   evidenceGroups?: EvidenceGroup[] | null
 }) {
-  const [sort, setSort] = useState<'default' | 'source' | 'summary' | 'trust' | 'time'>('default')
-  const [descending, setDescending] = useState(true)
+  const [sortState, setSortState] = useState<{ key: EvidenceSort; descending: boolean }>({
+    key: 'default',
+    descending: true,
+  })
+  const { key: sort, descending } = sortState
   const groups = getRenderGroups(evidenceGroups)
   const useGrouped = groups.length > 0 && sort === 'default'
   const sortedEvidence = useMemo(() => evidence.map((ev, idx) => ({ ev, idx })).sort((a, b) => {
@@ -209,15 +214,16 @@ export default function EvidenceTable({
     if (sort === 'trust') return direction * (a.ev.trust - b.ev.trust)
     return direction * (Date.parse(a.ev.fetched_at) - Date.parse(b.ev.fetched_at))
   }), [descending, evidence, sort])
-  const chooseSort = (next: typeof sort) => {
-    if (sort === next) setDescending((value) => !value)
-    else { setSort(next); setDescending(next === 'trust' || next === 'time') }
+  const chooseSort = (next: EvidenceSort) => {
+    setSortState((current) => {
+      if (current.key === next) return { ...current, descending: !current.descending }
+      return { key: next, descending: next === 'trust' || next === 'time' }
+    })
   }
   const restoreGroupedView = () => {
-    setSort('default')
-    setDescending(true)
+    setSortState({ key: 'default', descending: true })
   }
-  const sortLabel = (key: typeof sort) => sort === key ? (descending ? ' ▼' : ' ▲') : ''
+  const sortLabel = (key: EvidenceSort) => sort === key ? (descending ? ' ▼' : ' ▲') : ''
 
   return (
     <div className="overflow-x-auto hermes-clip rounded-lg border border-tf-border bg-tf-card">
