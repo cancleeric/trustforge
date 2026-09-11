@@ -2,6 +2,8 @@
 
 ## 目前專案快照
 
+![執行畫面](assets/README-execution-screenshot.jpg)
+
 以下數字以本 README 更新時的 `origin/main`（`a3f0824b`）為準；重新計算方式寫在表格中，避免把舊版快照誤當成目前狀態。
 
 | 項目 | 狀態 |
