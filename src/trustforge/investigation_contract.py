@@ -40,9 +40,11 @@ _MAX_DEPTH = 24
 _MAX_NODES = 50_000
 _MAX_INTEGER = 2**63 - 1
 _MAX_COLLECTION_ITEMS = 10_000
-# Review P2 (#1458 round 15): worst-case bytes per node under the contract
-# limits (max-size text plus small JSON/structural overhead).
-_MAX_PAYLOAD_BYTES = _MAX_NODES * (_MAX_TEXT + 64)
+# Review P2 (#1458 round 15): bound the raw payload before parsing.
+# Round 16: worst-case JSON escaping expands one input byte (a control
+# character) to a six-byte \uXXXX escape, so the budget must cover the
+# escaped encoding or valid reports could fail their own round-trip.
+_MAX_PAYLOAD_BYTES = _MAX_NODES * (_MAX_TEXT * 6 + 64)
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")

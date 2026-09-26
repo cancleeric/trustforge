@@ -835,9 +835,31 @@ def test_from_canonical_bytes_rejects_malformed_and_oversized_payloads() -> None
     deep = b"[" * 200_000 + b"1" + b"]" * 200_000
     with pytest.raises(InvestigationContractError, match="not valid JSON"):
         InvestigationReport.from_canonical_bytes(deep)
-    oversized = b" " * (50_000 * (4096 + 64) + 1)
+    oversized = b" " * (50_000 * (4096 * 6 + 64) + 1)
     with pytest.raises(InvestigationContractError, match="size limit"):
         InvestigationReport.from_canonical_bytes(oversized)
+
+
+def test_max_size_report_round_trips_through_canonical_bytes() -> None:
+    # Review P2 (#1458 round 16): the payload budget must cover the worst-case
+    # JSON-escaped encoding (\uXXXX = six bytes per control-character byte),
+    # so a report whose strings expand at that rate still round-trips.
+    from trustforge import investigation_contract as ic
+
+    tags = tuple("\x01" * 4096 for _ in range(200))
+    request = InvestigationRequest(
+        request_id="inv-req-rt", subject="s", question="q",
+        created_at="2026-09-26T00:00:00Z", scope_tags=tags,
+    )
+    report = InvestigationReport(
+        report_id="report-rt", investigation_id="inv-t-001", request=request,
+        claims=(_claim("c-1"),), generated_at="2026-09-26T00:00:00Z",
+    )
+    payload = report.to_canonical_bytes()
+    assert len(payload) > 200 * 4096  # escaping really expanded the strings
+    assert len(payload) <= ic._MAX_PAYLOAD_BYTES
+    restored = InvestigationReport.from_canonical_bytes(payload)
+    assert restored == report
 
 
 # ---------------------------------------------------------------------------
