@@ -87,6 +87,29 @@ def test_missing_governance_flags_are_normalized_to_safe_defaults(tmp_path):
     assert report["results"][0]["requires_human_approval"] is True
 
 
+def test_modelhub_real_dry_run_path_preserves_governance_defaults(tmp_path):
+    # Post-#1468 the trigger never imports web-owned submitters implicitly;
+    # the regression requirement from #1452 is the REAL ModelHub dry-run path
+    # (not a mock), injected explicitly here.
+    from trustforge.modelhub_submit import submit_calibrator_training
+
+    report = run_training_trigger(
+        provider="modelhub",
+        coins=("BTC",),
+        out_dir=tmp_path / "modelhub",
+        dry_run=True,
+        modelhub_submitter=submit_calibrator_training,
+    )
+
+    assert report["status"] == "ok"
+    assert report["summary"] == {"dry_run": 1}
+    result = report["results"][0]
+    assert result["coin"] == "BTC"
+    assert result["status"] == "dry_run"
+    assert result["automatic_apply"] is False
+    assert result["requires_human_approval"] is True
+
+
 def test_modelhub_live_requires_req_no_per_coin(monkeypatch, tmp_path):
     calls = []
 
