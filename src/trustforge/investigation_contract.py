@@ -736,6 +736,9 @@ class InvestigationReport:
                         f"claim {linked.claim_id!r}"
                     )
         self._enforce_verification_gate()
+        # Review P2 (#1458 round 12): enforce the global canonical node budget
+        # at construction so an accepted report can always be serialized.
+        _validate_canonical_json(self.to_dict(), seen=set(), nodes=[0], depth=0)
 
     @staticmethod
     def _index_by_id(items: tuple[Any, ...], id_field: str) -> dict[str, Any]:

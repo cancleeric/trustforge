@@ -752,6 +752,20 @@ def test_canonical_json_rejects_cycles_and_nonfinite() -> None:
         canonical_json_bytes({"custom": object()})
 
 
+def test_global_node_budget_enforced_at_construction() -> None:
+    # Review P2 (#1458 round 12): _MAX_NODES is a whole-document budget, so a
+    # report whose individual collections all stay under _MAX_COLLECTION_ITEMS
+    # can still exceed it (9,000 claims x 11 canonical nodes each).  The
+    # failure must surface at construction, not at serialization time.
+    with pytest.raises(InvestigationContractError, match="structural limits"):
+        InvestigationReport(
+            report_id="report-nodes", investigation_id="inv-t-001",
+            request=_request(),
+            claims=tuple(_claim(f"c-{i}") for i in range(9_000)),
+            generated_at="2026-09-26T00:00:00Z",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Summary rollup
 # ---------------------------------------------------------------------------
