@@ -40,6 +40,9 @@ _MAX_DEPTH = 24
 _MAX_NODES = 50_000
 _MAX_INTEGER = 2**63 - 1
 _MAX_COLLECTION_ITEMS = 10_000
+# Review P2 (#1458 round 15): worst-case bytes per node under the contract
+# limits (max-size text plus small JSON/structural overhead).
+_MAX_PAYLOAD_BYTES = _MAX_NODES * (_MAX_TEXT + 64)
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -843,9 +846,15 @@ class InvestigationReport:
 
     @classmethod
     def from_canonical_bytes(cls, payload: bytes) -> "InvestigationReport":
+        # Review P2 (#1458 round 15): bound the raw payload before parsing so
+        # a valid-by-construction document can never be larger, and surface
+        # parse failures (including deeply nested input that trips the JSON
+        # decoder's recursion limit) as contract errors, not raw exceptions.
+        if len(payload) > _MAX_PAYLOAD_BYTES:
+            raise InvestigationContractError("report payload exceeds size limit")
         try:
             data = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise InvestigationContractError(f"report payload is not valid JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise InvestigationContractError("report payload must be a JSON object")
@@ -900,18 +909,28 @@ class InvestigationSummary:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "InvestigationSummary":
         _strict_fields(cls.__name__, data, set(cls.FIELDS))
+        # Review P2 (#1458 round 15): counts must be genuine non-negative
+        # integers whose sum equals total_claims — int() truncation would
+        # silently rewrite fabricated summaries into plausible ones.
         try:
-            return cls(
-                report_id=data["report_id"],
-                total_claims=int(data["total_claims"]),
-                verified=int(data["verified"]),
-                corroborated=int(data["corroborated"]),
-                refuted=int(data["refuted"]),
-                unresolved=int(data["unresolved"]),
-                unverified=int(data["unverified"]),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise InvestigationContractError(f"InvestigationSummary invalid: {exc}") from exc
+            counts: dict[str, int] = {}
+            for key in ("total_claims", "verified", "corroborated", "refuted", "unresolved", "unverified"):
+                value = data[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise InvestigationContractError(
+                        f"InvestigationSummary field {key} must be a non-negative integer, got {value!r}"
+                    )
+                counts[key] = value
+            if (
+                counts["verified"] + counts["corroborated"] + counts["refuted"]
+                + counts["unresolved"] + counts["unverified"] != counts["total_claims"]
+            ):
+                raise InvestigationContractError(
+                    "InvestigationSummary status counts must sum to total_claims"
+                )
+            return cls(report_id=data["report_id"], **counts)
+        except KeyError as exc:
+            raise InvestigationContractError(f"InvestigationSummary missing field {exc}") from exc
 
 
 __all__ = [

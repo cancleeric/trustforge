@@ -803,6 +803,43 @@ def test_summary_counts_by_status() -> None:
     assert InvestigationSummary.from_dict(summary.to_dict()) == summary
 
 
+def test_summary_from_dict_rejects_fabricated_counts() -> None:
+    # Review P2 (#1458 round 15): counts must be real non-negative integers
+    # summing to total_claims — truncation or negative values must not be
+    # silently rewritten into a plausible summary.
+    base = {
+        "report_id": "r", "total_claims": 2, "verified": 1, "corroborated": 0,
+        "refuted": 0, "unresolved": 1, "unverified": 0,
+    }
+    assert InvestigationSummary.from_dict(base).total_claims == 2
+    bad_truncation = {**base, "verified": 1.9}
+    with pytest.raises(InvestigationContractError, match="non-negative integer"):
+        InvestigationSummary.from_dict(bad_truncation)
+    bad_negative = {**base, "verified": -1, "unresolved": 2}
+    with pytest.raises(InvestigationContractError, match="non-negative integer"):
+        InvestigationSummary.from_dict(bad_negative)
+    bad_bool = {**base, "verified": True, "unresolved": 1}
+    with pytest.raises(InvestigationContractError, match="non-negative integer"):
+        InvestigationSummary.from_dict(bad_bool)
+    bad_sum = {**base, "total_claims": 3}
+    with pytest.raises(InvestigationContractError, match="sum to total_claims"):
+        InvestigationSummary.from_dict(bad_sum)
+
+
+def test_from_canonical_bytes_rejects_malformed_and_oversized_payloads() -> None:
+    # Review P2 (#1458 round 15): parse failures surface as contract errors,
+    # and raw payloads larger than any valid-by-construction document are
+    # rejected before the JSON decoder runs.
+    with pytest.raises(InvestigationContractError, match="not valid JSON"):
+        InvestigationReport.from_canonical_bytes(b"not json at all")
+    deep = b"[" * 200_000 + b"1" + b"]" * 200_000
+    with pytest.raises(InvestigationContractError, match="not valid JSON"):
+        InvestigationReport.from_canonical_bytes(deep)
+    oversized = b" " * (50_000 * (4096 + 64) + 1)
+    with pytest.raises(InvestigationContractError, match="size limit"):
+        InvestigationReport.from_canonical_bytes(oversized)
+
+
 # ---------------------------------------------------------------------------
 # Offline boundary: module and tests load no network stack
 # ---------------------------------------------------------------------------
