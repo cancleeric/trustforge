@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from .sagemaker_submit import COIN_POOL
+from .training_backend_contracts import TRAINING_COIN_POOL as COIN_POOL
 
 Provider = Literal["modelhub", "sagemaker"]
 Submitter = Callable[..., Mapping[str, Any]]
@@ -192,10 +192,37 @@ def run_training_trigger(
                 "summary": {"blocked": len(normalized)},
             }
 
-    if modelhub_submitter is None:
-        from .modelhub_submit import submit_calibrator_training as modelhub_submitter
-    if sagemaker_submitter is None:
-        from .sagemaker_submit import submit_sagemaker_training as sagemaker_submitter
+    # Fail closed when no submitter is wired: this module must not import the
+    # web-owned submitter implementations itself (package-DAG boundary, #1468).
+    # The composition root (scripts/run_training_trigger.py) injects them.
+    if (provider == "modelhub" and modelhub_submitter is None) or (
+        provider == "sagemaker" and sagemaker_submitter is None
+    ):
+        missing = provider
+        return {
+            "schema_version": 1,
+            "provider": provider,
+            "generated_at": _utc_now(),
+            "dry_run": dry_run,
+            "enabled": False,
+            "status": "no_action",
+            "reason": (
+                f"no {missing} submitter configured; "
+                "composition root must inject the training submitter"
+            ),
+            "automatic_apply": False,
+            "requires_human_approval": True,
+            "results": [
+                _summary_result(
+                    provider=provider,
+                    coin=coin,
+                    status="blocked",
+                    reason=f"no {missing} submitter configured",
+                )
+                for coin in normalized
+            ],
+            "summary": {"blocked": len(normalized)},
+        }
 
     resolved_out_dir = out_dir or Path(f"out/{provider}-scheduled-proposals")
     results = [
@@ -260,7 +287,12 @@ def exit_code(report: Mapping[str, Any]) -> int:
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    modelhub_submitter: Submitter | None = None,
+    sagemaker_submitter: Submitter | None = None,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -274,6 +306,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             enable_live=args.enable_live,
             req_no_map=req_no_map,
+            modelhub_submitter=modelhub_submitter,
+            sagemaker_submitter=sagemaker_submitter,
         )
     except ValueError as exc:
         report = {

@@ -24,13 +24,15 @@ from .execlog import ExecutionLog
 from .modelhub_training import load_flat_training_rows, build_flat_training_package
 from .sagemaker_client import SageMakerBackend
 from .training_backend import TrainingBackendConfigError
+from .training_backend_contracts import TRAINING_COIN_POOL
 
 
 # 最小 ECE 改善門檻（與 modelhub_submit 一致）
 _MIN_ECE_IMPROVEMENT = 0.02
 
-# 五幣池
-COIN_POOL = ("BTC", "ETH", "SOL", "BNB", "XRP")
+# 五幣池；canonical 定義在 platform contracts（#1468），此處僅 re-export
+# 以保留既有 import 端點（cli.py 等）。
+COIN_POOL = TRAINING_COIN_POOL
 
 
 def _summary(status: str, coin: str, **values: Any) -> dict[str, Any]:

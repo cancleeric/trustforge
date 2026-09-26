@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from trustforge.training_trigger import (
     exit_code,
+    main,
     parse_req_no_map,
     run_training_trigger,
 )
@@ -155,3 +158,66 @@ def test_parse_req_no_map_validates_coin_and_shape():
 )
 def test_exit_code(status, code):
     assert exit_code({"status": status}) == code
+
+
+def test_missing_submitter_fails_closed_without_importing_web_modules(tmp_path):
+    """#1468: agent-layer trigger must not fall back to importing web-owned
+    submitter modules; without an injected submitter every coin is blocked."""
+    report = run_training_trigger(
+        provider="sagemaker",
+        coins=("BTC", "ETH"),
+        training_dir=tmp_path / "training",
+        out_dir=tmp_path / "out",
+        dry_run=True,
+    )
+
+    assert report["status"] == "no_action"
+    assert report["enabled"] is False
+    assert report["summary"] == {"blocked": 2}
+    assert all(
+        result["status"] == "blocked"
+        and "no sagemaker submitter configured" in result["reason"]
+        for result in report["results"]
+    )
+    assert report["automatic_apply"] is False
+    assert report["requires_human_approval"] is True
+
+
+def test_missing_modelhub_submitter_fails_closed(tmp_path):
+    report = run_training_trigger(
+        provider="modelhub",
+        coins=("BTC",),
+        training_dir=tmp_path / "training",
+        out_dir=tmp_path / "out",
+        dry_run=True,
+    )
+
+    assert report["status"] == "no_action"
+    assert report["summary"] == {"blocked": 1}
+    assert "no modelhub submitter configured" in report["reason"]
+
+
+def test_main_threads_composition_root_submitters(tmp_path, capsys):
+    """The CLI entrypoint must forward submitters injected by the composition
+    root (scripts/run_training_trigger.py) so cron behavior is unchanged."""
+    calls = []
+
+    def submitter(coin, **kwargs):
+        calls.append((coin, kwargs))
+        return {
+            "coin": coin,
+            "status": "dry_run",
+            "automatic_apply": False,
+            "requires_human_approval": True,
+        }
+
+    code = main(
+        ["--provider", "sagemaker", "--coin", "BTC", "--training-dir", str(tmp_path)],
+        sagemaker_submitter=submitter,
+    )
+
+    assert code == 0
+    assert [coin for coin, _ in calls] == ["BTC"]
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "ok"
+    assert report["summary"] == {"dry_run": 1}
