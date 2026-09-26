@@ -88,11 +88,17 @@ def test_missing_governance_flags_are_normalized_to_safe_defaults(tmp_path):
 
 
 def test_modelhub_real_dry_run_path_preserves_governance_defaults(tmp_path):
+    # Post-#1468 the trigger never imports web-owned submitters implicitly;
+    # the regression requirement from #1452 is the REAL ModelHub dry-run path
+    # (not a mock), injected explicitly here.
+    from trustforge.modelhub_submit import submit_calibrator_training
+
     report = run_training_trigger(
         provider="modelhub",
         coins=("BTC",),
         out_dir=tmp_path / "modelhub",
         dry_run=True,
+        modelhub_submitter=submit_calibrator_training,
     )
 
     assert report["status"] == "ok"
