@@ -689,14 +689,15 @@ class InvestigationReport:
         # — such a claim must be reported as unresolved instead.  Runs after
         # the E2-specific checks so their narrower diagnostics win.
         if contradiction_edges:
-            linked_evidence = {e.evidence_id: e for e in self.evidences}
+            # Review P1 (#1458 round 13): contradiction checks cover every
+            # evidence item the claim owns — omitting an item from
+            # evidence_ids must not hide a known contradiction.
             for claim in self.claims:
                 if claim.status not in {"corroborated", "verified", "refuted"}:
                     continue
                 cited: list[str] = []
-                for eid in claim.evidence_ids:
-                    evidence_item = linked_evidence.get(eid)
-                    if evidence_item is not None:
+                for evidence_item in self.evidences:
+                    if evidence_item.claim_id == claim.claim_id:
                         cited.extend(evidence_item.snapshot_ids)
                 cited_roots = [_find(sid) for sid in cited]
                 for index, left_root in enumerate(cited_roots):

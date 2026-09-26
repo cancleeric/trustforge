@@ -681,6 +681,26 @@ def test_settled_claim_rejected_when_evidence_contradicts_itself() -> None:
         )
 
 
+def test_unlinked_contradicting_evidence_blocks_settled_claim() -> None:
+    # Review P1 (#1458 round 13): a contradicting evidence item owned by the
+    # claim but omitted from evidence_ids must not be hidden — the claim
+    # cannot serialize as a settled conclusion.
+    snap_p = _snapshot("snap-p", "src-p", kind="primary")
+    snap_c = _snapshot("snap-c", "src-c")
+    ev_high = _evidence("ev-hi", "c-1", "E3", snapshot_ids=("snap-p",))
+    ev_low = _evidence("ev-lo", "c-1", "E1", snapshot_ids=("snap-c",))
+    rel = SourceRelation(
+        relation_id="rel-ct", from_snapshot="snap-c", to_snapshot="snap-p",
+        relation="contradicts",
+    )
+    claim = _claim("c-1", status="verified", evidence_ids=("ev-hi",))
+    with pytest.raises(InvestigationContractError, match="contradictory evidence"):
+        _report(
+            claims=(claim,), evidences=(ev_high, ev_low),
+            snapshots=(snap_p, snap_c), relations=(rel,),
+        )
+
+
 def test_id_sequences_reject_bare_strings() -> None:
     # Review P2 round 10: snapshot_ids/evidence_ids must be sequences, not
     # strings that tuple() would split into per-character ids.
