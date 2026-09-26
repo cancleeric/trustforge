@@ -692,21 +692,22 @@ class InvestigationReport:
             # Review P1 (#1458 round 13): contradiction checks cover every
             # evidence item the claim owns — omitting an item from
             # evidence_ids must not hide a known contradiction.
+            # Review P2 (#1458 round 14): index the cited source groups and
+            # test them against the forbidden pairs in O(cited + pairs), not
+            # a quadratic all-pairs scan over every cited snapshot.
             for claim in self.claims:
                 if claim.status not in {"corroborated", "verified", "refuted"}:
                     continue
-                cited: list[str] = []
+                cited_groups: set[str] = set()
                 for evidence_item in self.evidences:
                     if evidence_item.claim_id == claim.claim_id:
-                        cited.extend(evidence_item.snapshot_ids)
-                cited_roots = [_find(sid) for sid in cited]
-                for index, left_root in enumerate(cited_roots):
-                    for right_root in cited_roots[index + 1:]:
-                        if frozenset((left_root, right_root)) in forbidden_group_pairs:
-                            raise InvestigationContractError(
-                                f"claim {claim.claim_id} status {claim.status!r} rests on "
-                                "contradictory evidence; mark it unresolved instead"
-                            )
+                        cited_groups.update(_find(sid) for sid in evidence_item.snapshot_ids)
+                for pair in forbidden_group_pairs:
+                    if pair <= cited_groups:
+                        raise InvestigationContractError(
+                            f"claim {claim.claim_id} status {claim.status!r} rests on "
+                            "contradictory evidence; mark it unresolved instead"
+                        )
         # Review P2 (#1458 round 2): a report may only contain claims from its
         # own investigation — foreign conclusions must not leak across reports.
         for claim in self.claims:
