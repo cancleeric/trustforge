@@ -343,6 +343,66 @@ def test_relation_endpoints_must_resolve() -> None:
         _report(snapshots=(snap,), relations=(rel,))
 
 
+def test_e2_rejects_snapshots_related_as_same_group() -> None:
+    # Review P1 round 2: declared same_source_group/same_entity relations
+    # override an E2 evidence's independence declaration.
+    snaps = (_snapshot("snap-1", "src-1"), _snapshot("snap-2", "src-2"))
+    ev = _evidence(
+        "ev-e2", "c-1", "E2",
+        snapshot_ids=("snap-1", "snap-2"), independence="independent",
+    )
+    claim = _claim("c-1", status="corroborated", evidence_ids=("ev-e2",))
+    for relation, independence in [
+        ("same_source_group", "unknown"),
+        ("corroborates", "same_entity"),
+    ]:
+        rel = SourceRelation(
+            relation_id="rel-g", from_snapshot="snap-1", to_snapshot="snap-2",
+            relation=relation, independence=independence,
+        )
+        with pytest.raises(InvestigationContractError, match="same source group"):
+            _report(claims=(claim,), evidences=(ev,), snapshots=snaps, relations=(rel,))
+
+
+def test_claim_from_other_investigation_rejected() -> None:
+    foreign = Claim(
+        claim_id="c-foreign", investigation_id="inv-other",
+        text="foreign conclusion", status="unverified", evidence_ids=(),
+    )
+    with pytest.raises(InvestigationContractError, match="belongs to investigation"):
+        _report(claims=(foreign,))
+
+
+def test_oversized_excerpt_rejected_at_construction() -> None:
+    with pytest.raises(InvestigationContractError, match="excerpt"):
+        SourceSnapshot(
+            snapshot_id="snap-x", source_id="src-x",
+            uri="https://fixture.invalid/x",
+            captured_at="2026-09-26T00:00:00Z",
+            content_hash=_H, excerpt="x" * 5000,
+        )
+
+
+def test_oversized_notes_rejected_at_construction() -> None:
+    snap = _snapshot("snap-1", "src-1")
+    with pytest.raises(InvestigationContractError, match="note"):
+        _evidence("ev-1", "c-1", "E1", snapshot_ids=("snap-1",), note="n" * 5000)
+    with pytest.raises(InvestigationContractError, match="note"):
+        SourceRelation(
+            relation_id="rel-n", from_snapshot="snap-1", to_snapshot="snap-1",
+            relation="corroborates", note="n" * 5000,
+        )
+
+
+def test_reproduced_from_must_be_sha256_when_present() -> None:
+    snap = _snapshot("snap-1", "src-1")
+    with pytest.raises(InvestigationContractError, match="reproduced_from"):
+        _evidence(
+            "ev-e4", "c-1", "E4",
+            snapshot_ids=("snap-1",), reproduced_from="not-a-digest",
+        )
+
+
 def test_evidence_cannot_reference_unknown_snapshot() -> None:
     ev = _evidence("ev-1", "c-1", "E1", snapshot_ids=("snap-missing",))
     claim = _claim("c-1", evidence_ids=("ev-1",))

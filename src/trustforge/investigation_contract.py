@@ -175,6 +175,11 @@ def _require_str(name: str, value: Any) -> str:
     return value
 
 
+def _check_note(name: str, value: Any) -> None:
+    if not isinstance(value, str) or len(value.encode()) > _MAX_TEXT:
+        raise InvestigationContractError(f"{name} must be a string <= {_MAX_TEXT} bytes")
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -247,6 +252,12 @@ class SourceSnapshot:
                 f"content_hash must match sha256:<64 hex>, got {self.content_hash!r}"
             )
         _check_choice("kind", self.kind, SNAPSHOT_KINDS)
+        # Review P2 (#1458): cap free-text fields at construction so no
+        # report can exist that fails its promised canonical serialization.
+        if not isinstance(self.excerpt, str) or len(self.excerpt.encode()) > _MAX_TEXT:
+            raise InvestigationContractError(
+                f"excerpt must be a string <= {_MAX_TEXT} bytes"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -289,6 +300,7 @@ class SourceRelation:
         _check_id("to_snapshot", self.to_snapshot)
         _check_choice("relation", self.relation, SOURCE_RELATIONS)
         _check_choice("independence", self.independence, SOURCE_INDEPENDENCE)
+        _check_note("note", self.note)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -347,6 +359,14 @@ class Evidence:
         _check_id(_CLAIM_ID, self.claim_id)
         _check_choice("level", self.level, EVIDENCE_LEVELS)
         _check_choice("independence", self.independence, SOURCE_INDEPENDENCE)
+        _check_note("note", self.note)
+        if not isinstance(self.reproduced_from, str) or (
+            self.reproduced_from and not _SHA256.match(self.reproduced_from)
+        ):
+            raise InvestigationContractError(
+                f"reproduced_from must be empty or match sha256:<64 hex>, "
+                f"got {self.reproduced_from!r}"
+            )
         object.__setattr__(self, "snapshot_ids", tuple(str(s) for s in self.snapshot_ids))
         if self.level in {"E1", "E3", "E4"} and not self.snapshot_ids:
             raise InvestigationContractError(
@@ -498,6 +518,14 @@ class InvestigationReport:
         self._index_by_id(self.snapshots, _SNAPSHOT_ID)
         self._index_by_id(self.relations, _RELATION_ID)
         snapshot_map = {s.snapshot_id: s for s in self.snapshots}
+        # Review P1 (#1458 round 2): declared source relations override the
+        # independence claim on E2 evidence — snapshots linked by
+        # same_source_group or same_entity are known to be one origin and
+        # cannot corroborate each other as independent sources.
+        grouped_pairs: set[frozenset[str]] = set()
+        for relation in self.relations:
+            if relation.relation == "same_source_group" or relation.independence == "same_entity":
+                grouped_pairs.add(frozenset((relation.from_snapshot, relation.to_snapshot)))
         for ev in self.evidences:
             ev.validate_against_snapshots(snapshot_map)
             if ev.level == "E2":
@@ -514,6 +542,20 @@ class InvestigationReport:
                         f"E2 evidence {ev.evidence_id} spans a single source; "
                         "corroboration requires independent sources"
                     )
+                for pair in grouped_pairs:
+                    if pair <= set(ev.snapshot_ids):
+                        raise InvestigationContractError(
+                            f"E2 evidence {ev.evidence_id} declares independence over "
+                            f"snapshots related as same source group: {sorted(pair)}"
+                        )
+        # Review P2 (#1458 round 2): a report may only contain claims from its
+        # own investigation — foreign conclusions must not leak across reports.
+        for claim in self.claims:
+            if claim.investigation_id != self.investigation_id:
+                raise InvestigationContractError(
+                    f"claim {claim.claim_id} belongs to investigation "
+                    f"{claim.investigation_id!r}, not {self.investigation_id!r}"
+                )
         claim_map = {c.claim_id: c for c in self.claims}
         for ev in self.evidences:
             if ev.claim_id not in claim_map:
