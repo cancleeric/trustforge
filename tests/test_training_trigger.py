@@ -221,3 +221,41 @@ def test_main_threads_composition_root_submitters(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "ok"
     assert report["summary"] == {"dry_run": 1}
+
+
+def test_composition_root_script_smoke(tmp_path):
+    """codex-review MINOR: execute scripts/run_training_trigger.py itself so a
+    broken import/wiring in the composition root is caught, not just main()."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    # The shared dev venv is an editable install of the MAIN checkout; force
+    # the worktree src so this smoke test exercises the code under test.
+    env["PYTHONPATH"] = str(root / "src")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "run_training_trigger.py"),
+            "--provider", "sagemaker",
+            "--coin", "BTC",
+            "--training-dir", str(tmp_path / "no-such-data"),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Missing training data yields an error result (exit 1) — what matters is
+    # the script wired the real submitter and emitted a governed JSON report.
+    assert result.returncode == 1, result.stderr
+    report = json.loads(result.stdout)
+    assert report["provider"] == "sagemaker"
+    assert report["automatic_apply"] is False
+    assert report["requires_human_approval"] is True
+    assert report["results"][0]["coin"] == "BTC"
