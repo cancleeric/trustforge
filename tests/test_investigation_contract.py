@@ -403,6 +403,47 @@ def test_reproduced_from_must_be_sha256_when_present() -> None:
         )
 
 
+def _e2_case() -> tuple[Claim, Evidence, tuple[SourceSnapshot, ...]]:
+    snaps = (_snapshot("snap-1", "src-1"), _snapshot("snap-2", "src-2"))
+    ev = _evidence(
+        "ev-e2", "c-1", "E2",
+        snapshot_ids=("snap-1", "snap-2"), independence="independent",
+    )
+    claim = _claim("c-1", status="corroborated", evidence_ids=("ev-e2",))
+    return claim, ev, snaps
+
+
+def test_e2_rejects_contradicting_snapshots() -> None:
+    # Review P1 round 3: a declared contradicts edge between cited snapshots
+    # disqualifies them as mutual corroboration.
+    claim, ev, snaps = _e2_case()
+    rel = SourceRelation(
+        relation_id="rel-ct", from_snapshot="snap-1", to_snapshot="snap-2",
+        relation="contradicts",
+    )
+    with pytest.raises(InvestigationContractError, match="contradicting"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=snaps, relations=(rel,))
+
+
+def test_e2_rejects_indirect_same_group_snapshots() -> None:
+    # Review P2 round 3: same-origin components are transitive — A~B and B~C
+    # means A and C share one origin even without a direct edge.
+    claim, ev, snaps = _e2_case()
+    rels = (
+        SourceRelation(
+            relation_id="rel-g1", from_snapshot="snap-1", to_snapshot="snap-mid",
+            relation="same_source_group",
+        ),
+        SourceRelation(
+            relation_id="rel-g2", from_snapshot="snap-mid", to_snapshot="snap-2",
+            relation="same_source_group",
+        ),
+    )
+    all_snaps = snaps + (_snapshot("snap-mid", "src-mid"),)
+    with pytest.raises(InvestigationContractError, match="same source group"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=all_snaps, relations=rels)
+
+
 def test_evidence_cannot_reference_unknown_snapshot() -> None:
     ev = _evidence("ev-1", "c-1", "E1", snapshot_ids=("snap-missing",))
     claim = _claim("c-1", evidence_ids=("ev-1",))

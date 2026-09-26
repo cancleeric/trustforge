@@ -518,14 +518,38 @@ class InvestigationReport:
         self._index_by_id(self.snapshots, _SNAPSHOT_ID)
         self._index_by_id(self.relations, _RELATION_ID)
         snapshot_map = {s.snapshot_id: s for s in self.snapshots}
-        # Review P1 (#1458 round 2): declared source relations override the
-        # independence claim on E2 evidence — snapshots linked by
-        # same_source_group or same_entity are known to be one origin and
-        # cannot corroborate each other as independent sources.
-        grouped_pairs: set[frozenset[str]] = set()
+        # Relation endpoints must resolve before component analysis below.
+        for relation in self.relations:
+            for endpoint in (relation.from_snapshot, relation.to_snapshot):
+                if endpoint not in snapshot_map:
+                    raise InvestigationContractError(
+                        f"relation {relation.relation_id} references unknown "
+                        f"snapshot {endpoint!r}"
+                    )
+        # Review P1/P2 (#1458 round 3): connected components over declared
+        # same-origin edges (same_source_group relation or same_entity
+        # independence) plus explicit contradiction pairs. E2 corroboration
+        # must span components and must never cite a contradicting pair.
+        same_group_edges: list[tuple[str, str]] = []
+        contradiction_pairs: set[frozenset[str]] = set()
         for relation in self.relations:
             if relation.relation == "same_source_group" or relation.independence == "same_entity":
-                grouped_pairs.add(frozenset((relation.from_snapshot, relation.to_snapshot)))
+                same_group_edges.append((relation.from_snapshot, relation.to_snapshot))
+            if relation.relation == "contradicts":
+                contradiction_pairs.add(frozenset((relation.from_snapshot, relation.to_snapshot)))
+        parent = {sid: sid for sid in snapshot_map}
+
+        def _find(node: str) -> str:
+            root = node
+            while parent[root] != root:
+                root = parent[root]
+            while parent[node] != root:
+                parent[node], node = root, parent[node]
+            return root
+
+        for left, right in same_group_edges:
+            parent[_find(left)] = _find(right)
+
         for ev in self.evidences:
             ev.validate_against_snapshots(snapshot_map)
             if ev.level == "E2":
@@ -542,12 +566,19 @@ class InvestigationReport:
                         f"E2 evidence {ev.evidence_id} spans a single source; "
                         "corroboration requires independent sources"
                     )
-                for pair in grouped_pairs:
-                    if pair <= set(ev.snapshot_ids):
-                        raise InvestigationContractError(
-                            f"E2 evidence {ev.evidence_id} declares independence over "
-                            f"snapshots related as same source group: {sorted(pair)}"
-                        )
+                roots = [_find(sid) for sid in ev.snapshot_ids]
+                if len(set(roots)) != len(roots):
+                    raise InvestigationContractError(
+                        f"E2 evidence {ev.evidence_id} declares independence over "
+                        f"snapshots in the same source group: {list(ev.snapshot_ids)}"
+                    )
+                for index, left in enumerate(ev.snapshot_ids):
+                    for right in ev.snapshot_ids[index + 1:]:
+                        if frozenset((left, right)) in contradiction_pairs:
+                            raise InvestigationContractError(
+                                f"E2 evidence {ev.evidence_id} cites contradicting "
+                                f"snapshots {left!r} and {right!r} as corroboration"
+                            )
         # Review P2 (#1458 round 2): a report may only contain claims from its
         # own investigation — foreign conclusions must not leak across reports.
         for claim in self.claims:
@@ -576,14 +607,6 @@ class InvestigationReport:
                     raise InvestigationContractError(
                         f"claim {claim.claim_id} links evidence {eid} owned by "
                         f"claim {linked.claim_id!r}"
-                    )
-        # P2 fix (#1458 review): both endpoints of every relation must resolve.
-        for relation in self.relations:
-            for endpoint in (relation.from_snapshot, relation.to_snapshot):
-                if endpoint not in snapshot_map:
-                    raise InvestigationContractError(
-                        f"relation {relation.relation_id} references unknown "
-                        f"snapshot {endpoint!r}"
                     )
         self._enforce_verification_gate()
 
