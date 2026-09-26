@@ -696,9 +696,14 @@ class InvestigationReport:
                         f"E2 evidence {ev.evidence_id} declares independence over "
                         f"snapshots in the same source group: {list(ev.snapshot_ids)}"
                     )
-                for index, left in enumerate(roots):
-                    for right in roots[index + 1:]:
-                        if frozenset((left, right)) in forbidden_group_pairs:
+                # Review P2 (#1458 round 18): with no contradiction relations
+                # there is nothing to check; otherwise test the evidence's
+                # source groups against the forbidden pairs instead of
+                # scanning every snapshot pair (O(pairs), not O(n^2)).
+                if forbidden_group_pairs:
+                    root_set = set(roots)
+                    for pair in forbidden_group_pairs:
+                        if pair <= root_set:
                             raise InvestigationContractError(
                                 f"E2 evidence {ev.evidence_id} cites snapshots from "
                                 f"contradicting source groups {list(ev.snapshot_ids)}"
