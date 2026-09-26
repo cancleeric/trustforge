@@ -661,6 +661,26 @@ def test_e4_requires_documented_reproduction_method() -> None:
     assert report.evidences[0].level == "E4"
 
 
+def test_settled_claim_rejected_when_evidence_contradicts_itself() -> None:
+    # Review P1 round 9: high-level evidence does not settle a claim when
+    # other linked evidence comes from a contradicting snapshot — the honest
+    # status is unresolved.
+    snap_p = _snapshot("snap-p", "src-p", kind="primary")
+    snap_c = _snapshot("snap-c", "src-c")
+    ev_high = _evidence("ev-hi", "c-1", "E3", snapshot_ids=("snap-p",))
+    ev_low = _evidence("ev-lo", "c-1", "E1", snapshot_ids=("snap-c",))
+    rel = SourceRelation(
+        relation_id="rel-ct", from_snapshot="snap-c", to_snapshot="snap-p",
+        relation="contradicts",
+    )
+    claim = _claim("c-1", status="verified", evidence_ids=("ev-hi", "ev-lo"))
+    with pytest.raises(InvestigationContractError, match="contradictory evidence"):
+        _report(
+            claims=(claim,), evidences=(ev_high, ev_low),
+            snapshots=(snap_p, snap_c), relations=(rel,),
+        )
+
+
 def test_canonical_json_rejects_cycles_and_nonfinite() -> None:
     cyclic: dict[str, object] = {}
     cyclic["self"] = cyclic

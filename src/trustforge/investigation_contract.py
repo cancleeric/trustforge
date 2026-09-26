@@ -633,6 +633,27 @@ class InvestigationReport:
         forbidden_group_pairs = {
             frozenset((_find(left), _find(right))) for left, right in contradiction_edges
         }
+        # Review P1 (#1458 round 9): a settled conclusion (corroborated /
+        # verified / refuted) cannot rest on internally contradictory evidence
+        # — such a claim must be reported as unresolved instead.
+        if contradiction_edges:
+            linked_evidence = {e.evidence_id: e for e in self.evidences}
+            for claim in self.claims:
+                if claim.status not in {"corroborated", "verified", "refuted"}:
+                    continue
+                cited: list[str] = []
+                for eid in claim.evidence_ids:
+                    evidence_item = linked_evidence.get(eid)
+                    if evidence_item is not None:
+                        cited.extend(evidence_item.snapshot_ids)
+                cited_roots = [_find(sid) for sid in cited]
+                for index, left_root in enumerate(cited_roots):
+                    for right_root in cited_roots[index + 1:]:
+                        if frozenset((left_root, right_root)) in forbidden_group_pairs:
+                            raise InvestigationContractError(
+                                f"claim {claim.claim_id} status {claim.status!r} rests on "
+                                "contradictory evidence; mark it unresolved instead"
+                            )
 
         for ev in self.evidences:
             ev.validate_against_snapshots(snapshot_map)
