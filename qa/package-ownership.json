@@ -114,6 +114,7 @@
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/runtime_control.py"},
     {"owner": "platform", "priority": 85, "glob": "src/trustforge/training_backend.py"},
     {"owner": "platform", "priority": 90, "glob": "src/trustforge/training_backend_contracts.py"},
+    {"owner": "platform", "priority": 90, "glob": "src/trustforge/investigation*.py"},
 
     {"owner": "connectors", "priority": 70, "glob": "src/trustforge/ingestion/**/*.py"},
     {"owner": "connectors", "priority": 70, "glob": "src/trustforge/*connector*.py"},
@@ -179,6 +180,7 @@
     {"owner": "platform", "priority": 55, "glob": "tests/test_*ledger*.py"},
     {"owner": "platform", "priority": 55, "glob": "tests/test_*idempotency*.py"},
     {"owner": "platform", "priority": 55, "glob": "tests/test_*policy*.py"},
+    {"owner": "platform", "priority": 55, "glob": "tests/test_investigation*.py"},
 
     {"owner": "connectors", "priority": 60, "glob": "tests/test_*connector*.py"},
     {"owner": "connectors", "priority": 60, "glob": "tests/test_bedrock*.py"},
