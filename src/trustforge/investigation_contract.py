@@ -455,14 +455,14 @@ class Claim:
         object.__setattr__(self, "evidence_ids", tuple(str(e) for e in self.evidence_ids))
 
     def to_dict(self) -> dict[str, Any]:
-        # Review P2 (#1458 round 4): a standalone claim has no report context,
-        # so it can never prove a verified conclusion — refuse to emit one
-        # without linked evidence ids.  (Evidence-level thresholds are still
-        # enforced report-wide by InvestigationReport.)
-        if self.status in {"corroborated", "verified"} and not self.evidence_ids:
+        # Review P2 (#1458 round 4/6): a standalone claim has no report
+        # context, so it can never prove a settled conclusion — refuse to
+        # emit one without linked evidence ids.  (Evidence-level thresholds
+        # are still enforced report-wide by InvestigationReport.)
+        if self.status in {"corroborated", "verified", "refuted"} and not self.evidence_ids:
             raise InvestigationContractError(
                 f"claim {self.claim_id} status {self.status!r} has no linked evidence "
-                "and cannot be serialized as a verified conclusion"
+                "and cannot be serialized as a settled conclusion"
             )
         data = asdict(self)
         data["evidence_ids"] = list(self.evidence_ids)
@@ -505,6 +505,7 @@ class InvestigationReport:
     evidences: tuple[Evidence, ...] = ()
     snapshots: tuple[SourceSnapshot, ...] = ()
     relations: tuple[SourceRelation, ...] = ()
+    artifact_digests: tuple[str, ...] = ()
     generated_at: str = "1970-01-01T00:00:00Z"
 
     FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -516,6 +517,7 @@ class InvestigationReport:
             "evidences",
             "snapshots",
             "relations",
+            "artifact_digests",
             "generated_at",
         }
     )
@@ -524,8 +526,24 @@ class InvestigationReport:
         _check_id(_REPORT_ID, self.report_id)
         _check_id("investigation_id", self.investigation_id)
         _check_iso("generated_at", self.generated_at)
-        for name in ("claims", "evidences", "snapshots", "relations"):
+        for name in ("claims", "evidences", "snapshots", "relations", "artifact_digests"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        for digest in self.artifact_digests:
+            if not isinstance(digest, str) or not _SHA256.match(digest):
+                raise InvestigationContractError(
+                    f"artifact_digests entries must match sha256:<64 hex>, got {digest!r}"
+                )
+        if len(set(self.artifact_digests)) != len(self.artifact_digests):
+            raise InvestigationContractError("artifact_digests contains duplicates")
+        # Review P2 (#1458 round 6): an E4 reproduction digest must resolve to
+        # an artifact actually bundled with the report — a bare digest string
+        # does not establish independent reproduction.
+        for ev in self.evidences:
+            if ev.level == "E4" and ev.reproduced_from not in self.artifact_digests:
+                raise InvestigationContractError(
+                    f"E4 evidence {ev.evidence_id} reproduction digest "
+                    f"{ev.reproduced_from!r} is not in the report artifact set"
+                )
         # Structural integrity: ids unique, references resolvable.
         self._index_by_id(self.claims, _CLAIM_ID)
         self._index_by_id(self.evidences, _EVIDENCE_ID)
@@ -663,12 +681,15 @@ class InvestigationReport:
         return max(levels, key=lambda level: level_rank[level])
 
     def _enforce_verification_gate(self) -> None:
-        """No-evidence claims must never serialize as verified conclusions.
+        """No-evidence claims must never serialize as settled conclusions.
 
         ``corroborated`` requires evidence of level E2 or above (independent
         multi-source agreement); ``verified`` is strictly stronger and
         requires E3 (primary-source confirmation) or E4 (independent
-        reproduction) — single-source E0/E1 can never back either status.
+        reproduction); ``refuted`` is also a conclusion and requires at least
+        one linked sourced evidence item (E1 or above) — single-source E0/E1
+        can never back corroborated/verified, and no evidence at all can
+        never back any settled status.
         """
         for claim in self.claims:
             if claim.status == "corroborated":
@@ -685,6 +706,13 @@ class InvestigationReport:
                         f"claim {claim.claim_id} status 'verified' requires evidence "
                         f"of level E3 or E4, got {max_level!r}"
                     )
+            elif claim.status == "refuted":
+                max_level = self._max_evidence_level(claim)
+                if max_level is None or max_level == "E0":
+                    raise InvestigationContractError(
+                        f"claim {claim.claim_id} status 'refuted' requires sourced "
+                        f"evidence of level E1 or above, got {max_level!r}"
+                    )
 
     def to_dict(self) -> dict[str, Any]:
         self._enforce_verification_gate()
@@ -696,6 +724,7 @@ class InvestigationReport:
             "evidences": [e.to_dict() for e in self.evidences],
             "snapshots": [s.to_dict() for s in self.snapshots],
             "relations": [r.to_dict() for r in self.relations],
+            "artifact_digests": list(self.artifact_digests),
             "generated_at": self.generated_at,
         }
 
@@ -714,6 +743,7 @@ class InvestigationReport:
                 evidences=tuple(Evidence.from_dict(e) for e in data.get("evidences", ())),
                 snapshots=tuple(SourceSnapshot.from_dict(s) for s in data.get("snapshots", ())),
                 relations=tuple(SourceRelation.from_dict(r) for r in data.get("relations", ())),
+                artifact_digests=tuple(data.get("artifact_digests", ())),
                 generated_at=data.get("generated_at", "1970-01-01T00:00:00Z"),
             )
         except KeyError as exc:

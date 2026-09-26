@@ -183,6 +183,10 @@ def test_claim_statuses_round_trip() -> None:
             evidences = (
                 _evidence(f"ev-ver-{status}", f"c-{status}", "E3", snapshot_ids=("snap-p",)),
             )
+        elif status == "refuted":
+            evidences = (
+                _evidence(f"ev-ref-{status}", f"c-{status}", "E1", snapshot_ids=("snap-1",)),
+            )
         claim = _claim(
             f"c-{status}", status=status,
             evidence_ids=tuple(ev.evidence_id for ev in evidences),
@@ -248,8 +252,46 @@ def test_e4_accepts_valid_reproduction_digest() -> None:
     snap = _snapshot("snap-1", "src-1")
     ev = _evidence("ev-e4", "c-1", "E4", snapshot_ids=("snap-1",), reproduced_from=_H2)
     claim = _claim("c-1", status="verified", evidence_ids=("ev-e4",))
-    report = _report(claims=(claim,), evidences=(ev,), snapshots=(snap,))
+    report = InvestigationReport(
+        report_id="report-t-001", investigation_id="inv-t-001", request=_request(),
+        claims=(claim,), evidences=(ev,), snapshots=(snap,),
+        artifact_digests=(_H2,),
+        generated_at="2026-09-26T00:00:00Z",
+    )
     assert report.evidences[0].level == "E4"
+
+
+def test_e4_digest_must_resolve_to_report_artifact() -> None:
+    # Review P2 round 6: a syntactically valid digest that identifies no
+    # bundled artifact does not establish independent reproduction.
+    snap = _snapshot("snap-1", "src-1")
+    ev = _evidence("ev-e4", "c-1", "E4", snapshot_ids=("snap-1",), reproduced_from=_H2)
+    claim = _claim("c-1", status="verified", evidence_ids=("ev-e4",))
+    with pytest.raises(InvestigationContractError, match="artifact set"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=(snap,))
+    report = InvestigationReport(
+        report_id="report-t-001", investigation_id="inv-t-001", request=_request(),
+        claims=(claim,), evidences=(ev,), snapshots=(snap,),
+        artifact_digests=(_H2,),
+        generated_at="2026-09-26T00:00:00Z",
+    )
+    assert report.evidences[0].reproduced_from in report.artifact_digests
+
+
+def test_artifact_digests_must_be_unique_sha256() -> None:
+    claim = _claim("c-1")
+    with pytest.raises(InvestigationContractError, match="sha256"):
+        InvestigationReport(
+            report_id="report-t-001", investigation_id="inv-t-001", request=_request(),
+            claims=(claim,), artifact_digests=("not-a-digest",),
+            generated_at="2026-09-26T00:00:00Z",
+        )
+    with pytest.raises(InvestigationContractError, match="duplicates"):
+        InvestigationReport(
+            report_id="report-t-001", investigation_id="inv-t-001", request=_request(),
+            claims=(claim,), artifact_digests=(_H2, _H2),
+            generated_at="2026-09-26T00:00:00Z",
+        )
 
 
 def test_e2_constructible_with_two_independent_snapshots() -> None:
@@ -456,13 +498,26 @@ def test_e2_rejects_derived_snapshots() -> None:
         _report(claims=(claim,), evidences=(ev,), snapshots=snaps, relations=(rel,))
 
 
-@pytest.mark.parametrize("status", ["verified", "corroborated"])
-def test_standalone_claim_to_dict_refuses_verified_without_evidence(status: str) -> None:
-    # Review P2 round 4: standalone serialization must not emit a verified
+@pytest.mark.parametrize("status", ["verified", "corroborated", "refuted"])
+def test_standalone_claim_to_dict_refuses_settled_without_evidence(status: str) -> None:
+    # Review P2 rounds 4/6: standalone serialization must not emit a settled
     # conclusion for a claim with no linked evidence.
     claim = _claim("c-solo", status=status, evidence_ids=())
-    with pytest.raises(InvestigationContractError, match="verified conclusion"):
+    with pytest.raises(InvestigationContractError, match="settled conclusion"):
         claim.to_dict()
+
+
+def test_refuted_without_sourced_evidence_rejected() -> None:
+    # Review P1 round 6: refuted is also a conclusion — it needs sourced
+    # evidence (E1 or above), not merely an assertion.
+    claim = _claim("c-ref", status="refuted", evidence_ids=())
+    with pytest.raises(InvestigationContractError, match="status 'refuted'"):
+        _report(claims=(claim,))
+    snap = _snapshot("snap-1", "src-1")
+    ev = _evidence("ev-r", "c-ref", "E1", snapshot_ids=("snap-1",))
+    claim_ok = _claim("c-ref", status="refuted", evidence_ids=("ev-r",))
+    report = _report(claims=(claim_ok,), evidences=(ev,), snapshots=(snap,))
+    assert report.claims[0].status == "refuted"
 
 
 def test_e2_rejects_same_source_id_via_relation_chain() -> None:
