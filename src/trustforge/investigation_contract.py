@@ -190,6 +190,18 @@ def _check_note(name: str, value: Any) -> None:
         raise InvestigationContractError(f"{name} must be a string <= {_MAX_TEXT} bytes")
 
 
+def _check_id_sequence(name: str, value: Any) -> None:
+    # Review P2 (#1458 round 10): reject bare strings before tuple() conversion
+    # so "ab" cannot silently become per-character ids.
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise InvestigationContractError(
+            f"{name} must be a sequence of id strings, got {type(value).__name__}"
+        )
+    for entry in value:
+        if not isinstance(entry, str):
+            raise InvestigationContractError(f"{name} entries must be strings, got {entry!r}")
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -391,6 +403,7 @@ class Evidence:
                 f"reproduced_from must be empty or match sha256:<64 hex>, "
                 f"got {self.reproduced_from!r}"
             )
+        _check_id_sequence("snapshot_ids", self.snapshot_ids)
         object.__setattr__(self, "snapshot_ids", tuple(str(s) for s in self.snapshot_ids))
         if self.level == "E0" and self.snapshot_ids:
             raise InvestigationContractError(
@@ -486,6 +499,7 @@ class Claim:
         _check_id("investigation_id", self.investigation_id)
         _require_str("text", self.text)
         _check_choice("status", self.status, CLAIM_STATUSES)
+        _check_id_sequence("evidence_ids", self.evidence_ids)
         object.__setattr__(self, "evidence_ids", tuple(str(e) for e in self.evidence_ids))
 
     def to_dict(self) -> dict[str, Any]:
@@ -633,27 +647,6 @@ class InvestigationReport:
         forbidden_group_pairs = {
             frozenset((_find(left), _find(right))) for left, right in contradiction_edges
         }
-        # Review P1 (#1458 round 9): a settled conclusion (corroborated /
-        # verified / refuted) cannot rest on internally contradictory evidence
-        # — such a claim must be reported as unresolved instead.
-        if contradiction_edges:
-            linked_evidence = {e.evidence_id: e for e in self.evidences}
-            for claim in self.claims:
-                if claim.status not in {"corroborated", "verified", "refuted"}:
-                    continue
-                cited: list[str] = []
-                for eid in claim.evidence_ids:
-                    evidence_item = linked_evidence.get(eid)
-                    if evidence_item is not None:
-                        cited.extend(evidence_item.snapshot_ids)
-                cited_roots = [_find(sid) for sid in cited]
-                for index, left_root in enumerate(cited_roots):
-                    for right_root in cited_roots[index + 1:]:
-                        if frozenset((left_root, right_root)) in forbidden_group_pairs:
-                            raise InvestigationContractError(
-                                f"claim {claim.claim_id} status {claim.status!r} rests on "
-                                "contradictory evidence; mark it unresolved instead"
-                            )
 
         for ev in self.evidences:
             ev.validate_against_snapshots(snapshot_map)
@@ -677,6 +670,28 @@ class InvestigationReport:
                             raise InvestigationContractError(
                                 f"E2 evidence {ev.evidence_id} cites snapshots from "
                                 f"contradicting source groups {list(ev.snapshot_ids)}"
+                            )
+        # Review P1 (#1458 round 9): a settled conclusion (corroborated /
+        # verified / refuted) cannot rest on internally contradictory evidence
+        # — such a claim must be reported as unresolved instead.  Runs after
+        # the E2-specific checks so their narrower diagnostics win.
+        if contradiction_edges:
+            linked_evidence = {e.evidence_id: e for e in self.evidences}
+            for claim in self.claims:
+                if claim.status not in {"corroborated", "verified", "refuted"}:
+                    continue
+                cited: list[str] = []
+                for eid in claim.evidence_ids:
+                    evidence_item = linked_evidence.get(eid)
+                    if evidence_item is not None:
+                        cited.extend(evidence_item.snapshot_ids)
+                cited_roots = [_find(sid) for sid in cited]
+                for index, left_root in enumerate(cited_roots):
+                    for right_root in cited_roots[index + 1:]:
+                        if frozenset((left_root, right_root)) in forbidden_group_pairs:
+                            raise InvestigationContractError(
+                                f"claim {claim.claim_id} status {claim.status!r} rests on "
+                                "contradictory evidence; mark it unresolved instead"
                             )
         # Review P2 (#1458 round 2): a report may only contain claims from its
         # own investigation — foreign conclusions must not leak across reports.

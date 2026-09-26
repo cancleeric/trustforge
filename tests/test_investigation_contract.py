@@ -681,6 +681,15 @@ def test_settled_claim_rejected_when_evidence_contradicts_itself() -> None:
         )
 
 
+def test_id_sequences_reject_bare_strings() -> None:
+    # Review P2 round 10: snapshot_ids/evidence_ids must be sequences, not
+    # strings that tuple() would split into per-character ids.
+    with pytest.raises(InvestigationContractError, match="sequence of id strings"):
+        _evidence("ev-1", "c-1", "E1", snapshot_ids="ab")  # type: ignore[arg-type]
+    with pytest.raises(InvestigationContractError, match="sequence of id strings"):
+        _claim("c-1", evidence_ids="ev-1")  # type: ignore[arg-type]
+
+
 def test_canonical_json_rejects_cycles_and_nonfinite() -> None:
     cyclic: dict[str, object] = {}
     cyclic["self"] = cyclic
