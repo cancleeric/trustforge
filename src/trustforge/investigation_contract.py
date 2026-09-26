@@ -500,17 +500,48 @@ class InvestigationReport:
         snapshot_map = {s.snapshot_id: s for s in self.snapshots}
         for ev in self.evidences:
             ev.validate_against_snapshots(snapshot_map)
+            if ev.level == "E2":
+                # P1 fix (#1458 review): E2 corroboration must span distinct
+                # snapshots from distinct sources — a duplicated snapshot id or
+                # two captures of one source is single-source evidence.
+                if len(set(ev.snapshot_ids)) != len(ev.snapshot_ids):
+                    raise InvestigationContractError(
+                        f"E2 evidence {ev.evidence_id} lists duplicate snapshots"
+                    )
+                source_ids = [snapshot_map[sid].source_id for sid in ev.snapshot_ids]
+                if len(set(source_ids)) != len(source_ids):
+                    raise InvestigationContractError(
+                        f"E2 evidence {ev.evidence_id} spans a single source; "
+                        "corroboration requires independent sources"
+                    )
         claim_map = {c.claim_id: c for c in self.claims}
         for ev in self.evidences:
             if ev.claim_id not in claim_map:
                 raise InvestigationContractError(
                     f"evidence {ev.evidence_id} references unknown claim {ev.claim_id!r}"
                 )
+        evidence_map = self._index_by_id(self.evidences, _EVIDENCE_ID)
         for claim in self.claims:
             for eid in claim.evidence_ids:
-                if eid not in {e.evidence_id for e in self.evidences}:
+                linked = evidence_map.get(eid)
+                if linked is None:
                     raise InvestigationContractError(
                         f"claim {claim.claim_id} references unknown evidence {eid!r}"
+                    )
+                # P2 fix (#1458 review): the claim must own the evidence it
+                # links; another claim's evidence cannot support this status.
+                if linked.claim_id != claim.claim_id:
+                    raise InvestigationContractError(
+                        f"claim {claim.claim_id} links evidence {eid} owned by "
+                        f"claim {linked.claim_id!r}"
+                    )
+        # P2 fix (#1458 review): both endpoints of every relation must resolve.
+        for relation in self.relations:
+            for endpoint in (relation.from_snapshot, relation.to_snapshot):
+                if endpoint not in snapshot_map:
+                    raise InvestigationContractError(
+                        f"relation {relation.relation_id} references unknown "
+                        f"snapshot {endpoint!r}"
                     )
         self._enforce_verification_gate()
 
@@ -525,9 +556,16 @@ class InvestigationReport:
         return index
 
     def _max_evidence_level(self, claim: Claim) -> str | None:
+        """Highest level among evidence the claim actually links.
+
+        Only evidence referenced by the claim's own ``evidence_ids`` counts —
+        an E3 item that names the claim but is not linked to it must not
+        elevate the claim's status (P1 fix, #1458 review).
+        """
         level_rank = {level: rank for rank, level in enumerate(EVIDENCE_LEVELS)}
+        evidence_map = {e.evidence_id: e for e in self.evidences}
         levels = [
-            ev.level for ev in self.evidences if ev.claim_id == claim.claim_id
+            evidence_map[eid].level for eid in claim.evidence_ids if eid in evidence_map
         ]
         if not levels:
             return None

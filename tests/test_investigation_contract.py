@@ -171,19 +171,23 @@ def test_claim_statuses_round_trip() -> None:
         _snapshot("snap-p", "src-p", kind="primary"),
     )
     for status in CLAIM_STATUSES:
-        claim = _claim(f"c-{status}", status=status)
-        claims, evidences = (claim,), ()
+        claims, evidences = (), ()
         if status == "corroborated":
             evidences = (
                 _evidence(
-                    "ev-corrob", claim.claim_id, "E2",
+                    "ev-corrob", f"c-{status}", "E2",
                     snapshot_ids=("snap-1", "snap-2"), independence="independent",
                 ),
             )
         elif status == "verified":
             evidences = (
-                _evidence("ev-ver", claim.claim_id, "E3", snapshot_ids=("snap-p",)),
+                _evidence(f"ev-ver-{status}", f"c-{status}", "E3", snapshot_ids=("snap-p",)),
             )
+        claim = _claim(
+            f"c-{status}", status=status,
+            evidence_ids=tuple(ev.evidence_id for ev in evidences),
+        )
+        claims = (claim,)
         report = _report(claims=claims, evidences=evidences, snapshots=snaps)
         assert InvestigationReport.from_dict(report.to_dict()).claims[0].status == status
 
@@ -283,6 +287,60 @@ def test_claim_cannot_reference_unknown_evidence() -> None:
     claim = _claim("c-1", evidence_ids=("ev-missing",))
     with pytest.raises(InvestigationContractError, match="unknown evidence"):
         _report(claims=(claim,))
+
+
+def test_unlinked_e3_evidence_does_not_verify_claim() -> None:
+    # Review P1: an E3 evidence item that names the claim but is not linked
+    # from the claim's evidence_ids must not elevate its status.
+    snap = _snapshot("snap-p", "src-p", kind="primary")
+    ev = _evidence("ev-p", "c-1", "E3", snapshot_ids=("snap-p",))
+    claim = _claim("c-1", status="verified", evidence_ids=())
+    with pytest.raises(InvestigationContractError, match="E3 or E4"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=(snap,))
+
+
+def test_e2_rejects_duplicate_snapshot_ids() -> None:
+    snap = _snapshot("snap-1", "src-1")
+    ev = _evidence(
+        "ev-e2", "c-1", "E2",
+        snapshot_ids=("snap-1", "snap-1"), independence="independent",
+    )
+    claim = _claim("c-1", status="corroborated", evidence_ids=("ev-e2",))
+    with pytest.raises(InvestigationContractError, match="duplicate snapshots"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=(snap,))
+
+
+def test_e2_rejects_same_source_snapshots() -> None:
+    snaps = (
+        _snapshot("snap-1", "src-same"),
+        _snapshot("snap-2", "src-same"),
+    )
+    ev = _evidence(
+        "ev-e2", "c-1", "E2",
+        snapshot_ids=("snap-1", "snap-2"), independence="independent",
+    )
+    claim = _claim("c-1", status="corroborated", evidence_ids=("ev-e2",))
+    with pytest.raises(InvestigationContractError, match="single source"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=snaps)
+
+
+def test_claim_cannot_link_another_claims_evidence() -> None:
+    snap = _snapshot("snap-1", "src-1")
+    ev = _evidence("ev-b", "c-b", "E1", snapshot_ids=("snap-1",))
+    claim_a = _claim("c-a", status="unverified", evidence_ids=("ev-b",))
+    claim_b = _claim("c-b", evidence_ids=("ev-b",))
+    with pytest.raises(InvestigationContractError, match="owned by claim"):
+        _report(claims=(claim_a, claim_b), evidences=(ev,), snapshots=(snap,))
+
+
+def test_relation_endpoints_must_resolve() -> None:
+    snap = _snapshot("snap-1", "src-1")
+    rel = SourceRelation(
+        relation_id="rel-x", from_snapshot="snap-absent", to_snapshot="snap-1",
+        relation="corroborates",
+    )
+    with pytest.raises(InvestigationContractError, match="unknown"):
+        _report(snapshots=(snap,), relations=(rel,))
 
 
 def test_evidence_cannot_reference_unknown_snapshot() -> None:
