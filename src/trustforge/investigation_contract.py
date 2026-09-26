@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Mapping
 
@@ -152,6 +153,15 @@ def _check_id(name: str, value: str) -> str:
 def _check_iso(name: str, value: str) -> str:
     if not isinstance(value, str) or not re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z", value):
         raise InvestigationContractError(f"{name} must be an ISO-8601 UTC string, got {value!r}")
+    # Review P2 (#1458 round 7): the regex alone accepts impossible dates like
+    # 2026-99-99T99:99:99Z — validate the actual calendar values so downstream
+    # consumers can parse or sort without a late failure.
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise InvestigationContractError(
+            f"{name} must be a valid UTC timestamp, got {value!r}"
+        ) from exc
     return value
 
 
@@ -664,15 +674,18 @@ class InvestigationReport:
             index[key] = item
         return index
 
-    def _max_evidence_level(self, claim: Claim) -> str | None:
+    def _max_evidence_level(
+        self, claim: Claim, evidence_map: Mapping[str, Evidence]
+    ) -> str | None:
         """Highest level among evidence the claim actually links.
 
         Only evidence referenced by the claim's own ``evidence_ids`` counts —
         an E3 item that names the claim but is not linked to it must not
-        elevate the claim's status (P1 fix, #1458 review).
+        elevate the claim's status (P1 fix, #1458 review).  ``evidence_map``
+        is built once by the caller so gate validation stays linear in the
+        number of claims (P2 fix, #1458 round 7).
         """
         level_rank = {level: rank for rank, level in enumerate(EVIDENCE_LEVELS)}
-        evidence_map = {e.evidence_id: e for e in self.evidences}
         levels = [
             evidence_map[eid].level for eid in claim.evidence_ids if eid in evidence_map
         ]
@@ -691,23 +704,24 @@ class InvestigationReport:
         can never back corroborated/verified, and no evidence at all can
         never back any settled status.
         """
+        evidence_map = {e.evidence_id: e for e in self.evidences}
         for claim in self.claims:
             if claim.status == "corroborated":
-                max_level = self._max_evidence_level(claim)
+                max_level = self._max_evidence_level(claim, evidence_map)
                 if max_level is None or max_level in {"E0", "E1"}:
                     raise InvestigationContractError(
                         f"claim {claim.claim_id} status 'corroborated' requires evidence "
                         f"of level E2 or above, got {max_level!r}"
                     )
             elif claim.status == "verified":
-                max_level = self._max_evidence_level(claim)
+                max_level = self._max_evidence_level(claim, evidence_map)
                 if max_level not in {"E3", "E4"}:
                     raise InvestigationContractError(
                         f"claim {claim.claim_id} status 'verified' requires evidence "
                         f"of level E3 or E4, got {max_level!r}"
                     )
             elif claim.status == "refuted":
-                max_level = self._max_evidence_level(claim)
+                max_level = self._max_evidence_level(claim, evidence_map)
                 if max_level is None or max_level == "E0":
                     raise InvestigationContractError(
                         f"claim {claim.claim_id} status 'refuted' requires sourced "

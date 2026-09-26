@@ -599,6 +599,17 @@ def test_content_hash_must_be_sha256() -> None:
         )
 
 
+def test_impossible_calendar_timestamp_rejected() -> None:
+    # Review P2 round 7: regex-shaped but invalid dates must fail early.
+    with pytest.raises(InvestigationContractError, match="valid UTC timestamp"):
+        InvestigationRequest(
+            request_id="inv-req-bad-ts",
+            subject="bad timestamp",
+            question="q",
+            created_at="2026-99-99T99:99:99Z",
+        )
+
+
 def test_canonical_json_rejects_cycles_and_nonfinite() -> None:
     cyclic: dict[str, object] = {}
     cyclic["self"] = cyclic
