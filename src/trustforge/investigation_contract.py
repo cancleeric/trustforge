@@ -450,6 +450,15 @@ class Claim:
         object.__setattr__(self, "evidence_ids", tuple(str(e) for e in self.evidence_ids))
 
     def to_dict(self) -> dict[str, Any]:
+        # Review P2 (#1458 round 4): a standalone claim has no report context,
+        # so it can never prove a verified conclusion — refuse to emit one
+        # without linked evidence ids.  (Evidence-level thresholds are still
+        # enforced report-wide by InvestigationReport.)
+        if self.status in {"corroborated", "verified"} and not self.evidence_ids:
+            raise InvestigationContractError(
+                f"claim {self.claim_id} status {self.status!r} has no linked evidence "
+                "and cannot be serialized as a verified conclusion"
+            )
         data = asdict(self)
         data["evidence_ids"] = list(self.evidence_ids)
         return data
@@ -526,14 +535,18 @@ class InvestigationReport:
                         f"relation {relation.relation_id} references unknown "
                         f"snapshot {endpoint!r}"
                     )
-        # Review P1/P2 (#1458 round 3): connected components over declared
-        # same-origin edges (same_source_group relation or same_entity
-        # independence) plus explicit contradiction pairs. E2 corroboration
-        # must span components and must never cite a contradicting pair.
+        # Review P1/P2 (#1458 rounds 3-4): connected components over declared
+        # same-origin edges (same_source_group relation, same_entity
+        # independence, or derives_from lineage) plus explicit contradiction
+        # pairs. E2 corroboration must span components and must never cite a
+        # contradicting pair.
         same_group_edges: list[tuple[str, str]] = []
         contradiction_pairs: set[frozenset[str]] = set()
         for relation in self.relations:
-            if relation.relation == "same_source_group" or relation.independence == "same_entity":
+            if (
+                relation.relation in {"same_source_group", "derives_from"}
+                or relation.independence == "same_entity"
+            ):
                 same_group_edges.append((relation.from_snapshot, relation.to_snapshot))
             if relation.relation == "contradicts":
                 contradiction_pairs.add(frozenset((relation.from_snapshot, relation.to_snapshot)))

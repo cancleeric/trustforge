@@ -444,6 +444,27 @@ def test_e2_rejects_indirect_same_group_snapshots() -> None:
         _report(claims=(claim,), evidences=(ev,), snapshots=all_snaps, relations=rels)
 
 
+def test_e2_rejects_derived_snapshots() -> None:
+    # Review P1 round 4: a repost/derivative traces to the same origin and
+    # cannot corroborate its upstream source as independent.
+    claim, ev, snaps = _e2_case()
+    rel = SourceRelation(
+        relation_id="rel-dv", from_snapshot="snap-2", to_snapshot="snap-1",
+        relation="derives_from",
+    )
+    with pytest.raises(InvestigationContractError, match="same source group"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=snaps, relations=(rel,))
+
+
+@pytest.mark.parametrize("status", ["verified", "corroborated"])
+def test_standalone_claim_to_dict_refuses_verified_without_evidence(status: str) -> None:
+    # Review P2 round 4: standalone serialization must not emit a verified
+    # conclusion for a claim with no linked evidence.
+    claim = _claim("c-solo", status=status, evidence_ids=())
+    with pytest.raises(InvestigationContractError, match="verified conclusion"):
+        claim.to_dict()
+
+
 def test_evidence_cannot_reference_unknown_snapshot() -> None:
     ev = _evidence("ev-1", "c-1", "E1", snapshot_ids=("snap-missing",))
     claim = _claim("c-1", evidence_ids=("ev-1",))
