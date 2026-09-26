@@ -368,6 +368,11 @@ class Evidence:
                 f"got {self.reproduced_from!r}"
             )
         object.__setattr__(self, "snapshot_ids", tuple(str(s) for s in self.snapshot_ids))
+        if self.level == "E0" and self.snapshot_ids:
+            raise InvestigationContractError(
+                f"E0 evidence {self.evidence_id} must not carry snapshots "
+                "(E0 means no captured source); use E1 or above"
+            )
         if self.level in {"E1", "E3", "E4"} and not self.snapshot_ids:
             raise InvestigationContractError(
                 f"{self.level} evidence {self.evidence_id} requires at least one snapshot"
@@ -535,13 +540,13 @@ class InvestigationReport:
                         f"relation {relation.relation_id} references unknown "
                         f"snapshot {endpoint!r}"
                     )
-        # Review P1/P2 (#1458 rounds 3-4): connected components over declared
+        # Review P1/P2 (#1458 rounds 3-5): connected components over declared
         # same-origin edges (same_source_group relation, same_entity
-        # independence, or derives_from lineage) plus explicit contradiction
-        # pairs. E2 corroboration must span components and must never cite a
-        # contradicting pair.
+        # independence, derives_from lineage) and shared source_id, plus
+        # contradiction pairs applied at group level.  E2 corroboration must
+        # span components and must never cite contradicting groups.
         same_group_edges: list[tuple[str, str]] = []
-        contradiction_pairs: set[frozenset[str]] = set()
+        contradiction_edges: list[tuple[str, str]] = []
         for relation in self.relations:
             if (
                 relation.relation in {"same_source_group", "derives_from"}
@@ -549,7 +554,7 @@ class InvestigationReport:
             ):
                 same_group_edges.append((relation.from_snapshot, relation.to_snapshot))
             if relation.relation == "contradicts":
-                contradiction_pairs.add(frozenset((relation.from_snapshot, relation.to_snapshot)))
+                contradiction_edges.append((relation.from_snapshot, relation.to_snapshot))
         parent = {sid: sid for sid in snapshot_map}
 
         def _find(node: str) -> str:
@@ -562,6 +567,20 @@ class InvestigationReport:
 
         for left, right in same_group_edges:
             parent[_find(left)] = _find(right)
+        # Round 5 P1: snapshots sharing a source_id are the same origin even
+        # without an explicit relation — merge them before group checks.
+        by_source: dict[str, list[str]] = {}
+        for snap in self.snapshots:
+            by_source.setdefault(snap.source_id, []).append(snap.snapshot_id)
+        for members in by_source.values():
+            for other in members[1:]:
+                parent[_find(members[0])] = _find(other)
+        # Round 5 P1: contradiction applies at group level — if any member of
+        # one origin group contradicts any member of another, those groups
+        # cannot corroborate each other.
+        forbidden_group_pairs = {
+            frozenset((_find(left), _find(right))) for left, right in contradiction_edges
+        }
 
         for ev in self.evidences:
             ev.validate_against_snapshots(snapshot_map)
@@ -573,24 +592,18 @@ class InvestigationReport:
                     raise InvestigationContractError(
                         f"E2 evidence {ev.evidence_id} lists duplicate snapshots"
                     )
-                source_ids = [snapshot_map[sid].source_id for sid in ev.snapshot_ids]
-                if len(set(source_ids)) != len(source_ids):
-                    raise InvestigationContractError(
-                        f"E2 evidence {ev.evidence_id} spans a single source; "
-                        "corroboration requires independent sources"
-                    )
                 roots = [_find(sid) for sid in ev.snapshot_ids]
                 if len(set(roots)) != len(roots):
                     raise InvestigationContractError(
                         f"E2 evidence {ev.evidence_id} declares independence over "
                         f"snapshots in the same source group: {list(ev.snapshot_ids)}"
                     )
-                for index, left in enumerate(ev.snapshot_ids):
-                    for right in ev.snapshot_ids[index + 1:]:
-                        if frozenset((left, right)) in contradiction_pairs:
+                for index, left in enumerate(roots):
+                    for right in roots[index + 1:]:
+                        if frozenset((left, right)) in forbidden_group_pairs:
                             raise InvestigationContractError(
-                                f"E2 evidence {ev.evidence_id} cites contradicting "
-                                f"snapshots {left!r} and {right!r} as corroboration"
+                                f"E2 evidence {ev.evidence_id} cites snapshots from "
+                                f"contradicting source groups {list(ev.snapshot_ids)}"
                             )
         # Review P2 (#1458 round 2): a report may only contain claims from its
         # own investigation — foreign conclusions must not leak across reports.

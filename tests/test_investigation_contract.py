@@ -320,7 +320,7 @@ def test_e2_rejects_same_source_snapshots() -> None:
         snapshot_ids=("snap-1", "snap-2"), independence="independent",
     )
     claim = _claim("c-1", status="corroborated", evidence_ids=("ev-e2",))
-    with pytest.raises(InvestigationContractError, match="single source"):
+    with pytest.raises(InvestigationContractError, match="same source group"):
         _report(claims=(claim,), evidences=(ev,), snapshots=snaps)
 
 
@@ -463,6 +463,60 @@ def test_standalone_claim_to_dict_refuses_verified_without_evidence(status: str)
     claim = _claim("c-solo", status=status, evidence_ids=())
     with pytest.raises(InvestigationContractError, match="verified conclusion"):
         claim.to_dict()
+
+
+def test_e2_rejects_same_source_id_via_relation_chain() -> None:
+    # Review P1 round 5: source_id merges snapshots into one origin group even
+    # when the evidence cites snapshots without a direct relation.
+    snaps = (
+        _snapshot("snap-a", "src-shared"),
+        _snapshot("snap-b", "src-shared"),
+        _snapshot("snap-c", "src-c"),
+    )
+    ev = _evidence(
+        "ev-e2", "c-1", "E2",
+        snapshot_ids=("snap-a", "snap-c"), independence="independent",
+    )
+    claim = _claim("c-1", status="corroborated", evidence_ids=("ev-e2",))
+    rel = SourceRelation(
+        relation_id="rel-bc", from_snapshot="snap-b", to_snapshot="snap-c",
+        relation="derives_from",
+    )
+    with pytest.raises(InvestigationContractError, match="same source group"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=snaps, relations=(rel,))
+
+
+def test_e2_rejects_group_level_contradiction() -> None:
+    # Review P1 round 5: A and B share an origin; B contradicts C, so A and C
+    # are from contradicting groups even though A itself has no direct edge.
+    snaps = (
+        _snapshot("snap-a", "src-g1"),
+        _snapshot("snap-b", "src-g1"),
+        _snapshot("snap-c", "src-g2"),
+    )
+    ev = _evidence(
+        "ev-e2", "c-1", "E2",
+        snapshot_ids=("snap-a", "snap-c"), independence="independent",
+    )
+    claim = _claim("c-1", status="corroborated", evidence_ids=("ev-e2",))
+    rels = (
+        SourceRelation(
+            relation_id="rel-ab", from_snapshot="snap-a", to_snapshot="snap-b",
+            relation="same_source_group",
+        ),
+        SourceRelation(
+            relation_id="rel-bc", from_snapshot="snap-b", to_snapshot="snap-c",
+            relation="contradicts",
+        ),
+    )
+    with pytest.raises(InvestigationContractError, match="contradicting source groups"):
+        _report(claims=(claim,), evidences=(ev,), snapshots=snaps, relations=rels)
+
+
+def test_e0_must_not_carry_snapshots() -> None:
+    # Review P2 round 5: E0 means no captured source; snapshots require E1+.
+    with pytest.raises(InvestigationContractError, match="must not carry snapshots"):
+        _evidence("ev-e0", "c-1", "E0", snapshot_ids=("snap-1",))
 
 
 def test_evidence_cannot_reference_unknown_snapshot() -> None:
