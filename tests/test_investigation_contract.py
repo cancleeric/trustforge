@@ -250,7 +250,10 @@ def test_e4_requires_reproduced_from_digest() -> None:
 
 def test_e4_accepts_valid_reproduction_digest() -> None:
     snap = _snapshot("snap-1", "src-1")
-    ev = _evidence("ev-e4", "c-1", "E4", snapshot_ids=("snap-1",), reproduced_from=_H2)
+    ev = _evidence(
+        "ev-e4", "c-1", "E4", snapshot_ids=("snap-1",), reproduced_from=_H2,
+        note="recomputed from raw inputs",
+    )
     claim = _claim("c-1", status="verified", evidence_ids=("ev-e4",))
     report = InvestigationReport(
         report_id="report-t-001", investigation_id="inv-t-001", request=_request(),
@@ -265,7 +268,10 @@ def test_e4_digest_must_resolve_to_report_artifact() -> None:
     # Review P2 round 6: a syntactically valid digest that identifies no
     # bundled artifact does not establish independent reproduction.
     snap = _snapshot("snap-1", "src-1")
-    ev = _evidence("ev-e4", "c-1", "E4", snapshot_ids=("snap-1",), reproduced_from=_H2)
+    ev = _evidence(
+        "ev-e4", "c-1", "E4", snapshot_ids=("snap-1",), reproduced_from=_H2,
+        note="recomputed from raw inputs",
+    )
     claim = _claim("c-1", status="verified", evidence_ids=("ev-e4",))
     with pytest.raises(InvestigationContractError, match="artifact set"):
         _report(claims=(claim,), evidences=(ev,), snapshots=(snap,))
@@ -608,6 +614,51 @@ def test_impossible_calendar_timestamp_rejected() -> None:
             question="q",
             created_at="2026-99-99T99:99:99Z",
         )
+
+
+def test_scope_tags_rejects_bare_string_and_oversized_entries() -> None:
+    # Review P2 round 8: a bare string must not silently split into
+    # per-character tags, and each tag is length-bounded at construction.
+    with pytest.raises(InvestigationContractError, match="sequence of strings"):
+        InvestigationRequest(
+            request_id="inv-req-tags",
+            subject="tags",
+            question="q",
+            created_at="2026-09-26T00:00:00Z",
+            scope_tags="fraud",  # type: ignore[arg-type]
+        )
+    with pytest.raises(InvestigationContractError, match="scope_tags entries"):
+        InvestigationRequest(
+            request_id="inv-req-tags2",
+            subject="tags",
+            question="q",
+            created_at="2026-09-26T00:00:00Z",
+            scope_tags=("ok", "x" * 5000),
+        )
+
+
+def test_e4_requires_documented_reproduction_method() -> None:
+    # Review P2 round 8: digest membership alone must not grant E4 — the
+    # reproduction method has to be documented.
+    snap = _snapshot("snap-1", "src-1")
+    with pytest.raises(InvestigationContractError, match="reproduction method"):
+        _evidence(
+            "ev-e4", "c-1", "E4",
+            snapshot_ids=("snap-1",), reproduced_from=_H2, note="",
+        )
+    ev = _evidence(
+        "ev-e4", "c-1", "E4",
+        snapshot_ids=("snap-1",), reproduced_from=_H2,
+        note="recomputed aggregate from raw ledger rows",
+    )
+    claim = _claim("c-1", status="verified", evidence_ids=("ev-e4",))
+    report = InvestigationReport(
+        report_id="report-t-001", investigation_id="inv-t-001", request=_request(),
+        claims=(claim,), evidences=(ev,), snapshots=(snap,),
+        artifact_digests=(_H2,),
+        generated_at="2026-09-26T00:00:00Z",
+    )
+    assert report.evidences[0].level == "E4"
 
 
 def test_canonical_json_rejects_cycles_and_nonfinite() -> None:

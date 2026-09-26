@@ -214,7 +214,21 @@ class InvestigationRequest:
         _require_str("subject", self.subject)
         _require_str("question", self.question)
         _check_iso("created_at", self.created_at)
-        object.__setattr__(self, "scope_tags", tuple(str(t) for t in self.scope_tags))
+        # Review P2 (#1458 round 8): a bare string would silently split into
+        # per-character tags — require a real sequence of bounded strings.
+        if isinstance(self.scope_tags, (str, bytes)) or not isinstance(
+            self.scope_tags, (list, tuple)
+        ):
+            raise InvestigationContractError(
+                "scope_tags must be a sequence of strings, "
+                f"got {type(self.scope_tags).__name__}"
+            )
+        for tag in self.scope_tags:
+            if not isinstance(tag, str) or not tag or len(tag.encode()) > _MAX_TEXT:
+                raise InvestigationContractError(
+                    f"scope_tags entries must be non-empty strings <= {_MAX_TEXT} bytes"
+                )
+        object.__setattr__(self, "scope_tags", tuple(self.scope_tags))
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -400,6 +414,16 @@ class Evidence:
             if not isinstance(self.reproduced_from, str) or not _SHA256.match(self.reproduced_from):
                 raise InvestigationContractError(
                     f"E4 evidence {self.evidence_id} requires reproduced_from sha256 digest"
+                )
+            # Review P2 (#1458 round 8): E4 must document the reproduction
+            # method — a bare digest pair proves nothing about independent
+            # reproduction.  (The residual trust boundary: artifact contents
+            # live outside this serialization contract; consumers verify the
+            # digest against the actual artifact bundle.)
+            if not self.note.strip():
+                raise InvestigationContractError(
+                    f"E4 evidence {self.evidence_id} requires a note documenting "
+                    "the reproduction method"
                 )
 
     def validate_against_snapshots(self, snapshots: Mapping[str, SourceSnapshot]) -> None:
