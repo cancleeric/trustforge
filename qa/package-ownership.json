@@ -56,7 +56,9 @@
     {"importer": "trustforge.trust.insights", "imported": "trustforge.ingestion.base", "issue": "#419"},
     {"importer": "trustforge.trust.insights", "imported": "trustforge.schema", "issue": "#420"},
     {"importer": "trustforge.ports", "imported": "trustforge.bedrock", "issue": "#407"},
-    {"importer": "trustforge.ports", "imported": "trustforge.ingestion.cache", "issue": "#408"}
+    {"importer": "trustforge.ports", "imported": "trustforge.ingestion.cache", "issue": "#408"},
+    {"importer": "trustforge.training_trigger", "imported": "trustforge.sagemaker_submit", "issue": "#1457"},
+    {"importer": "trustforge.training_trigger", "imported": "trustforge.modelhub_submit", "issue": "#1457"}
   ],
   "explicit_ignore_globs": [
     ".eye-cache/**",

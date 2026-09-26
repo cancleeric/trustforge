@@ -43,7 +43,9 @@ def test_reverse_dependents_follows_declared_dag(manifest):
         ("src/trustforge/schema.py", "platform", {"core", "platform", "connectors", "agent", "web", "frontend"}),
         ("src/trustforge/bedrock.py", "connectors", {"core", "platform", "connectors", "agent", "web", "frontend"}),
         ("src/trustforge/analysis_flow.py", "agent", {"agent", "web", "frontend"}),
-        ("src/trustforge/web.py", "web", {"web", "frontend"}),
+        # web.py changes also affect agent: training_trigger (agent) holds
+        # temporary bridges (#1457) into sagemaker_submit/modelhub_submit (web).
+        ("src/trustforge/web.py", "web", {"agent", "web", "frontend"}),
         ("frontend/src/main.tsx", "frontend", {"frontend"}),
         ("native/trustforge-native-sys/src/lib.rs", "native", {"native"}),
     ],
