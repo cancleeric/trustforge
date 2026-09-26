@@ -23,3 +23,10 @@ class TrainingBackend(Protocol):
 
 class TrainingBackendConfigError(RuntimeError):
     """Training backend configuration is unsupported or incomplete."""
+
+
+# Coins supported by the scheduled training trigger backends. Canonical home
+# is this platform contract so agent-layer callers (training_trigger) can
+# import it without crossing into web-owned submitter modules (#1468).
+# NOTE: trustforge.schema.COIN_POOL is a different, wider pool — keep separate.
+TRAINING_COIN_POOL: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB", "XRP")
