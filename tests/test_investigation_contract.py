@@ -690,6 +690,57 @@ def test_id_sequences_reject_bare_strings() -> None:
         _claim("c-1", evidence_ids="ev-1")  # type: ignore[arg-type]
 
 
+def test_from_dict_rejects_bare_string_sequences() -> None:
+    # Review P2 round 11: from_dict must pass raw values through so malformed
+    # JSON strings are rejected instead of converted to char tuples first.
+    base = {
+        "request_id": "inv-req-fd",
+        "subject": "s",
+        "question": "q",
+        "created_at": "2026-09-26T00:00:00Z",
+        "scope_tags": "fraud",
+    }
+    with pytest.raises(InvestigationContractError, match="sequence of strings"):
+        InvestigationRequest.from_dict(base)
+    snap_data = {
+        "snapshot_id": "snap-1", "source_id": "src-1",
+        "uri": "https://fixture.invalid/x", "captured_at": "2026-09-26T00:00:00Z",
+        "content_hash": _H, "snapshot_ids": "ab",
+    }
+    snap_data.pop("snapshot_ids")
+    with pytest.raises(InvestigationContractError, match="sequence of id strings"):
+        Evidence.from_dict({
+            "evidence_id": "ev-1", "claim_id": "c-1", "level": "E1",
+            "snapshot_ids": "ab",
+        })
+    with pytest.raises(InvestigationContractError, match="sequence of id strings"):
+        Claim.from_dict({
+            "claim_id": "c-1", "investigation_id": "inv-t-001", "text": "t",
+            "evidence_ids": "ev-1",
+        })
+
+
+def test_oversized_collections_rejected_at_construction() -> None:
+    # Review P2 round 11: canonical collection limits apply at construction so
+    # an accepted report can always be serialized.
+    many_tags = tuple(f"tag-{i}" for i in range(10_001))
+    with pytest.raises(InvestigationContractError, match="exceeds 10000"):
+        InvestigationRequest(
+            request_id="inv-req-big", subject="s", question="q",
+            created_at="2026-09-26T00:00:00Z", scope_tags=many_tags,
+        )
+    with pytest.raises(InvestigationContractError, match="exceeds 10000"):
+        _claim("c-big", evidence_ids=tuple(f"ev-{i}" for i in range(10_001)))
+    with pytest.raises(InvestigationContractError, match="exceeds 10000"):
+        InvestigationReport(
+            report_id="report-big", investigation_id="inv-t-001", request=_request(),
+            claims=tuple(
+                _claim(f"c-{i}") for i in range(10_001)
+            ),
+            generated_at="2026-09-26T00:00:00Z",
+        )
+
+
 def test_canonical_json_rejects_cycles_and_nonfinite() -> None:
     cyclic: dict[str, object] = {}
     cyclic["self"] = cyclic

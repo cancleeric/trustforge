@@ -202,6 +202,15 @@ def _check_id_sequence(name: str, value: Any) -> None:
             raise InvestigationContractError(f"{name} entries must be strings, got {entry!r}")
 
 
+def _check_collection_limit(name: str, value: Any) -> None:
+    # Review P2 (#1458 round 11): enforce the canonical encoder's collection
+    # limit at construction so an accepted report can always be serialized.
+    if len(value) > _MAX_COLLECTION_ITEMS:
+        raise InvestigationContractError(
+            f"{name} exceeds {_MAX_COLLECTION_ITEMS} items ({len(value)})"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -240,6 +249,7 @@ class InvestigationRequest:
                 raise InvestigationContractError(
                     f"scope_tags entries must be non-empty strings <= {_MAX_TEXT} bytes"
                 )
+        _check_collection_limit("scope_tags", self.scope_tags)
         object.__setattr__(self, "scope_tags", tuple(self.scope_tags))
 
     def to_dict(self) -> dict[str, Any]:
@@ -256,7 +266,7 @@ class InvestigationRequest:
                 subject=data["subject"],
                 question=data["question"],
                 created_at=data["created_at"],
-                scope_tags=tuple(data.get("scope_tags", ())),
+                scope_tags=data.get("scope_tags", ()),
             )
         except KeyError as exc:
             raise InvestigationContractError(f"InvestigationRequest missing field {exc}") from exc
@@ -404,6 +414,7 @@ class Evidence:
                 f"got {self.reproduced_from!r}"
             )
         _check_id_sequence("snapshot_ids", self.snapshot_ids)
+        _check_collection_limit("snapshot_ids", self.snapshot_ids)
         object.__setattr__(self, "snapshot_ids", tuple(str(s) for s in self.snapshot_ids))
         if self.level == "E0" and self.snapshot_ids:
             raise InvestigationContractError(
@@ -466,7 +477,7 @@ class Evidence:
                 evidence_id=data["evidence_id"],
                 claim_id=data["claim_id"],
                 level=data["level"],
-                snapshot_ids=tuple(data.get("snapshot_ids", ())),
+                snapshot_ids=data.get("snapshot_ids", ()),
                 independence=data.get("independence", "unknown"),
                 reproduced_from=data.get("reproduced_from", ""),
                 note=data.get("note", ""),
@@ -500,6 +511,7 @@ class Claim:
         _require_str("text", self.text)
         _check_choice("status", self.status, CLAIM_STATUSES)
         _check_id_sequence("evidence_ids", self.evidence_ids)
+        _check_collection_limit("evidence_ids", self.evidence_ids)
         object.__setattr__(self, "evidence_ids", tuple(str(e) for e in self.evidence_ids))
 
     def to_dict(self) -> dict[str, Any]:
@@ -525,7 +537,7 @@ class Claim:
                 investigation_id=data["investigation_id"],
                 text=data["text"],
                 status=data.get("status", "unverified"),
-                evidence_ids=tuple(data.get("evidence_ids", ())),
+                evidence_ids=data.get("evidence_ids", ()),
             )
         except KeyError as exc:
             raise InvestigationContractError(f"Claim missing field {exc}") from exc
@@ -576,6 +588,7 @@ class InvestigationReport:
         _check_iso("generated_at", self.generated_at)
         for name in ("claims", "evidences", "snapshots", "relations", "artifact_digests"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+            _check_collection_limit(name, getattr(self, name))
         for digest in self.artifact_digests:
             if not isinstance(digest, str) or not _SHA256.match(digest):
                 raise InvestigationContractError(
@@ -817,7 +830,7 @@ class InvestigationReport:
                 evidences=tuple(Evidence.from_dict(e) for e in data.get("evidences", ())),
                 snapshots=tuple(SourceSnapshot.from_dict(s) for s in data.get("snapshots", ())),
                 relations=tuple(SourceRelation.from_dict(r) for r in data.get("relations", ())),
-                artifact_digests=tuple(data.get("artifact_digests", ())),
+                artifact_digests=data.get("artifact_digests", ()),
                 generated_at=data.get("generated_at", "1970-01-01T00:00:00Z"),
             )
         except KeyError as exc:
