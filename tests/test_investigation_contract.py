@@ -840,6 +840,29 @@ def test_from_canonical_bytes_rejects_malformed_and_oversized_payloads() -> None
         InvestigationReport.from_canonical_bytes(oversized)
 
 
+def test_from_dict_rejects_wrong_shaped_collections() -> None:
+    # Review P2 (#1458 round 17): null or non-list collection fields must
+    # surface as contract errors, not raw TypeError from iterating None or
+    # silently accepted empty objects.
+    base = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    for field in ("claims", "evidences", "snapshots", "relations"):
+        null_payload = {**base, field: None}
+        with pytest.raises(InvestigationContractError, match="must be a list of objects"):
+            InvestigationReport.from_dict(null_payload)
+        object_payload = {**base, field: {}}
+        with pytest.raises(InvestigationContractError, match="must be a list of objects"):
+            InvestigationReport.from_dict(object_payload)
+    scalar_payload = {**base, "claims": ["not-an-object"]}
+    with pytest.raises(InvestigationContractError, match="must be a list of objects"):
+        InvestigationReport.from_dict(scalar_payload)
+    digest_payload = {**base, "artifact_digests": "sha256:" + "ab" * 32}
+    with pytest.raises(InvestigationContractError, match="artifact_digests"):
+        InvestigationReport.from_dict(digest_payload)
+    null_request = {**base, "request": None}
+    with pytest.raises(InvestigationContractError, match="'request' must be an object"):
+        InvestigationReport.from_dict(null_request)
+
+
 def test_max_size_report_round_trips_through_canonical_bytes() -> None:
     # Review P2 (#1458 round 16): the payload budget must cover the worst-case
     # JSON-escaped encoding (\uXXXX = six bytes per control-character byte),

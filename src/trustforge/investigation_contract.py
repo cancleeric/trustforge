@@ -182,6 +182,20 @@ def _strict_fields(cls_name: str, data: Mapping[str, Any], expected: set[str]) -
         raise InvestigationContractError(f"{cls_name}: unknown fields {sorted(unknown)}")
 
 
+def _require_object_list(cls_name: str, field: str, value: Any) -> list[Mapping[str, Any]]:
+    """A decoded collection field must be a list of JSON objects."""
+    if not isinstance(value, (list, tuple)):
+        raise InvestigationContractError(
+            f"{cls_name} field {field!r} must be a list of objects, got {type(value).__name__}"
+        )
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise InvestigationContractError(
+                f"{cls_name} field {field!r} must be a list of objects"
+            )
+    return list(value)
+
+
 def _require_str(name: str, value: Any) -> str:
     if not isinstance(value, str) or not value:
         raise InvestigationContractError(f"{name} must be a non-empty string")
@@ -700,13 +714,17 @@ class InvestigationReport:
             # Review P2 (#1458 round 14): index the cited source groups and
             # test them against the forbidden pairs in O(cited + pairs), not
             # a quadratic all-pairs scan over every cited snapshot.
+            # Review P2 (#1458 round 17): group evidence by claim once so the
+            # per-claim pass does not rescan the whole evidence collection.
+            evidence_by_claim: dict[str, list[Evidence]] = {}
+            for evidence_item in self.evidences:
+                evidence_by_claim.setdefault(evidence_item.claim_id, []).append(evidence_item)
             for claim in self.claims:
                 if claim.status not in {"corroborated", "verified", "refuted"}:
                     continue
                 cited_groups: set[str] = set()
-                for evidence_item in self.evidences:
-                    if evidence_item.claim_id == claim.claim_id:
-                        cited_groups.update(_find(sid) for sid in evidence_item.snapshot_ids)
+                for evidence_item in evidence_by_claim.get(claim.claim_id, ()):
+                    cited_groups.update(_find(sid) for sid in evidence_item.snapshot_ids)
                 for pair in forbidden_group_pairs:
                     if pair <= cited_groups:
                         raise InvestigationContractError(
@@ -832,15 +850,34 @@ class InvestigationReport:
     def from_dict(cls, data: Mapping[str, Any]) -> "InvestigationReport":
         _strict_fields(cls.__name__, data, set(cls.FIELDS))
         try:
+            # Review P2 (#1458 round 17): wrong-shaped fields (null, a bare
+            # object, scalar) must surface as contract errors, not raw
+            # TypeError from iterating None or silently empty collections.
+            claims = _require_object_list(cls.__name__, "claims", data.get("claims", ()))
+            evidences = _require_object_list(cls.__name__, "evidences", data.get("evidences", ()))
+            snapshots = _require_object_list(cls.__name__, "snapshots", data.get("snapshots", ()))
+            relations = _require_object_list(cls.__name__, "relations", data.get("relations", ()))
+            request = data["request"]
+            if not isinstance(request, Mapping):
+                raise InvestigationContractError(
+                    f"{cls.__name__} field 'request' must be an object, got {type(request).__name__}"
+                )
+            artifact_digests = data.get("artifact_digests", ())
+            if isinstance(artifact_digests, (str, bytes)) or not isinstance(
+                artifact_digests, (list, tuple)
+            ):
+                raise InvestigationContractError(
+                    "InvestigationReport field 'artifact_digests' must be a list of strings"
+                )
             return cls(
                 report_id=data["report_id"],
                 investigation_id=data["investigation_id"],
                 request=InvestigationRequest.from_dict(data["request"]),
-                claims=tuple(Claim.from_dict(c) for c in data.get("claims", ())),
-                evidences=tuple(Evidence.from_dict(e) for e in data.get("evidences", ())),
-                snapshots=tuple(SourceSnapshot.from_dict(s) for s in data.get("snapshots", ())),
-                relations=tuple(SourceRelation.from_dict(r) for r in data.get("relations", ())),
-                artifact_digests=data.get("artifact_digests", ()),
+                claims=tuple(Claim.from_dict(c) for c in claims),
+                evidences=tuple(Evidence.from_dict(e) for e in evidences),
+                snapshots=tuple(SourceSnapshot.from_dict(s) for s in snapshots),
+                relations=tuple(SourceRelation.from_dict(r) for r in relations),
+                artifact_digests=tuple(artifact_digests),
                 generated_at=data.get("generated_at", "1970-01-01T00:00:00Z"),
             )
         except KeyError as exc:
