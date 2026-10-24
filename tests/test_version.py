@@ -99,18 +99,22 @@ def test_dynamic_package_and_frontend_versions_match_canonical_source():
     assert frontend_lock["packages"][""]["version"] == trustforge.__version__
 
 
-def test_uv_lock_is_parseable_and_pins_canonical_project_version():
-    """Fresh frozen worktrees must not depend on a stale shared virtualenv."""
-    import trustforge
-
+def test_uv_lock_is_parseable_and_tracks_dynamic_editable_project():
+    """The editable lock entry uses source metadata, not a static version pin."""
     repo_root = Path(__file__).resolve().parent.parent
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "version" in pyproject["project"]["dynamic"]
+    assert "version" not in pyproject["project"]
+    assert pyproject["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "trustforge._version.VERSION"
+    }
     lock = tomllib.loads((repo_root / "uv.lock").read_text(encoding="utf-8"))
     trustforge_packages = [
         package for package in lock["package"] if package["name"] == "trustforge"
     ]
 
     assert len(trustforge_packages) == 1
-    assert trustforge_packages[0]["version"] == trustforge.__version__
+    assert trustforge_packages[0]["source"] == {"editable": "."}
 
 
 def test_lambda_handler_analyze_json_has_version(monkeypatch):
