@@ -146,7 +146,7 @@ def test_single_worker_keeps_batches_sequential(tmp_path: Path) -> None:
 # --- failures are never swallowed ------------------------------------------
 
 
-def test_a_failing_batch_fails_the_gate(tmp_path: Path) -> None:
+def test_a_failing_batch_fails_the_gate_with_diagnostics(tmp_path: Path, capfd) -> None:
     root = _fake_repo(
         tmp_path,
         {
@@ -155,6 +155,9 @@ def test_a_failing_batch_fails_the_gate(tmp_path: Path) -> None:
         },
     )
     assert _run(root, workers=4) != 0
+    output = capfd.readouterr().out
+    assert "tests/test_bad.py::test_bad" in output
+    assert "assert False" in output
 
 
 def test_failure_is_reported_even_when_it_finishes_last(tmp_path: Path) -> None:

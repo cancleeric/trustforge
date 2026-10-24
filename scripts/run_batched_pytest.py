@@ -151,7 +151,6 @@ def _pytest_command(batch: list[Path]) -> list[str]:
         "addopts=",
         "-q",
         "--no-header",
-        "--no-summary",
         "--disable-warnings",
     ]
     command.extend(str(path) for path in batch)

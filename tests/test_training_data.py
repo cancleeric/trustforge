@@ -108,3 +108,138 @@ def test_scan_detects_file_swap_between_enumeration_and_open(
     monkeypatch.setattr(os, "open", swapped_open)
     with pytest.raises(TrainingDataUnavailable, match="changed during scan"):
         scan_training_data(directory)
+
+
+def test_scan_detects_same_inode_same_size_write_with_restored_mtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = _directory(tmp_path)
+    path = directory / "btc.jsonl"
+    path.write_bytes(b'{"direction":"bullish"}\n')
+    initial = path.stat()
+    real_loads = training_data.json.loads
+
+    def mutate_after_read(line: str) -> object:
+        with path.open("r+b") as writer:
+            writer.write(b'{"direction":"bearish"}\n')
+        os.utime(path, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+        assert path.stat().st_ino == initial.st_ino
+        assert path.stat().st_size == initial.st_size
+        assert path.stat().st_mtime_ns == initial.st_mtime_ns
+        return real_loads(line)
+
+    monkeypatch.setattr(training_data.json, "loads", mutate_after_read)
+    with pytest.raises(TrainingDataUnavailable, match="changed during scan"):
+        scan_training_data(directory)
+
+
+def test_scan_detects_directory_membership_change_while_reading_last_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = _directory(tmp_path)
+    (directory / "btc.jsonl").write_bytes(b"{}\n")
+    real_loads = training_data.json.loads
+
+    def add_file_after_read(line: str) -> object:
+        (directory / "eth.jsonl").write_bytes(b"{}\n")
+        return real_loads(line)
+
+    monkeypatch.setattr(training_data.json, "loads", add_file_after_read)
+    with pytest.raises(TrainingDataUnavailable, match="directory changed during scan"):
+        scan_training_data(directory)
+
+
+def test_scan_detects_new_file_after_empty_enumeration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = _directory(tmp_path)
+    real_scandir = os.scandir
+
+    class ChangingEnumeration:
+        def __enter__(self):
+            self.iterator = real_scandir(directory)
+            return self.iterator
+
+        def __exit__(self, *args):
+            self.iterator.close()
+            (directory / "btc.jsonl").write_bytes(b"{}\n")
+
+    monkeypatch.setattr(os, "scandir", lambda _: ChangingEnumeration())
+    with pytest.raises(TrainingDataUnavailable, match="directory changed during scan"):
+        scan_training_data(directory)
+
+
+def test_scan_detects_directory_replacement_after_last_file_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = _directory(tmp_path)
+    (directory / "btc.jsonl").write_bytes(b"{}\n")
+    real_loads = training_data.json.loads
+
+    def replace_directory(line: str) -> object:
+        directory.rename(tmp_path / "old-training")
+        directory.mkdir()
+        (directory / "btc.jsonl").write_bytes(b"{}\n")
+        return real_loads(line)
+
+    monkeypatch.setattr(training_data.json, "loads", replace_directory)
+    with pytest.raises(TrainingDataUnavailable, match="changed during scan"):
+        scan_training_data(directory)
+
+
+def test_scan_rechecks_earlier_file_after_later_file_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = _directory(tmp_path)
+    earlier = directory / "btc.jsonl"
+    earlier.write_bytes(b"{}\n")
+    (directory / "eth.jsonl").write_bytes(b'{"last":true}\n')
+    real_loads = training_data.json.loads
+
+    def mutate_earlier(line: str) -> object:
+        if "last" in line:
+            earlier.write_bytes(b'{"changed":true}\n')
+        return real_loads(line)
+
+    monkeypatch.setattr(training_data.json, "loads", mutate_earlier)
+    with pytest.raises(TrainingDataUnavailable, match="file changed during scan"):
+        scan_training_data(directory)
+
+
+@pytest.mark.parametrize("failure_point", ["fstat", "fdopen"])
+def test_scan_closes_descriptor_when_setup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_point: str
+) -> None:
+    directory = _directory(tmp_path)
+    (directory / "btc.jsonl").write_bytes(b"{}\n")
+    real_open = os.open
+    real_fstat = os.fstat
+    opened = []
+
+    def track_open(*args, **kwargs):
+        descriptor = real_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def fail(*args, **kwargs):
+        raise OSError("injected setup failure")
+
+    monkeypatch.setattr(os, "open", track_open)
+    monkeypatch.setattr(os, failure_point, fail)
+    with pytest.raises(TrainingDataUnavailable):
+        scan_training_data(directory)
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        real_fstat(opened[0])
+
+
+def test_scan_preserves_empty_and_normal_multifile_results(tmp_path: Path) -> None:
+    directory = _directory(tmp_path)
+    assert scan_training_data(directory) == training_data.TrainingDataScan(0, 0, {})
+    (directory / "btc.jsonl").write_bytes(b'{"direction":"bullish"}\n{}\n')
+    (directory / "eth.jsonl").write_bytes(b'\n{"direction":"not-known"}\n')
+    assert scan_training_data(directory) == training_data.TrainingDataScan(
+        3, 2,
+        {"BTC": {"total": 2, "has_direction": 1},
+         "ETH": {"total": 1, "has_direction": 1}},
+    )
